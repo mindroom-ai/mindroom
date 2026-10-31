@@ -20,14 +20,13 @@ from mindroom.egress import policy as egress_policy_module
 from mindroom.tool_system.metadata import ToolConfigOverrideError, get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools import approved_egress as approved_egress_module
-from tests.agent_tool_helpers import toolkit_offers
+from tests.agent_tool_helpers import blocking_entrypoint, toolkit_offers
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.tools import Toolkit
-
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.authoring import Toolkit
 
 
 def _runtime_paths(tmp_path: Path, env: dict[str, str] | None = None) -> RuntimePaths:
@@ -167,51 +166,28 @@ def test_full_access_option_is_configurable(tmp_path: Path) -> None:
     )
 
 
-def test_request_network_access_rejects_internal_hostname_before_grant(
+@pytest.mark.parametrize(
+    ("hostnames", "match"),
+    [
+        (["metadata.google.internal"], "points at an internal name"),
+        (["\u0430\u0440\u0440\u04cf\u0435.com"], "must be written in ASCII; request 'xn--"),
+        (["g\u0456thub.com"], "must be written in ASCII; request 'xn--"),
+        (["docs.example.com", "metadata.google.internal"], "points at an internal name"),
+        ([], "hostnames must not be empty"),
+        ([f"host{index}.example.com" for index in range(21)], "at most 20 hostnames"),
+    ],
+    ids=["internal", "unicode-lookalike", "unicode-mixed", "one-bad-in-batch", "empty", "oversized"],
+)
+def test_request_network_access_rejects_before_any_grant(
     monkeypatch: pytest.MonkeyPatch,
+    hostnames: list[str],
+    match: str,
     tmp_path: Path,
 ) -> None:
-    """Internal hostnames must never reach the policy API."""
+    """Internal names, Unicode look-alikes, empty batches, and batches too big for one approval card create no grant.
 
-    def post_grant(_runtime_paths: object, _payload: dict[str, object]) -> dict[str, object]:
-        msg = "rejected hostname should not create a grant"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
-
-    with pytest.raises(ValueError, match="points at an internal name"):
-        asyncio.run(
-            _approved_egress_tool(tmp_path).request_network_access(
-                ["metadata.google.internal"],
-                5,
-                "Need metadata",
-            ),
-        )
-
-
-@pytest.mark.parametrize("hostname", ["\u0430\u0440\u0440\u04cf\u0435.com", "g\u0456thub.com"])
-def test_request_network_access_rejects_unicode_hostname_before_grant(
-    monkeypatch: pytest.MonkeyPatch,
-    hostname: str,
-    tmp_path: Path,
-) -> None:
-    """A Unicode look-alike must not be granted as an xn-- name the approval card never showed."""
-
-    def post_grant(_runtime_paths: object, _payload: dict[str, object]) -> dict[str, object]:
-        msg = "a Unicode hostname should not create a grant"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
-
-    with pytest.raises(ValueError, match="must be written in ASCII; request 'xn--"):
-        asyncio.run(_approved_egress_tool(tmp_path).request_network_access([hostname], 5, "Need docs"))
-
-
-def test_request_network_access_rejects_whole_batch_on_one_bad_hostname(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """One invalid hostname must fail the whole batch before any grant is created."""
+    One bad hostname fails the whole batch, and a Unicode name is never granted as an xn-- name the card never showed.
+    """
 
     def post_grant(_runtime_paths: object, _payload: dict[str, object]) -> dict[str, object]:
         msg = "a rejected batch should not create any grant"
@@ -219,64 +195,16 @@ def test_request_network_access_rejects_whole_batch_on_one_bad_hostname(
 
     monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
 
-    with pytest.raises(ValueError, match="points at an internal name"):
-        asyncio.run(
-            _approved_egress_tool(tmp_path).request_network_access(
-                ["docs.example.com", "metadata.google.internal"],
-                5,
-                "Need docs and metadata",
-            ),
-        )
+    with pytest.raises(ValueError, match=match):
+        asyncio.run(_approved_egress_tool(tmp_path).request_network_access(hostnames, 5, "Need access"))
 
 
-def test_request_network_access_rejects_bare_string_hostnames(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_request_network_access_rejects_bare_string_hostnames(tmp_path: Path) -> None:
     """A bare string must not be iterated as characters."""
-
-    def post_grant(_runtime_paths: object, _payload: dict[str, object]) -> dict[str, object]:
-        msg = "a rejected batch should not create any grant"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
-    entrypoint = toolkit_offers(_approved_egress_tool(tmp_path), "request_network_access").entrypoint
+    request_network_access = blocking_entrypoint(_approved_egress_tool(tmp_path), "request_network_access")
 
     with pytest.raises(ValidationError, match="hostnames"):
-        asyncio.run(entrypoint(hostnames="docs.example.com", ttl_minutes=5, reason="Need docs"))
-
-
-def test_request_network_access_rejects_empty_hostnames(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """An empty hostname list is a caller error, not a silent no-op."""
-
-    def post_grant(_runtime_paths: object, _payload: dict[str, object]) -> dict[str, object]:
-        msg = "an empty batch should not create any grant"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
-
-    with pytest.raises(ValueError, match="hostnames must not be empty"):
-        asyncio.run(_approved_egress_tool(tmp_path).request_network_access([], 5, "Need nothing"))
-
-
-def test_request_network_access_caps_batch_size(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Oversized batches must fail so one approval card stays reviewable."""
-
-    def post_grant(_runtime_paths: object, _payload: dict[str, object]) -> dict[str, object]:
-        msg = "an oversized batch should not create any grant"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
-    hostnames = [f"host{index}.example.com" for index in range(21)]
-
-    with pytest.raises(ValueError, match="at most 20 hostnames"):
-        asyncio.run(_approved_egress_tool(tmp_path).request_network_access(hostnames, 5, "Need many hosts"))
+        request_network_access(hostnames="docs.example.com", ttl_minutes=5, reason="Need docs")
 
 
 def test_effective_ttl_rejects_non_integer_max_ttl_env(tmp_path: Path) -> None:
@@ -459,13 +387,21 @@ def test_a_bare_run_reads_the_policy_settings_from_the_env_file(
     assert "Already allowed by the static egress allowlist (no grant needed): docs.example.com." in result
 
 
-def test_post_grant_surfaces_policy_error_body(tmp_path: Path) -> None:
-    """Policy API HTTP errors should preserve JSON error details."""
+@pytest.mark.parametrize(
+    ("status", "body", "match"),
+    [
+        (401, {"ok": False, "error": "bad token"}, "bad token"),
+        (500, {"ok": True, "grant": {"expires_at": 123}}, "HTTP 500"),
+    ],
+    ids=["error-details", "success-payload"],
+)
+def test_post_grant_raises_on_http_error(tmp_path: Path, status: int, body: dict[str, object], match: str) -> None:
+    """Policy API HTTP errors keep their JSON error details and never create grants, even with a success payload."""
+    response = json.dumps(body).encode()
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
-            response = json.dumps({"ok": False, "error": "bad token"}).encode()
-            self.send_response(401)
+            self.send_response(status)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(response)))
             self.end_headers()
@@ -486,42 +422,7 @@ def test_post_grant_surfaces_policy_error_body(tmp_path: Path) -> None:
     )
 
     try:
-        with pytest.raises(RuntimeError, match="bad token"):
-            approved_egress_module._post_grant(runtime_paths, {"hostname": "docs.example.com"})
-    finally:
-        server.shutdown()
-        thread.join(timeout=2)
-        server.server_close()
-
-
-def test_post_grant_rejects_success_payload_from_http_error(tmp_path: Path) -> None:
-    """Policy API HTTP errors must never create grants."""
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            response = json.dumps({"ok": True, "grant": {"expires_at": 123}}).encode()
-            self.send_response(500)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(response)))
-            self.end_headers()
-            self.wfile.write(response)
-
-        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-            del format, args
-
-    server = HTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        {
-            "MINDROOM_APPROVED_EGRESS_API_URL": f"http://127.0.0.1:{server.server_port}",
-            "MINDROOM_APPROVED_EGRESS_TOKEN": "token",
-        },
-    )
-
-    try:
-        with pytest.raises(RuntimeError, match="HTTP 500"):
+        with pytest.raises(RuntimeError, match=match):
             approved_egress_module._post_grant(runtime_paths, {"hostname": "docs.example.com"})
     finally:
         server.shutdown()
@@ -542,22 +443,8 @@ def test_request_network_access_posts_grant_without_blocking_event_loop(
             raise AssertionError(msg)
         return {"expires_at": 123}
 
-    config = Config(
-        agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="shared")},
-        models={"default": ModelConfig(provider="openai", id="test-model")},
-    )
-
-    context = SimpleNamespace(
-        agent_name="assistant",
-        room_id="!room:server",
-        resolved_thread_id=None,
-        thread_id="$thread",
-        requester_id="@user:server",
-        config=config,
-        runtime_paths=object(),
-    )
     monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
-    monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", _shared_worker_context)
 
     async def invoke_tool() -> str:
         task = asyncio.create_task(
