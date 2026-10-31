@@ -61,7 +61,7 @@ class ApiSnapshot:
     runtime_config: Config | None = None
     load_error: Exception | None = None
     source_fingerprint: str | None = None
-    uses_includes: bool | None = None
+    uses_includes: bool = False
 
 
 @dataclass
@@ -156,7 +156,7 @@ def _published_snapshot(
     runtime_config: Config | None | _Keep = _Keep.FIELD,
     load_error: Exception | None | _Keep = _Keep.FIELD,
     source_fingerprint: str | None | _Keep = _Keep.FIELD,
-    uses_includes: bool | None | _Keep = _Keep.FIELD,
+    uses_includes: bool | _Keep = _Keep.FIELD,
 ) -> ApiSnapshot:
     """Return ``snapshot`` with the given fields as one new publication, always with a fresh commit revision."""
     return replace(
@@ -183,7 +183,7 @@ def publish_runtime_paths(state: ApiState, runtime_paths: constants.RuntimePaths
                 runtime_config=None,
                 load_error=None,
                 source_fingerprint=None,
-                uses_includes=None,
+                uses_includes=False,
             )
             if changed
             else _published_snapshot(current)
@@ -342,16 +342,13 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
         same_source = (
             attempt.source_fingerprint is not None and attempt.source_fingerprint == current.source_fingerprint
         )
-        published_uses_includes = attempt.uses_includes if attempt.uses_includes is not None else current.uses_includes
-        if attempt.error is not None and current.uses_includes:
-            published_uses_includes = True
         state.snapshot = _published_snapshot(
             current,
             increment_generation=not same_source,
             runtime_config=attempt.config if attempt.config is not None else current.runtime_config,
             load_error=attempt.error,
             source_fingerprint=attempt.source_fingerprint,
-            uses_includes=published_uses_includes,
+            uses_includes=attempt.uses_includes is True or (attempt.error is not None and current.uses_includes),
         )
     return attempt
 
@@ -403,7 +400,7 @@ def config_pending_restart(request: Request) -> bool:
 
 def config_uses_includes(request: Request) -> bool:
     """Return whether the committed config uses include or expansion tags."""
-    return _request_or_current_snapshot(request).uses_includes is True
+    return _request_or_current_snapshot(request).uses_includes
 
 
 def read_raw_config_source(request: Request) -> str:
