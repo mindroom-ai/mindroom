@@ -294,7 +294,7 @@ def _wait_budget(call: ToolCall, *, mode: ToolWaitMode, depth: int) -> float | N
             raise ValueError(msg)
         background_after = read_background_after(call.arguments, owned_execution=job_owns_execution() or depth > 0)
     if call.function.controls_run and background_after is not None:
-        msg = f"{BACKGROUND_AFTER} is not supported for tools that stop the current model step"
+        msg = f"{BACKGROUND_AFTER} is not supported for tools that can stop the current model step"
         raise ValueError(msg)
     return background_after
 
