@@ -5,7 +5,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 
 ## Decisions
 
-- The direct delegate tools and the native delegation driver stay two execution adapters, because runs that cannot pause (the OpenAI-compatible API, voice calls, minimal children, and workflow participants) still need a child that finishes inside the caller's tool call.
+- The direct delegate tools and the native delegation driver stay two execution adapters, because a run that cannot pause, such as one serving the OpenAI-compatible API or a voice call, or a minimal child's or a workflow participant's run, still needs a child that finishes inside the caller's tool call.
   Only reading a call's arguments into its target is shared; authorizing the target stays with each adapter.
 - Authorization stays outside the shared resolver because the native driver must treat a refused authorization of a child it already started (interrupting or forgetting it, closing its visible tools, running the after-hook) differently from a refused resolution.
 - The fresh and follow-up resolvers are separate entry points because a fresh direct call must still return a refusal when no caller identity exists, while a follow-up loads a session only its owner may read.
