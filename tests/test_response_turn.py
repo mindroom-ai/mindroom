@@ -278,6 +278,7 @@ def test_a_paused_child_s_toolkit_owners_are_the_toolkits_its_sources_recorded(
         requested_model_name="default",
         depth=1,
         execution_identity={},
+        subagent_id="delegation",
         agent_mode="standard",
         persona=None,
     )

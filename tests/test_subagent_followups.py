@@ -92,7 +92,6 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     async def invoke(name: str, **args: object) -> str:
         toolkit = DelegateTools(
             "leader",
-            ["leader"],
             paths,
             config,
             agent_workspace_root_path(paths.storage_root, "leader"),
@@ -199,7 +198,6 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     foreign_identity = replace(identity, session_id="another-parent-session")
     toolkit = DelegateTools(
         "leader",
-        ["leader"],
         paths,
         config,
         agent_workspace_root_path(paths.storage_root, "leader"),
@@ -207,16 +205,17 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     )
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=foreign_identity)):
         assert "not available" in await toolkit.continue_subagent(subagent_id=subagent_id, message="Leak the word")
-    config.agents["leader"].delegate_to = []
+    # A reload revokes the leader's own grant; the toolkit its earlier build made still lists it.
+    reloaded = config.model_copy(deep=True)
+    reloaded.agents["leader"].delegate_to = []
     # The subagent's caller asks again: the leader, inside the team answering through the team's account.
     caller_context = replace(
-        _delegate_runtime_context(config, paths, execution_identity=identity),
+        _delegate_runtime_context(reloaded, paths, execution_identity=identity),
         transport_agent_name="squad" if execution == "team" else None,
     )
     with tool_runtime_context(caller_context):
         toolkit = DelegateTools(
             "leader",
-            ["leader"],
             paths,
             config,
             agent_workspace_root_path(paths.storage_root, "leader"),
@@ -252,7 +251,6 @@ async def test_cancellation_during_direct_reservation_settles_claim(
     monkeypatch.setattr(sessions, "write_json_file_durable", blocked_write)
     toolkit = DelegateTools(
         "leader",
-        ["leader"],
         paths,
         config,
         agent_workspace_root_path(paths.storage_root, "leader"),

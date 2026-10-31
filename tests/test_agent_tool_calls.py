@@ -704,6 +704,24 @@ async def test_canonical_shell_releases_only_shell_leaf_and_retains_middleware(t
 
 
 @pytest.mark.asyncio
+async def test_only_the_canonical_shell_function_takes_a_shell_leaf(tmp_path: Path) -> None:
+    """Replacing the leaf of another shell call would run the owner's shell command in its place."""
+
+    async def check_shell_command(args: str) -> str:
+        return args
+
+    catalog = await _catalog(tmp_path, [_toolkit("shell", check_shell_command)])
+    binding = await catalog.bind(ToolKey("shell", "check_shell_command"))
+
+    async def leaf(arguments: dict[str, object]) -> str:
+        del arguments
+        pytest.fail("the leaf of a call that is not the shell's command must never run")
+
+    with pytest.raises(ValueError, match="canonical shell function"):
+        agent_tool_calls.execute_agent_shell_call(binding, "call", {}, shell_leaf=leaf)
+
+
+@pytest.mark.asyncio
 async def test_authorization_is_rechecked_under_dispatch_lock(tmp_path: Path) -> None:
     """Authority changing while a call waits for mutation ownership blocks its body."""
     entered = asyncio.Event()

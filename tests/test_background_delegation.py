@@ -1551,7 +1551,6 @@ async def test_only_a_top_level_delegate_offers_background_waits(tmp_path: Path,
     try:
         delegate = DelegateTools(
             "leader",
-            ["code"],
             paths,
             config,
             agent_workspace_root_path(paths.storage_root, "leader"),

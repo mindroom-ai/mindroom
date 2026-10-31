@@ -188,6 +188,7 @@ expose = [
 [[modules]]
 path = "mindroom.agent_cli.bash"
 depends_on = [
+    "mindroom.agent_cli.shell_contract",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.tool_access",
@@ -498,6 +499,8 @@ expose = [
 path = "mindroom.agent_cli.shell_contract"
 depends_on = []
 visibility = [
+    "mindroom.agent_cli.bash",
+    "mindroom.agent_cli.cli_shell_agent",
     "mindroom.agent_cli.client",
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.turn",
@@ -517,7 +520,7 @@ expose = [
     "AGENT_CLI_WINDOW_ENV",
     "AGENT_CLI_WINDOW_HEADER",
     "AgentCliShellEnv",
-    "SHELL_OPERATION_NAMES",
+    "SHELL_FUNCTION",
     "bound_agent_cli_shell_env",
     "current_agent_cli_shell_env",
 ]
@@ -1736,9 +1739,9 @@ depends_on = [
     "mindroom.delegation.direct",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.personas",
-    "mindroom.delegation.recovery",
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
+    "mindroom.delegation.targets",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.authoring",
@@ -8182,7 +8185,6 @@ depends_on = [
     "mindroom.delegation.job_approvals",
     "mindroom.tool_jobs.consumption",
     "mindroom.cancellation",
-    "mindroom.delegation.personas",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.failure_text",
@@ -8205,6 +8207,7 @@ depends_on = [
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
     "mindroom.delegation.state",
+    "mindroom.delegation.targets",
     "mindroom.knowledge.utils",
     "mindroom.response_turn",
     "mindroom.run_storage",
@@ -8218,8 +8221,21 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
     "mindroom.turn_model",
-    "mindroom.tool_system.plugins",
 ]
+
+[[modules]]
+path = "mindroom.delegation.targets"
+depends_on = [
+    "mindroom.delegation.lifecycle",
+    "mindroom.delegation.personas",
+    "mindroom.delegation.recovery",
+    "mindroom.delegation.sessions",
+    "mindroom.delegation.state",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.runtime_context",
+]
+visibility = ["mindroom.custom_tools.delegate", "mindroom.delegation.execution"]
 
 [[modules]]
 path = "mindroom.delegation.personas"
@@ -8571,6 +8587,7 @@ visibility = [
     "mindroom.delegation.recovery",
     "mindroom.tool_system.agent_tools",
     "mindroom.orchestration.tool_job_runtime",
+    "mindroom.delegation.targets",
 ]
 
 [[modules]]
@@ -8595,8 +8612,8 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.orchestrator",
     "mindroom.approval.continuation_runner",
-    "mindroom.custom_tools.delegate",
     "mindroom.delegation.execution",
+    "mindroom.delegation.targets",
 ]
 
 [[modules]]
@@ -9303,6 +9320,7 @@ depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.shell_access",
+    "mindroom.agent_cli.shell_contract",
     "mindroom.custom_tools.job",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",

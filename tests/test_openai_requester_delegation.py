@@ -121,7 +121,6 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
         assert (identity.responder, identity.requester_id) == ("leader", "@alice:example.org")
         tool = DelegateTools(
             "leader",
-            ["specialist"],
             api.runtime_paths,
             api.config,
             _workspace(api, "leader"),
@@ -175,7 +174,6 @@ def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarn
         assert execution_identity is not None
         tool = DelegateTools(
             "leader",
-            ["specialist"],
             api.runtime_paths,
             api.config,
             _workspace(api, "leader"),
@@ -206,7 +204,6 @@ def test_delegation_fails_closed(api: _ApiHarness, key: str, target: str) -> Non
         assert execution_identity is not None
         tool = DelegateTools(
             "leader",
-            [target],
             api.runtime_paths,
             api.config,
             _workspace(api, "leader"),
@@ -313,7 +310,6 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
         assert execution_identity is not None
         tool = DelegateTools(
             "leader",
-            ["specialist"],
             api.runtime_paths,
             api.config,
             _workspace(api, "leader"),
@@ -328,7 +324,6 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
         assert execution_identity.agent_name == "specialist"
         tool = DelegateTools(
             "specialist",
-            ["forbidden"],
             api.runtime_paths,
             api.config,
             _workspace(api, "specialist"),
@@ -369,7 +364,6 @@ def test_delegation_rechecks_current_authorization(api: _ApiHarness, policy: str
             snapshot.runtime_paths = resolve_runtime_paths(config_path=tmp_path / "replaced.yaml", process_env={})
         tool = DelegateTools(
             "leader",
-            ["specialist"],
             api.runtime_paths,
             api.config,
             _workspace(api, "leader"),
@@ -402,7 +396,6 @@ def test_delegation_rechecks_current_caller_allowlist(api: _ApiHarness) -> None:
         config_lifecycle.require_api_state(api.client.app).snapshot.runtime_config = replacement
         tool = DelegateTools(
             "leader",
-            ["specialist"],
             api.runtime_paths,
             api.config,
             _workspace(api, "leader"),

@@ -445,6 +445,7 @@ def test_the_readers_take_only_the_current_shape(field: str | None, persona_fiel
         requested_model_name="default",
         depth=1,
         execution_identity={},
+        subagent_id="d",
         agent_mode="standard",
         persona=persona,
     )

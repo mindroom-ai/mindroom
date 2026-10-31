@@ -150,7 +150,7 @@ def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> N
     """Default delegation must not promise a job API or reserved wait argument."""
     config = Config(agents={"lead": AgentConfig(display_name="Lead", delegate_to=["lead"])})
     paths = test_runtime_paths(tmp_path)
-    toolkit = DelegateTools("lead", ["lead"], paths, config, agent_workspace_root_path(paths.storage_root, "lead"))
+    toolkit = DelegateTools("lead", paths, config, agent_workspace_root_path(paths.storage_root, "lead"))
     instructions = toolkit.instructions or ""
     description = toolkit_offers(toolkit, "run_subagent").description or ""
     assert "background_after" not in instructions + description

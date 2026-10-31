@@ -411,6 +411,7 @@ Matrix sync callback
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool, skill, and knowledge subsets, `subagents/<name>.md` workspace profiles, and the caller tool, skill, and knowledge checks |
 | `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
+| `delegation/targets.py` | Turning a `run_subagent` or `continue_subagent` call into the child it starts or continues, for both the direct tools and the native driver |
 | `delegation/legacy_records.py` | Delegation records whose working state lived only in their workspace files, left as they were |
 | `delegation/legacy_snapshots.py` | Delegation child snapshots stored without a field a later release added, rewritten once in subagent session files at startup and in runs' metadata as conversation layout version 5 |
 | `credentials/manager.py` | Credential stores (CredentialsManager) and `credential_layers`, the one resolver of where a service's credentials are read and written for a target |
