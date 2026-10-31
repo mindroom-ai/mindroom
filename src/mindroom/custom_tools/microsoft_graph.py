@@ -566,7 +566,7 @@ def graph_error_payload(tool_name: str, exc: MicrosoftGraphError) -> str:
     return custom_tool_payload(tool_name, "error", code=exc.code, message=exc.message, **exc.details)
 
 
-def graph_tool_result(tool_name: str, operation: Callable[[], Mapping[str, object]]) -> str:
+def _graph_tool_result(tool_name: str, operation: Callable[[], Mapping[str, object]]) -> str:
     """Run one tool operation and render it, its connect prompt, or its error as the tool's JSON payload."""
     try:
         fields = operation()
@@ -596,7 +596,7 @@ def graph_call[T](
         with session() as opened:
             return run(opened, request)
 
-    return graph_tool_result(tool_name, operation)
+    return _graph_tool_result(tool_name, operation)
 
 
 def mailbox_tool_result(
@@ -605,7 +605,7 @@ def mailbox_tool_result(
     mailbox: str | None,
     operation: Callable[[], Mapping[str, object]],
 ) -> str:
-    """Run one operation, as `graph_tool_result` does, for a call that may name another user's mailbox.
+    """Run one operation, as `_graph_tool_result` does, for a call that may name another user's mailbox.
 
     A malformed mailbox is refused before the operation runs; once the call names a valid one, every result,
     errors included, repeats it as `field_name`.
@@ -623,4 +623,4 @@ def mailbox_tool_result(
             exc.details.update(named)
             raise
 
-    return graph_tool_result(tool_name, run)
+    return _graph_tool_result(tool_name, run)

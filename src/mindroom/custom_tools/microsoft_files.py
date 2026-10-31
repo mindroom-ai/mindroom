@@ -14,12 +14,11 @@ from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     GraphSession,
     MicrosoftGraphError,
-    graph_error_payload,
+    graph_call,
     graph_int,
     graph_object,
     graph_records,
     graph_session,
-    graph_tool_result,
     graph_upload_errors,
     next_page_token,
     page_offset,
@@ -166,12 +165,14 @@ def _checked_target(metadata: Mapping[str, Any], expected_web_url: str | None) -
     return summary
 
 
-def _upload_name_error(name: str) -> str | None:
+def _upload_name(name: str) -> str:
     if name in {"", ".", ".."} or name != name.strip():
-        return "File names must not be empty, '.', '..', or start or end with a space."
+        msg = "File names must not be empty, '.', '..', or start or end with a space."
+        raise MicrosoftGraphError(code="invalid_name", message=msg)
     if any(character in _INVALID_NAME_CHARACTERS or ord(character) < 32 for character in name):
-        return 'File names must not contain control characters or any of " * : < > ? / \\ |.'
-    return None
+        msg = 'File names must not contain control characters or any of " * : < > ? / \\ |.'
+        raise MicrosoftGraphError(code="invalid_name", message=msg)
+    return name
 
 
 def _address(value: str) -> str:
@@ -297,13 +298,6 @@ class MicrosoftFilesTools(Toolkit):
             tools=[function for name, function in functions.items() if write or name not in _WRITE_FUNCTIONS],
         )
 
-    def _run(self, operation: Callable[[GraphSession], Mapping[str, object]]) -> str:
-        def run() -> Mapping[str, object]:
-            with self._session() as session:
-                return operation(session)
-
-        return graph_tool_result(_TOOL_NAME, run)
-
     @staticmethod
     def _metadata(item: _Item, session: GraphSession) -> dict[str, Any]:
         return session.json("GET", item.path, params={"$select": _ITEM_SELECT})
@@ -327,8 +321,7 @@ class MicrosoftFilesTools(Toolkit):
 
         """
 
-        def operation(session: GraphSession) -> Mapping[str, object]:
-            offset = page_offset(page_token, _MAX_SEARCH_OFFSET)
+        def operation(session: GraphSession, offset: int) -> Mapping[str, object]:
             request = {
                 "entityTypes": ["driveItem"],
                 "query": {"queryString": required_text(query, "query")},
@@ -348,7 +341,7 @@ class MicrosoftFilesTools(Toolkit):
             more = any(container.get("moreResultsAvailable") is True for container in containers)
             return {"files": files, "next_page_token": str(offset + len(files)) if more and files else None}
 
-        return self._call(operation, validate=lambda: page_offset(page_token, _MAX_SEARCH_OFFSET))
+        return graph_call(_TOOL_NAME, self._session, lambda: page_offset(page_token, _MAX_SEARCH_OFFSET), operation)
 
     def microsoft_files_list_folder(
         self,
@@ -366,9 +359,16 @@ class MicrosoftFilesTools(Toolkit):
 
         """
 
-        def operation(session: GraphSession) -> Mapping[str, object]:
+        def build() -> str | None:
             if page_token is not None:
-                payload = session.json("GET", page_path(page_token, _CHILDREN_PAGES))
+                return page_path(page_token, _CHILDREN_PAGES)
+            if folder is not None:
+                _parse_file(folder, "folder")
+            return None
+
+        def operation(session: GraphSession, next_page: str | None) -> Mapping[str, object]:
+            if next_page is not None:
+                payload = session.json("GET", next_page)
             else:
                 parent = "/me/drive/root" if folder is None else _resolve(folder, session, "folder").path
                 params = {"$top": str(graph_int(limit, "limit", maximum=200)), "$select": _ITEM_SELECT}
@@ -376,13 +376,7 @@ class MicrosoftFilesTools(Toolkit):
             entries = [_summary(entry) for entry in graph_records(payload)]
             return {"files": entries, "next_page_token": next_page_token(payload)}
 
-        def validate() -> None:
-            if page_token is not None:
-                page_path(page_token, _CHILDREN_PAGES)
-            elif folder is not None:
-                _parse_file(folder, "folder")
-
-        return self._call(operation, validate=validate)
+        return graph_call(_TOOL_NAME, self._session, build, operation)
 
     def microsoft_files_get_file(self, file: str) -> str:
         """Get one OneDrive or SharePoint file's details, including the etag microsoft_files_replace_file checks.
@@ -391,9 +385,11 @@ class MicrosoftFilesTools(Toolkit):
             file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
 
         """
-        return self._call(
-            lambda session: {"file": _summary(self._metadata(_resolve(file, session), session))},
-            validate=lambda: _parse_file(file),
+        return graph_call(
+            _TOOL_NAME,
+            self._session,
+            lambda: _parse_file(file),
+            lambda session, _item: {"file": _summary(self._metadata(_resolve(file, session), session))},
         )
 
     def microsoft_files_download_file(self, file: str) -> str:
@@ -407,7 +403,7 @@ class MicrosoftFilesTools(Toolkit):
 
         """
 
-        def operation(session: GraphSession) -> Mapping[str, object]:
+        def operation(session: GraphSession, _item: _Item | None) -> Mapping[str, object]:
             if self._workspace_root is None:
                 raise MicrosoftGraphError(code="workspace_required", message="Downloads need an agent workspace.")
             item = _resolve(file, session)
@@ -426,7 +422,7 @@ class MicrosoftFilesTools(Toolkit):
             )
             return {"file": summary, "path": str(path)}
 
-        return self._call(operation, validate=lambda: _parse_file(file))
+        return graph_call(_TOOL_NAME, self._session, lambda: _parse_file(file), operation)
 
     def microsoft_files_replace_file(
         self,
@@ -449,8 +445,14 @@ class MicrosoftFilesTools(Toolkit):
 
         """
 
-        def operation(session: GraphSession) -> Mapping[str, object]:
-            source = self._upload_source(local_path)
+        def build() -> tuple[str, AuthorizedFile]:
+            _parse_file(file)
+            etag = _etag(expected_etag)
+            _web_url(expected_web_url)
+            return etag, self._upload_source(local_path)
+
+        def operation(session: GraphSession, checked: tuple[str, AuthorizedFile]) -> Mapping[str, object]:
+            etag, source = checked
             item = _resolve(file, session)
             if _checked_target(self._metadata(item, session), expected_web_url)["is_folder"]:
                 raise MicrosoftGraphError(code="is_folder", message="That item is a folder, not a file.")
@@ -461,20 +463,12 @@ class MicrosoftFilesTools(Toolkit):
                         f"{item.path}/content",
                         source,
                         max_bytes=_MAX_UPLOAD_BYTES,
-                        headers={"If-Match": _etag(expected_etag)},
+                        headers={"If-Match": etag},
                     ),
                 ),
             }
 
-        return self._call(
-            operation,
-            validate=lambda: (
-                _parse_file(file),
-                _etag(expected_etag),
-                _web_url(expected_web_url),
-                self._upload_source(local_path),
-            ),
-        )
+        return graph_call(_TOOL_NAME, self._session, build, operation)
 
     def microsoft_files_upload_file(
         self,
@@ -496,18 +490,16 @@ class MicrosoftFilesTools(Toolkit):
                 returns it; search results show a different form of it. Required with folder.
 
         """
-        try:
+
+        def build() -> tuple[AuthorizedFile, str]:
             if folder is not None:
                 _parse_file(folder, "folder")
                 _web_url(expected_web_url)
             source = self._upload_source(local_path)
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-        file_name = source.name if name is None else name
-        if error := _upload_name_error(file_name):
-            return graph_error_payload(_TOOL_NAME, MicrosoftGraphError(code="invalid_name", message=error))
+            return source, _upload_name(source.name if name is None else name)
 
-        def operation(session: GraphSession) -> Mapping[str, object]:
+        def operation(session: GraphSession, checked: tuple[AuthorizedFile, str]) -> Mapping[str, object]:
+            source, file_name = checked
             parent = "/me/drive/root"
             if folder is not None:
                 target = _resolve(folder, session, "folder")
@@ -523,7 +515,7 @@ class MicrosoftFilesTools(Toolkit):
                 raise MicrosoftGraphError(code="name_conflict", message=msg) from None
             return {"file": _summary(result)}
 
-        return self._run(operation)
+        return graph_call(_TOOL_NAME, self._session, build, operation)
 
     def microsoft_files_excel_list_worksheets(self, file: str) -> str:
         """List the worksheets in one Excel workbook stored in OneDrive or SharePoint.
@@ -533,7 +525,7 @@ class MicrosoftFilesTools(Toolkit):
 
         """
 
-        def operation(session: GraphSession) -> Mapping[str, object]:
+        def operation(session: GraphSession, _item: _Item | None) -> Mapping[str, object]:
             item = _resolve(file, session)
             payload = session.json(
                 "GET",
@@ -546,7 +538,7 @@ class MicrosoftFilesTools(Toolkit):
             ]
             return {"worksheets": sheets}
 
-        return self._call(operation, validate=lambda: _parse_file(file))
+        return graph_call(_TOOL_NAME, self._session, lambda: _parse_file(file), operation)
 
     def microsoft_files_excel_read_range(self, file: str, worksheet: str, address: str | None = None) -> str:
         """Read cell values from one worksheet of an Excel workbook, up to 10,000 cells.
@@ -558,7 +550,7 @@ class MicrosoftFilesTools(Toolkit):
 
         """
 
-        def operation(session: GraphSession) -> Mapping[str, object]:
+        def operation(session: GraphSession, _item: _Item | None) -> Mapping[str, object]:
             sheet = _worksheet(worksheet)
             if address is None:
                 target = "usedRange(valuesOnly=true)"
@@ -574,7 +566,7 @@ class MicrosoftFilesTools(Toolkit):
             )
             return {"range": _range(payload)}
 
-        return self._call(operation, validate=lambda: _parse_file(file))
+        return graph_call(_TOOL_NAME, self._session, lambda: _parse_file(file), operation)
 
     def microsoft_files_excel_update_range(
         self,
@@ -597,13 +589,16 @@ class MicrosoftFilesTools(Toolkit):
                 returns it; search results show a different form of it. Required.
 
         """
-        try:
+
+        def build() -> tuple[str, str]:
             sheet = _worksheet(worksheet)
             target = _range_write(address, values)
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
+            _parse_file(file)
+            _web_url(expected_web_url)
+            return sheet, target
 
-        def operation(session: GraphSession) -> Mapping[str, object]:
+        def operation(session: GraphSession, checked: tuple[str, str]) -> Mapping[str, object]:
+            sheet, target = checked
             item = _resolve(file, session)
             _checked_target(self._metadata(item, session), expected_web_url)
             payload = session.json(
@@ -613,18 +608,4 @@ class MicrosoftFilesTools(Toolkit):
             )
             return {"range": _range(payload)}
 
-        return self._call(operation, validate=lambda: (_parse_file(file), _web_url(expected_web_url)))
-
-    def _call(
-        self,
-        operation: Callable[[GraphSession], Mapping[str, object]],
-        *,
-        validate: Callable[[], object] | None = None,
-    ) -> str:
-        """Refuse malformed arguments before any request, then run the operation."""
-        if validate is not None:
-            try:
-                validate()
-            except MicrosoftGraphError as exc:
-                return graph_error_payload(_TOOL_NAME, exc)
-        return self._run(operation)
+        return graph_call(_TOOL_NAME, self._session, build, operation)

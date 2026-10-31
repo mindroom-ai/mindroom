@@ -83,11 +83,13 @@ def _tools(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
     write: bool = True,
+    connected: bool = True,
 ) -> tuple[MicrosoftFilesTools, FakeGraph]:
     graph = FakeGraph(handler).install(monkeypatch)
     paths = runtime_paths(tmp_path)
     manager = save_client_config(paths)
-    publish_grant(microsoft_oauth_provider("microsoft_files"), manager)
+    if connected:
+        publish_grant(microsoft_oauth_provider("microsoft_files"), manager)
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     tools = MicrosoftFilesTools(
@@ -205,6 +207,30 @@ def test_a_file_that_is_not_a_graph_item_or_link_is_refused(
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
     assert _payload(tools.microsoft_files_get_file(file))["code"] == "invalid_file"
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda tools: tools.microsoft_files_list_folder(folder="report.docx"),
+        lambda tools: tools.microsoft_files_get_file("report.docx"),
+        lambda tools: tools.microsoft_files_download_file("report.docx"),
+        lambda tools: tools.microsoft_files_replace_file("report.docx", "report.docx", "etag", WEB_URL),
+        lambda tools: tools.microsoft_files_upload_file("report.docx", folder="report.docx", expected_web_url=WEB_URL),
+        lambda tools: tools.microsoft_files_excel_list_worksheets("report.docx"),
+        lambda tools: tools.microsoft_files_excel_read_range("report.docx", "Budget"),
+        lambda tools: tools.microsoft_files_excel_update_range("report.docx", "Budget", "A1", [[1]], WEB_URL),
+    ],
+)
+def test_a_malformed_file_is_refused_before_asking_for_a_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    call: Callable[[MicrosoftFilesTools], str],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph(), connected=False)
+
+    assert _payload(call(tools))["code"] == "invalid_file"
     assert graph.requests == []
 
 

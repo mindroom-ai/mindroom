@@ -19,7 +19,6 @@ from mindroom.custom_tools.microsoft_graph import (
     graph_int,
     graph_session,
     graph_time,
-    graph_tool_result,
     html_to_text,
     mailbox_next_page_token,
     mailbox_page_path,
@@ -48,6 +47,7 @@ from tests.oauth_test_utils import serve_token_endpoint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from mindroom.custom_tools.microsoft_graph import GraphSession
@@ -69,11 +69,15 @@ def _result(
     if connected:
         publish_grant(PROVIDER, manager, **grant_overrides)
 
-    def run() -> Mapping[str, object]:
-        with graph_session(PROVIDER, paths, manager, worker_target() if requester else None, None) as session:
-            return operation(session)
+    session = partial(graph_session, PROVIDER, paths, manager, worker_target() if requester else None, None)
+    return json.loads(_call(session, operation))
 
-    return json.loads(graph_tool_result("microsoft_files", run))
+
+def _call(
+    session: Callable[[], AbstractContextManager[GraphSession]],
+    operation: Callable[[GraphSession], Mapping[str, object]],
+) -> str:
+    return graph_call("microsoft_files", session, lambda: None, lambda opened, _request: operation(opened))
 
 
 def _answer(status: int, **kwargs: object) -> Callable[[httpx.Request], httpx.Response]:
@@ -573,11 +577,9 @@ def test_a_tenant_change_retires_connections_made_for_another_tenant(
     manager = save_client_config(paths)
     publish_grant(PROVIDER, manager)
 
-    def run() -> Mapping[str, object]:
-        with graph_session(PROVIDER, paths, manager, worker_target(), None) as session:
-            return session.json("GET", "/me/drive")
+    session = partial(graph_session, PROVIDER, paths, manager, worker_target(), None)
 
-    result = json.loads(graph_tool_result("microsoft_files", run))
+    result = json.loads(_call(session, lambda opened: opened.json("GET", "/me/drive")))
 
     assert result["oauth_connection_required"] is True
     assert result["reason"] == "refresh_rejected"
@@ -590,11 +592,9 @@ def test_a_malformed_tenant_setting_is_reported_not_raised(tmp_path: Path, monke
     manager = save_client_config(paths)
     publish_grant(PROVIDER, manager)
 
-    def run() -> Mapping[str, object]:
-        with graph_session(PROVIDER, paths, manager, worker_target(), None) as session:
-            return session.json("GET", "/me/drive")
+    session = partial(graph_session, PROVIDER, paths, manager, worker_target(), None)
 
-    result = json.loads(graph_tool_result("microsoft_files", run))
+    result = json.loads(_call(session, lambda opened: opened.json("GET", "/me/drive")))
 
     assert result["code"] == "invalid_tenant"
     assert graph.requests == []
