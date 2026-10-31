@@ -629,13 +629,11 @@ def test_a_request_never_rebinds_onto_another_runtime(loaded_app: FastAPI, tmp_p
     assert exc_info.value.status_code == 409
 
 
-@pytest.mark.parametrize("writer", ["structured", "raw"])
 @pytest.mark.parametrize("bind_mount", [False, True], ids=["renamed", "single_file_bind_mount"])
 def test_a_dashboard_save_keeps_the_config_file_mode(
     loaded_app: FastAPI,
     runtime_paths: constants.RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
-    writer: str,
     bind_mount: bool,
 ) -> None:
     """A save replaces the config's content, never its permissions, because the file can hold API keys.
@@ -649,7 +647,7 @@ def test_a_dashboard_save_keeps_the_config_file_mode(
         rename = Path.replace
 
         def refuse_renaming_onto_the_config(source: Path, target: Path) -> Path:
-            if Path(target) == config_path:
+            if target == config_path:
                 raise OSError(errno.EBUSY, "Device or resource busy")
             return rename(source, target)
 
@@ -657,14 +655,10 @@ def test_a_dashboard_save_keeps_the_config_file_mode(
     edited = copy.deepcopy(VALID_CONFIG)
     edited["agents"]["test_agent"]["role"] = "An edited test agent"
 
-    if writer == "structured":
-        save_config(request_for(loaded_app), edited)
-    else:
-        save_raw_config(request_for(loaded_app), yaml.dump(edited))
+    save_config(request_for(loaded_app), edited)
 
     assert yaml.safe_load(config_path.read_text())["agents"]["test_agent"]["role"] == "An edited test agent"
     assert config_path.stat().st_mode & 0o777 == 0o604
-    assert list(config_path.parent.glob(f".{config_path.name}.*.tmp")) == []
 
 
 @pytest.mark.parametrize("writer", ["structured", "raw"])

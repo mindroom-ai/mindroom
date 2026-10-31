@@ -89,14 +89,13 @@ def write_config_commit(
     Provisioning reserves personal-agent names under the same lock, so a commit validated before a reservation
     cannot take a name it reserved.
     """
-    config_path = runtime_paths.config_path
     with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
         if commit.structured:
             _raise_when_composed_from_includes(runtime_paths, committed_uses_includes)
         _raise_when_roster_names_collide(runtime_paths, commit.config.authored_model_dump())
         if loaded is not None and _current_file_fingerprint(runtime_paths) != loaded.source_fingerprint:
             raise ConfigFileChangedError
-        yaml_io.write_text_atomic(config_path, commit.source, copy_when_rename_fails=True)
+        yaml_io.write_text_atomic(runtime_paths.config_path, commit.source, copy_when_rename_fails=True)
 
 
 def _current_file_fingerprint(runtime_paths: RuntimePaths) -> str | None:

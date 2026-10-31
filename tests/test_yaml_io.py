@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import errno
 import io
-import pathlib
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 import yaml
 
 from mindroom import yaml_io
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _SAMPLE_DOCUMENT = """\
 thread:
@@ -141,34 +137,27 @@ def test_safe_dump_rejects_unsafe_types_like_safe_dump() -> None:
         yaml_io.safe_dump({"bad": Unrepresentable()})
 
 
-def test_write_text_atomic_replaces_content_and_preserves_mode(tmp_path: Path) -> None:
-    """Atomic text replacement must retain file permissions and leave no temp file."""
-    path = tmp_path / "config.yaml"
-    path.write_text("old\n", encoding="utf-8")
-    path.chmod(0o640)
-
-    yaml_io.write_text_atomic(path, "new\n")
-
-    assert path.read_text(encoding="utf-8") == "new\n"
-    assert path.stat().st_mode & 0o777 == 0o640
-    assert list(tmp_path.iterdir()) == [path]
+def _reject_rename(_source: Path, _target: Path) -> None:
+    raise OSError(errno.EBUSY, "Device or resource busy")
 
 
-def test_write_text_atomic_copies_into_a_bind_mount_and_keeps_its_mode(
+@pytest.mark.parametrize("bind_mount", [False, True], ids=["renamed", "single_file_bind_mount"])
+def test_write_text_atomic_replaces_content_and_preserves_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    bind_mount: bool,
 ) -> None:
-    """A single-file bind mount cannot be renamed over, so the content is copied in place with the file's mode."""
+    """Atomic text replacement keeps the file's permissions and leaves no temp file.
+
+    A single-file bind mount cannot be renamed over, so the content is copied in place instead.
+    """
     path = tmp_path / "config.yaml"
     path.write_text("old\n", encoding="utf-8")
     path.chmod(0o640)
+    if bind_mount:
+        monkeypatch.setattr(Path, "replace", _reject_rename)
 
-    def reject_rename(_source: Path, _target: Path) -> None:
-        raise OSError(errno.EBUSY, "Device or resource busy")
-
-    monkeypatch.setattr(pathlib.Path, "replace", reject_rename)
-
-    yaml_io.write_text_atomic(path, "new\n", copy_when_rename_fails=True)
+    yaml_io.write_text_atomic(path, "new\n", copy_when_rename_fails=bind_mount)
 
     assert path.read_text(encoding="utf-8") == "new\n"
     assert path.stat().st_mode & 0o777 == 0o640
@@ -182,11 +171,7 @@ def test_write_text_atomic_refuses_a_bind_mount_unless_copying_is_allowed(
     """Without the copy fallback a failed rename leaves the old content and no temp file."""
     path = tmp_path / "config.yaml"
     path.write_text("old\n", encoding="utf-8")
-
-    def reject_rename(_source: Path, _target: Path) -> None:
-        raise OSError(errno.EBUSY, "Device or resource busy")
-
-    monkeypatch.setattr(pathlib.Path, "replace", reject_rename)
+    monkeypatch.setattr(Path, "replace", _reject_rename)
 
     with pytest.raises(OSError, match="busy"):
         yaml_io.write_text_atomic(path, "new\n")
