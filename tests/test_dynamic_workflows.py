@@ -1559,6 +1559,9 @@ async def test_dynamic_workflow_tool_uses_runtime_context(tmp_path: Path) -> Non
 
     assert created["status"] == "ok"
     assert created["workflow_id"] == "competitor-research-report"
+    # Every workflow is the calling agent's, so results name no scope the tools would not take.
+    assert "scope" not in created
+    assert "scope" not in listed
     assert listed["workflows"][0]["workflow_id"] == "competitor-research-report"
     assert run["status"] == "completed"
     assert run["outputs"]["brief"] == "Research brief for Agno factories."
@@ -2331,3 +2334,10 @@ def test_participant_function_owners_count_only_selected_functions() -> None:
         {"file": ("read_file",), "python": ("read_file",)},
     )
     assert whole == {"read_file": frozenset({"file", "python"})}
+
+
+@pytest.mark.parametrize("scope", ["room", "tenant"])
+def test_the_store_has_only_the_agent_scope(tmp_path: Path, scope: str) -> None:
+    """No tool creates another scope, so the store refuses one, as a report URL naming it does."""
+    with pytest.raises(DynamicWorkflowError, match="Unsupported Dynamic Workflow scope"):
+        DynamicWorkflowStore(tmp_path).list_workflows(scope=scope, owner_id="general")

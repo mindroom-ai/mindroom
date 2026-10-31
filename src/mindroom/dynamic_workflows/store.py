@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.dynamic_workflows.runner import WorkflowExecution
 
 _REVISION_RE = re.compile(r"^[0-9]{6}$")
-_SCOPES = frozenset({"agent", "room", "tenant"})
+_SCOPES = frozenset({"agent"})
 _REVISION_METADATA_KEYS = frozenset({"revision", "revision_reason", "updated_by", "updated_at"})
 
 
@@ -360,7 +360,7 @@ class DynamicWorkflowStore:
 
     def _scope_dir(self, scope: str, owner_id: str) -> Path:
         _validate_scope(scope)
-        owner_dir = _owner_dir_name(scope, owner_id)
+        owner_dir = _owner_dir_name(owner_id)
         return self._root / scope / owner_dir
 
     def _workflow_dir(self, scope: str, owner_id: str, workflow_id: str) -> Path:
@@ -559,9 +559,7 @@ def _validate_revision(value: str) -> None:
         raise DynamicWorkflowError(msg)
 
 
-def _owner_dir_name(scope: str, owner_id: str) -> str:
-    if scope == "tenant":
-        return "tenant"
+def _owner_dir_name(owner_id: str) -> str:
     if ID_RE.fullmatch(owner_id):
         return owner_id
     digest = hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:24]
@@ -581,7 +579,7 @@ def _private_report_url(
 ) -> str | None:
     if base_url is None or not base_url.strip():
         return None
-    owner_key = _owner_dir_name(scope, owner_id)
+    owner_key = _owner_dir_name(owner_id)
     return f"{base_url.rstrip('/')}/reports/private/{scope}/{owner_key}/{workflow_id}/{run_id}"
 
 

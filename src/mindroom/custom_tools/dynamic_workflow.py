@@ -170,7 +170,6 @@ class DynamicWorkflowTools(Toolkit):
         return cls._payload(
             "ok",
             workflow_id=summary.workflow_id,
-            scope=summary.scope,
             owner_id=summary.owner_id,
             active_revision=summary.active_revision,
             name=summary.name,
@@ -335,7 +334,6 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", message=str(exc))
         return self._payload(
             "ok",
-            scope=AGENT_SCOPE,
             owner_id=owner_id,
             workflows=[
                 {
