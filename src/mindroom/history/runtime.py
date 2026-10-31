@@ -537,12 +537,7 @@ async def _compact_before_reply(
         raise
     except Exception:
         # A failing manual compaction must not retry on every reply.
-        await clear_manual_compaction_request(
-            storage=storage,
-            session=session,
-            state=state,
-            keep_concurrent_request=False,
-        )
+        await clear_manual_compaction_request(storage=storage, session=session, state=state)
         raise
 
 

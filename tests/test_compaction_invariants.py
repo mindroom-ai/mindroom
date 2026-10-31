@@ -27,10 +27,16 @@ from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     RuntimePaths,
 )
-from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
+from mindroom.history.compaction import (
+    SummaryModel,
+    _summarize_chunk,
+    clear_manual_compaction_request,
+    compact_scope_history,
+)
 from mindroom.history.storage import (
+    has_queued_force_compaction,
     read_scope_state,
-    update_scope_state_on_latest,
+    set_force_compaction,
     with_force_compaction,
 )
 from mindroom.history.summary_call import (
@@ -207,8 +213,8 @@ def test_a_stale_save_of_a_folded_run_and_its_member_runs_changes_neither(tmp_pa
     assert [run.run_id for run in persisted.runs] == ["kept"]
 
 
-def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: Path) -> None:
-    """The update callable sees the latest persisted state, and the write lands on that row."""
+def test_clearing_the_force_flag_through_a_stale_session_lands_on_the_freshest_row(tmp_path: Path) -> None:
+    """The clear applies to the stored row's latest metadata, keeps what another writer stored, and syncs the session."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     stale_session = _session([_completed_run("run-1")])
@@ -216,40 +222,51 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
 
     concurrent_session = storage.load_session("session-1")
     assert concurrent_session is not None
-    concurrent_state = HistoryScopeState(force_compact_before_next_run=True)
-    storage.update_metadata(concurrent_session, with_force_compaction)
+    storage.update_metadata(concurrent_session, lambda metadata: {**with_force_compaction(metadata), "other": "kept"})
     storage.save_run(concurrent_session, _completed_run("run-2"), record_usage=False)
 
-    seen_states: list[HistoryScopeState] = []
+    assert set_force_compaction(storage, session=stale_session, forced=False) == HistoryScopeState()
 
-    def clear_force(latest: HistoryScopeState) -> HistoryScopeState:
-        seen_states.append(latest)
-        return HistoryScopeState(force_compact_before_next_run=False)
-
-    returned_state = update_scope_state_on_latest(storage, session=stale_session, update=clear_force)
-
-    assert seen_states == [concurrent_state]
-    assert returned_state.force_compact_before_next_run is False
     persisted_session = storage.load_session("session-1")
     assert persisted_session is not None
-    assert read_scope_state(persisted_session) == returned_state
+    assert persisted_session.metadata == {"other": "kept"}
     assert stale_session.metadata == persisted_session.metadata
+    assert [run.run_id for run in persisted_session.runs] == ["run-1", "run-2"]
 
 
-def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(
+@pytest.mark.asyncio
+async def test_a_reply_that_read_no_request_leaves_one_made_meanwhile(tmp_path: Path) -> None:
+    """Only the request a reply read clears, so one made while it compacted automatically stays for the next reply."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session([_completed_run("run-1")])
+    seed_session(storage, session)
+    state = read_scope_state(session)
+    concurrent_session = storage.load_session("session-1")
+    assert concurrent_session is not None
+    storage.update_metadata(concurrent_session, with_force_compaction)
+
+    await clear_manual_compaction_request(storage=storage, session=session, state=state)
+
+    assert has_queued_force_compaction(storage, "session-1")
+
+
+@pytest.mark.parametrize("forced", [True, False], ids=["already-forced", "never-forced"])
+def test_a_force_flag_update_that_changes_nothing_writes_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    forced: bool,
 ) -> None:
-    """A no-op update writes nothing, and the session then holds the freshest row's metadata."""
+    """Setting the flag to what the freshest row holds writes nothing, and the session then holds that row's metadata."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     stale_session = _session([_completed_run("run-1")])
     seed_session(storage, stale_session)
-
-    concurrent_session = storage.load_session("session-1")
-    assert concurrent_session is not None
-    persisted_state = HistoryScopeState(force_compact_before_next_run=True)
-    storage.update_metadata(concurrent_session, with_force_compaction)
+    if forced:
+        concurrent_session = storage.load_session("session-1")
+        assert concurrent_session is not None
+        storage.update_metadata(concurrent_session, with_force_compaction)
     statements: list[str] = []
     connect = store_module.connect_conversation_database
 
@@ -260,12 +277,15 @@ def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(
 
     monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
 
-    returned_state = update_scope_state_on_latest(storage, session=stale_session, update=lambda latest: latest)
+    assert set_force_compaction(storage, session=stale_session, forced=forced) == HistoryScopeState(
+        force_compact_before_next_run=forced,
+    )
 
     assert statements
     assert not [statement for statement in statements if statement.lstrip().upper().startswith("UPDATE")]
-    assert returned_state == persisted_state
-    assert read_scope_state(stale_session) == persisted_state
+    persisted_session = storage.load_session("session-1")
+    assert persisted_session is not None
+    assert stale_session.metadata == persisted_session.metadata
 
 
 # --- Invariant 2: chunk progress survives interruption ------------------------

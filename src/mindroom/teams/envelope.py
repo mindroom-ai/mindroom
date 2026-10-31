@@ -19,7 +19,7 @@ from uuid import uuid4
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content, with_prior_usage
 from mindroom.config.resolution import entity_timezone
-from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
+from mindroom.constants import is_silent_schedule_no_report_response
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
@@ -31,7 +31,6 @@ from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import load_bound_scope_session
-from mindroom.history.storage import update_scope_seen_event_ids
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
@@ -60,7 +59,6 @@ from mindroom.response_turn import (
     stream_with_llm_request_log_context,
 )
 from mindroom.run_storage import bind_turn_session, scope_run_storage
-from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
 from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
@@ -311,29 +309,6 @@ def run_prepared_team(
         metadata=prepared.run_metadata,
         records=None,
     )
-
-
-async def _persist_bound_seen_event_ids(*, scope_context: ScopeSessionContext, event_ids: list[str]) -> None:
-    """Record the Matrix events this team turn consumed on the stored session row, creating the row if needed.
-
-    The ids merge into the metadata the row holds, so nothing the run or another writer stored is put back or lost.
-    The write runs in the database's lane, as the session's other writes do.
-    """
-    storage = scope_context.storage
-    # A new session names the row to merge into, so the run's loaded session never writes its stale state back.
-    record = partial(
-        update_scope_seen_event_ids,
-        session=scope_context.first_session(),
-        event_ids=event_ids,
-    )
-    await run_session_storage_operation(lambda: storage, record)
-
-
-def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[str]:
-    raw_event_ids = (run_metadata or {}).get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
-    if not isinstance(raw_event_ids, list):
-        return []
-    return [event_id for event_id in raw_event_ids if isinstance(event_id, str) and event_id]
 
 
 # ---------------------------------------------------------------------------
@@ -664,9 +639,7 @@ class _TeamTurn:
         """Return the completed attempt: what its reply still has to show, what replays, and the turn's metadata.
 
         ``shown`` says whether the attempt's chunks showed a document; one that showed nothing ends with the
-        no-response line. An attempt that produced anything, text or tool calls, records the Matrix events the turn
-        consumed as seen on the stored session row; an empty one, whose run is not stored, leaves them unseen, so the
-        next turn still reads them.
+        no-response line.
         """
         tool_executions = team_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
@@ -676,11 +649,6 @@ class _TeamTurn:
         body_text = attempt.presentation.text_without_tool_markers(finished=True)
         has_visible_output = bool(body_text)
         is_empty = is_empty_reply(record)
-        if not is_empty and self.ctx.reply_to_event_id:
-            await _persist_bound_seen_event_ids(
-                scope_context=run.scope,
-                event_ids=_run_metadata_seen_event_ids(run.run_metadata),
-            )
         rendered = header + (body_text or NO_TEAM_RESPONSE)
         replayable_text = rendered if has_visible_output else ""
         if self.silent_no_report(record):

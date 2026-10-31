@@ -21,8 +21,10 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 - Compaction keeps every run in the runs table and appends a summary row positioned after the newest run it covers, instead of moving runs into a second store, because keeping two stores consistent produced repeated bugs once summaries had to cover part of a running turn (see `docs/dev/2026-10-12-compaction-log-store-design.md`).
 - Edits and redactions cut the log from the earliest element holding the event; rows that only end earlier summaries (barriers) survive cuts, so retired summaries never replay again.
   Summaries written when compaction deleted runs cannot be split by run, so while such a summary is in force, redacting an event it may contain cuts at it, removing every run and summary row of the scope.
-- Seen ids are derived from the loaded runs and the summary rows after the latest barrier rather than stored, so they follow the remaining history after compaction or redaction.
-  Every redaction change drops the scope's metadata seen ids, because dropping ids can only re-offer messages, never hide them.
+- Seen ids are derived from the loaded runs and the summary rows after the latest barrier rather than stored, so they follow the remaining history after compaction, an edit, or a redaction.
+  A team turn records the events it consumed only in its stored run, as an agent turn does: the copy earlier releases also kept in session metadata outlived the runs an edit removed, so the regenerated turn never saw the messages they had read.
+  Every redaction change drops the metadata seen ids earlier releases kept, because dropping ids can only re-offer messages, never hide them.
+- A manual compaction request is one flag that the compacting reply clears, not a request id, because no reply of the scope can run alongside the one compacting; the [Limitations](#limitations) name the one writer that can.
 - A completed approval moves to the end of the log, after the turns that happened while it waited, because its continuation saw them.
 - The summary replays as the first history message instead of inside the system prompt, so a compaction never changes the cached prompt prefix, and minimal agents with a string system message see it too.
   After a mid-turn compaction it follows that turn's prompt instead, in the rewritten request, its resume, and later turns while that run replays first, because a fast model that reads the prompt last restarts the request even when the summary records it finished (evidence in `docs/dev/2026-10-10-compaction-unification-design.md`).
@@ -54,7 +56,8 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 
 ## Limitations
 
-Metadata seen ids, such as team consumption, have no summary-row counterpart, so a stale whole-row session write can restore ids that a redaction dropped; that only withholds those messages from unseen thread context.
+Metadata seen ids that earlier releases kept survive an edit's cut, so a regenerated team turn stored before the upgrade still withholds the messages the removed turn read.
+A `compact_context` call running as a background tool job can request compaction while a later reply of the same scope compacts on an earlier request; that reply's clear drops the new request, which its compaction covers unless it fails.
 Stored history grows until the conversation is deleted.
 Folded requests' usage lives in the run's metadata, so it is lost when the run never saves, as a crashed run's usage is.
 An approval resume loads a fresh session, which can replay turns stored after its run's mid-turn fold, so an edit or redaction of such a turn during the resume leaves the resuming run unfenced, because the run sorts before that turn, and its completion can store content derived from the cut turn.

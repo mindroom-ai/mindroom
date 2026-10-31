@@ -21,9 +21,7 @@ from mindroom.history.session_context import (
 )
 from mindroom.history.storage import (
     has_queued_force_compaction,
-    read_scope_seen_event_ids,
     read_scope_state,
-    update_scope_seen_event_ids,
     with_force_compaction,
 )
 from mindroom.history.types import (
@@ -740,7 +738,7 @@ async def test_a_request_survives_the_requesting_runs_terminal_save_and_a_concur
     )
 
     assert await tool.compact_context() == COMPACT_CONTEXT_SUCCESS
-    update_scope_seen_event_ids(storage, other_copy, ["$consumed"])
+    storage.update_metadata(other_copy, lambda metadata: {**(metadata or {}), "other": "kept"})
     # The run's tools changed the state they share, which its terminal record saves with it.
     running.session_state["tool"] = "state"
     await persist_to(storage, running)(_completed_run("run-2", agent_id="test_agent"))
@@ -748,7 +746,8 @@ async def test_a_request_survives_the_requesting_runs_terminal_save_and_a_concur
     stored = storage.load_session("session-1")
     assert stored is not None
     assert stored.session_state == {"tool": "state"}
-    assert read_scope_seen_event_ids(storage, stored) == {"$consumed"}
+    assert stored.metadata is not None
+    assert stored.metadata["other"] == "kept"
     assert has_queued_force_compaction(storage, "session-1")
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="summary")):
@@ -784,10 +783,10 @@ async def test_a_requested_compaction_keeps_metadata_another_writer_stored_meanw
     seed_session(storage, seeded)
     session = storage.load_session("session-1")
     assert session is not None
-    # Another turn records the events it consumed on the row after this reply loaded it.
+    # Another writer changes the row's metadata after this reply loaded it.
     other = storage.load_session("session-1")
     assert other is not None
-    update_scope_seen_event_ids(storage, other, ["$consumed"])
+    storage.update_metadata(other, lambda metadata: {**(metadata or {}), "other": "kept"})
 
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="summary")):
@@ -804,42 +803,9 @@ async def test_a_requested_compaction_keeps_metadata_another_writer_stored_meanw
 
     stored = storage.load_session("session-1")
     assert stored is not None
-    assert read_scope_seen_event_ids(storage, stored) == {"$consumed"}
+    assert stored.metadata == {"other": "kept"}
     assert stored.summary is not None
     assert not has_queued_force_compaction(storage, "session-1")
-
-
-@pytest.mark.asyncio
-async def test_recording_consumed_event_ids_keeps_a_compaction_request_stored_after_the_copy_loaded(
-    tmp_path: Path,
-) -> None:
-    """Consumed ids merge into the row's metadata, not a copy loaded earlier, so a later request stays."""
-    config, runtime_paths = _make_config(tmp_path)
-    identity = _execution_identity()
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
-    seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
-    other_copy = storage.load_session("session-1")
-    assert other_copy is not None
-    # The user asks for compaction after another turn loaded its copy of the session.
-    result = await request_compaction_before_next_reply(
-        scope=_AGENT_SCOPE,
-        agent_name="test_agent",
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=identity,
-        active_model_name=None,
-        room_id=None,
-    )
-    assert result == COMPACT_CONTEXT_SUCCESS
-
-    update_scope_seen_event_ids(storage, other_copy, ["$consumed"])
-
-    stored = storage.load_session("session-1")
-    assert stored is not None
-    assert read_scope_state(stored).force_compact_before_next_run is True
-    assert read_scope_seen_event_ids(storage, stored) == {"$consumed"}
-    assert other_copy.metadata == stored.metadata
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -22,12 +21,12 @@ from mindroom.agents import create_agent
 from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
-from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import AI_RUN_METADATA_KEY, MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.execution_preparation import render_prepared_messages_text
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
 from mindroom.history.session_context import load_bound_scope_session
-from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
+from mindroom.history.storage import read_scope_seen_event_ids, remove_runs_answering
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import (
@@ -526,13 +525,9 @@ def _seed_history(
     seen_event_ids: Sequence[str] = (),
 ) -> None:
     """Store one earlier team turn, ``run-earlier``, in the team's scope, with the thread events it already read."""
-    session = _team_session(
-        SESSION_ID,
-        team_id=team.scope.scope_id,
-        runs=[_completed_team_run("run-earlier", team_id=team.scope.scope_id, messages=list(messages))],
-    )
-    seed_session(team.storage, session)
-    update_scope_seen_event_ids(team.storage, session, list(seen_event_ids))
+    run = _completed_team_run("run-earlier", team_id=team.scope.scope_id, messages=list(messages))
+    run.metadata = {MATRIX_SEEN_EVENT_IDS_METADATA_KEY: list(seen_event_ids)}
+    seed_session(team.storage, _team_session(SESSION_ID, team_id=team.scope.scope_id, runs=[run]))
 
 
 @pytest.mark.asyncio
@@ -816,28 +811,57 @@ async def test_a_matrix_reply_marks_its_trigger_and_the_unread_thread_events_see
 
 
 @pytest.mark.asyncio
-async def test_a_team_reply_writes_session_metadata_in_the_database_s_lane(
+async def test_a_turn_regenerated_after_an_edit_reads_the_thread_events_the_removed_turn_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every metadata write of the turn, the events it marks seen included, runs in the database's lane."""
+    """Only the stored runs mark events seen, so the events a removed turn read join the regenerated turn as unseen."""
+    team = _team(tmp_path, monkeypatch, leader=[answer("First answer"), answer("Regenerated answer")])
+    _seed_history(team)
+    thread_history = [
+        make_visible_message(event_id="$event-1", sender=REQUESTER_ID, body="Fresh follow-up"),
+        make_visible_message(event_id=EVENT_ID, sender=REQUESTER_ID, body="Hello"),
+    ]
+    await team.respond(thread_history=thread_history, response_sender_id="@mindroom_team:localhost")
+
+    # What an edit of the triggering message does before the turn regenerates.
+    assert remove_runs_answering(team.storage, SESSION_ID, team.scope, EVENT_ID)
+    await team.respond(thread_history=thread_history, response_sender_id="@mindroom_team:localhost")
+
+    first, regenerated = (
+        _contents([message for message in request.messages if message.role != "system"])
+        for request in _leader(team).requests
+    )
+    assert first == [
+        ("user", "Earlier question"),
+        ("assistant", "Earlier answer"),
+        ("user", render_msg_tag(sender=REQUESTER_ID, body="Fresh follow-up", event_id="$event-1")),
+        ("user", f"Current message:\n{render_msg_tag(sender=REQUESTER_ID, body='Hello', event_id=EVENT_ID)}"),
+    ]
+    assert regenerated == first
+
+
+@pytest.mark.asyncio
+async def test_a_team_reply_writes_no_session_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stored team run alone records the events the turn consumed; the session row's metadata stays unwritten."""
     team = _team(tmp_path, monkeypatch, leader=[answer("Recovered team response")])
-    writing_threads: list[str] = []
-    update_metadata = ConversationStore.update_metadata
-
-    def recording(self: ConversationStore, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
-        writing_threads.append(threading.current_thread().name)
-        update_metadata(self, *args, **kwargs)
-
-    monkeypatch.setattr(ConversationStore, "update_metadata", recording)
+    update_metadata_calls: list[object] = []
+    monkeypatch.setattr(
+        ConversationStore,
+        "update_metadata",
+        lambda *args, **_kwargs: update_metadata_calls.append(args),
+    )
 
     await team.respond(response_sender_id="@mindroom_team:localhost")
 
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert read_scope_seen_event_ids(team.storage, session) == {EVENT_ID}
-    assert writing_threads
-    assert all(name.startswith("conversation-store") for name in writing_threads), writing_threads
+    assert update_metadata_calls == []
+    assert session.metadata is None
 
 
 # ---------------------------------------------------------------------------
