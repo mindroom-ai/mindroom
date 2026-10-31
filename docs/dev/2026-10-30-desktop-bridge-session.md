@@ -11,7 +11,7 @@ Startup releases what it acquired in reverse order through one exit stack, so a 
 A run that never started its workers is not stopped: stopping gives recorded replies a final delivery, and that must not happen before the pinned controller's identity was checked.
 
 Closing keeps the order the resources depend on.
-Admission and new execution are fenced before the close first yields, so a command admitted just before a stop never starts.
+The first close starts its teardown eagerly, so admission, new execution, local control, and shell access end before the close first yields, as a direct stop did before: a command admitted just before a stop never starts, and a shell command whose controller check finishes as the stop begins is refused instead of started and killed.
 Native input runs in threads that cancelling a task cannot stop, so the bridge stops first (ends shell access, waits for the active action, delivers recorded replies), and only after that are the workers cancelled and the journal, folders, browser, and Matrix owner released, with the durable source lease released before its HTTP connection.
 The terminal stops reading shell approvals before the bridge stops, because stopping settles a pending approval.
 Concurrent closes share one teardown that a cancelled caller cannot cut short, which is what lets the helper's stop wait for a close its failed-worker supervisor already began.

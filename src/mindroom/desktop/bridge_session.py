@@ -77,7 +77,7 @@ class DesktopBridgeSession:
     browser: PlaywrightMCPBrowserProvider | None
     workers: tuple[asyncio.Task[None], ...]
     _resources: AsyncExitStack = field(repr=False)
-    _closing: asyncio.Future[None] | None = field(default=None, init=False, repr=False)
+    _closing: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _live: bool = field(default=True, init=False, repr=False)
 
     @property
@@ -88,12 +88,12 @@ class DesktopBridgeSession:
     async def close(self) -> None:
         """Stop the bridge, then release what start acquired, in reverse order.
 
-        Admission and new execution are fenced before this first yields.
+        The first call starts the teardown eagerly, so admission, new execution, control, and shell access end
+        before it first yields, as a direct `bridge.stop()` would.
         Concurrent and repeated calls share one close and its outcome, and a cancelled caller does not cut it short.
         """
         if self._closing is None:
-            self.bridge.fence()
-            self._closing = asyncio.ensure_future(self._stop_and_release())
+            self._closing = asyncio.eager_task_factory(asyncio.get_running_loop(), self._stop_and_release())
         await asyncio.shield(self._closing)
 
     async def _stop_and_release(self) -> None:

@@ -519,14 +519,10 @@ class DesktopBridge:
         self._control_revoked = False
         return self.local_status()
 
-    def fence(self) -> None:
-        """Refuse new admission and new execution and end local control, without waiting for active work."""
-        self._accepting = False
-        self.revoke_local_control()
-
     async def stop(self) -> None:
         """Fence admission, settle active work, and give recorded replies a bounded final delivery."""
-        self.fence()
+        self._accepting = False
+        self.revoke_local_control()
         if self.shell is not None:
             # Pending approval can otherwise hold the shell lane until the command expires.
             await self.shell.close()

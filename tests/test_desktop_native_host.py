@@ -1457,6 +1457,37 @@ async def test_stop_fences_a_command_admitted_just_before_it(
 
 
 @pytest.mark.asyncio
+async def test_stop_ends_shell_access_before_a_verified_auto_approved_command_can_start(
+    bridge_transport: AsyncMock,
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shell command whose controller check finishes in the same step as stop is refused, even when auto-approved."""
+    verifying, verified = asyncio.Event(), asyncio.Event()
+
+    async def held_controller_check(*_args: object) -> None:
+        verifying.set()
+        await verified.wait()
+
+    monkeypatch.setattr("mindroom.desktop.bridge.resolve_pinned_device", held_controller_check)
+    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), _folder_config(tmp_path, shell_enabled=True))
+    await runtime.start()
+    runtime.grant_shell(600)
+    marker = tmp_path / "marker"
+    await offline_runtime_session.bridge().on_to_device_event(_shell_event(f"printf ran > {marker}", tmp_path))
+    await asyncio.wait_for(verifying.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    # The check completes and stop starts before the shell lane resumes.
+    verified.set()
+    await runtime.stop()
+
+    assert (await _reply(bridge_transport, "shell-1")).error == "Local shell is closed."
+    assert not marker.exists()
+    assert runtime.status()["gui_mode"] == "stopped"
+
+
+@pytest.mark.asyncio
 async def test_fault_status_reports_the_draining_action_until_the_bridge_has_stopped(
     bridge_transport: AsyncMock,
     offline_runtime_session: _OfflineMatrix,
