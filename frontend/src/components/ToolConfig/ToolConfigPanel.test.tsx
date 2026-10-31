@@ -243,6 +243,15 @@ describe("ToolConfigPanel", () => {
     ).toBeChecked();
   });
 
+  it("edits a boolean override", () => {
+    seedStore({ agentTools: [{ shell: { enable_run_shell_command: true } }] });
+    renderShellPanel();
+
+    fireEvent.click(screen.getByText("Enabled"));
+    expect(agentOverrides()).toEqual({ enable_run_shell_command: false });
+    expect(screen.getByText("Disabled")).toBeInTheDocument();
+  });
+
   it("shows a value stored from elsewhere in place of the draft", () => {
     seedStore({
       agentTools: [{ shell: { extra_env_passthrough: ["GITEA_TOKEN"] } }],
