@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urlencode, urljoin
 
 import httpx
@@ -24,18 +24,7 @@ from mindroom.homeassistant_url_validation import homeassistant_url_error_detail
 from mindroom.origins import deployment_origin
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
-if TYPE_CHECKING:
-    from mindroom.constants import RuntimePaths
-
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
-
-
-def _oauth_client_id(request: Request, runtime_paths: RuntimePaths) -> str:
-    """Return the Client ID MindRoom gives Home Assistant: its public origin, which the redirect URI must share."""
-    origin = deployment_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL"), str(request.base_url))
-    if origin is None:
-        raise HTTPException(status_code=503, detail="MINDROOM_PUBLIC_URL is not a valid URL")
-    return origin
 
 
 class HomeAssistantStatus(BaseModel):
@@ -233,7 +222,10 @@ async def connect_oauth(
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=config.allow_private_url)
-    client_id = _oauth_client_id(request, target.runtime_paths)
+    # Home Assistant identifies a client by a URL whose scheme and host the redirect URI must share: MindRoom's origin.
+    client_id = deployment_origin(target.runtime_paths.env_value("MINDROOM_PUBLIC_URL"), str(request.base_url))
+    if client_id is None:
+        raise HTTPException(status_code=503, detail="MINDROOM_PUBLIC_URL is not a valid URL")
     state = issue_pending_oauth_state(
         request,
         "homeassistant",

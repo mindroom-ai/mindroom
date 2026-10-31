@@ -2224,7 +2224,8 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "http://127.0.0.1:8123/auth/authorize"
     assert params["state"][0]
     assert params["state"][0] != "general"
-    assert "agent_name=general" not in params["redirect_uri"][0]
+    assert params["client_id"] == ["http://localhost"]
+    assert params["redirect_uri"] == ["http://localhost/api/homeassistant/callback"]
 
 
 def _connect_homeassistant_oauth_behind_proxy(tmp_path: Path, public_url: str) -> httpx.Response:
@@ -2237,7 +2238,7 @@ def _connect_homeassistant_oauth_behind_proxy(tmp_path: Path, public_url: str) -
             "MINDROOM_PUBLIC_URL": public_url,
         },
     )
-    _publish_committed_runtime_config(main.app, runtime_paths, _config_with_worker_scope("shared").model_dump())
+    main.initialize_api_app(main.app, runtime_paths)
     bind_test_embedded_runtime(main.app)
     return TestClient(main.app, base_url="http://mindroom.example.com").post(
         "/api/homeassistant/connect/oauth",
@@ -2246,25 +2247,14 @@ def _connect_homeassistant_oauth_behind_proxy(tmp_path: Path, public_url: str) -
     )
 
 
-@pytest.mark.parametrize(
-    ("public_url", "origin"),
-    [
-        ("", "http://mindroom.example.com"),
-        ("https://mindroom.example.com/", "https://mindroom.example.com"),
-    ],
-)
-def test_homeassistant_connect_oauth_identifies_mindroom_by_its_public_origin(
-    tmp_path: Path,
-    public_url: str,
-    origin: str,
-) -> None:
+def test_homeassistant_connect_oauth_identifies_mindroom_by_its_public_origin(tmp_path: Path) -> None:
     """Behind a proxy that terminates TLS, the Client ID and redirect URI share the public origin, not the request's."""
-    response = _connect_homeassistant_oauth_behind_proxy(tmp_path, public_url)
+    response = _connect_homeassistant_oauth_behind_proxy(tmp_path, "https://mindroom.example.com/")
 
     assert response.status_code == 200, response.text
     params = parse_qs(urlparse(response.json()["auth_url"]).query)
-    assert params["client_id"] == [origin]
-    assert params["redirect_uri"] == [f"{origin}/api/homeassistant/callback"]
+    assert params["client_id"] == ["https://mindroom.example.com"]
+    assert params["redirect_uri"] == ["https://mindroom.example.com/api/homeassistant/callback"]
 
 
 def test_homeassistant_connect_oauth_refuses_an_invalid_public_url(tmp_path: Path) -> None:
