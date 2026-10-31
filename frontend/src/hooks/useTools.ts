@@ -125,7 +125,6 @@ export function mapToolToIntegration(tool: ToolInfo) {
     status,
     setup_type,
     config_fields: tool.config_fields,
-    dependencies: tool.dependencies,
     docs_url: tool.docs_url,
     helper_text: tool.helper_text,
     oauth_fallback_fields: tool.oauth_fallback_fields,

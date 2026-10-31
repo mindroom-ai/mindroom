@@ -1,8 +1,9 @@
 /**
- * Central registry for all integrations
+ * Built-in integration cards and the generic OAuth provider behind every OAuth card
  */
 
 import { createElement } from "react";
+import type { IconType } from "react-icons";
 import {
   SiGmail,
   SiGooglecalendar,
@@ -11,17 +12,18 @@ import {
   SiGoogledrive,
   SiGooglesheets,
   SiGoogletasks,
+  SiHomeassistant,
 } from "react-icons/si";
 import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 import { watchOAuthCompletion } from "@/lib/oauthCompletion";
 import type { WorkerScope } from "@/types/config";
 import {
-  Integration,
+  IntegrationCard,
   IntegrationConfig,
   IntegrationProvider,
   IntegrationScope,
+  IntegrationStatus,
 } from "./types";
-import { homeAssistantIntegration } from "./homeassistant";
 
 type OAuthStatus = {
   connected: boolean;
@@ -30,7 +32,6 @@ type OAuthStatus = {
   hasServiceAccountConfig: boolean;
   clientConfigService?: string;
   clientConfigRedirectUriSupported: boolean;
-  toolConfigService?: string;
   resetRequired: boolean;
   statusError?: string;
 };
@@ -47,32 +48,30 @@ function oauthCompletionOrigin(rawOrigin: unknown): string {
 
 export class GenericOAuthIntegrationProvider implements IntegrationProvider {
   constructor(
-    private readonly integration: Integration,
     private readonly providerId: string,
+    private readonly displayName: string,
   ) {}
 
   getConfig(scope?: IntegrationScope): IntegrationConfig {
     const agentName = scope?.agentName ?? null;
     const executionScope = scope?.executionScope;
     return {
-      integration: this.integration,
       onAction: () => this.connect(agentName, executionScope),
       onDisconnect: () => this.disconnect(agentName, executionScope),
     };
   }
 
-  async loadStatus(scope?: IntegrationScope): Promise<Partial<Integration>> {
+  async loadStatus(scope?: IntegrationScope): Promise<IntegrationStatus> {
     const status = await this.checkConnection(
       scope?.agentName ?? null,
       scope?.executionScope,
     );
-    const integrationStatus: Partial<Integration> = {
+    const integrationStatus: IntegrationStatus = {
       status: status.connected
         ? "connected"
         : !status.resetRequired && status.hasClientConfig
           ? "available"
           : "not_connected",
-      connected: status.connected,
       oauth_client_configured: status.hasClientConfig,
       oauth_custom_client_configured: status.hasCustomClientConfig,
       oauth_client_config_service: status.clientConfigService,
@@ -80,7 +79,6 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         status.clientConfigRedirectUriSupported,
       oauth_service_account_configured: status.hasServiceAccountConfig,
       oauth_reset_required: status.resetRequired,
-      config_service: status.toolConfigService,
     };
     if (status.resetRequired) {
       integrationStatus.helper_text =
@@ -107,13 +105,11 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     );
     if (!response.ok) {
       const error = await response.json();
-      throw new Error(
-        error.detail || `Failed to connect ${this.integration.name}`,
-      );
+      throw new Error(error.detail || `Failed to connect ${this.displayName}`);
     }
     const data = await response.json();
     if (typeof data.auth_url !== "string" || data.auth_url.length === 0) {
-      throw new Error(`Failed to connect ${this.integration.name}`);
+      throw new Error(`Failed to connect ${this.displayName}`);
     }
     await this.openAuthWindow(
       data.auth_url,
@@ -136,7 +132,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     if (!response.ok) {
       const error = await response.json();
       throw new Error(
-        error.detail || `Failed to disconnect ${this.integration.name}`,
+        error.detail || `Failed to disconnect ${this.displayName}`,
       );
     }
   }
@@ -154,7 +150,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         ),
       );
       if (!response.ok) {
-        let detail = `Failed to load ${this.integration.name} OAuth status.`;
+        let detail = `Failed to load ${this.displayName} OAuth status.`;
         try {
           const data = await response.json();
           if (typeof data.detail === "string" && data.detail.length > 0) {
@@ -186,10 +182,6 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
           typeof data.client_config_service === "string"
             ? data.client_config_service
             : undefined,
-        toolConfigService:
-          typeof data.tool_config_service === "string"
-            ? data.tool_config_service
-            : undefined,
       };
     } catch (error) {
       console.error(`Failed to load ${this.providerId} status:`, error);
@@ -200,7 +192,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         hasServiceAccountConfig: false,
         clientConfigRedirectUriSupported: false,
         resetRequired: false,
-        statusError: `Failed to load ${this.integration.name} OAuth status.`,
+        statusError: `Failed to load ${this.displayName} OAuth status.`,
       };
     }
   }
@@ -218,7 +210,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         provider: this.providerId,
         expectedOrigin: () => expectedCompletionOrigin,
         pollIntervalMs: 1000,
-        cancellationMessage: `${this.integration.name} authorization was cancelled`,
+        cancellationMessage: `${this.displayName} authorization was cancelled`,
         onSettled: (error) => {
           if (error) {
             reject(error);
@@ -232,143 +224,97 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
   }
 }
 
-const googleDriveIntegration = new GenericOAuthIntegrationProvider(
+const googleCard = (
+  id: string,
+  name: string,
+  description: string,
+  category: string,
+  icon: IconType,
+  iconColor: string,
+): IntegrationCard => ({
+  id,
+  name,
+  description,
+  category,
+  icon: createElement(icon, { className: `h-5 w-5 ${iconColor}` }),
+  setup_type: "oauth",
+  oauth_provider_id: id,
+});
+
+// Built-in cards show whether or not the tools list names their provider, so also before it loads.
+// Discovered OAuth providers follow them, named after their tools; Google Cloud's card is named after the connection, not its BigQuery tool.
+export const builtInProviderCards: IntegrationCard[] = [
+  googleCard(
+    "google_calendar",
+    "Google Calendar",
+    "View and schedule meetings with your connected Google Calendar",
+    "productivity",
+    SiGooglecalendar,
+    "text-blue-600",
+  ),
+  googleCard(
+    "google_cloud",
+    "Google Cloud",
+    "Connect Google Cloud with read-only access for Google Cloud tools",
+    "development",
+    SiGooglecloud,
+    "text-blue-600",
+  ),
+  googleCard(
+    "google_docs",
+    "Google Docs",
+    "Create, read, and edit documents with Google Docs",
+    "productivity",
+    SiGoogledocs,
+    "text-blue-600",
+  ),
+  googleCard(
+    "google_drive",
+    "Google Drive",
+    "Search, read, upload, and organize files in your connected Google Drive",
+    "productivity",
+    SiGoogledrive,
+    "text-green-600",
+  ),
+  googleCard(
+    "google_gmail",
+    "Gmail",
+    "Read, search, and manage Gmail emails",
+    "email",
+    SiGmail,
+    "text-red-500",
+  ),
+  googleCard(
+    "google_sheets",
+    "Google Sheets",
+    "Read, create, and update Google Sheets spreadsheets",
+    "development",
+    SiGooglesheets,
+    "text-green-600",
+  ),
+  googleCard(
+    "google_tasks",
+    "Google Tasks",
+    "List, create, update, complete, and delete tasks with Google Tasks",
+    "productivity",
+    SiGoogletasks,
+    "text-blue-600",
+  ),
   {
-    id: "google_drive",
-    name: "Google Drive",
-    description:
-      "Search, read, upload, and organize files in your connected Google Drive",
-    category: "productivity",
-    icon: createElement(SiGoogledrive, {
-      className: "h-5 w-5 text-green-600",
-    }),
-    status: "available",
-    setup_type: "oauth",
-    connected: false,
+    id: "homeassistant",
+    name: "Home Assistant",
+    description: "Control and monitor your smart home devices",
+    category: "smart_home",
+    icon: createElement(SiHomeassistant, { className: "h-5 w-5" }),
+    setup_type: "special",
   },
-  "google_drive",
-);
+];
 
-const googleDocsIntegration = new GenericOAuthIntegrationProvider(
-  {
-    id: "google_docs",
-    name: "Google Docs",
-    description: "Create, read, and edit documents with Google Docs",
-    category: "productivity",
-    icon: createElement(SiGoogledocs, {
-      className: "h-5 w-5 text-blue-600",
-    }),
-    status: "available",
-    setup_type: "oauth",
-    connected: false,
-  },
-  "google_docs",
-);
-
-const googleCalendarIntegration = new GenericOAuthIntegrationProvider(
-  {
-    id: "google_calendar",
-    name: "Google Calendar",
-    description:
-      "View and schedule meetings with your connected Google Calendar",
-    category: "productivity",
-    icon: createElement(SiGooglecalendar, {
-      className: "h-5 w-5 text-blue-600",
-    }),
-    status: "available",
-    setup_type: "oauth",
-    connected: false,
-  },
-  "google_calendar",
-);
-
-const googleSheetsIntegration = new GenericOAuthIntegrationProvider(
-  {
-    id: "google_sheets",
-    name: "Google Sheets",
-    description: "Read, create, and update Google Sheets spreadsheets",
-    category: "development",
-    icon: createElement(SiGooglesheets, {
-      className: "h-5 w-5 text-green-600",
-    }),
-    status: "available",
-    setup_type: "oauth",
-    connected: false,
-  },
-  "google_sheets",
-);
-
-const googleTasksIntegration = new GenericOAuthIntegrationProvider(
-  {
-    id: "google_tasks",
-    name: "Google Tasks",
-    description:
-      "List, create, update, complete, and delete tasks with Google Tasks",
-    category: "productivity",
-    icon: createElement(SiGoogletasks, {
-      className: "h-5 w-5 text-blue-600",
-    }),
-    status: "available",
-    setup_type: "oauth",
-    connected: false,
-  },
-  "google_tasks",
-);
-
-const googleCloudIntegration = new GenericOAuthIntegrationProvider(
-  {
-    id: "google_cloud",
-    name: "Google Cloud",
-    description:
-      "Connect Google Cloud with read-only access for Google Cloud tools",
-    category: "development",
-    icon: createElement(SiGooglecloud, {
-      className: "h-5 w-5 text-blue-600",
-    }),
-    status: "available",
-    setup_type: "oauth",
-    connected: false,
-  },
-  "google_cloud",
-);
-
-const googleGmailIntegration = new GenericOAuthIntegrationProvider(
-  {
-    id: "google_gmail",
-    name: "Gmail",
-    description: "Read, search, and manage Gmail emails",
-    category: "email",
-    icon: createElement(SiGmail, {
-      className: "h-5 w-5 text-red-500",
-    }),
-    status: "available",
-    setup_type: "oauth",
-    connected: false,
-  },
-  "google_gmail",
-);
-
-// Export all integration providers
-export const integrationProviders: Record<string, IntegrationProvider> = {
-  google_calendar: googleCalendarIntegration,
-  google_cloud: googleCloudIntegration,
-  google_docs: googleDocsIntegration,
-  google_drive: googleDriveIntegration,
-  google_gmail: googleGmailIntegration,
-  google_sheets: googleSheetsIntegration,
-  google_tasks: googleTasksIntegration,
-  homeassistant: homeAssistantIntegration,
-};
-
-// Export types
 export type {
   Integration,
+  IntegrationCard,
   IntegrationConfig,
   IntegrationProvider,
   IntegrationScope,
+  IntegrationStatus,
 } from "./types";
-
-// Helper function to get all integrations
-export function getAllIntegrations(): IntegrationProvider[] {
-  return Object.values(integrationProviders);
-}

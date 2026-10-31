@@ -11,20 +11,14 @@ export interface Integration {
   description: string;
   category: string;
   icon: React.ReactNode;
-  iconColor?: string | null;
   status: "connected" | "not_connected" | "available";
   setup_type: "oauth" | "api_key" | "special" | "none";
-  connected?: boolean;
-  details?: any;
   docs_url?: string | null;
   helper_text?: string | null;
   config_fields?: ToolFieldSchema[] | null;
-  dependencies?: string[] | null;
   icon_color?: string | null;
   auth_provider?: string;
   oauth_provider_id?: string;
-  dashboard_configuration_supported?: boolean;
-  execution_scope_supported?: boolean;
   oauth_client_configured?: boolean;
   oauth_custom_client_configured?: boolean;
   oauth_client_config_service?: string;
@@ -38,6 +32,13 @@ export interface Integration {
   environment_auth_configured?: boolean;
 }
 
+/** A card before its provider reports a status. */
+export type IntegrationCard = Omit<Integration, "status">;
+
+/** What a provider reports about its connection, always including the card status. */
+export type IntegrationStatus = Partial<Integration> &
+  Pick<Integration, "status">;
+
 export interface IntegrationScope {
   agentName?: string | null;
   executionScope?: WorkerScope | null;
@@ -45,19 +46,14 @@ export interface IntegrationScope {
 
 export interface IntegrationConfig {
   /**
-   * The integration definition
-   */
-  integration: Integration;
-
-  /**
    * Handler for when the integration is selected/clicked
    */
-  onAction?: (integration: Integration) => void | Promise<void>;
+  onAction?: () => Promise<void>;
 
   /**
    * Handler for disconnecting the integration
    */
-  onDisconnect?: (integrationId: string) => void | Promise<void>;
+  onDisconnect?: () => Promise<void>;
 
   /**
    * Custom component to render when configuring this integration
@@ -67,15 +63,6 @@ export interface IntegrationConfig {
     onSuccess?: () => void;
     agentName?: string | null;
     executionScope?: WorkerScope | null;
-  }>;
-
-  /**
-   * Custom action button component
-   */
-  ActionButton?: React.ComponentType<{
-    integration: Integration;
-    loading: boolean;
-    onAction: () => void;
   }>;
 }
 
@@ -88,5 +75,5 @@ export interface IntegrationProvider {
   /**
    * Load the current status of this integration
    */
-  loadStatus?: (scope?: IntegrationScope) => Promise<Partial<Integration>>;
+  loadStatus(scope?: IntegrationScope): Promise<IntegrationStatus>;
 }

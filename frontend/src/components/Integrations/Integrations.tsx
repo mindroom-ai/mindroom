@@ -45,11 +45,14 @@ import { getIconForTool } from "./iconMapping";
 import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 import {
   Integration,
+  IntegrationCard,
   IntegrationConfig,
+  IntegrationProvider,
+  IntegrationStatus,
   GenericOAuthIntegrationProvider,
-  integrationProviders,
-  getAllIntegrations,
+  builtInProviderCards,
 } from "./integrations/index";
+import { homeAssistantIntegration } from "./integrations/homeassistant";
 import { EnhancedConfigDialog } from "./EnhancedConfigDialog";
 import { FilterSelector } from "@/components/shared/FilterSelector";
 
@@ -88,6 +91,45 @@ const providersSharedByTools = (tools: ToolInfo[]) => {
   );
 };
 
+const builtInCardsById = new Map(
+  builtInProviderCards.map((card) => [card.id, card]),
+);
+
+const providerForIntegration = (
+  integration: IntegrationCard,
+): IntegrationProvider | null => {
+  if (integration.id === "homeassistant") {
+    return homeAssistantIntegration;
+  }
+  if (!integration.oauth_provider_id) {
+    return null;
+  }
+  return new GenericOAuthIntegrationProvider(
+    integration.oauth_provider_id,
+    integration.name,
+  );
+};
+
+// A provider known only from tool metadata takes its card's text and icon from the tool that stands for it.
+const discoveredOAuthCard = (
+  providerId: string,
+  providerTool?: ToolInfo,
+): IntegrationCard => {
+  const name = oauthProviderDisplayName(providerId, providerTool);
+  return {
+    id: providerId,
+    name,
+    description: `Connect ${name} OAuth for ${providerTool?.display_name ?? "this tool"}.`,
+    category: providerTool?.category ?? "productivity",
+    icon: getIconForTool(
+      providerTool?.icon ?? null,
+      providerTool?.icon_color ?? null,
+    ),
+    setup_type: "oauth",
+    oauth_provider_id: providerId,
+  };
+};
+
 const oauthRedirectPlaceholderOrigin = () =>
   new URL(API_BASE_URL || window.location.origin, window.location.origin)
     .origin;
@@ -102,6 +144,31 @@ const hasConfiguredOAuthFallback = (integration?: {
 }) =>
   integration?.manual_auth_configured === true ||
   integration?.environment_auth_configured === true;
+
+const withProviderState = (
+  card: IntegrationCard,
+  providerTool: ToolInfo | undefined,
+  status: IntegrationStatus,
+): Integration => {
+  const fallbackConfigured = hasConfiguredOAuthFallback(providerTool);
+  return {
+    ...card,
+    config_fields: providerTool?.config_fields,
+    docs_url: providerTool?.docs_url,
+    icon_color: providerTool?.icon_color,
+    oauth_fallback_fields: providerTool?.oauth_fallback_fields,
+    manual_auth_configured: providerTool?.manual_auth_configured,
+    environment_auth_configured: providerTool?.environment_auth_configured,
+    ...status,
+    status: fallbackConfigured ? "connected" : status.status,
+    status_error: fallbackConfigured ? undefined : status.status_error,
+    helper_text:
+      fallbackConfigured && status.oauth_reset_required !== true
+        ? providerTool?.helper_text
+        : (status.helper_text ?? providerTool?.helper_text),
+    config_service: providerTool?.name,
+  };
+};
 
 const manualOAuthFallbackLabel = (integration: Integration) => {
   const fallbackFields = integration.oauth_fallback_fields ?? [];
@@ -184,21 +251,8 @@ export function Integrations() {
     currentScopeKeyRef.current === scopeKey;
   const isCurrentLoadRequest = (requestId: number, scopeKey: string) =>
     requestId === loadRequestIdRef.current && isCurrentScope(scopeKey);
-  const oauthProviderForIntegration = (integration: Integration) => {
-    const provider = integrationProviders[integration.id];
-    if (provider) {
-      return provider;
-    }
-    if (integration.setup_type !== "oauth" || !integration.oauth_provider_id) {
-      return null;
-    }
-    return new GenericOAuthIntegrationProvider(
-      integration,
-      integration.oauth_provider_id,
-    );
-  };
   const [activeDialog, setActiveDialog] = useState<{
-    integrationId: string;
+    integration: Integration;
     config: IntegrationConfig;
   } | null>(null);
   const [configDialog, setConfigDialog] = useState<{
@@ -255,7 +309,6 @@ export function Integrations() {
         agentName: effectiveScopeAgentName,
         executionScope: selectedExecutionScope,
       };
-      const providerIds = new Set(Object.keys(integrationProviders));
       const backendToolsByName = new Map<string, ToolInfo>(
         backendTools.map((tool) => [tool.name, tool]),
       );
@@ -264,137 +317,28 @@ export function Integrations() {
         sharedProviderIds.has(providerId)
           ? undefined
           : backendTools.find((tool) => tool.auth_provider === providerId);
-
-      // Load special integrations from providers
-      for (const provider of getAllIntegrations()) {
-        const config = provider.getConfig(scope);
-        const providerTool =
-          backendToolsByName.get(config.integration.id) ??
-          findProviderTool(config.integration.id);
-        if (
-          hidesSharedOnlyIntegrations &&
-          SHARED_ONLY_PROVIDER_IDS.has(config.integration.id)
-        ) {
-          continue;
-        }
-        const status = provider.loadStatus
-          ? await provider.loadStatus(scope)
-          : {};
-        const fallbackConfigured = hasConfiguredOAuthFallback(providerTool);
-        loadedIntegrations.push({
-          ...config.integration,
-          config_fields:
-            providerTool?.config_fields ?? config.integration.config_fields,
-          docs_url: providerTool?.docs_url ?? config.integration.docs_url,
-          dependencies:
-            providerTool?.dependencies ?? config.integration.dependencies,
-          icon_color: providerTool?.icon_color ?? config.integration.icon_color,
-          dashboard_configuration_supported:
-            providerTool?.dashboard_configuration_supported ??
-            config.integration.dashboard_configuration_supported,
-          execution_scope_supported:
-            providerTool?.execution_scope_supported ??
-            config.integration.execution_scope_supported,
-          oauth_fallback_fields: providerTool?.oauth_fallback_fields,
-          manual_auth_configured: providerTool?.manual_auth_configured,
-          environment_auth_configured:
-            providerTool?.environment_auth_configured,
-          ...status,
-          status: fallbackConfigured
-            ? "connected"
-            : (status.status ?? config.integration.status),
-          connected: fallbackConfigured || status.connected === true,
-          status_error: fallbackConfigured ? undefined : status.status_error,
-          helper_text:
-            status.oauth_reset_required === true
-              ? (status.helper_text ?? providerTool?.helper_text)
-              : fallbackConfigured
-                ? providerTool?.helper_text
-                : (status.helper_text ??
-                  providerTool?.helper_text ??
-                  config.integration.helper_text),
-          config_service:
-            providerTool?.name ??
-            status.config_service ??
-            config.integration.config_service,
-        });
-      }
-
-      const dynamicOAuthProviderIds = new Set(
-        backendTools
+      // Built-in cards first, then providers discovered from tool metadata.
+      const providerIds = new Set([
+        ...builtInCardsById.keys(),
+        ...backendTools
           .map((tool) => tool.auth_provider)
-          .filter(
-            (providerId): providerId is string =>
-              typeof providerId === "string" &&
-              providerId.length > 0 &&
-              !providerIds.has(providerId),
-          ),
-      );
-      for (const providerId of dynamicOAuthProviderIds) {
+          .filter((providerId): providerId is string => Boolean(providerId)),
+      ]);
+
+      for (const providerId of providerIds) {
         if (
           hidesSharedOnlyIntegrations &&
           SHARED_ONLY_PROVIDER_IDS.has(providerId)
         ) {
           continue;
         }
-        const providerTool = findProviderTool(providerId);
-        const providerDisplayName = oauthProviderDisplayName(
-          providerId,
-          providerTool,
-        );
-        const integration: Integration = {
-          id: providerId,
-          name: providerDisplayName,
-          description: `Connect ${providerDisplayName} OAuth for ${providerTool?.display_name ?? "this tool"}.`,
-          category: providerTool?.category ?? "productivity",
-          icon: getIconForTool(
-            providerTool?.icon ?? null,
-            providerTool?.icon_color ?? null,
-          ),
-          icon_color: providerTool?.icon_color ?? null,
-          status: "available",
-          setup_type: "oauth",
-          connected: false,
-          config_fields: providerTool?.config_fields ?? null,
-          docs_url: providerTool?.docs_url ?? null,
-          helper_text: providerTool?.helper_text ?? null,
-          dependencies: providerTool?.dependencies ?? null,
-          oauth_provider_id: providerId,
-          config_service: providerTool?.name,
-          dashboard_configuration_supported:
-            providerTool?.dashboard_configuration_supported,
-          execution_scope_supported: providerTool?.execution_scope_supported,
-          oauth_fallback_fields: providerTool?.oauth_fallback_fields,
-          manual_auth_configured: providerTool?.manual_auth_configured,
-          environment_auth_configured:
-            providerTool?.environment_auth_configured,
-        };
-        const provider = new GenericOAuthIntegrationProvider(
-          integration,
-          providerId,
-        );
-        const status = await provider.loadStatus?.(scope);
-        const fallbackConfigured = hasConfiguredOAuthFallback(providerTool);
-        loadedIntegrations.push({
-          ...integration,
-          ...status,
-          status: fallbackConfigured
-            ? "connected"
-            : (status?.status ?? integration.status),
-          connected: fallbackConfigured || status?.connected === true,
-          status_error: fallbackConfigured ? undefined : status?.status_error,
-          helper_text:
-            status?.oauth_reset_required === true
-              ? (status.helper_text ?? providerTool?.helper_text)
-              : fallbackConfigured
-                ? providerTool?.helper_text
-                : (status?.helper_text ?? integration.helper_text),
-          config_service:
-            providerTool?.name ??
-            status?.config_service ??
-            integration.config_service,
-        });
-        providerIds.add(providerId);
+        const providerTool =
+          backendToolsByName.get(providerId) ?? findProviderTool(providerId);
+        const card =
+          builtInCardsById.get(providerId) ??
+          discoveredOAuthCard(providerId, providerTool);
+        const status = await providerForIntegration(card)!.loadStatus(scope);
+        loadedIntegrations.push(withProviderState(card, providerTool, status));
       }
 
       // Load backend tools and map them to integrations
@@ -419,7 +363,6 @@ export function Integrations() {
           return {
             ...mapped,
             icon: getIconForTool(tool.icon, tool.icon_color),
-            connected: false,
             // Tools with auth_provider show as connected if their status is 'available'
             status:
               tool.auth_provider && tool.status === "available"
@@ -467,7 +410,7 @@ export function Integrations() {
 
   const integrationHasScopedOAuthProvider = (integration: Integration) =>
     integration.setup_type === "oauth" &&
-    oauthProviderForIntegration(integration) != null &&
+    providerForIntegration(integration) != null &&
     !SHARED_ONLY_PROVIDER_IDS.has(integration.id);
 
   const blocksScopedDashboardCredentials = (integration: Integration) =>
@@ -488,7 +431,7 @@ export function Integrations() {
       docsUrl: integration.docs_url || null,
       helperText: integration.helper_text || null,
       icon: null,
-      iconColor: integration.icon_color || integration.iconColor || undefined,
+      iconColor: integration.icon_color || undefined,
     });
     return true;
   };
@@ -543,7 +486,7 @@ export function Integrations() {
       docsUrl: integration.docs_url || null,
       helperText: null,
       icon: null,
-      iconColor: integration.icon_color || integration.iconColor || undefined,
+      iconColor: integration.icon_color || undefined,
       useSelectedScope: false,
     });
     return true;
@@ -561,7 +504,7 @@ export function Integrations() {
     }
 
     // Check if we have a provider for this integration
-    const provider = oauthProviderForIntegration(integration);
+    const provider = providerForIntegration(integration);
     const scope = {
       agentName: effectiveScopeAgentName,
       executionScope: selectedExecutionScope,
@@ -572,7 +515,7 @@ export function Integrations() {
 
       // If there's a custom config component, show it in a dialog
       if (config.ConfigComponent) {
-        setActiveDialog({ integrationId: integration.id, config });
+        setActiveDialog({ integration, config });
         return;
       }
 
@@ -594,7 +537,7 @@ export function Integrations() {
       if (config.onAction) {
         setLoading(true);
         try {
-          await config.onAction(integration);
+          await config.onAction();
           await loadIntegrations(); // Reload status
         } catch (error) {
           toast({
@@ -678,7 +621,7 @@ export function Integrations() {
   ) =>
     runDisconnectOperation(
       integration,
-      () => disconnect(integration.id),
+      disconnect,
       integration.oauth_reset_required === true
         ? {
             title: "Connection reset",
@@ -714,24 +657,10 @@ export function Integrations() {
       );
     }
 
-    // Check if there's a custom action button
-    const provider = oauthProviderForIntegration(integration);
-    const config = provider?.getConfig({
+    const providerDisconnect = providerForIntegration(integration)?.getConfig({
       agentName: effectiveScopeAgentName,
       executionScope: selectedExecutionScope,
-    });
-
-    if (config?.ActionButton) {
-      const ActionButton = config.ActionButton;
-      return (
-        <ActionButton
-          integration={integration}
-          loading={loading}
-          onAction={() => handleIntegrationAction(integration)}
-        />
-      );
-    }
-    const providerDisconnect = config?.onDisconnect;
+    }).onDisconnect;
     const disconnectProvider = providerDisconnect
       ? () => handleProviderDisconnect(integration, providerDisconnect)
       : undefined;
@@ -1455,11 +1384,11 @@ export function Integrations() {
           <DialogContent className="max-w-4xl max-h-[90vh] overflow-auto">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
-                {activeDialog.config.integration.icon}
-                {activeDialog.config.integration.name} Setup
+                {activeDialog.integration.icon}
+                {activeDialog.integration.name} Setup
               </DialogTitle>
               <DialogDescription>
-                {activeDialog.config.integration.description}
+                {activeDialog.integration.description}
               </DialogDescription>
             </DialogHeader>
             {activeDialog.config.ConfigComponent && (

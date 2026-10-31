@@ -44,16 +44,6 @@ describe("HomeAssistantIntegrationProvider", () => {
   });
 
   describe("getConfig", () => {
-    it("should return proper configuration", () => {
-      const config = homeAssistantIntegration.getConfig();
-
-      expect(config.integration.id).toBe("homeassistant");
-      expect(config.integration.name).toBe("Home Assistant");
-      expect(config.integration.category).toBe("smart_home");
-      expect(config.integration.setup_type).toBe("special");
-      expect(config.ConfigComponent).toBeDefined();
-    });
-
     it("binds the setup component to the selected scope", () => {
       const onSuccess = vi.fn();
       const Setup = homeAssistantIntegration.getConfig({
@@ -86,16 +76,9 @@ describe("HomeAssistantIntegrationProvider", () => {
         json: async () => mockResponse,
       });
 
-      const status = await homeAssistantIntegration.loadStatus!();
+      const status = await homeAssistantIntegration.loadStatus();
 
-      expect(status.status).toBe("connected");
-      expect(status.connected).toBe(true);
-      expect(status.details).toEqual({
-        instance_url: "http://homeassistant.local:8123",
-        version: "2024.1.0",
-        location_name: "Home",
-        entities_count: 42,
-      });
+      expect(status).toEqual({ status: "connected" });
       expect(global.fetch).toHaveBeenCalledWith(
         "https://backend.example.test/api/homeassistant/status",
       );
@@ -107,19 +90,17 @@ describe("HomeAssistantIntegrationProvider", () => {
         json: async () => ({ connected: false }),
       });
 
-      const status = await homeAssistantIntegration.loadStatus!();
+      const status = await homeAssistantIntegration.loadStatus();
 
-      expect(status.status).toBe("available");
-      expect(status.connected).toBe(false);
+      expect(status).toEqual({ status: "available" });
     });
 
     it("should handle API errors gracefully", async () => {
       (global.fetch as any).mockRejectedValueOnce(new Error("Network error"));
 
-      const status = await homeAssistantIntegration.loadStatus!();
+      const status = await homeAssistantIntegration.loadStatus();
 
-      expect(status.status).toBe("available");
-      expect(status.connected).toBe(false);
+      expect(status).toEqual({ status: "available" });
     });
 
     it("appends agent_name and execution_scope when checking scoped status", async () => {
@@ -128,7 +109,7 @@ describe("HomeAssistantIntegrationProvider", () => {
         json: async () => ({ connected: false }),
       });
 
-      await homeAssistantIntegration.loadStatus!({
+      await homeAssistantIntegration.loadStatus({
         agentName: "code",
         executionScope: "shared",
       });
@@ -147,7 +128,7 @@ describe("HomeAssistantIntegrationProvider", () => {
         agentName: "code",
         executionScope: "shared",
       });
-      await config.onDisconnect!("homeassistant");
+      await config.onDisconnect!();
 
       expect(global.fetch).toHaveBeenCalledWith(
         "https://backend.example.test/api/homeassistant/disconnect?agent_name=code&execution_scope=shared",

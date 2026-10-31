@@ -10,15 +10,27 @@ import {
   SiHomeassistant,
 } from "react-icons/si";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { integrationProviders } from "./index";
+import { GenericOAuthIntegrationProvider, builtInProviderCards } from "./index";
 
 vi.mock("@/lib/api", () => ({
   API_BASE_URL: "",
-  withAgentExecutionScope: (url: string) => url,
+  withAgentExecutionScope: (
+    url: string,
+    agentName?: string | null,
+    executionScope?: string | null,
+  ) =>
+    agentName
+      ? `${url}?agent_name=${agentName}&execution_scope=${executionScope}`
+      : url,
 }));
 
 global.fetch = vi.fn();
 global.window.open = vi.fn();
+
+const drive = new GenericOAuthIntegrationProvider(
+  "google_drive",
+  "Google Drive",
+);
 
 describe("Generic OAuth integration provider", () => {
   beforeEach(() => {
@@ -29,22 +41,31 @@ describe("Generic OAuth integration provider", () => {
 
   it("lists the built-in provider cards in display order", () => {
     expect(
-      Object.values(integrationProviders).map((provider) => {
-        const { id, name, description, category, setup_type, icon } =
-          provider.getConfig().integration;
-        if (!isValidElement<{ className: string }>(icon)) {
-          throw new Error(`${id} has no icon element`);
-        }
-        return {
+      builtInProviderCards.map(
+        ({
           id,
           name,
           description,
           category,
           setup_type,
-          icon: icon.type,
-          iconClass: icon.props.className,
-        };
-      }),
+          icon,
+          oauth_provider_id,
+        }) => {
+          if (!isValidElement<{ className: string }>(icon)) {
+            throw new Error(`${id} has no icon element`);
+          }
+          return {
+            id,
+            name,
+            description,
+            category,
+            setup_type,
+            icon: icon.type,
+            iconClass: icon.props.className,
+            oauth_provider_id,
+          };
+        },
+      ),
     ).toEqual([
       {
         id: "google_calendar",
@@ -55,6 +76,7 @@ describe("Generic OAuth integration provider", () => {
         setup_type: "oauth",
         icon: SiGooglecalendar,
         iconClass: "h-5 w-5 text-blue-600",
+        oauth_provider_id: "google_calendar",
       },
       {
         id: "google_cloud",
@@ -65,6 +87,7 @@ describe("Generic OAuth integration provider", () => {
         setup_type: "oauth",
         icon: SiGooglecloud,
         iconClass: "h-5 w-5 text-blue-600",
+        oauth_provider_id: "google_cloud",
       },
       {
         id: "google_docs",
@@ -74,6 +97,7 @@ describe("Generic OAuth integration provider", () => {
         setup_type: "oauth",
         icon: SiGoogledocs,
         iconClass: "h-5 w-5 text-blue-600",
+        oauth_provider_id: "google_docs",
       },
       {
         id: "google_drive",
@@ -84,6 +108,7 @@ describe("Generic OAuth integration provider", () => {
         setup_type: "oauth",
         icon: SiGoogledrive,
         iconClass: "h-5 w-5 text-green-600",
+        oauth_provider_id: "google_drive",
       },
       {
         id: "google_gmail",
@@ -93,6 +118,7 @@ describe("Generic OAuth integration provider", () => {
         setup_type: "oauth",
         icon: SiGmail,
         iconClass: "h-5 w-5 text-red-500",
+        oauth_provider_id: "google_gmail",
       },
       {
         id: "google_sheets",
@@ -102,6 +128,7 @@ describe("Generic OAuth integration provider", () => {
         setup_type: "oauth",
         icon: SiGooglesheets,
         iconClass: "h-5 w-5 text-green-600",
+        oauth_provider_id: "google_sheets",
       },
       {
         id: "google_tasks",
@@ -112,6 +139,7 @@ describe("Generic OAuth integration provider", () => {
         setup_type: "oauth",
         icon: SiGoogletasks,
         iconClass: "h-5 w-5 text-blue-600",
+        oauth_provider_id: "google_tasks",
       },
       {
         id: "homeassistant",
@@ -121,40 +149,16 @@ describe("Generic OAuth integration provider", () => {
         setup_type: "special",
         icon: SiHomeassistant,
         iconClass: "h-5 w-5",
+        oauth_provider_id: undefined,
       },
     ]);
   });
 
-  it("registers Google Docs as a first-class OAuth integration", () => {
-    const config = integrationProviders.google_docs.getConfig();
-
-    expect(config.integration).toMatchObject({
-      id: "google_docs",
-      name: "Google Docs",
-      setup_type: "oauth",
-    });
-  });
-
-  it("registers Google Tasks as a first-class OAuth integration", () => {
-    const config = integrationProviders.google_tasks.getConfig();
-
-    expect(config.integration).toMatchObject({
-      id: "google_tasks",
-      name: "Google Tasks",
-      setup_type: "oauth",
-    });
-  });
-
-  it("registers one Google Cloud card for the shared Google Cloud connection", async () => {
-    const provider = integrationProviders.google_cloud;
-    const config = provider.getConfig();
-
-    expect(config.integration).toMatchObject({
-      id: "google_cloud",
-      name: "Google Cloud",
-      setup_type: "oauth",
-    });
-    expect(integrationProviders).not.toHaveProperty("google_bigquery");
+  it("loads status from the provider's own endpoint", async () => {
+    const provider = new GenericOAuthIntegrationProvider(
+      "google_cloud",
+      "Google Cloud",
+    );
 
     (global.fetch as any).mockResolvedValueOnce({
       ok: true,
@@ -167,7 +171,7 @@ describe("Generic OAuth integration provider", () => {
       }),
     });
 
-    const status = await provider.loadStatus!();
+    const status = await provider.loadStatus();
 
     expect(global.fetch).toHaveBeenCalledWith("/api/oauth/google_cloud/status");
     expect(status).toMatchObject({
@@ -194,8 +198,8 @@ describe("Generic OAuth integration provider", () => {
       json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
     });
 
-    const config = integrationProviders.google_drive.getConfig();
-    const connectPromise = config.onAction!(config.integration);
+    const config = drive.getConfig();
+    const connectPromise = config.onAction!();
 
     await vi.waitFor(() => {
       expect(global.window.open).toHaveBeenCalled();
@@ -255,17 +259,17 @@ describe("Generic OAuth integration provider", () => {
           origin: window.location.origin,
         }),
       );
-    const config = integrationProviders.google_drive.getConfig();
+    const config = drive.getConfig();
 
     const connected = openPopup();
-    const connect = config.onAction!(config.integration);
+    const connect = config.onAction!();
     await vi.waitFor(() => expect(global.window.open).toHaveBeenCalled());
     say(connected, "connected");
     await connect;
     expect(connected.close).toHaveBeenCalledOnce();
 
     const cancelled = openPopup();
-    const cancel = config.onAction!(config.integration);
+    const cancel = config.onAction!();
     const rejection = expect(cancel).rejects.toThrow(
       "Google Drive authorization was cancelled",
     );
@@ -295,8 +299,8 @@ describe("Generic OAuth integration provider", () => {
       }),
     });
 
-    const config = integrationProviders.google_drive.getConfig();
-    const connectPromise = config.onAction!(config.integration);
+    const config = drive.getConfig();
+    const connectPromise = config.onAction!();
 
     await vi.waitFor(() => {
       expect(global.window.open).toHaveBeenCalled();
@@ -335,8 +339,8 @@ describe("Generic OAuth integration provider", () => {
       json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
     });
 
-    const config = integrationProviders.google_drive.getConfig();
-    const connectPromise = config.onAction!(config.integration);
+    const config = drive.getConfig();
+    const connectPromise = config.onAction!();
 
     await vi.waitFor(() => {
       expect(global.window.open).toHaveBeenCalled();
@@ -380,8 +384,8 @@ describe("Generic OAuth integration provider", () => {
       json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
     });
 
-    const config = integrationProviders.google_drive.getConfig();
-    const connectPromise = config.onAction!(config.integration);
+    const config = drive.getConfig();
+    const connectPromise = config.onAction!();
 
     await vi.waitFor(() => {
       expect(global.window.open).toHaveBeenCalled();
@@ -402,11 +406,11 @@ describe("Generic OAuth integration provider", () => {
       json: async () => ({ detail: "server error" }),
     });
 
-    const status = await integrationProviders.google_drive.loadStatus!();
+    const status = await drive.loadStatus();
 
     expect(status).toMatchObject({
       status: "not_connected",
-      connected: false,
+      status_error: "server error",
       oauth_client_configured: false,
       oauth_custom_client_configured: false,
     });
@@ -415,11 +419,11 @@ describe("Generic OAuth integration provider", () => {
   it("fails closed when OAuth status cannot be loaded", async () => {
     (global.fetch as any).mockRejectedValueOnce(new Error("network error"));
 
-    const status = await integrationProviders.google_drive.loadStatus!();
+    const status = await drive.loadStatus();
 
     expect(status).toMatchObject({
       status: "not_connected",
-      connected: false,
+      status_error: "Failed to load Google Drive OAuth status.",
       oauth_client_configured: false,
       oauth_custom_client_configured: false,
     });
@@ -437,7 +441,7 @@ describe("Generic OAuth integration provider", () => {
       }),
     });
 
-    const status = await integrationProviders.google_drive.loadStatus!();
+    const status = await drive.loadStatus();
 
     expect(status).toMatchObject({
       status: "available",
@@ -460,7 +464,7 @@ describe("Generic OAuth integration provider", () => {
       }),
     });
 
-    const status = await integrationProviders.google_drive.loadStatus!();
+    const status = await drive.loadStatus();
 
     expect(status).toMatchObject({
       status: "not_connected",
@@ -482,15 +486,43 @@ describe("Generic OAuth integration provider", () => {
       }),
     });
 
-    const status = await integrationProviders.google_drive.loadStatus!();
+    const status = await drive.loadStatus();
 
     expect(status).toMatchObject({
       status: "connected",
-      connected: true,
       oauth_service_account_configured: true,
       oauth_reset_required: true,
       helper_text:
         "Stored OAuth credentials cannot be read. Reset the OAuth connection to remove them.",
     });
+  });
+
+  it("sends the selected agent scope with status, connect, and disconnect", async () => {
+    const scope = { agentName: "mind", executionScope: "user" as const };
+    (global.fetch as any)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({}) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
+      })
+      .mockResolvedValueOnce({ ok: true });
+    (global.window.open as any).mockReturnValue(null);
+
+    await drive.loadStatus(scope);
+    const config = drive.getConfig(scope);
+    await expect(config.onAction!()).rejects.toThrow("OAuth popup was blocked");
+    await config.onDisconnect!();
+
+    expect((global.fetch as any).mock.calls).toEqual([
+      ["/api/oauth/google_drive/status?agent_name=mind&execution_scope=user"],
+      [
+        "/api/oauth/google_drive/connect?agent_name=mind&execution_scope=user",
+        { method: "POST" },
+      ],
+      [
+        "/api/oauth/google_drive/disconnect?agent_name=mind&execution_scope=user",
+        { method: "POST" },
+      ],
+    ]);
   });
 });
