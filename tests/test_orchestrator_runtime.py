@@ -281,7 +281,7 @@ async def test_unavailable_final_recovery_uses_retained_owner_bot(tmp_path: Path
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=Config())
     continuation = MagicMock(approval_id="approval-1", entity_name="removed")
     bot = MagicMock()
-    bot.approval_store.principal_id = "removed@@removed:localhost"
+    bot.journal_principal.return_value.principal_id = "removed@@removed:localhost"
     bot.recover_approval_final = AsyncMock(return_value=True)
     orchestrator.fleet.add("removed", bot)
 
@@ -314,7 +314,7 @@ async def test_unavailable_final_recovery_restores_offline_owner_account(tmp_pat
     )
     recovery_bot = MagicMock()
     recovery_bot.client = None
-    recovery_bot.approval_store.principal_id = "removed@@removed:localhost"
+    recovery_bot.journal_principal.return_value.principal_id = "removed@@removed:localhost"
     recovery_bot.recover_approval_final = AsyncMock(return_value=True)
 
     with (
@@ -2830,7 +2830,7 @@ class TestMultiAgentOrchestrator:
         mock_config.teams = {}
         bind_mock_config_event_journal(mock_config)
 
-        with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(
                 runtime_paths=TestAgentBot._runtime_paths(tmp_path),
                 config=mock_config,
@@ -2904,10 +2904,8 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
-            patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
-            patch.object(
-                _MultiAgentOrchestrator,
-                "_prepare_entity_accounts",
+            patch(
+                "mindroom.orchestrator.prepare_managed_accounts",
                 new=AsyncMock(
                     return_value={
                         ROUTER_AGENT_NAME: AgentMatrixUser(
@@ -2961,9 +2959,8 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
-            patch.object(
-                orchestrator,
-                "_prepare_user_account",
+            patch(
+                "mindroom.orchestrator.prepare_managed_accounts",
                 new=AsyncMock(side_effect=RuntimeError("boom")),
             ),
             patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_managed_bot,
@@ -2993,7 +2990,7 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         bind_mock_config_event_journal(mock_config)
 
-        with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(
                 runtime_paths=TestAgentBot._runtime_paths(tmp_path),
                 config=mock_config,
@@ -4592,7 +4589,6 @@ class TestMultiAgentOrchestrator:
         apply_update_plan = AsyncMock(side_effect=RuntimeError("script reload boundary"))
 
         with (
-            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
             patch.object(type(runtime), "apply_update_plan", new=apply_update_plan),
             pytest.raises(RuntimeError, match="script reload boundary"),
         ):
@@ -4616,7 +4612,6 @@ class TestMultiAgentOrchestrator:
         prepare_plugins = MagicMock()
 
         with (
-            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
             patch.object(type(orchestrator.script_runtime), "apply_update_plan", new=apply_update_plan),
             patch.object(orchestrator, "_stage_plugins", new=prepare_plugins),
             pytest.raises(RuntimeError, match="script plugin boundary"),
@@ -4663,7 +4658,6 @@ class TestMultiAgentOrchestrator:
         runtime.manager.worker_backend = old_backend
 
         with (
-            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
             patch.object(
                 type(runtime),
                 "_apply_update_pass",
@@ -4703,7 +4697,6 @@ class TestMultiAgentOrchestrator:
             completed_configs.append(orchestrator.config)
 
         with (
-            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
             patch.object(
                 orchestrator._startup_maintenance,
                 "cancel",
@@ -4742,7 +4735,6 @@ class TestMultiAgentOrchestrator:
             completed_configs.append(orchestrator.config)
 
         with (
-            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
             patch.object(type(runtime), "apply_update_plan", new=AsyncMock()),
             patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
             patch.object(type(runtime), "reopen_script_calls", new=reopen_script_calls),
@@ -4918,7 +4910,10 @@ class TestMultiAgentOrchestrator:
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
         old_cards = MagicMock()
         router_cards = MagicMock()
-        install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(approval_store=router_cards)})
+        install_bots(
+            orchestrator,
+            {ROUTER_AGENT_NAME: MagicMock(journal_principal=MagicMock(return_value=router_cards))},
+        )
         store = initialize_approval_store_for_test(runtime_paths, cards=old_cards)
 
         try:
@@ -5066,9 +5061,8 @@ class TestMultiAgentOrchestrator:
                 "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                 side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
             ),
-            patch.object(
-                orchestrator,
-                "_prepare_user_account",
+            patch(
+                "mindroom.orchestrator.prepare_managed_accounts",
                 new=AsyncMock(side_effect=RuntimeError("boom")),
             ),
             pytest.raises(RuntimeError, match="boom"),
@@ -5372,9 +5366,8 @@ class TestMultiAgentOrchestrator:
                 return_value=set(),
             ),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
-            patch.object(
-                orchestrator,
-                "_prepare_entity_accounts",
+            patch(
+                "mindroom.orchestrator.prepare_managed_accounts",
                 new=AsyncMock(
                     return_value={
                         "coach": AgentMatrixUser(
@@ -5460,9 +5453,8 @@ class TestMultiAgentOrchestrator:
                 return_value=set(),
             ),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
-            patch.object(
-                orchestrator,
-                "_prepare_entity_accounts",
+            patch(
+                "mindroom.orchestrator.prepare_managed_accounts",
                 new=AsyncMock(
                     return_value={
                         "coach": AgentMatrixUser(
@@ -5504,18 +5496,17 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         bind_mock_config_event_journal(mock_config)
 
-        with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(
                 runtime_paths=TestAgentBot._runtime_paths(tmp_path),
                 config=mock_config,
             )
             await orchestrator.initialize()
 
-            # Mock the agent clients and ensure_user_account
+            # Mock the agent clients
             for bot in orchestrator.agent_bots.values():
                 bot.client = AsyncMock()
                 bot.running = True
-                bot.ensure_user_account = AsyncMock()
 
             await orchestrator.stop()
 
@@ -5544,7 +5535,7 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         bind_mock_config_event_journal(mock_config)
 
-        with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(
                 runtime_paths=TestAgentBot._runtime_paths(tmp_path),
                 config=mock_config,

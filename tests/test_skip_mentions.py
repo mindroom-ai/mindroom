@@ -299,7 +299,6 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock]:
             runtime_paths=runtime_paths,
             agent_name="email_agent",
             logger=MagicMock(),
-            redact_message_event=AsyncMock(return_value=True),
             resolver=SimpleNamespace(
                 build_message_target=MagicMock(),
                 deps=SimpleNamespace(

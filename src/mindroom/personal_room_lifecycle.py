@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from time import monotonic
 from typing import TYPE_CHECKING
 
+import nio
+
 from mindroom.background_tasks import create_background_task
 from mindroom.config.personal_agents import read_personal_agent_roster
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -20,18 +22,17 @@ from mindroom.matrix.personal_room_store import (
 )
 from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomValidationError
 from mindroom.matrix.state import resolve_room_aliases
-from mindroom.personal_agents import is_mindroom_account_id
+from mindroom.personal_agents import is_mindroom_account_id, provision_personal_agent
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
-    import nio
+    from collections.abc import Callable
 
     from mindroom.config.personal_rooms import PersonalRoomsConfig
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.personal_rooms import PersonalRoomService
     from mindroom.matrix.room_member_joins import RoomMemberJoin
+    from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
     from mindroom.runtime_protocols import SupportsClientConfig
 
 
@@ -85,10 +86,12 @@ class PersonalRoomLifecycle:
     runtime_paths: RuntimePaths
     service: PersonalRoomService
     lookup_target: Callable[[str], PersonalRoomTarget | None]
-    # Creates one user's agent from a template (template, owner, joining account, source_room_id) and requests a reload.
-    provision_personal_agent: Callable[[str, str, str, str], Awaitable[None]] | None = None
+    # Starts a user's agent once provisioning added it to the roster.
+    config_reload: ConfigReloadLifecycle
     # Tells the router that one room's membership changed, which may unblock a personal room's imported roster.
     report_membership_change: Callable[[str], None] | None = None
+    # A live join and a reconciliation pass can both reach one user; only one may register the account.
+    _provisioning: set[tuple[str, str]] = field(default_factory=set, init=False)
     _reconciled: bool = field(default=False, init=False)
     _config_revision: int = field(default=0, init=False)
     _completed_candidates: set[tuple[str, str]] = field(default_factory=set, init=False)
@@ -235,10 +238,12 @@ class PersonalRoomLifecycle:
             if is_mindroom_account_id(user_id, self.runtime_paths):
                 logger.debug("MindRoom account gets no personal agent", user_id=user_id, room_id=source_room_id)
                 return
-            if self.provision_personal_agent is None:
-                msg = "Personal agents need a provisioning callback"
-                raise RuntimeError(msg)
-            await self.provision_personal_agent(settings.agent, owner_id, user_id, source_room_id)
+            await self._provision_personal_agent(
+                settings.agent,
+                user_id=owner_id,
+                source_user_id=user_id,
+                source_room_id=source_room_id,
+            )
             msg = "Personal agent is not in the live config yet"
             raise _TargetPendingError(msg)
         target = self.lookup_target(target_name)
@@ -255,6 +260,45 @@ class PersonalRoomLifecycle:
             self.runtime.client,
             reinvite_departed_owner=reinvite_departed_owner,
         )
+
+    async def _provision_personal_agent(
+        self,
+        template: str,
+        *,
+        user_id: str,
+        source_user_id: str,
+        source_room_id: str,
+    ) -> None:
+        """Create one user's agent from a template and request a reload so the runtime starts it.
+
+        A second call for a user already being provisioned returns at once, so the caller treats the user as pending
+        and retries without waiting.
+        """
+        client = self.runtime.client
+        assert client is not None
+        key = (template, user_id)
+        if key in self._provisioning:
+            return
+        self._provisioning.add(key)
+        try:
+            profile = await client.get_displayname(user_id)
+            _, changed = await provision_personal_agent(
+                self.runtime.config,
+                self.runtime_paths,
+                template=template,
+                user_id=user_id,
+                user_display_name=profile.displayname
+                if isinstance(profile, nio.ProfileGetDisplayNameResponse)
+                else None,
+                source_user_id=source_user_id,
+                source_room_id=source_room_id,
+            )
+        finally:
+            self._provisioning.discard(key)
+        # This runs only while the live config lacks the agent, so an existing entry still needs a reload,
+        # but re-requesting a queued one would restart its debounce and response drain on every retry.
+        if changed or self.config_reload.status.status != "pending":
+            self.config_reload.request_reload()
 
     async def _onboard_live(
         self,

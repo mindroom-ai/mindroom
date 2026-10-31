@@ -173,14 +173,16 @@ def scheduling_bot(
     *,
     agent_name: str = ROUTER_AGENT_NAME,
     conversation_reader: ConversationReader | None = None,
+    matrix_admin: HookMatrixAdmin | None = None,
 ) -> AgentBot:
-    """Return a started, synced bot double whose client and reader scheduled-task runners borrow."""
+    """Return a started, synced bot double whose client, reader, and router-backed admin scheduled-task runners borrow."""
     bot = MagicMock(spec=AgentBot)
     bot.agent_name = agent_name
     bot.client = client
     bot.running = True
     bot.first_sync_complete = True
     bot.conversation_reader = conversation_reader if conversation_reader is not None else AsyncMock()
+    bot.hook_context.matrix_admin.return_value = matrix_admin
     return bot
 
 
@@ -189,7 +191,6 @@ def scheduled_task_runtime(
     *bots: AgentBot,
     config: Config | None = None,
     config_provider: Callable[[], Config] | None = None,
-    matrix_admin: HookMatrixAdmin | None = None,
     hooks: HookRegistryLifetime | None = None,
 ) -> ScheduledTaskRuntime:
     """Return the scheduled-task owner over these bots, reading ``config`` unless a provider is given."""
@@ -205,7 +206,6 @@ def scheduled_task_runtime(
         runtime_paths=runtime_paths,
         config_provider=config_provider,
         bots=lambda: bots_by_name,
-        matrix_admin=lambda: matrix_admin,
         hooks=hooks if hooks is not None else HookRegistryState(HookRegistry.empty()).lifetime(),
     )
 
@@ -223,13 +223,12 @@ def task_runner(
     hooks: HookRegistryLifetime | None = None,
 ) -> _TaskRunner:
     """Return one task's runner owned by a ready router bot on ``client``."""
-    bot = scheduling_bot(client, conversation_reader=conversation_reader)
+    bot = scheduling_bot(client, conversation_reader=conversation_reader, matrix_admin=matrix_admin)
     runtime = scheduled_task_runtime(
         runtime_paths,
         bot,
         config=config,
         config_provider=config_provider,
-        matrix_admin=matrix_admin,
         hooks=hooks,
     )
     return _TaskRunner(runtime, ROUTER_AGENT_NAME, room_id, task_id)
@@ -242,7 +241,6 @@ async def run_once_task(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_reader: ConversationReader | None = None,
-    matrix_admin: HookMatrixAdmin | None = None,
     *,
     config_provider: Callable[[], Config] | None = None,
 ) -> None:
@@ -255,7 +253,6 @@ async def run_once_task(
         config,
         runtime_paths,
         conversation_reader,
-        matrix_admin,
         config_provider=config_provider,
     )
     await runner.run_once(workflow)

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Protocol
 import nio
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
+from mindroom.background_tasks import create_background_task
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.managed_room_notice import managed_room_join_notice
@@ -259,7 +260,24 @@ class BotRoomLifecycle:
             await asyncio.to_thread(forget_invited_room, self._invited_rooms_file_path(), room_id)
         self._welcomed_room_ids.discard(room_id)
 
-    async def record_pending_room_invite(self, room_id: str, sender_id: str) -> None:
+    async def on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
+        """Act on one invite to this account without journalling it.
+
+        An invite has no Matrix event ID to key durable work on.
+        Persist its room and inviter before network work moves to the
+        background so policy changes and process restarts can reconcile it.
+        """
+        if (
+            not isinstance(event, nio.InviteMemberEvent)
+            or event.state_key != self.deps.agent_user.user_id
+            or event.membership != "invite"
+        ):
+            return
+        await self._record_pending_room_invite(room.room_id, event.sender)
+        # The bot's runtime owns the handling, so its shutdown drains it.
+        create_background_task(self._handle_recorded_invite(room, event.sender), owner=self.deps.runtime)
+
+    async def _record_pending_room_invite(self, room_id: str, sender_id: str) -> None:
         """Persist an outstanding invite before its network work runs."""
         if self._should_persist_invited_rooms():
             await self._record_pending_room_invites({room_id: sender_id})
@@ -551,7 +569,7 @@ class BotRoomLifecycle:
                 room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
                 room.inviter = sender
             try:
-                await self.handle_recorded_invite(room, sender)
+                await self._handle_recorded_invite(room, sender)
             except Exception:
                 self._logger().exception("Pending invite reconciliation failed", room_id=room_id, sender=sender)
 
@@ -572,7 +590,7 @@ class BotRoomLifecycle:
             else None
         )
 
-    async def handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:
+    async def _handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:
         """Accept one recorded invite when its dedicated invitation policy allows it."""
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
             if not self._should_accept_invite():

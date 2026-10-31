@@ -1,4 +1,4 @@
-"""Bot lifecycle: startup ordering and hooks, journal ownership across logins and rebuilds, handled-turn cleanup, and background-task drains."""
+"""Bot lifecycle: startup ordering and hooks, journal ownership, handled-turn cleanup, and background-task drains."""
 
 from __future__ import annotations
 
@@ -57,11 +57,8 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         )
         assert isinstance(event, nio.ReactionEvent)
         with (
-            patch.object(bot, "ensure_user_account", AsyncMock()),
             patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=bot.client)),
-            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "refresh_presence", AsyncMock()),
-            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
         ):
             await bot.start()
 
@@ -112,12 +109,10 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         bot.orchestrator.hook_registry_state.registry = hook_registry
 
         with (
-            patch.object(bot, "ensure_user_account", AsyncMock()),
             patch(
                 "mindroom.bot.login_agent_owned_session",
                 AsyncMock(return_value=SimpleNamespace(client=start_client, session=ingestion_session)),
             ),
-            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "refresh_presence", AsyncMock()),
             patch("mindroom.bot.emit", AsyncMock(side_effect=startup_error)),
             pytest.raises(type(startup_error)),
@@ -168,12 +163,10 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         client = _make_client_mock(user_id="@mindroom_general:localhost")
         session = AsyncMock()
         with (
-            patch.object(bot, "ensure_user_account", AsyncMock()),
             patch(
                 "mindroom.bot.login_agent_owned_session",
                 AsyncMock(return_value=SimpleNamespace(client=client, session=session)),
             ),
-            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "refresh_presence", AsyncMock()),
             pytest.raises(RuntimeError, match="Required startup hook") as error,
         ):
@@ -227,39 +220,18 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         client.sync.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_login_as_another_user_keeps_the_runtime_journal(self, bot: AgentBot) -> None:
-        """A re-login under a different Matrix ID moves the principal, not the database.
-
-        The bot borrows its runtime's one store, and the rebuild that follows an
-        identity change borrows that same store again. One database holds every
-        principal, and turn records are deliberately not principal-scoped
-        precisely so that a re-login keeps reading the same database. The bot's
-        stop leaves the store open for the other bots of its runtime.
-        """
-        store_before_login = bot._journal_store
-        assert store_before_login is bot.orchestrator.event_journal_store()
-        identity_before_login = bot.matrix_id
-
-        bot.agent_user.user_id = "@mindroom_general_2:localhost"
-        bot._rebuild_runtime_components_after_login_if_identity_changed(identity_before_login)
-
-        assert bot._journal_principal_id == "general@@mindroom_general_2:localhost"
-        assert bot._journal_store is store_before_login
+    async def test_a_bot_borrows_its_runtimes_journal_store_and_leaves_it_open(self, bot: AgentBot) -> None:
+        """One database holds every principal, so the bot's stop leaves the store open for the other bots of its runtime."""
+        store = bot._journal_store
+        assert store is bot.orchestrator.event_journal_store()
 
         await bot.stop()
 
-        await store_before_login.existing_generation()
+        await store.existing_generation()
 
-    def test_a_rebuild_wires_each_collaborator_to_the_owners_of_its_own_build(self, bot: AgentBot) -> None:
-        """Collaborators built after the owners they hand work to hold those owners, never ones from an earlier build."""
-        identity_before_login = bot.matrix_id
-        first_dispatcher = bot._journal_dispatcher
-
-        bot.agent_user.user_id = "@mindroom_general_2:localhost"
-        bot._rebuild_runtime_components_after_login_if_identity_changed(identity_before_login)
-
+    def test_each_collaborator_holds_the_owners_it_hands_work_to(self, bot: AgentBot) -> None:
+        """Collaborators built after the owners they hand work to hold exactly those owners."""
         dispatcher, runner, gate = bot._journal_dispatcher, bot._response_runner, bot._coalescing_gate
-        assert dispatcher is not first_dispatcher
         assert bot._turn_store.deps.retry_dispatch_sources == dispatcher.retry_turn_sources
         assert bot._reply_runtime.retry_sources == dispatcher.retry_turn_sources
         assert bot._delivery_gateway.deps.turn_handoff == dispatcher.release_delivered_turn_sources
@@ -274,7 +246,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         assert gate._active_thread_ids_for_room == runner.active_thread_ids_for_room
         assert gate._room_scope_is_single_conversation == bot._conversation_resolver.room_is_one_conversation
         # The journal's schedule trigger trusts exactly the senders the entity registry manages.
-        assert dispatcher.schedule_trigger_sender_is_managed(identity_before_login.full_id)
+        assert dispatcher.schedule_trigger_sender_is_managed(bot.matrix_id.full_id)
         assert not dispatcher.schedule_trigger_sender_is_managed("@user:localhost")
 
     @pytest.mark.asyncio

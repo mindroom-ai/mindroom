@@ -106,6 +106,7 @@ from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     RESERVED_ENTITY_NAMES,
     ROUTER_AGENT_NAME,
+    ROUTER_DISPLAY_NAME,
     RuntimePaths,
     config_relative_path,
     matrix_state_file,
@@ -1186,7 +1187,9 @@ class Config(BaseModel):
         return team_name if team_name in self.teams else None
 
     def entity_display_name(self, entity_name: str) -> str:
-        """Return the configured display name for one agent or team."""
+        """Return the display name of the router or of one configured agent or team."""
+        if entity_name == ROUTER_AGENT_NAME:
+            return ROUTER_DISPLAY_NAME
         return configured_entity(self, entity_name).display_name
 
     def resolve_scope(self, entity_name: str | None) -> ResolvedScope:

@@ -35,7 +35,6 @@ from mindroom.constants import (
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import (
-    FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     ResponseIdentity,
 )
@@ -118,7 +117,6 @@ from tests.conftest import (
     install_runtime_journal_support,
     message_origin,
     patch_response_runner_module,
-    replace_delivery_gateway_deps,
     request_envelope,
     runtime_paths_for,
     seed_session,
@@ -126,7 +124,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer
 from tests.journal_membership_helpers import admit_room_membership
-from tests.reply_span_helpers import reply_span, response_span
+from tests.reply_span_helpers import response_span
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import (
     attempt_in_place,
@@ -1382,134 +1380,6 @@ class TestAgentBot(AgentBotTestBase):
         live_event_ids.assert_awaited_with("!test:localhost")
 
     @pytest.mark.asyncio
-    async def test_deliver_generated_response_redacts_suppressed_placeholder(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Suppressing a placeholder-backed response should redact the provisional event."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        redact_message_event = AsyncMock(return_value=True)
-        gateway = replace_delivery_gateway_deps(
-            bot,
-            redact_message_event=redact_message_event,
-            response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
-                    return_value=SimpleNamespace(
-                        response_text="Handled",
-                        response_kind="ai",
-                        tool_trace=None,
-                        extra_content=None,
-                        envelope=response_envelope,
-                        suppress=True,
-                    ),
-                ),
-                _emit_after_response=AsyncMock(),
-                _emit_cancelled_response=AsyncMock(),
-            ),
-        )
-
-        async with reply_span(
-            gateway.deps.outbox,
-            source_event_id="$event123",
-            room_id="!test:localhost",
-            thread_id="$thread123",
-            placeholder_event_id="$placeholder",
-        ):
-            delivery = await gateway.deliver_final(
-                FinalDeliveryRequest(
-                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                    existing_event_id="$placeholder",
-                    response_text="Handled",
-                    identity=ResponseIdentity(
-                        response_kind="ai",
-                        response_envelope=response_envelope,
-                        correlation_id="corr-deliver-suppress",
-                        sources=ResponseSources(
-                            (response_envelope.source_event_id,),
-                            (response_envelope.source_event_id,),
-                        ),
-                    ),
-                    tool_trace=None,
-                    extra_content=None,
-                ),
-            )
-
-        assert delivery.ending == Suppressed(Suppression.HOOK)
-        assert delivery.event_id is None
-        redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$placeholder",
-            reason="Reply removed",
-        )
-        assert _handled_response_event_id(delivery) is None
-
-    @pytest.mark.asyncio
-    async def test_deliver_generated_response_suppressed_existing_event_returns_no_final_event(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Suppressing a non-placeholder edit should keep the prior visible event retryable."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        redact_message_event = AsyncMock()
-        gateway = replace_delivery_gateway_deps(
-            bot,
-            redact_message_event=redact_message_event,
-            response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
-                    return_value=SimpleNamespace(
-                        response_text="Handled",
-                        response_kind="ai",
-                        tool_trace=None,
-                        extra_content=None,
-                        envelope=response_envelope,
-                        suppress=True,
-                    ),
-                ),
-                _emit_after_response=AsyncMock(),
-                _emit_cancelled_response=AsyncMock(),
-            ),
-        )
-
-        async with reply_span(
-            gateway.deps.outbox,
-            source_event_id="$event123",
-            room_id="!test:localhost",
-            thread_id="$thread123",
-            regenerated_event_id="$existing",
-        ):
-            delivery = await gateway.deliver_final(
-                FinalDeliveryRequest(
-                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                    existing_event_id="$existing",
-                    response_text="Handled",
-                    identity=ResponseIdentity(
-                        response_kind="ai",
-                        response_envelope=response_envelope,
-                        correlation_id="corr-deliver-existing-suppress",
-                        sources=ResponseSources(
-                            (response_envelope.source_event_id,),
-                            (response_envelope.source_event_id,),
-                        ),
-                    ),
-                    tool_trace=None,
-                    extra_content=None,
-                ),
-            )
-
-        assert delivery.ending == Suppressed(Suppression.HOOK)
-        assert delivery.event_id == "$existing"
-        redact_message_event.assert_not_awaited()
-        assert _handled_response_event_id(delivery) is None
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(("hook_action"), ["rewrite", "suppress"])
     async def test_streamed_before_response_no_longer_mutates_post_visible_success(
         self,
@@ -1533,8 +1403,8 @@ class TestAgentBot(AgentBotTestBase):
             [_hook_plugin("hooked", [before_hook])],
         )
         response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        redact_message_event = AsyncMock(return_value=True)
-        gateway = replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
+        bot.client.room_redact = AsyncMock()
+        gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
         mock_deliver_final = AsyncMock(
             return_value=FinalDeliveryOutcome(
                 ending=Completed(),
@@ -1566,7 +1436,7 @@ class TestAgentBot(AgentBotTestBase):
         assert outcome.final_visible_event_id == "$streaming"
         assert outcome.final_visible_body == "chunk"
         mock_deliver_final.assert_not_awaited()
-        redact_message_event.assert_not_awaited()
+        bot.client.room_redact.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_streamed_regeneration_against_an_existing_visible_reply_preserves_linkage_when_no_new_body_lands(
@@ -2087,8 +1957,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        redact_message_event = AsyncMock(return_value=True)
-        replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
         mock_ai_response = AsyncMock(return_value=response_text)
 
         with (
@@ -2144,7 +2012,7 @@ class TestAgentBot(AgentBotTestBase):
         if expected_event_id is not None:
             assert send_text.await_args.args[-1].response_text == "Finding"
         edit_text.assert_not_awaited()
-        redact_message_event.assert_not_awaited()
+        bot.client.room_redact.assert_not_awaited()
         add_stop_button.assert_not_awaited()
         bot.client.room_send.assert_not_awaited()
         receipt_path = (

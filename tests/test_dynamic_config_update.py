@@ -108,7 +108,6 @@ class TestDynamicConfigUpdate:
             },
             models={"default": {"provider": "openai", "id": "test-model"}},
         )
-        persist_entity_accounts(initial_config, orchestrator.runtime_paths)
         persist_entity_accounts(updated_config, orchestrator.runtime_paths)
 
         # Mock the explicit runtime-bound config loader used by update_config().
@@ -178,7 +177,6 @@ class TestDynamicConfigUpdate:
         )
 
         orchestrator = orchestrator_factory(initial_config)
-        persist_entity_accounts(initial_config, orchestrator.runtime_paths)
         persist_entity_accounts(updated_config, orchestrator.runtime_paths)
 
         general_bot = _mock_agent_bot()
@@ -666,7 +664,10 @@ class TestDynamicConfigUpdate:
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
-            patch.object(orchestrator, "_ensure_user_account", new=AsyncMock()) as mock_ensure_user,
+            patch(
+                "mindroom.orchestration.accounts.create_agent_user",
+                new=AsyncMock(return_value=MagicMock(user_id="@mindroom_user:localhost")),
+            ) as create_account,
             patch.object(orchestrator._rooms, "setup", new=AsyncMock()) as mock_setup,
         ):
             updated = await orchestrator.config_reload._update_config()
@@ -674,15 +675,17 @@ class TestDynamicConfigUpdate:
         assert updated is False
         assert orchestrator.config == updated_config
         router_bot.apply_published_config.assert_called_once_with()
-        mock_ensure_user.assert_awaited_once_with(updated_config)
+        create_account.assert_awaited_once()
+        assert create_account.await_args.args[1:] == ("user", "Alice Internal")
+        assert create_account.await_args.kwargs["username"] == "mindroom_user"
         mock_setup.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
-    async def test_mindroom_user_username_change_is_rejected_without_partial_update(
+    async def test_mindroom_user_change_keeps_current_config_when_account_preparation_fails(
         self,
         orchestrator_factory: Callable[[Config], _MultiAgentOrchestrator],
     ) -> None:
-        """Reject changing mindroom_user.username and keep the current runtime config."""
+        """An internal-user change whose account preparation fails keeps the current runtime config and bots."""
         initial_config = Config(
             agents={
                 "general": {
@@ -717,11 +720,10 @@ class TestDynamicConfigUpdate:
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
-            patch.object(
-                orchestrator,
-                "_ensure_user_account",
+            patch(
+                "mindroom.orchestration.accounts.create_agent_user",
                 new=AsyncMock(side_effect=PermanentMatrixStartupError("mindroom_user.username cannot be changed")),
-            ) as mock_ensure_user,
+            ) as create_account,
             patch.object(orchestrator._rooms, "setup", new=AsyncMock()) as mock_setup,
             pytest.raises(PermanentMatrixStartupError, match="cannot be changed"),
         ):
@@ -730,5 +732,6 @@ class TestDynamicConfigUpdate:
         assert orchestrator.config == initial_config
         mock_bot.apply_published_config.assert_not_called()
         router_bot.apply_published_config.assert_not_called()
-        mock_ensure_user.assert_awaited_once_with(updated_config)
+        create_account.assert_awaited_once()
+        assert create_account.await_args.args[1:] == ("user", "Alice Internal")
         mock_setup.assert_not_awaited()

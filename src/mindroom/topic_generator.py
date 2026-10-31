@@ -36,9 +36,7 @@ def _configured_entity_display_names_for_room(
     """Return configured agent and team display names for one room key or ID."""
     room_id = matrix_state.get_room_id(room_key, runtime_paths) or room_key
     return [
-        (config.agents[entity_name].display_name or entity_name)
-        if entity_name in config.agents
-        else (config.teams[entity_name].display_name or entity_name)
+        config.entity_display_name(entity_name) or entity_name
         for entity_name in configured_routable_entity_names_for_room(config, room_id, runtime_paths)
     ]
 
