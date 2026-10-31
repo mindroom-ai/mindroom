@@ -651,13 +651,28 @@ def test_a_paused_run_s_turn_input_is_the_context_its_request_sent_before_the_pr
         transient=(Message(role="user", content="memories", add_to_agent_memory=False),) if transient else (),
     )
     paused_request = _request(summary=_SUMMARY, history=_replay([_agent_run("earlier")]), turn=turn)
-    stored = _paused_row(
-        [message for message in [*paused_request, _tool_call("call-multiply")] if not message.from_history],
-    ).messages
+    answer = replace(_tool_call("call-multiply"), provider_data=model_provenance("m", "Synthetic"))
+    stored = _paused_row([message for message in [*paused_request, answer] if not message.from_history]).messages
 
     turn_input = stored_turn_input(stored)
     assert [message.id for message in turn_input.context] == [message.id for message in context]
     assert turn_input.summary == ()
+
+
+def test_a_paused_row_whose_answers_name_no_model_ends_its_input_at_the_first_call() -> None:
+    """A row stored before answers named their model, without the transient context too, still reads its context."""
+    context = Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>')
+    stored = _paused_row(
+        [
+            _system(),
+            context,
+            Message(role="user", content="multiply"),
+            _tool_call("call-multiply"),
+            Message(role="tool", tool_call_id="call-multiply", content="42"),
+        ],
+    ).messages
+
+    assert [message.id for message in stored_turn_input(stored).context] == [context.id]
 
 
 def test_a_stopped_run_s_turn_input_ends_at_its_model_s_first_answer() -> None:

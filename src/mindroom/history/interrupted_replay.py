@@ -62,24 +62,29 @@ def stored_turn_input(messages: Sequence[Message]) -> TurnInput:
 
     They start with it, after the system messages: the context, the prompt, then the run's own fold summary when a fold
     made one. The transient context only a paused run stores, a queued-message notice, or the model's first answer
-    follows. That answer names its model, and in a paused row stored before answers did, it calls a tool.
+    follows.
     """
-    turn_input = list(
-        takewhile(
-            lambda message: (
-                message.add_to_agent_memory
-                and not message.tool_calls
-                and not is_own_model_message(message)
-                and not is_queued_notice_message(message)
-            ),
-            (message for message in messages if message.role != "system"),
-        ),
-    )
+    turn_input = list(takewhile(_is_turn_input, (message for message in messages if message.role != "system")))
     before_summary = [message for message in turn_input if not is_compaction_summary(message)]
     return TurnInput(
         context=tuple(before_summary[:-1]),
         summary=tuple(message for message in turn_input if is_compaction_summary(message)),
     )
+
+
+def _is_turn_input(message: Message) -> bool:
+    """Return whether a stored message, read in order after the run's system messages, still belongs to its input."""
+    if not message.add_to_agent_memory or is_own_model_message(message) or is_queued_notice_message(message):
+        return False
+    # LEGACY_COMPAT: Paused rows whose model answers name no model.
+    # Legacy format: a paused run's row, or a minimal-mode checkpoint of it, whose assistant answers carry no
+    # ``MODEL_PROVENANCE_KEY`` (``mindroom_model``) in their provider data, so ``is_own_model_message`` reads none.
+    # Last legacy release: v2026.9.303; v2026.9.304 stamped every answer the Agno runtime populated with it, and
+    # v2026.10.499's owned providers stamp every answer they finish.
+    # Handling: a message that calls a tool ends the input instead, since a paused run's first answer calls one, so the
+    # context and prompt read as for a current row; an approval window of up to 36,500 days keeps such a row approvable.
+    # Coverage: tests/test_history_request_messages.py::test_a_paused_row_whose_answers_name_no_model_ends_its_input_at_the_first_call
+    return not message.tool_calls
 
 
 @dataclass(frozen=True)
