@@ -61,7 +61,6 @@ from mindroom.model_usage import message_context_tokens
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.timing import timed
-from mindroom.token_counting.counts import uncalibrated
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -143,10 +142,6 @@ class PreparedScopeHistory:
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     # The native settings the run's requests carry, when the provider route manages history of its own.
     native_history: NativeHistory | None = None
-    # The history size the provider reported for the scope's latest request, when it still describes the history the
-    # run replays, and whether it outweighed the estimate; the final replay plan sizes on the check's basis.
-    reported_history_tokens: int | None = None
-    reported_outweighs_estimate: bool = False
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
@@ -227,13 +222,9 @@ async def prepare_scope_history(
         if native_route is None and visible_runs
         else None
     )
-    # Decided once, so a background count that calibrates the route meanwhile cannot size the final plan differently.
-    reported_outweighs_estimate = uncalibrated(counter)
-    current_history_tokens = _current_history_tokens(
-        estimated_history_tokens,
-        reported_history_tokens,
-        outweighs=reported_outweighs_estimate,
-    )
+    # The provider's count only ever raises the estimate: a count that misses replayed content cannot hide it, and the
+    # request it counted carried the system prompt and tools of its day, so it cannot show that history shrank.
+    current_history_tokens = max(estimated_history_tokens, reported_history_tokens or 0)
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
@@ -326,24 +317,7 @@ async def prepare_scope_history(
         compaction_reply_outcome=compaction_reply_outcome,
         native_history=native_history,
         counter=counter,
-        # A compaction rewrote the history that request held.
-        reported_history_tokens=reported_history_tokens if compaction_decision.mode != "required" else None,
-        reported_outweighs_estimate=reported_outweighs_estimate,
     )
-
-
-def _current_history_tokens(estimated: int, reported: int | None, *, outweighs: bool) -> int:
-    """Return the history size a reply sizes with, from its estimate and the provider's reported size.
-
-    ``outweighs`` says the estimate still carries its family's margin (``uncalibrated``), which can count half again
-    too many tokens, so the provider's own count of the conversation is closer.
-    """
-    if reported is None:
-        return estimated
-    if outweighs:
-        return reported
-    # The provider's count only ever raises the estimate, so a count that misses replayed content cannot hide it.
-    return max(estimated, reported)
 
 
 def _reported_history_tokens(
@@ -702,11 +676,7 @@ def finalize_history_preparation(
             history_settings=history_settings,
             counter=counter,
         )
-        current_history_tokens = _current_history_tokens(
-            estimate_history_tokens(native_route=native_history_route(native_history)),
-            prepared_scope_history.reported_history_tokens,
-            outweighs=prepared_scope_history.reported_outweighs_estimate,
-        )
+        current_history_tokens = estimate_history_tokens(native_route=native_history_route(native_history))
         if history_budget is not None and current_history_tokens > history_budget:
             # Never trim a native checkpoint by run/message count. Fall back to the
             # existing canonical guard if the final dynamic prompt exhausts its room.

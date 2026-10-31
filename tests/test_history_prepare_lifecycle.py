@@ -17,11 +17,9 @@ import pytest
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import prepare_agent_execution_context, prepare_bound_team_run_context
-from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_tokens
 from mindroom.history.runtime import (
     PreparedScopeHistory,
-    finalize_history_preparation,
     prepare_bound_scope_history,
     prepare_scope_history,
     resolve_entity_preparation_inputs,
@@ -55,7 +53,6 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_counting.counts import count_exact
 from tests.conftest import delete_runs, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
@@ -1917,12 +1914,13 @@ async def _prepare_with_reported_usage(
     history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
     folded_run_ids: tuple[str, ...] = (),
     counter: TokenCounter | None = None,
+    non_prompt_tokens: int = 400,
 ) -> tuple[PreparedScopeHistory, int, RecordingCompactionLifecycle]:
     """Prepare a reply after three runs; return it, the chars / 4 history estimate, and the compaction notices.
 
     ``latest`` configures the newest run, and a summary folding ``folded_run_ids`` is stored as written at
-    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, 400 are the system prompt and tools. The
-    answering model counts with ``counter``, a quarter token per character when it is None.
+    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, ``non_prompt_tokens`` are the system prompt
+    and tools. The answering model counts with ``counter``, a quarter token per character when it is None.
     """
     runs = [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", **latest)]
     config, runtime_paths = _make_config(
@@ -1972,7 +1970,7 @@ async def _prepare_with_reported_usage(
                 token_counter=counter or fake_token_counter(),
             ),
             resolved_inputs=resolved_inputs,
-            non_prompt_tokens=400,
+            non_prompt_tokens=non_prompt_tokens,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(
@@ -2034,57 +2032,6 @@ async def test_the_reported_request_size_counts_its_answer_as_the_answering_rout
 
 
 @pytest.mark.asyncio
-async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_path: Path) -> None:
-    """A history the reported size kept below the trigger replays whole, not trimmed by the margin estimate."""
-
-    async def endpoint(text: str) -> int:
-        return len(text)
-
-    one_per_character = TokenCounter(key="margin", estimate=len, count=endpoint)
-    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
-        tmp_path,
-        {"input_tokens": 1_000},
-        counter=one_per_character,
-    )
-    reported = 1_000 + 2_000 - 400
-    assert prepared.compaction_decision.current_history_tokens == reported
-    # A background count that calibrates the route between the check and the plan changes neither's basis.
-    await count_exact(one_per_character, "x" * 100)
-    assert prepared.session is not None
-    margin_estimate = estimate_prompt_visible_history_tokens(
-        session=prepared.session,
-        history_settings=prepared.resolved_inputs.history_settings,
-        counter=one_per_character,
-    )
-    config, _paths = _make_config(tmp_path, compaction=CompactionOverrideConfig(enabled=True), context_window=64_000)
-    # The agent's own settings, which bound replay by the context window.
-    history_settings = config.resolve_scope("test_agent").history_settings
-    resolved_inputs = replace(prepared.resolved_inputs, history_settings=history_settings, active_context_window=64_000)
-    prepared = replace(prepared, resolved_inputs=resolved_inputs)
-    unloaded = resolve_history_execution_plan(
-        config=config,
-        history_settings=history_settings,
-        active_model_name=resolved_inputs.active_model_name,
-        active_context_window=64_000,
-        static_prompt_tokens=0,
-    )
-    assert unloaded.hard_replay_budget_tokens is not None
-    # A static prompt that leaves a hard budget between the reported size and the margin estimate.
-    static_prompt_tokens = unloaded.hard_replay_budget_tokens - (reported + margin_estimate) // 2
-
-    state = finalize_history_preparation(
-        prepared_scope_history=prepared,
-        config=config,
-        static_prompt_tokens=static_prompt_tokens,
-        pipeline_timing=None,
-    )
-
-    assert state.replay_plan is not None
-    assert state.replay_plan.mode != "limited"
-    assert state.replay_plan.estimated_tokens == reported
-
-
-@pytest.mark.asyncio
 async def test_history_preparation_counts_off_the_event_loop(tmp_path: Path) -> None:
     """Sizing the latest answer and the summary encodes them, which must never stall the replies sharing the loop."""
     loop_thread = threading.get_ident()
@@ -2106,20 +2053,24 @@ async def test_history_preparation_counts_off_the_event_loop(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_a_reported_request_size_outweighs_an_uncalibrated_estimate(tmp_path: Path) -> None:
-    """An estimate still carrying its family margin can count half again too many tokens, so the provider's count wins.
+async def test_a_reported_size_never_undercuts_the_estimate_after_the_system_prompt_grew(tmp_path: Path) -> None:
+    """The reported request carried the system prompt of its day, so a prompt grown since cannot shrink the history.
 
-    Once the provider has counted text for the route, the calibrated estimate and the reported size are compared again.
+    Longer instructions or context files leave the reported size minus today's system prompt below the history the
+    next request replays, even before the provider has counted any text for the route.
     """
     one_per_character = TokenCounter(key="margin", estimate=len)
     prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 8_000},
         counter=one_per_character,
+        non_prompt_tokens=7_000,
     )
 
-    # The reported request plus the 2,000-character answer it did not hold, minus the system prompt and tools.
-    assert prepared.compaction_decision.current_history_tokens == 8_000 + 2_000 - 400
+    # The reported size minus today's system prompt is 3,000 tokens, under the 4,000-token trigger, while the three
+    # runs hold 12,000 characters, past the 6,000-token hard budget.
+    assert prepared.compaction_decision.current_history_tokens > 6_000
+    assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
 
 
 @pytest.mark.asyncio

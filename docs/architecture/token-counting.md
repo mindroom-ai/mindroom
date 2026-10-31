@@ -44,7 +44,7 @@ Provider tokens per o200k_base token on those samples:
   The system prompt's messages, the tool definitions, and the `MEMORY.md` preload are counted in the background, a few at a time and each with a time limit; a later reply finds them cached.
   A failed count pauses that route's counting for a while, so one broken endpoint does not cost every reply a failed call.
 - The family margins are upper bounds, because a cap or a compaction input that undercounts fails a request, while one that overcounts only wastes room.
-  The compaction check before a reply is the exception: there a margin estimate would compact conversations that fit, so the provider's reported size of the latest request wins over an estimate that no provider count has calibrated yet.
+  The compaction check before a reply keeps them too, so until the route's provider has counted text, a margin estimate can compact a conversation before it reaches its threshold; [compaction](compaction.md) explains why the provider's reported request size cannot replace the estimate.
 - Estimates are o200k_base scaled by a margin per family: Claude 1.8, Gemini 1.35, OpenAI 1.0, any other model 1.25.
   The Claude and Gemini margins cover the largest ratios measured above (JSON 1.798, Markdown notes 1.309); the other margin covers a Qwen thread where o200k undercounted by about 10% (see [compaction](compaction.md)).
   Calibration replaces the margin once the provider has counted text.

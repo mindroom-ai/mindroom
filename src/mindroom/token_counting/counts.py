@@ -35,7 +35,6 @@ __all__ = [
     "opaque_tokens",
     "prefetch",
     "text_tokens",
-    "uncalibrated",
     "utf8_byte_bound",
 ]
 
@@ -134,17 +133,6 @@ def count(counter: TokenCounter, text: str) -> TokenCount:
         counted, estimated = ratio
         return TokenCount(math.ceil(estimate * counted / estimated), "calibrated")
     return TokenCount(estimate, "estimated")
-
-
-def uncalibrated(counter: TokenCounter) -> bool:
-    """Return whether ``counter`` estimates without its model's tokenizer and before any provider count calibrated it.
-
-    Such an estimate carries its family's upper-bound margin.
-    """
-    if counter.exact_locally:
-        return False
-    with _state.lock:
-        return counter.key not in _state.ratios
 
 
 def _cooling(counter: TokenCounter) -> bool:
