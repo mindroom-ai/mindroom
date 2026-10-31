@@ -212,8 +212,15 @@ def _fake_kubectl(deployments: dict[str, dict[str, Any]], *, unreachable: frozen
     return run_cmd
 
 
-def _deployment(*, desired: int, ready: int) -> dict[str, Any]:
-    counts = {"readyReplicas": ready, "availableReplicas": ready, "updatedReplicas": desired}
+def _deployment(
+    *, desired: int, ready: int, available: int | None = None, updated: int | None = None
+) -> dict[str, Any]:
+    """Return deployment JSON as kubectl prints it, which omits replica counts that are zero."""
+    counts = {
+        "readyReplicas": ready,
+        "availableReplicas": ready if available is None else available,
+        "updatedReplicas": desired if updated is None else updated,
+    }
     return {"spec": {"replicas": desired}, "status": {k: v for k, v in counts.items() if v}}
 
 
@@ -231,11 +238,27 @@ class TestInstanceStatusSync:
         assert result == {"total": 1, "synced": 0, "errors": 0, "updates": []}
 
     @pytest.mark.parametrize(
+        ("deployment", "expected"),
+        [
+            (_deployment(desired=0, ready=0), "stopped"),
+            (_deployment(desired=1, ready=1), "running"),
+            (_deployment(desired=2, ready=1), "provisioning"),
+            (_deployment(desired=1, ready=1, available=0), "provisioning"),
+            (_deployment(desired=1, ready=1, updated=0), "provisioning"),
+            ({"spec": {"replicas": 1}}, "provisioning"),
+        ],
+    )
+    def test_running_needs_every_desired_pod_ready_available_and_updated(
+        self, deployment: dict[str, Any], expected: str
+    ):
+        """A rollout whose ready pods are still the old ones, or not yet available, is not running."""
+        assert provisioner_service._deployment_status(deployment) == expected
+
+    @pytest.mark.parametrize(
         ("stored", "deployment", "expected"),
         [
             ("stopped", _deployment(desired=1, ready=1), "running"),
             ("error", _deployment(desired=1, ready=1), "running"),
-            ("provisioning", _deployment(desired=1, ready=0), "provisioning"),
             ("running", _deployment(desired=1, ready=0), "provisioning"),
             ("running", _deployment(desired=0, ready=0), "stopped"),
             ("running", None, "error"),
@@ -244,22 +267,15 @@ class TestInstanceStatusSync:
             ("provisioning", None, "provisioning"),
         ],
     )
-    @pytest.mark.parametrize("trigger", ["dashboard", "bulk"])
-    def test_every_trigger_records_the_same_status(
-        self, trigger: str, stored: str, deployment: dict[str, Any] | None, expected: str
+    def test_sync_records_the_status_kubernetes_shows(
+        self, stored: str, deployment: dict[str, Any] | None, expected: str
     ):
-        """The dashboard refresh and the admin and system sync derive one status from the same deployment."""
+        """Each sync stamps the row with the status its deployment, or the lack of one, shows."""
         db = FakeSupabase({"instances": [{"id": "1", "instance_id": "7", "status": stored}]})
         deployments = {} if deployment is None else {"7": deployment}
 
-        with (
-            patch("backend.k8s.run_cmd", _fake_kubectl(deployments)),
-            patch("backend.routes.instances.ensure_supabase", return_value=db),
-        ):
-            if trigger == "dashboard":
-                asyncio.run(_background_sync_instance_status("7"))
-            else:
-                asyncio.run(provisioner_service.sync_instances(db))
+        with patch("backend.k8s.run_cmd", _fake_kubectl(deployments)):
+            asyncio.run(provisioner_service.sync_instance_status(db, "7", stored))
 
         row = db.row("instances", instance_id="7")
         assert row["status"] == expected
