@@ -1,10 +1,11 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Connect the Agno toolkits that hold a connection around each run or call that uses them.
+"""Connect the toolkits that hold a connection around each run or call that uses them, and release what they hold.
 
 A toolkit that sets ``requires_connect``, such as Postgres or Redshift, holds a connection its run must close. A run
 connects every such toolkit first and closes what it connected once it ends; a failure either way is logged as a
-warning and the run goes on. A call that builds its own toolkit, as the MCP gateway and script runs do, holds it for
-that call alone (``toolkit_call_lifetime``).
+warning and the run goes on. An owned toolkit whose calls here start resources it holds (``ReleasesAfterUse``), such
+as the browser's Chromium, connects nothing and is released the same way. A call that builds its own toolkit, as the
+MCP gateway and script runs do, holds it for that call alone (``toolkit_call_lifetime``).
 """
 
 from __future__ import annotations
@@ -16,11 +17,11 @@ from contextlib import asynccontextmanager
 from contextvars import copy_context
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom.background_tasks import create_background_task
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.agno_toolkits import requires_connect
+from mindroom.tool_system.agno_toolkits import holds_call_resources, requires_connect
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 
 if TYPE_CHECKING:
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from concurrent.futures import Executor
 
     from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.declarations import ReleasesAfterUse
     from mindroom.tool_system.tool_function import ToolkitClose, ToolkitConnect
 
 logger = get_logger(__name__)
@@ -53,10 +55,20 @@ _pending_cleanups: weakref.WeakKeyDictionary[_ConnectingToolkit, asyncio.Task[No
 
 
 def run_connection(toolkit: AnyToolkit) -> ToolkitConnect | None:
-    """Return how a run connects ``toolkit`` before its first request, or None for a toolkit that holds no connection."""
+    """Return how a run connects ``toolkit`` before its first request, or None for a toolkit that holds nothing here.
+
+    A toolkit that holds resources its calls start, rather than a connection, connects nothing and is released once
+    the run ends.
+    """
     if requires_connect(toolkit):
         return partial(_connect, toolkit)
+    if holds_call_resources(toolkit):
+        return partial(_hold, toolkit)
     return None
+
+
+async def _hold(toolkit: AnyToolkit) -> ToolkitClose:
+    return partial(_logged_release, toolkit.name, _release(toolkit))
 
 
 async def _connect(toolkit: _ConnectingToolkit) -> ToolkitClose | None:
@@ -91,10 +103,21 @@ async def _close_once_connected(toolkit: _ConnectingToolkit, connecting: asyncio
 
 
 async def _close(toolkit: _ConnectingToolkit) -> None:
+    await _logged_release(toolkit.name, toolkit.close)
+
+
+async def _logged_release(name: str, release: Callable[[], object]) -> None:
     try:
-        await run_toolkit_lifecycle(toolkit.close)
+        await run_toolkit_lifecycle(release)
     except Exception as exc:
-        logger.warning("toolkit_close_failed", toolkit=toolkit.name, error=str(exc))
+        logger.warning("toolkit_close_failed", toolkit=name, error=str(exc))
+
+
+def _release(toolkit: AnyToolkit) -> Callable[[], object]:
+    """Return what releases ``toolkit``, which holds something here: its connection's close, else its ``aclose``."""
+    if requires_connect(toolkit):
+        return toolkit.close
+    return cast("ReleasesAfterUse", toolkit).aclose
 
 
 async def _shielded_lifecycle[T](
@@ -128,10 +151,10 @@ async def run_toolkit_lifecycle(operation: Callable[[], object], *, executor: Ex
         await result
 
 
-async def close_connected_toolkit(toolkit: AnyToolkit, *, executor: Executor | None = None) -> None:
-    """Close ``toolkit`` when it holds a connection, as ``run_toolkit_lifecycle`` runs its ``close``."""
-    if requires_connect(toolkit):
-        await run_toolkit_lifecycle(toolkit.close, executor=executor)
+async def release_toolkit(toolkit: AnyToolkit, *, executor: Executor | None = None) -> None:
+    """Release what this process holds of ``toolkit``, its connection or its calls' resources; nothing when it holds none."""
+    if holds_call_resources(toolkit):
+        await run_toolkit_lifecycle(_release(toolkit), executor=executor)
 
 
 @dataclass(slots=True)
@@ -180,15 +203,17 @@ async def toolkit_call_lifetime(
     *,
     executor: Executor | None = None,
 ) -> AsyncIterator[None]:
-    """Connect ``toolkit`` for one call, own every synchronous body the block starts, then close it.
+    """Connect ``toolkit`` for one call, own every synchronous body the block starts, then close or release it.
 
     A failed connect closes the toolkit and raises the connect's error, with a close error as its cause, before the
     block runs; a cancelled connect hands the close to ``cleanups``. When the block is cancelled, or ends while a body
     it started still runs, ``cleanups`` closes the toolkit once those bodies return and the caller does not wait, and a
     body's failure, which already reached the call, is not raised again; otherwise the caller waits for the close and
-    sees its error. ``executor`` runs the blocking connect, close, and bodies; None is the loop's default executor.
+    sees its error. A toolkit that holds resources its calls start connects nothing and is released as a connected one
+    is closed. ``executor`` runs the blocking connect, close, and bodies; None is the loop's default executor.
     """
     lifecycle = partial(run_toolkit_lifecycle, executor=executor)
+    held = holds_call_resources(toolkit)
     connected = toolkit if requires_connect(toolkit) else None
     if connected is not None:
         try:
@@ -217,10 +242,10 @@ async def toolkit_call_lifetime(
     finally:
         # A body the call started that still runs, after a cancel or beside a failure, keeps the toolkit.
         running = [body for body in tracker.settle() if not body.done()]
-        if running or (cancelled and connected is not None):
+        if running or (cancelled and held):
             _retain_close(cleanups, toolkit, after=running, executor=executor)
-        elif connected is not None:
-            await _shielded_lifecycle(lifecycle(connected.close), retain=cleanups.retain)
+        elif held:
+            await _shielded_lifecycle(lifecycle(_release(toolkit)), retain=cleanups.retain)
 
 
 def _retain_close(
@@ -234,6 +259,6 @@ def _retain_close(
 
     async def close_after() -> None:
         await asyncio.gather(*after, return_exceptions=True)
-        await close_connected_toolkit(toolkit, executor=executor)
+        await release_toolkit(toolkit, executor=executor)
 
     cleanups.retain(asyncio.create_task(close_after(), name="toolkit-cleanup"))

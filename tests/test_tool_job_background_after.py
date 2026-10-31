@@ -24,8 +24,9 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import encode_tool_result
 from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system import authoring
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_scope
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.agno_toolkits import Toolkit, configure_toolkit_functions
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
@@ -412,6 +413,21 @@ class _ConnectedTools(Toolkit):
         return "rows"
 
 
+class _ProfileTools(authoring.Toolkit):
+    """An owned toolkit whose calls start a process resource released when their run ends, as the browser's do."""
+
+    def __init__(self) -> None:
+        super().__init__(name="profile")
+
+    @authoring.tool
+    def open_page(self) -> str:
+        """Open a page."""
+        return "opened"
+
+    async def aclose(self) -> None:
+        """Release the process resource."""
+
+
 def _excluded_tool() -> JobTool:
     """A function of a toolkit built as shell, which the test settings exclude."""
     toolkit = Toolkit(name="shell", tools=[_ordinary])
@@ -438,6 +454,8 @@ def _stopping_tool() -> JobTool:
         ("job", 0, False, "native"),
         ("job", 1, True, "native"),
         ("run_connection", 0, False, "native"),
+        ("run_resources", 0, False, "native"),
+        ("worker_resources", 0, False, "managed"),
         ("excluded", 0, False, "native"),
     ],
 )
@@ -466,6 +484,11 @@ def test_wait_mode_classifies_every_call_from_current_policy(
             authored_name="job",
         )["job"],
         "run_connection": lambda: toolkit_job_tools(_ConnectedTools(), authored_name="connected")["query"],
+        "run_resources": lambda: toolkit_job_tools(_ProfileTools(), authored_name="profile")["open_page"],
+        "worker_resources": lambda: toolkit_job_tools(
+            configure_toolkit_functions(_ProfileTools(), to_worker=lambda _name, entrypoint: entrypoint),
+            authored_name="profile",
+        )["open_page"],
         "excluded": _excluded_tool,
     }
     tool = tools[case]()
