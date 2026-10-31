@@ -2228,28 +2228,29 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     assert params["redirect_uri"] == ["http://localhost/api/homeassistant/callback"]
 
 
-def _connect_homeassistant_oauth_behind_proxy(tmp_path: Path, public_url: str) -> httpx.Response:
+def _connect_homeassistant_oauth_behind_proxy(
+    tmp_path: Path,
+    env: dict[str, str],
+    *,
+    host: str = "mindroom.example.com",
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
     """Start Home Assistant OAuth through a TLS-terminating proxy, which forwards plain HTTP with the browser's Host."""
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        process_env={
-            "MINDROOM_OWNER_USER_ID": "@owner:example.org",
-            "MINDROOM_API_KEY": "test-key",
-            "MINDROOM_PUBLIC_URL": public_url,
-        },
-    )
-    main.initialize_api_app(main.app, runtime_paths)
+    main.initialize_api_app(main.app, _runtime_paths(tmp_path, process_env=env))
     bind_test_embedded_runtime(main.app)
-    return TestClient(main.app, base_url="http://mindroom.example.com").post(
+    return TestClient(main.app, base_url=f"http://{host}").post(
         "/api/homeassistant/connect/oauth",
-        headers={"Authorization": "Bearer test-key"},
+        headers=headers or {"Authorization": "Bearer test-key"},
         json={"instance_url": "127.0.0.1:8123", "allow_private_url": True},
     )
 
 
 def test_homeassistant_connect_oauth_identifies_mindroom_by_its_public_origin(tmp_path: Path) -> None:
     """Behind a proxy that terminates TLS, the Client ID and redirect URI share the public origin, not the request's."""
-    response = _connect_homeassistant_oauth_behind_proxy(tmp_path, "https://mindroom.example.com/")
+    response = _connect_homeassistant_oauth_behind_proxy(
+        tmp_path,
+        {"MINDROOM_API_KEY": "test-key", "MINDROOM_PUBLIC_URL": "https://mindroom.example.com/"},
+    )
 
     assert response.status_code == 200, response.text
     params = parse_qs(urlparse(response.json()["auth_url"]).query)
@@ -2259,10 +2260,33 @@ def test_homeassistant_connect_oauth_identifies_mindroom_by_its_public_origin(tm
 
 def test_homeassistant_connect_oauth_refuses_an_invalid_public_url(tmp_path: Path) -> None:
     """A `MINDROOM_PUBLIC_URL` without an origin gives Home Assistant no Client ID to accept."""
-    response = _connect_homeassistant_oauth_behind_proxy(tmp_path, "mindroom.example.com")
+    response = _connect_homeassistant_oauth_behind_proxy(
+        tmp_path,
+        {"MINDROOM_API_KEY": "test-key", "MINDROOM_PUBLIC_URL": "mindroom.example.com"},
+    )
 
     assert response.status_code == 503
     assert response.json()["detail"] == "MINDROOM_PUBLIC_URL is not a valid URL"
+
+
+def test_homeassistant_connect_oauth_from_the_dashboard_host_returns_there(tmp_path: Path) -> None:
+    """A dashboard on its own host gets the callback there, because the public host may send the path to another app."""
+    env = {
+        **trusted_upstream_env(),
+        "MINDROOM_PUBLIC_URL": "https://chat.example.org",
+        "MINDROOM_DASHBOARD_URL": "https://admin.example.org",
+    }
+    response = _connect_homeassistant_oauth_behind_proxy(
+        tmp_path,
+        env,
+        host="admin.example.org",
+        headers={**trusted_upstream_headers(), "Origin": "https://admin.example.org"},
+    )
+
+    assert response.status_code == 200, response.text
+    params = parse_qs(urlparse(response.json()["auth_url"]).query)
+    assert params["client_id"] == ["https://admin.example.org"]
+    assert params["redirect_uri"] == ["https://admin.example.org/api/homeassistant/callback"]
 
 
 def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(

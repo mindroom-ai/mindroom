@@ -155,7 +155,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 
 Connect Home Assistant in the dashboard's **Tools** tab, using either method:
 
-- **OAuth**: enter the Home Assistant URL; Home Assistant needs no application registration, and after sign-in it returns you to `MINDROOM_PUBLIC_URL`, or to the address MindRoom received the request on when that is unset, so set it when a proxy in front of MindRoom terminates HTTPS.
+- **OAuth**: enter the Home Assistant URL; Home Assistant needs no application registration, and after sign-in it returns you to `MINDROOM_DASHBOARD_URL` when you connect from that host, else to `MINDROOM_PUBLIC_URL`, or to the address MindRoom received the request on when that is unset, so set `MINDROOM_PUBLIC_URL` when a proxy in front of MindRoom terminates HTTPS.
 - **Access token**: in your Home Assistant profile, create a long-lived access token under **Long-Lived Access Tokens**, then enter the Home Assistant URL and the token.
 
 Expired OAuth access tokens renew automatically.

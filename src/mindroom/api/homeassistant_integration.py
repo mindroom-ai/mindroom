@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
+from mindroom.api.auth import browser_origin
 from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
 from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
@@ -21,7 +22,6 @@ from mindroom.api.credentials_target import (
 )
 from mindroom.homeassistant_requests import send_homeassistant_request
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
-from mindroom.origins import deployment_origin
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
@@ -220,10 +220,10 @@ async def connect_oauth(
 
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
+    resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=config.allow_private_url)
     # Home Assistant identifies a client by a URL whose scheme and host the redirect URI must share: MindRoom's origin.
-    client_id = deployment_origin(target.runtime_paths.env_value("MINDROOM_PUBLIC_URL"), str(request.base_url))
+    client_id = browser_origin(request)
     if client_id is None:
         raise HTTPException(status_code=503, detail="MINDROOM_PUBLIC_URL is not a valid URL")
     state = issue_pending_oauth_state(
