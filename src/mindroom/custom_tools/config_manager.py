@@ -949,7 +949,7 @@ class ConfigManagerTools(Toolkit):
     def _agent_entries_for_scope(
         self,
         config: Config,
-        agent_scope: str,
+        agent_scope: _AgentScope,
     ) -> tuple[str, list[tuple[str, AgentConfig]]]:
         """Return the heading and agent entries for one listing scope."""
         all_agents = list(config.agents.items())
@@ -980,7 +980,7 @@ class ConfigManagerTools(Toolkit):
         agent_entries = [(name, agent) for name, agent in all_agents if name in available_responder_names]
         return "Agents in This Room", agent_entries
 
-    def _list_agents(self, *, agent_scope: _AgentScope = "current_room") -> str:
+    def _list_agents(self, *, agent_scope: _AgentScope) -> str:
         """List agents and their details."""
         config, load_error = self._load_config_or_error()
         if load_error:
