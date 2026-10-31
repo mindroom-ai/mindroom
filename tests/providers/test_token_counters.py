@@ -183,10 +183,10 @@ async def test_counting_builds_the_sdk_client_off_the_event_loop(
     async with httpx2.AsyncClient() as http_client:
         claude = provider_for(ROUTE_CONFIGS["vertexai_claude"], tmp_path, http_client)
         monkeypatch.setattr(type(claude), "_client", client)
-        await claude._count_message_tokens("hello")
+        await claude._count_text_tokens("hello")
     gemini = build_adapter({"provider": "google", "id": "gemini-3.8-flash", "api_key": "k"}, tmp_path, _Wire(dict))
     monkeypatch.setattr(type(gemini), "_sdk_client", client)
-    await gemini._count_content_tokens("hello")
+    await gemini._count_text_tokens("hello")
 
     assert len(built_on) == 2
     assert loop_thread not in built_on

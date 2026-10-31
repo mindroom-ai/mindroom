@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 __all__ = [
     "TokenCount",
     "TokenCountKind",
-    "carries_margin",
     "count",
     "count_exact",
     "fit_text",
@@ -35,6 +34,7 @@ __all__ = [
     "opaque_tokens",
     "prefetch",
     "text_tokens",
+    "uncalibrated",
     "utf8_byte_bound",
 ]
 
@@ -128,8 +128,11 @@ def count(counter: TokenCounter, text: str) -> TokenCount:
     return TokenCount(estimate, "estimated")
 
 
-def carries_margin(counter: TokenCounter) -> bool:
-    """Return whether ``counter``'s estimates still carry their family margin: no local tokenizer, no provider count."""
+def uncalibrated(counter: TokenCounter) -> bool:
+    """Return whether ``counter`` estimates without its model's tokenizer and before any provider count calibrated it.
+
+    Such an estimate carries its family's upper-bound margin.
+    """
     if counter.exact_locally:
         return False
     with _state.lock:

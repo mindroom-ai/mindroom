@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -35,6 +36,7 @@ from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
+from mindroom.token_counting import counts as token_counts
 from mindroom.token_counting.counts import count, count_exact
 from mindroom.tool_system.runtime_context import current_execution_identity, detached_tool_scope
 from mindroom.tool_system.worker_routing import (
@@ -1567,6 +1569,42 @@ async def test_file_backend_entrypoint_token_cap_trusts_the_providers_count_of_t
 
     kept = len([line for line in lines if line in counted.session_preamble])
     assert count(counter, "\n".join(lines[:kept])).tokens <= 100 < count(counter, "\n".join(lines[: kept + 1])).tokens
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_grows_to_the_cap_once_the_provider_counted_the_file(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A provider that counts fewer tokens than the margin estimate lets the preload grow toward the cap."""
+    config.memory.file.max_entrypoint_lines = 500
+    config.memory.file.max_entrypoint_tokens = 100
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    lines = [f"fact {index:02} " + "z" * 32 for index in range(40)]
+    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    async def half(text: str) -> int:
+        return len(text) // 8
+
+    counter = fake_token_counter(count=half)
+    estimated = await public_build_memory_prompt_parts(
+        "x",
+        "general",
+        config,
+        runtime_paths_for(config),
+        counter=counter,
+    )
+    estimated_lines = len([line for line in lines if line in estimated.session_preamble])
+    await asyncio.gather(*token_counts._state.pending.values())
+    await count_exact(counter, "\n".join(lines))
+
+    counted = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
+
+    kept = [line for line in lines if line in counted.session_preamble]
+    # The provider counts half the estimate, so about twice the lines fit.
+    assert len(kept) >= 2 * estimated_lines - 1
+    assert (await count_exact(counter, "\n".join(kept))).tokens <= 100
 
 
 @pytest.mark.asyncio

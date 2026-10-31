@@ -93,18 +93,18 @@ class GeminiProvider:
             if params["vertexai"]
             else f"gemini-api:{params['http_options'].get('base_url', '')}"
         )
-        return counter_for_model(
-            self.identity,
-            count=partial(text_tokens, self._count_content_tokens),
-            endpoint=endpoint,
-        )
+        return counter_for_model(self.identity, count=self._count_text_tokens, endpoint=endpoint)
 
-    async def _count_content_tokens(self, text: str) -> int:
-        """Count one content holding ``text``, framing included."""
+    async def _count_text_tokens(self, text: str) -> int:
+        """Count ``text`` without the framing of the content the endpoint counts it in, on one client."""
         # Building the client may discover Google credentials, which blocks.
         client = await asyncio.to_thread(self._sdk_client)
-        counted = await client.aio.models.count_tokens(model=self.identity.id, contents=text)
-        return counted.total_tokens or 0
+
+        async def content_tokens(content: str) -> int:
+            counted = await client.aio.models.count_tokens(model=self.identity.id, contents=content)
+            return counted.total_tokens or 0
+
+        return await text_tokens(content_tokens, text)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.

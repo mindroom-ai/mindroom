@@ -17,9 +17,11 @@ import pytest
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import prepare_agent_execution_context, prepare_bound_team_run_context
+from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_tokens
 from mindroom.history.runtime import (
     PreparedScopeHistory,
+    finalize_history_preparation,
     prepare_bound_scope_history,
     prepare_scope_history,
     resolve_entity_preparation_inputs,
@@ -2028,6 +2030,51 @@ async def test_the_reported_request_size_counts_its_answer_as_the_answering_rout
     # The route sizes the 500-token answer at 1,200 tokens; the whole history it sizes no higher than chars / 4.
     assert estimate < 4_000
     assert prepared.compaction_decision.current_history_tokens == 8_000 + 1_200 - 400
+
+
+@pytest.mark.asyncio
+async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_path: Path) -> None:
+    """A history the reported size kept below the trigger replays whole, not trimmed by the margin estimate."""
+    one_per_character = TokenCounter(key="margin", estimate=len)
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 1_000},
+        counter=one_per_character,
+    )
+    reported = 1_000 + 2_000 - 400
+    assert prepared.compaction_decision.current_history_tokens == reported
+    assert prepared.session is not None
+    margin_estimate = estimate_prompt_visible_history_tokens(
+        session=prepared.session,
+        history_settings=prepared.resolved_inputs.history_settings,
+        counter=one_per_character,
+    )
+    config, _paths = _make_config(tmp_path, compaction=CompactionOverrideConfig(enabled=True), context_window=64_000)
+    # The agent's own settings, which bound replay by the context window.
+    history_settings = config.resolve_scope("test_agent").history_settings
+    resolved_inputs = replace(prepared.resolved_inputs, history_settings=history_settings, active_context_window=64_000)
+    prepared = replace(prepared, resolved_inputs=resolved_inputs)
+    unloaded = resolve_history_execution_plan(
+        config=config,
+        history_settings=history_settings,
+        active_model_name=resolved_inputs.active_model_name,
+        active_context_window=64_000,
+        static_prompt_tokens=0,
+    )
+    assert unloaded.hard_replay_budget_tokens is not None
+    # A static prompt that leaves a hard budget between the reported size and the margin estimate.
+    static_prompt_tokens = unloaded.hard_replay_budget_tokens - (reported + margin_estimate) // 2
+
+    state = finalize_history_preparation(
+        prepared_scope_history=prepared,
+        config=config,
+        static_prompt_tokens=static_prompt_tokens,
+        pipeline_timing=None,
+    )
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode != "limited"
+    assert state.replay_plan.estimated_tokens == reported
 
 
 @pytest.mark.asyncio

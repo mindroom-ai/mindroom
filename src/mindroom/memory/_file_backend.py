@@ -673,6 +673,21 @@ def _selected_lines(costs: list[float], first_entry: int, max_lines: int, max_to
     return [*range(first_entry), *reversed(newest)]
 
 
+def _entrypoint_text(lines: list[str]) -> str:
+    """Return the text of ``lines`` as the preamble inlines it, which is also the text counted in the background."""
+    return "\n".join(lines).strip()
+
+
+def _file_rate(counter: TokenCounter, text: str) -> float:
+    """Return how many provider tokens the file holds per estimated token, once its provider counted the whole file.
+
+    The rate stays while the file does, so the cut of an unchanged file never moves; before the count, it is one.
+    """
+    counted = count(counter, text)
+    estimate = counter.estimate(text) if counted.kind == "exact" else None
+    return counted.tokens / estimate if estimate else 1.0
+
+
 def _line_cost(counter: TokenCounter, line: str) -> float:
     """Return a line's tokens with its newline by the counter's own estimate, which no later provider count moves."""
     text = f"{line}\n"
@@ -702,12 +717,11 @@ def _entrypoint_lines_within_caps(
         _line_cost(counter, line) if index < max_lines or index >= len(lines) - max_lines else 0.0
         for index, line in enumerate(lines)
     ]
-    scale = 1.0
+    scale = _file_rate(counter, _entrypoint_text(lines))
     while True:
         selected = _selected_lines(costs, first_entry, max_lines, max_tokens / scale)
         kept = [lines[index] for index in selected]
-        # The preamble inlines the stripped preload, which is also the text counted exactly in the background.
-        measured = count(counter, "\n".join(kept).strip()).tokens
+        measured = count(counter, _entrypoint_text(kept)).tokens
         estimated = sum(costs[index] for index in selected)
         if measured <= max_tokens or not estimated:
             return kept
@@ -750,9 +764,11 @@ def _load_scope_entrypoint_context(
             path=str(entrypoint_path),
             max_bytes=_MAX_MEMORY_FILE_BYTES,
         )
+    file_text = _entrypoint_text(lines)
     lines = _entrypoint_lines_within_caps(lines, max_lines, max_tokens, counter)
     return MemoryEntrypointContext(
-        text="\n".join(lines).strip(),
+        text=_entrypoint_text(lines),
+        file_text=file_text,
         source_path=entrypoint_path,
         included_lines=len(lines),
         total_lines=total_lines,

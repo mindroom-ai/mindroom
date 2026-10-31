@@ -221,8 +221,8 @@ async def _entrypoint_preamble(
         counter=counter,
         execution_identity=execution_identity,
     )
-    # A later turn finds the preload's exact count cached and sizes the preload by it.
-    prefetch(counter, entrypoint.text)
+    # Later turns find the file's and the preload's exact counts cached and size the preload by them.
+    prefetch(counter, entrypoint.file_text, entrypoint.text)
     body = (
         _render_entrypoint_body(entrypoint, config, kept_copy=conversation is not None)
         if entrypoint.text or entrypoint.omitted_lines

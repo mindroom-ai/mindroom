@@ -61,7 +61,7 @@ from mindroom.model_usage import message_context_tokens
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.timing import timed
-from mindroom.token_counting.counts import carries_margin
+from mindroom.token_counting.counts import uncalibrated
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -143,6 +143,9 @@ class PreparedScopeHistory:
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     # The native settings the run's requests carry, when the provider route manages history of its own.
     native_history: NativeHistory | None = None
+    # The history size the provider reported for the scope's latest request, when it still describes the history the
+    # run replays; the final replay plan sizes with it as the compaction check did.
+    reported_history_tokens: int | None = None
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
@@ -223,7 +226,7 @@ async def prepare_scope_history(
         if native_route is None and visible_runs
         else None
     )
-    current_history_tokens = _current_history_tokens(estimated_history_tokens, reported_history_tokens, model)
+    current_history_tokens = _current_history_tokens(estimated_history_tokens, reported_history_tokens, counter)
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
@@ -316,14 +319,16 @@ async def prepare_scope_history(
         compaction_reply_outcome=compaction_reply_outcome,
         native_history=native_history,
         counter=counter,
+        # A compaction rewrote the history that request held.
+        reported_history_tokens=reported_history_tokens if compaction_decision.mode != "required" else None,
     )
 
 
-def _current_history_tokens(estimated: int, reported: int | None, model: ModelProvider) -> int:
-    """Return the history size a reply's compaction check uses, from its estimate and the provider's reported size."""
+def _current_history_tokens(estimated: int, reported: int | None, counter: TokenCounter) -> int:
+    """Return the history size a reply sizes with, from its estimate and the provider's reported size."""
     if reported is None:
         return estimated
-    if carries_margin(model.token_counter):
+    if uncalibrated(counter):
         # An estimate still carrying its family margin can count half again too many tokens; the provider's own count
         # of the conversation is closer.
         return reported
@@ -687,7 +692,11 @@ def finalize_history_preparation(
             history_settings=history_settings,
             counter=counter,
         )
-        current_history_tokens = estimate_history_tokens(native_route=native_history_route(native_history))
+        current_history_tokens = _current_history_tokens(
+            estimate_history_tokens(native_route=native_history_route(native_history)),
+            prepared_scope_history.reported_history_tokens,
+            counter,
+        )
         if history_budget is not None and current_history_tokens > history_budget:
             # Never trim a native checkpoint by run/message count. Fall back to the
             # existing canonical guard if the final dynamic prompt exhausts its room.

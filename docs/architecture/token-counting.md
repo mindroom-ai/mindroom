@@ -56,8 +56,8 @@ Provider tokens per o200k_base token on those samples:
   A stretch of 8,192 characters with no word start is cut anyway, which can add a token per cut; such counts keep the exact label, since the error stays far below the provider's own framing.
 - While o200k_base loads, and for good when it cannot, estimates count a quarter token per character.
   The UTF-8 byte count is an upper bound but triples history estimates, which would compact conversations that fit on the first reply after a start.
-- The `MEMORY.md` preload selects whole lines by their uncalibrated estimates, then counts the preload they make, which the provider counts exactly in the background, and rescales the line estimates until the preload fits.
-  Per-line provider counts would send every withheld line and cost a call per line, and calibrated line counts would move the cut of an unchanged file whenever the provider counted other text, breaking the conversation's cached prompt.
+- The `MEMORY.md` preload selects whole lines by their uncalibrated estimates, scaled by the whole file's provider count once that is cached, then counts the preload they make and shrinks the selection until it fits; the file and the preload are both counted in the background.
+  The file's own rate lets the preload grow to the cap and stays while the file does; calibrated line counts would instead move the cut of an unchanged file whenever the provider counted other text, breaking the conversation's cached prompt, and per-line provider counts would cost a call per line.
 - Counting may send text a reply withholds, such as the part of `MEMORY.md` past the preload cap, when it goes to the provider of the agent's own model: that model reads those files through its tools anyway.
 - Exact counts stay in memory; a restart counts each stable input once more, in the background.
 - Parts, not whole requests, are counted: each part caches on its own and changes on its own schedule.

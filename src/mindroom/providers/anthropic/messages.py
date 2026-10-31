@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import anthropic
@@ -243,20 +242,24 @@ class ClaudeProvider:
         """Claude counts through the Messages API's free token counting endpoint, which every route serves."""
         return counter_for_model(
             self.identity,
-            count=partial(text_tokens, self._count_message_tokens),
+            count=self._count_text_tokens,
             # Only Bedrock has no endpoint identity; its region names where counts go.
             endpoint=f"bedrock:{self.settings.aws_region}" if self.route == "bedrock_claude" else None,
         )
 
-    async def _count_message_tokens(self, text: str) -> int:
-        """Count one user message holding ``text``, framing included."""
+    async def _count_text_tokens(self, text: str) -> int:
+        """Count ``text`` without the framing of the user message the endpoint counts it in, on one client."""
         # Building the client may discover Google credentials, which blocks.
         client = await asyncio.to_thread(self._client)
-        counted = await client.messages.count_tokens(
-            model=self.identity.id,
-            messages=[{"role": "user", "content": text}],
-        )
-        return counted.input_tokens
+
+        async def message_tokens(content: str) -> int:
+            counted = await client.messages.count_tokens(
+                model=self.identity.id,
+                messages=[{"role": "user", "content": content}],
+            )
+            return counted.input_tokens
+
+        return await text_tokens(message_tokens, text)
 
     def native_compaction_settings(
         self,
