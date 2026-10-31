@@ -15,7 +15,6 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
-from mindroom.cli.config import validate_config_source_quiet
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config import load_attempt
 from mindroom.config.commit import ConfigComposedFromIncludesError
@@ -338,7 +337,7 @@ class TestEmptyDirectoryIncludes:
         main.initialize_api_app(api_app, other_runtime)
         assert config_lifecycle.config_uses_includes(request_for(api_app)) is False
 
-    @pytest.mark.parametrize("loader", ["runtime", "cli", "api"])
+    @pytest.mark.parametrize("loader", ["runtime", "api"])
     def test_access_migration_preserves_empty_include(
         self,
         empty_include_runtime_paths: constants.RuntimePaths,
@@ -351,17 +350,13 @@ class TestEmptyDirectoryIncludes:
         if loader == "api":
             api_app = make_api_app(empty_include_runtime_paths)
             assert not config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app).loaded
-            result = api_snapshot(api_app).config_load_result
-            assert result is not None
-            assert result.error_status_code == 422
-            assert "does not support !include" in str(result.error_detail)
+            error = api_snapshot(api_app).load_error
+            assert isinstance(error, AccessMigrationError)
+            assert "does not support !include" in str(error)
             assert config_lifecycle.config_uses_includes(request_for(api_app)) is True
-        elif loader == "runtime":
-            with pytest.raises(AccessMigrationError, match="does not support !include"):
-                load_config(empty_include_runtime_paths)
         else:
             with pytest.raises(AccessMigrationError, match="does not support !include"):
-                validate_config_source_quiet(empty_include_runtime_paths, source=source, original=source)
+                load_config(empty_include_runtime_paths)
 
         assert path.read_bytes() == source
         assert not path.with_name(f"{path.name}.pre-membership-access").exists()
@@ -715,10 +710,9 @@ class TestIncludeAwareSnapshots:
 
         assert not config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
 
-        result = api_snapshot(api_app).config_load_result
-        assert result is not None
-        assert result.error_status_code == 422
-        assert "does not support !include" in str(result.error_detail)
+        error = api_snapshot(api_app).load_error
+        assert isinstance(error, AccessMigrationError)
+        assert "does not support !include" in str(error)
         assert config_path.read_text(encoding="utf-8") == config_source
         assert authorization_path.read_text(encoding="utf-8") == authorization_source
         assert not config_path.with_name(f"{config_path.name}.pre-membership-access").exists()

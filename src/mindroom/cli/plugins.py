@@ -7,9 +7,7 @@ from typing import TYPE_CHECKING
 
 import typer
 
-from mindroom import constants
-
-from .config import CONFIG_PATH_OPTION, console
+from .config import CONFIG_PATH_OPTION, activate_cli_runtime, console
 
 if TYPE_CHECKING:
     from mindroom.plugin_install import InstallResult
@@ -62,7 +60,7 @@ def plugin_install(
     """Install one plugin from GitHub after a strict compatibility check."""
     from mindroom.plugin_install import install_plugin, parse_plugin_spec  # noqa: PLC0415
 
-    config_dir = _runtime_config_dir(path)
+    config_dir = activate_cli_runtime(path).config_dir
     try:
         result = install_plugin(parse_plugin_spec(spec), _resolved_plugins_dir(plugins_dir, config_dir))
     except Exception as exc:
@@ -95,7 +93,7 @@ def plugin_update(
         console.print(f"[red]Invalid plugin name (expected a plain directory name):[/red] {name}")
         raise typer.Exit(2)
 
-    resolved_plugins_dir = _resolved_plugins_dir(plugins_dir, _runtime_config_dir(path))
+    resolved_plugins_dir = _resolved_plugins_dir(plugins_dir, activate_cli_runtime(path).config_dir)
     directories = find_locked_plugin_dirs(resolved_plugins_dir) if update_all else (resolved_plugins_dir / str(name),)
     if not directories:
         console.print(f"No vendored plugins found in {resolved_plugins_dir}")
@@ -129,14 +127,6 @@ def _print_installed(result: InstallResult, previous_commit: str | None = None) 
             "[yellow]  Note: the plugin declares pyproject.toml dependencies; "
             "they are not installed automatically.[/yellow]",
         )
-
-
-def _runtime_config_dir(path: Path | None) -> Path:
-    runtime_paths = constants.resolve_runtime_paths(
-        config_path=path,
-        process_env=constants.exported_process_env(),
-    )
-    return runtime_paths.config_dir
 
 
 def _resolved_plugins_dir(plugins_dir: Path | None, config_dir: Path) -> Path:

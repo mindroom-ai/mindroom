@@ -35,7 +35,7 @@ from mindroom.history.interrupted_replay import (
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.llm.events import ToolCompleted, ToolStarted
-from mindroom.llm.runs import ToolExecution
+from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import calculate_event_size
@@ -3202,7 +3202,7 @@ class TestStreamingBehavior:
             PausedAttempt(
                 session_id="session-1",
                 run_id="run-1",
-                tools=(tool,),
+                requirements=(RunRequirement(tool),),
                 response_text=f"Before approval.{marker}",
                 tool_trace=(trace_entry,),
                 toolkit_owners={("general", "inspect"): "test_toolkit"},
@@ -3295,7 +3295,7 @@ class TestStreamingBehavior:
             PausedAttempt(
                 session_id="session-1",
                 run_id="run-1",
-                tools=(tool,),
+                requirements=(RunRequirement(tool),),
                 response_text=f"{raw_interactive}{marker}".rstrip(),
                 tool_trace=(trace_entry,),
                 toolkit_owners={("general", "inspect"): "test_toolkit"},

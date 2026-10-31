@@ -8324,6 +8324,7 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
 - Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
 - The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, `skill_manage`, and `slack` toolkits are never available to scripts, even when the agent has them.
+- Functions that can stop the agent's current model step, such as `thread_model`'s `switch_thread_model`, are never available to scripts either; the toolkit's other functions are.
 - Listing `config_manager` or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
 - Operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
 - Only the original requester can approve or deny a script's call, and approval cards for a cancelled or finished run are settled without running the call.
@@ -14186,7 +14187,7 @@ Tools that can run as background jobs accept an optional `background_after` argu
 It is how many seconds the call may hold the reply before it continues in the background, separate from a tool's own execution or network timeout.
 The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
-Tools that stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
+Tools that can stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
 Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
 
@@ -14286,7 +14287,7 @@ The reply waits for the decision for `background_tool_jobs.approval_wait_timeout
 The setting is a non-negative number of seconds, defaulting to `300`; `0` goes on at once, and `null` waits until the decision or a newer human message.
 A call's own `background_after`, or a newer human message, releases the reply the same way.
 Cancelling the job before the decision denies its card.
-Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits, subagent calls, and minimal mode.
+Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that can stop the current model step (such as model switching) or ask the user for input, run-connected toolkits, excluded toolkits, subagent calls, and minimal mode.
 
 A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
 Cancelling the job denies its open cards.
@@ -22089,6 +22090,7 @@ Smaller changes that need operator action:
 - **Model names**: a model key under `models` may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.1` fails config load even when no agent uses it, and `mindroom run` and the dashboard do not start until you rename it, as [Model Config Fields](https://docs.mindroom.chat/configuration/models/#model-config-fields) describes, and update every reference to it.
 - **Restart resume setting**: `defaults.auto_resume_after_restart` is removed and fails validation, so delete it from `config.yaml`; a reply interrupted by a restart always continues in the same message.
 - **Delegation records**: a delegation still running during the upgrade finishes normally, but its workspace `run.json`, `events.jsonl`, and `transcript.md` stop updating.
+- **Pending tool approvals after going back**: once this release has opened a conversation, an earlier release cannot resume a reply in it that waits for a tool approval, and approving it there fails; answer pending approvals before going back, or ask again afterwards.
 - **Knowledge index state**: the first start converts each semantic knowledge base's index in place, and older releases cannot read the converted index, so going back to one rebuilds every semantic base from scratch, embedding every file again, and its search is unavailable until that rebuild finishes.
 - **MCP gateway and shared agents**: the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.
   To restore an agent, set `mcp_gateway_shared_credentials: true` on it or give it `worker_scope: user` or `user_agent`.
@@ -22462,8 +22464,9 @@ See [Membership Access Migration](https://docs.mindroom.chat/deployment/upgrades
 Check your environment for common issues before running `mindroom run`.
 It checks, in one pass:
 
-- **Config file**: exists, is valid YAML, and matches the config schema.
+- **Config file**: exists, is valid YAML, matches the config schema, and lists only automations a loaded plugin provides, the same checks `config validate` fails on.
 - **Providers**: API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, and others) are valid.
+  Doctor also warns about each environment variable a model needs but nothing sets, such as a missing key, Bedrock region, or Azure endpoint, as `config validate` does.
   Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
   Doctor skips the key check and reports it as not checked for a model that uses a custom endpoint, meaning its config sets an endpoint or headers (such as `base_url` or `default_headers`) or its provider's endpoint variable (such as `OPENAI_BASE_URL`) is set.
 - **Memory config**: the memory LLM and embedder are reachable (Ollama, OpenAI embeddings, sentence-transformers).

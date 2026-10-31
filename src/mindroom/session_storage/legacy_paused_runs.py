@@ -180,11 +180,11 @@ def _strip_summary_blocks(connection: sqlite3.Connection, names: TableNames) -> 
 #   delegation call, as blocking turns on the Agno runtime did; v2026.10.498, the last release on the Agno runtime,
 #   for the last-ended link; replacement: v2026.10.575, which names the paused member's run on the call that waits on
 #   it.
-# Handling: each paused member run, in the order the team's resume runs them, takes the waiting call to its member that
-#   names it, else the first such call not yet taken, which is the call the earlier readers answered with it when
-#   every member finishes, so an approval saved before the upgrade answers the same call with the member's result. A
-#   call that no longer waits keeps what it stored, and so does a team run whose requirements or tool rows do not
-#   decode.
+# Handling: each paused member run, in the order the team's resume runs them, its paused member rows in log order,
+#   takes the waiting call to its member that names it, else the first such call not yet taken, which is the call the
+#   earlier readers answered with it when every member finishes, so an approval saved before the upgrade answers the
+#   same call with the member's result. A call that no longer waits keeps what it stored, and so does a team run whose
+#   tool rows do not decode.
 # Coverage: tests/session_storage/test_legacy_paused_runs.py::test_a_waiting_call_stored_without_its_member_run_names_it,
 #   tests/session_storage/test_legacy_paused_runs.py::test_each_waiting_call_names_the_run_of_the_member_it_names,
 #   tests/session_storage/test_legacy_paused_runs.py::test_two_waiting_calls_to_one_member_take_its_runs_in_the_order_they_resume,
@@ -198,18 +198,23 @@ def _strip_summary_blocks(connection: sqlite3.Connection, names: TableNames) -> 
 def _link_waiting_delegations(connection: sqlite3.Connection, names: TableNames) -> None:
     runs, tools = quote_identifier(names.log_runs), quote_identifier(names.log_tools)
     paused_teams = connection.execute(
-        f"SELECT run_id, requirements FROM {runs} "  # noqa: S608
-        "WHERE kind = 'team' AND status = ? AND parent_run_id IS NULL AND requirements IS NOT NULL",
+        f"SELECT run_id FROM {runs} WHERE kind = 'team' AND status = ? AND parent_run_id IS NULL",  # noqa: S608
         (RunStatus.paused.value,),
     ).fetchall()
-    for run_id, raw_requirements in paused_teams:
-        member_runs = _paused_member_runs(raw_requirements)
+    for (run_id,) in paused_teams:
+        member_runs = [
+            (scope_key.removeprefix("agent:"), member_run_id)
+            for member_run_id, scope_key in connection.execute(
+                f"SELECT run_id, scope_key FROM {runs} WHERE parent_run_id = ? AND status = ? ORDER BY seq",  # noqa: S608
+                (run_id, RunStatus.paused.value),
+            )
+        ]
         rows = connection.execute(
             f"SELECT ord, data FROM {tools} WHERE run_id = ? ORDER BY ord",  # noqa: S608
             (run_id,),
         ).fetchall()
         calls = _decoded_objects(data for _, data in rows)
-        if member_runs is None or calls is None:
+        if calls is None:
             continue
         waiting = [
             (position, call)
@@ -232,28 +237,6 @@ def _link_waiting_delegations(connection: sqlite3.Connection, names: TableNames)
                     f"UPDATE {tools} SET data = ? WHERE run_id = ? AND ord = ?",  # noqa: S608
                     (json.dumps(call), run_id, position),
                 )
-
-
-def _paused_member_runs(raw_requirements: object) -> list[tuple[str, str]] | None:
-    """Return a team run's paused member runs as ``(member id, run id)`` in the order its resume runs them.
-
-    The resume runs one plan per member run, in the order the requirements first name them. None when the requirements
-    do not decode.
-    """
-    try:
-        requirements = json.loads(raw_requirements) if isinstance(raw_requirements, str) else None
-    except (RecursionError, ValueError):
-        return None
-    if not isinstance(requirements, list) or not all(isinstance(item, dict) for item in requirements):
-        return None
-    named = ((requirement.get("member_agent_id"), requirement.get("member_run_id")) for requirement in requirements)
-    return list(
-        dict.fromkeys(
-            (member_id, run_id)
-            for member_id, run_id in named
-            if isinstance(member_id, str) and isinstance(run_id, str) and run_id
-        ),
-    )
 
 
 def _called_member(call: dict[str, Any]) -> object:

@@ -260,8 +260,8 @@ class TurnContinuationRunState:
     active_current_event_id: str | None
     active_run_id: str | None
     continuation_model_prompt_tail: str
+    # The model a switch for the current response moved the turn to, which its team's members run on too.
     active_model_name: str | None
-    apply_model_to_team_members: bool
 
     @classmethod
     def initial(
@@ -286,17 +286,10 @@ class TurnContinuationRunState:
             active_run_id=run_id,
             continuation_model_prompt_tail=continuation_model_prompt_tail,
             active_model_name=None,
-            apply_model_to_team_members=False,
         )
 
-    def advance(
-        self,
-        *,
-        continuation_prompt: str,
-        active_model_name: str | None,
-        apply_model_to_team_members: bool,
-    ) -> TurnContinuationRunState:
-        """Return the continuation state for one more same-turn attempt."""
+    def advance(self, *, continuation_prompt: str, active_model_name: str) -> TurnContinuationRunState:
+        """Return the continuation state for one more same-turn attempt, on the model a switch moved the turn to."""
         return replace(
             self.next_attempt(),
             active_prompt=continuation_prompt,
@@ -305,7 +298,6 @@ class TurnContinuationRunState:
             active_current_prompt_is_structured=False,
             active_current_event_id=None,
             active_model_name=active_model_name,
-            apply_model_to_team_members=apply_model_to_team_members,
         )
 
     def next_attempt(self) -> TurnContinuationRunState:
@@ -499,7 +491,6 @@ class CompletedAttempt:
     is_empty: bool = False
     run_id: str | None = None
     attempt_run_id: str | None = None
-    runtime_model_name: str | None = None
     # The usage the attempt's runs reported, which the turn's later attempts publish with their own once it is spent.
     usage: RunMetrics | None = None
     # The run's own calls, read from its record, and the control calls its hidden CLI calls made.
@@ -524,13 +515,12 @@ class PausedAnswer:
 
 @dataclass(frozen=True)
 class PausedAttempt:
-    """One run durably paused before approval-gated tool execution."""
+    """One run durably paused before approval-gated tool execution, with the calls its approval asks about."""
 
     session_id: str
     run_id: str
-    tools: tuple[ToolExecution, ...]
+    requirements: tuple[RunRequirement, ...]
     toolkit_owners: Mapping[tuple[str, str], str]
-    requirements: tuple[RunRequirement, ...] = ()
     runtime_model_name: str | None = None
     team_member_model_names: tuple[tuple[str, str], ...] = ()
     response_text: str = ""
@@ -541,6 +531,11 @@ class PausedAttempt:
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     cli_call: dict[str, object] | None = None
     continuation_count: int = 0
+
+    @property
+    def tools(self) -> tuple[ToolExecution, ...]:
+        """The paused calls the approval asks about, in the order its cards show them."""
+        return tuple(requirement.tool_execution for requirement in self.requirements)
 
 
 class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N818
@@ -608,11 +603,7 @@ def pause_without_approval_error(record: AnyRunRecord, *, entity_label: str) -> 
     paused on any other externally executed call has nothing that can resume it, so the reply fails loudly. The
     loop stored the ``PAUSED`` row; the reply's lifecycle owner then records the failure over it.
     """
-    pending = [
-        requirement.tool_execution.tool_name
-        for requirement in record.requirements or ()
-        if not requirement.is_resolved()
-    ]
+    pending = [item.tool_execution.tool_name for item in record.requirements if not item.is_resolved()]
     msg = f"{entity_label} run {record.run_id!r} paused on {pending} without an approval to ask for"
     return RuntimeError(msg)
 
@@ -630,13 +621,13 @@ def own_approved_calls(record: AnyRunRecord, calls: Sequence[ApprovalCall]) -> t
 def pending_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
     """Return copies of the requirements the paused run ``record``'s approval cards ask about.
 
-    A delegation driver lists the calls it asked about as pending requirements, its own or those of the child it
-    waits on, whose approved calls ``own_approved_calls`` leaves to the child executor.
+    A delegation driver that asked about calls the run does not hold, a delegation's gate or the calls of the child
+    it waits on, lists them as its pending tools; otherwise the cards ask about the run's own waiting calls.
     """
     delegation = DelegationState.from_metadata(record.metadata)
-    if delegation.pending_requirements:
-        return [RunRequirement.from_dict(item) for item in delegation.pending_requirements]
-    return deepcopy(record.requirements or [])
+    if delegation.pending_tools:
+        return [RunRequirement(ToolExecution.from_dict(tool)) for tool in delegation.pending_tools]
+    return deepcopy(record.requirements)
 
 
 def paused_attempt_from_response(
@@ -651,83 +642,53 @@ def paused_attempt_from_response(
         msg = f"Paused run {record.run_id!r} names no session"
         raise RuntimeError(msg)
     delegation = DelegationState.from_metadata(record.metadata)
-    if delegation.pending_tools:
-        pending_tools = [ToolExecution.from_dict(tool) for tool in delegation.pending_tools]
-        if delegation.pending_child_id is not None:
-            # A source that recorded no toolkit leaves its call unowned, as a missing key does.
-            toolkit_owners = {
-                (source.child.child_agent_name, tool.tool_name): source.toolkit_name
-                for tool in pending_tools
-                if (source := delegation.pending_tool_sources.get(tool.tool_call_id)) is not None
-                and source.toolkit_name is not None
-            }
-        paused = _paused_attempt_from_pause(
+    if not delegation.pending_tools:
+        return _paused_attempt_from_pause(
+            record.requirements,
             toolkit_owners=toolkit_owners,
-            tools=pending_tools,
-            requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
             session_id=record.session_id,
             run_id=record.run_id,
         )
-        return (
-            replace(
-                paused,
-                approval_agent_name=delegation.pending_agent_name,
-                delegation_storage_bindings=delegation.storage_bindings,
-            )
-            if paused is not None
-            else None
-        )
-    return _paused_attempt_from_pause(
+    requirements = pending_approval_requirements(record)
+    if delegation.pending_child_id is not None:
+        # A source that recorded no toolkit leaves its call unowned, as a missing key does.
+        toolkit_owners = {
+            (source.child.child_agent_name, tool.tool_name): source.toolkit_name
+            for tool in (requirement.tool_execution for requirement in requirements)
+            if (source := delegation.pending_tool_sources.get(tool.tool_call_id)) is not None
+            and source.toolkit_name is not None
+        }
+    paused = _paused_attempt_from_pause(
+        requirements,
         toolkit_owners=toolkit_owners,
-        tools=record.tools or (),
-        requirements=record.requirements or (),
         session_id=record.session_id,
         run_id=record.run_id,
+    )
+    if paused is None:
+        return None
+    return replace(
+        paused,
+        approval_agent_name=delegation.pending_agent_name,
+        delegation_storage_bindings=delegation.storage_bindings,
     )
 
 
 def _paused_attempt_from_pause(
-    *,
-    tools: Sequence[ToolExecution],
     requirements: Sequence[RunRequirement],
+    *,
     toolkit_owners: Mapping[tuple[str, str], str],
     session_id: str,
     run_id: str,
 ) -> PausedAttempt | None:
-    """Build one restartable pause from a run's paused tools and confirmation requirements."""
-    pending_requirements = tuple(requirement for requirement in requirements if requirement.needs_confirmation)
-    requirement_call_ids = [requirement.tool_execution.tool_call_id for requirement in pending_requirements]
-    if len(requirement_call_ids) != len(set(requirement_call_ids)):
+    """Build one restartable pause from the calls of a run that still wait for a confirmation."""
+    pending = tuple(requirement for requirement in requirements if requirement.needs_confirmation)
+    call_ids = [requirement.tool_execution.tool_call_id for requirement in pending]
+    if len(call_ids) != len(set(call_ids)):
         msg = "Paused approval requirements contain duplicate tool-call IDs"
         raise RuntimeError(msg)
-    pending_tools = [tool for tool in tools if tool.requires_confirmation and tool.confirmed is None]
-    tool_call_ids = [tool.tool_call_id for tool in pending_tools]
-    if len(tool_call_ids) != len(set(tool_call_ids)):
-        msg = "Paused approval tools contain duplicate tool-call IDs"
-        raise RuntimeError(msg)
-    known_call_ids = set(tool_call_ids)
-    for requirement in pending_requirements:
-        tool = requirement.tool_execution
-        if tool.tool_call_id not in known_call_ids:
-            pending_tools.append(tool)
-            known_call_ids.add(tool.tool_call_id)
-    if not pending_tools:
+    if not pending:
         return None
-    return PausedAttempt(
-        session_id=session_id,
-        run_id=run_id,
-        tools=tuple(pending_tools),
-        requirements=pending_requirements,
-        approval_agent_name=next(
-            (
-                requirement.member_display_name
-                for requirement in pending_requirements
-                if requirement.member_display_name and requirement.member_agent_id is None
-            ),
-            None,
-        ),
-        toolkit_owners=toolkit_owners,
-    )
+    return PausedAttempt(session_id=session_id, run_id=run_id, requirements=pending, toolkit_owners=toolkit_owners)
 
 
 @dataclass(frozen=True)
@@ -912,24 +873,6 @@ def _drop_spent_attempt(run: TurnRunState, resolution: CompletedAttempt) -> None
     run.attempt = None
 
 
-def _advance_turn_continuation(
-    run: TurnRunState,
-    resolution: CompletedAttempt,
-    continuation: TurnContinuationRunState,
-    *,
-    next_prompt: str | None,
-    active_model_name: str | None,
-    apply_model_to_team_members: bool,
-) -> TurnContinuationRunState:
-    """Drop the spent attempt and prepare run state for one more continuation."""
-    _drop_spent_attempt(run, resolution)
-    return continuation.advance(
-        continuation_prompt=next_prompt or continuation.original_prompt,
-        active_model_name=active_model_name,
-        apply_model_to_team_members=apply_model_to_team_members,
-    )
-
-
 async def _remove_history_of_redacted_events(
     ctx: ResponseTurnContext,
     scope_context: ScopeSessionContext,
@@ -1082,22 +1025,13 @@ def _settle_completed_attempt(
         original_prompt=continuation.original_prompt,
         continuation_count=continuation_count,
     )
-    if decision.should_continue:
+    if decision.continuation is not None:
+        _drop_spent_attempt(run, resolution)
         return _CompletionSettle(
             keep_going=True,
-            continuation=_advance_turn_continuation(
-                run,
-                resolution,
-                continuation,
-                next_prompt=decision.next_prompt,
-                active_model_name=(
-                    decision.model_switch_name
-                    if decision.model_switch_when == "after-toolcall"
-                    else resolution.runtime_model_name
-                    if decision.model_switch_when == "next-turn"
-                    else continuation.active_model_name
-                ),
-                apply_model_to_team_members=decision.model_switch_when == "after-toolcall",
+            continuation=continuation.advance(
+                continuation_prompt=decision.continuation.prompt,
+                active_model_name=decision.continuation.model_name,
             ),
         )
     recorded_text = resolution.replayable_text

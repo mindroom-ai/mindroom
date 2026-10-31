@@ -10,8 +10,16 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 
-MATRIX_ROOM_RUNTIME_APPROVAL_TYPE = "mindroom_matrix_room_runtime"
 MATRIX_ROOM_RUNTIME_TOOL_NAMES = ("invite_router",)
+
+
+def is_matrix_room_runtime_function(registered_toolkit: str | None, function_name: str) -> bool:
+    """Return whether a function is a Matrix room recovery action, which no approval rule gates.
+
+    It is one of the reserved functions, offered by the registered tool of its own name; no plugin or MCP tool may
+    register that name, and no other tool may offer a function of it.
+    """
+    return function_name in MATRIX_ROOM_RUNTIME_TOOL_NAMES and registered_toolkit == function_name
 
 
 @runtime_checkable

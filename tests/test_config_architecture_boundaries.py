@@ -16,8 +16,9 @@ RUNTIME_PROTOCOLS_MODULE = Path("src/mindroom/runtime_protocols.py")
 CONFIG_MAIN_MODULE = Path("src/mindroom/config/main.py")
 CONFIG_MODELS_MODULE = Path("src/mindroom/config/models.py")
 CONFIG_SLACK_MODULE = Path("src/mindroom/config/slack.py")
-# The only `mindroom.matrix.identity` names each config module may import: validators of identity-shaped settings.
+# The only `mindroom.matrix.identity` names each config module may import: identity helpers config validation uses.
 CONFIG_IDENTITY_IMPORT_ALLOWLIST = {
+    CONFIG_MAIN_MODULE: {"managed_account_key"},
     CONFIG_MODELS_MODULE: {"valid_matrix_server_name"},
     CONFIG_SLACK_MODULE: {"validate_email_to_matrix_mapping"},
 }

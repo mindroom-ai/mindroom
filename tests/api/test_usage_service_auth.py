@@ -16,6 +16,7 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api.usage_export import UsageExportRunner
+from mindroom.config.main import ConfigRuntimeValidationError
 from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.schema import TableNames
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
@@ -109,6 +110,18 @@ def _install_manual_export_runner(client: TestClient) -> tuple[UsageExportRunner
         state.usage_export_runner.close()
     state.usage_export_runner = runner
     return runner, workers
+
+
+def _publish_failed_config_load(client: TestClient, detail: str) -> None:
+    """Publish a committed config load failure whose diagnostic is `detail`."""
+    api_state = config_lifecycle.require_api_state(client.app)
+    with api_state.config_lock:
+        snapshot = api_state.snapshot
+        api_state.snapshot = replace(
+            snapshot,
+            generation=snapshot.generation + 1,
+            load_error=ConfigRuntimeValidationError(detail),
+        )
 
 
 def _seed_usage_database(storage_root: Path) -> None:
@@ -342,19 +355,8 @@ def test_usage_export_sanitizes_failed_committed_configuration(
     env, private_key = usage_service_auth
     client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
     runner, workers = _install_manual_export_runner(client)
-    api_state = config_lifecycle.require_api_state(client.app)
     sensitive_detail = "sensitive-config-diagnostic"
-    with api_state.config_lock:
-        snapshot = api_state.snapshot
-        api_state.snapshot = replace(
-            snapshot,
-            generation=snapshot.generation + 1,
-            config_load_result=config_lifecycle.ConfigLoadResult(
-                success=False,
-                error_status_code=422,
-                error_detail={"diagnostic": sensitive_detail},
-            ),
-        )
+    _publish_failed_config_load(client, sensitive_detail)
 
     try:
         response = client.get(
