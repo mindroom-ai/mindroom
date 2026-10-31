@@ -16,6 +16,7 @@ FORBIDDEN_FACADE_MODULES = {
     "mindroom.tool_system.runtime",
 }
 PRIVATE_REGISTRY_INTERFACE_VISIBILITY = {
+    "mindroom.tool_system.google_workspaces",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.registration",
@@ -82,7 +83,7 @@ def _tach_interface_exposes(
 
 
 def _private_registry_exports() -> set[str]:
-    """Return the registry members only the plugin loader and registration may use.
+    """Return the registry members only the plugin loader and the registration modules may use.
 
     Tach applies only an exclusive interface to the modules it names, so that interface repeats the public members
     those modules also use.

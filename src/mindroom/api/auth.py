@@ -997,6 +997,14 @@ def _reached_dashboard_host(request: Request, settings: _ApiAuthSettings) -> boo
     return dashboard is not None and request.url.netloc.lower() == urlsplit(dashboard).netloc
 
 
+def browser_origin(request: Request) -> str | None:
+    """Return the origin the browser opened MindRoom at: the dashboard's own host, else the deployment origin."""
+    settings = _request_auth_state(request).settings
+    if _reached_dashboard_host(request, settings):
+        return settings.dashboard_origin
+    return deployment_origin(settings.public_url, str(request.base_url))
+
+
 def dashboard_host_public_origin(request: Request) -> str | None:
     """Return the public origin when this request reached the dashboard's own host from `MINDROOM_DASHBOARD_URL`."""
     settings = _request_auth_state(request).settings
@@ -1026,22 +1034,15 @@ def require_same_origin(
         raise HTTPException(403, detail, headers=headers)
 
 
-def _require_browser_mutation_origin(
-    request: Request,
-    settings: _ApiAuthSettings,
-    validated_authorization: str | None = None,
-) -> None:
+def _require_browser_mutation_origin(request: Request, validated_authorization: str | None = None) -> None:
     if (
         request.method in {"GET", "HEAD", "OPTIONS", "TRACE"}
         or _extract_bearer_token(validated_authorization) is not None
     ):
         return
-    origin = deployment_origin(settings.public_url, str(request.base_url))
+    origin = browser_origin(request)
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
-    # A dashboard on its own host sends that host's origin there.
-    if settings.dashboard_origin is not None and _reached_dashboard_host(request, settings):
-        origin = settings.dashboard_origin
     require_same_origin(request, origin)
 
 
@@ -1050,7 +1051,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
     auth_state = _request_auth_state(request)
     session_user = _connections_session_auth_user(request)
     if session_user is not None:
-        _require_browser_mutation_origin(request, auth_state.settings)
+        _require_browser_mutation_origin(request)
         return bind_request_auth_user(request, session_user)
 
     trusted_auth_user = await _trusted_upstream_auth_user(
@@ -1059,7 +1060,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
         auth_state.trusted_upstream_jwt_client,
     )
     if trusted_auth_user is not None:
-        _require_browser_mutation_origin(request, auth_state.settings)
+        _require_browser_mutation_origin(request)
         return bind_request_auth_user(request, trusted_auth_user)
 
     if auth_state.supabase_auth is None:
@@ -1070,7 +1071,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
                 raise HTTPException(status_code=401, detail="Missing or invalid credentials")
             if not secrets.compare_digest(token, mindroom_api_key):
                 raise HTTPException(status_code=401, detail="Invalid API key")
-            _require_browser_mutation_origin(request, auth_state.settings, authorization)
+            _require_browser_mutation_origin(request, authorization)
         else:
             # Without a credential, only where the request comes from authorizes it.
             rejection = open_access_rejection(request.headers, request.method, auth_state.runtime_paths)
@@ -1085,7 +1086,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
     if auth_state.settings.account_id and user_id != auth_state.settings.account_id:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    _require_browser_mutation_origin(request, auth_state.settings, authorization)
+    _require_browser_mutation_origin(request, authorization)
     return bind_request_auth_user(request, AuthUser(user_id=user_id, email=email, source=AuthSource.PLATFORM))
 
 

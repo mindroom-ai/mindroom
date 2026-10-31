@@ -29,9 +29,11 @@ from tests.agent_loop.helpers import add, boom, context, echo, external, gated, 
 from tests.fakes.scripted_model import ScriptedModel, raw_tool_call, tool_call
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
+    from mindroom.agent_loop.tools import PlannedCall
     from mindroom.llm.messages import Message
+    from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
 # --- offered_toolkits and PreparedTools ------------------------------------------------------------------------------
@@ -254,8 +256,13 @@ def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
 # --- dispatch_tool_calls ----------------------------------------------------------------------------------------------
 
 
+async def _dispatch(calls: Sequence[PlannedCall], *, middleware: Sequence[ToolMiddleware] = ()) -> list[Message]:
+    """Run ``calls`` and return the result messages of those that ran, in the order they finished."""
+    return [result async for _, result in dispatch_tool_calls(calls, run=context(), middleware=middleware)]
+
+
 @pytest.mark.asyncio
-async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> None:
+async def test_dispatch_runs_calls_concurrently_and_the_batch_answers_them_in_call_order() -> None:
     started = {"one": asyncio.Event(), "two": asyncio.Event()}
 
     async def meet(who: str) -> str:
@@ -279,15 +286,18 @@ async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> N
         entity="code",
     )
 
-    results = await dispatch_tool_calls(batch.planned, run=context(), middleware=())
+    results = await _dispatch(batch.planned)
 
+    # The second call finds the first already started, so it finishes first and comes first.
     assert [(m.tool_call_id, m.content, m.tool_call_error) for m in results] == [
-        ("c1", "one met two", False),
         ("c2", "two met one", False),
+        ("c1", "one met two", False),
     ]
-    for call, result in zip(batch.planned, results, strict=True):
+    answers = batch.answers(results)
+    assert [(m.tool_call_id, m.content) for m in answers] == [("c1", "one met two"), ("c2", "two met one")]
+    for call, answer in zip(batch.planned, answers, strict=True):
         execution = call.execution
-        assert (execution.result, execution.is_error) == (result.content, False)
+        assert (execution.result, execution.is_error) == (answer.content, False)
 
 
 def _linger(release: asyncio.Event, finished: list[str]) -> Callable[[], Awaitable[str]]:
@@ -321,7 +331,7 @@ async def test_a_call_cancelled_on_its_own_lets_its_siblings_finish_before_the_b
         max_tool_calls_per_turn=None,
         entity="code",
     )
-    dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context(), middleware=()))
+    dispatch = asyncio.create_task(_dispatch(batch.planned))
     for _ in range(5):
         await asyncio.sleep(0)
     assert not dispatch.done()  # give_up is gone, but linger still runs: the batch waits for it.
@@ -330,6 +340,7 @@ async def test_a_call_cancelled_on_its_own_lets_its_siblings_finish_before_the_b
     with pytest.raises(asyncio.CancelledError):
         await dispatch
     assert finished == ["linger"]
+    assert batch.planned[0].execution.result == "lingered"
 
 
 @pytest.mark.asyncio
@@ -345,7 +356,7 @@ async def test_a_cancelled_dispatch_waits_for_every_call_to_unwind() -> None:
         max_tool_calls_per_turn=None,
         entity="code",
     )
-    dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context(), middleware=()))
+    dispatch = asyncio.create_task(_dispatch(batch.planned))
     for _ in range(5):
         await asyncio.sleep(0)
 
@@ -353,6 +364,41 @@ async def test_a_cancelled_dispatch_waits_for_every_call_to_unwind() -> None:
     with pytest.raises(asyncio.CancelledError):
         await dispatch
     assert finished == ["linger"]
+
+
+@pytest.mark.asyncio
+async def test_each_call_is_recorded_and_yielded_as_it_finishes_and_closing_unwinds_the_rest() -> None:
+    release = asyncio.Event()
+    finished: list[str] = []
+
+    async def quick() -> str:
+        """Answer at once."""
+        return "quick answer"
+
+    functions = spec(ScriptedModel([]), toolkit(_linger(release, finished), quick)).functions
+    batch = plan_tool_batch(
+        [tool_call("linger", "c1"), tool_call("quick", "c2")],
+        functions,
+        calls_so_far=0,
+        max_tool_calls_per_turn=None,
+        entity="code",
+    )
+    linger, quick_call = batch.planned
+    dispatch = dispatch_tool_calls(batch.planned, run=context(), middleware=())
+
+    async with asyncio.timeout(5):
+        call, result = await anext(dispatch)
+
+    # The later call finished first, so it comes first, recorded while its earlier sibling still runs.
+    assert call is quick_call
+    assert (result.content, quick_call.execution.result, quick_call.execution.is_error) == (
+        "quick answer",
+        "quick answer",
+        False,
+    )
+    assert (linger.execution.result, finished) == (None, [])
+    await dispatch.aclose()
+    assert (linger.execution.result, finished) == (None, ["linger"])
 
 
 @pytest.mark.asyncio
@@ -370,9 +416,8 @@ async def test_dispatch_coerces_arguments_and_turns_failures_into_error_results(
         entity="code",
     )
 
-    results = await dispatch_tool_calls(batch.planned, run=context(), middleware=())
-
-    coerced, invalid, failed = results
+    # The sync calls run on worker threads and may finish in any order; the batch answers them in call order.
+    coerced, invalid, failed = batch.answers(await _dispatch(batch.planned))
     assert (coerced.content, coerced.tool_call_error, coerced.tool_args) == ('{"sum": 7}', False, {"a": "3", "b": 4})
     assert invalid.tool_call_error is True
     assert "validation error" in str(invalid.content)
@@ -397,7 +442,7 @@ async def test_dispatch_skips_paused_calls_and_passes_the_call_id_through_middle
         entity="code",
     )
 
-    results = await dispatch_tool_calls(batch.planned, run=context(), middleware=[middleware])
+    results = await _dispatch(batch.planned, middleware=[middleware])
 
     assert [(m.tool_call_id, m.content) for m in results] == [("c2", "hi")]
     assert seen == [("c2", "echo")]
@@ -413,7 +458,7 @@ async def test_media_results_move_onto_one_follow_up_user_message() -> None:
             label: Its label.
 
         """
-        return ToolResult(content=f"picture {label}", images=[AgnoImage(content=b"png", format="png")])
+        return ToolResult(content=f"picture {label}", images=[AgnoImage(content=label.encode(), format="png")])
 
     functions = spec(ScriptedModel([]), toolkit(picture, echo)).functions
     batch = plan_tool_batch(
@@ -427,14 +472,15 @@ async def test_media_results_move_onto_one_follow_up_user_message() -> None:
         max_tool_calls_per_turn=None,
         entity="code",
     )
-    results = await dispatch_tool_calls(batch.planned, run=context(), middleware=())
+    # The sync calls may finish in any order; the batch answers them, and so orders their media, in call order.
+    results = batch.answers(await _dispatch(batch.planned))
     assert [len(m.images or ()) for m in results] == [1, 0, 1]
 
     follow_up = media_follow_up(results)
 
     assert follow_up is not None
     assert (follow_up.role, follow_up.content) == ("user", MEDIA_FOLLOW_UP_TEXT)
-    assert [image.content for image in follow_up.images or ()] == [b"png", b"png"]
+    assert [image.content for image in follow_up.images or ()] == [b"a", b"b"]
     assert all(m.images is None for m in results)
     assert media_follow_up(results) is None
     assert json.loads(json.dumps(results[0].to_dict()))["content"] == "picture a"

@@ -151,7 +151,7 @@ async def test_a_declined_call_reaches_claude_and_gemini_as_a_failed_call(
     ]
     planned = PlannedCall(function=echo, execution=echo.planned_execution("call-1", {"text": "secret"}))
 
-    [answer] = await dispatch_tool_calls([planned], run=context(), middleware=middleware)
+    [(_, answer)] = [item async for item in dispatch_tool_calls([planned], run=context(), middleware=middleware)]
     wire = Wire(FAMILIES[family].reply())
     call = {"id": "call-1", "type": "function", "function": {"name": "echo", "arguments": '{"text": "secret"}'}}
     turn = [Message(role="user", content="Echo the secret."), Message(role="assistant", tool_calls=[call]), answer]
