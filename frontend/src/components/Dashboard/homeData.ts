@@ -154,11 +154,16 @@ export function useHomeData() {
         !isRecord(data) ||
         !Array.isArray(data.tasks) ||
         !data.tasks.every(isHomeSchedule) ||
+        !Array.isArray(data.unreadable_rooms) ||
         typeof data.timezone !== "string"
       )
         throw new Error("Invalid schedules response");
       new Intl.DateTimeFormat("en-US", { timeZone: data.timezone }).format();
-      return { tasks: data.tasks, timezone: data.timezone };
+      return {
+        tasks: data.tasks,
+        timezone: data.timezone,
+        unreadableRoomCount: data.unreadable_rooms.length,
+      };
     },
     retry: false,
     staleTime: 60_000,
