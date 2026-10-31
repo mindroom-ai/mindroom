@@ -36,7 +36,7 @@ It records reasons, rejected alternatives, evidence, and accepted limitations; t
 ## Accepted limitations
 
 - The sequence orders one grant change; overlapping changes and earlier background tasks can interleave, and joins stay fail-closed through the index's fencing of refreshes an invalidation voided and the call manager's authorization check at call start.
-- Calls authorized through a grant room end when the router's view of membership becomes uncertain (a sync restart, a router replacement, a history gap) and start again after the next authoritative refresh.
+- Calls authorized through a grant room end when the router's view of membership becomes uncertain (a sync restart, a router replacement, a history gap) and start again after the next authoritative refresh that leaves no refresh owed; while a grant room the router cannot query keeps a refresh owed, they start again only at the caller's next call event, and the ready rooms stay denied until the refresh retry, which backs off up to 300 s.
 - A call teardown that a revocation started finishes on its own when the bot's drain deadline cancels that revocation, because a session's stop is shielded and the call manager stops tracking a session once it detaches it; this predates the change, which only moved the fence revocation from the router's drain to the agent's.
 - An invite recheck skipped while a bot drains waits for the next grant change or invite-policy change; invite acceptance does not depend on grants, so nothing it would have accepted became newly allowed.
 
