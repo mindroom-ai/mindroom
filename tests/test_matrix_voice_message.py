@@ -6,7 +6,7 @@ import inspect
 import json
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -267,6 +267,8 @@ async def test_matrix_voice_message_room_sentinel_forces_room_level_send(tmp_pat
         )
 
     context.conversation_reader.latest_thread_event_id.assert_not_awaited()
+    # The sentinel is not an event ID, so nothing looks it up as one.
+    cast("AsyncMock", context.relations.runtime.client.room_get_event).assert_not_awaited()
     assert speech.send_audio.await_args.kwargs["thread_id"] is None
     assert speech.send_audio.await_args.kwargs["latest_thread_event_id"] is None
 

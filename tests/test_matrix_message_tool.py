@@ -7,7 +7,7 @@ import json
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
@@ -541,6 +541,8 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
     assert "m.relates_to" not in sent_content
+    # The sentinel is not an event ID, so nothing looks it up as one.
+    cast("AsyncMock", ctx.relations.runtime.client.room_get_event).assert_not_awaited()
 
 
 @pytest.mark.asyncio
