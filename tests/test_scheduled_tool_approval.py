@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import AsyncIterator, Iterator, Sequence  # noqa: TC003 - Agno reads tool annotations at runtime
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -140,7 +141,7 @@ def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelive
     )
 
 
-def _binding(*, execute_at: datetime | None = None, workflow_digest: str = "workflow") -> ScheduledCallBinding:
+def _binding(*, execute_at: datetime | None = None) -> ScheduledCallBinding:
     return ScheduledCallBinding(
         task_id=_TASK,
         room_id=_ROOM,
@@ -150,7 +151,7 @@ def _binding(*, execute_at: datetime | None = None, workflow_digest: str = "work
         toolkit_name=_TOOLKIT,
         tool_name="post_slack_message",
         arguments_json=canonical_arguments(_ARGUMENTS),
-        workflow_digest=workflow_digest,
+        workflow_digest="workflow",
         execute_at_ns=int((execute_at or datetime.now(UTC) + timedelta(minutes=1)).timestamp() * 1_000_000_000),
     )
 
@@ -159,12 +160,11 @@ async def _schedule(
     manager: ApprovalManager,
     *,
     execute_at: datetime | None = None,
-    workflow_digest: str = "workflow",
     any_arguments_offered: bool = False,
     approver: str = _REQUESTER,
 ) -> bool:
     return await manager.request_scheduled_call_approval(
-        _binding(execute_at=execute_at, workflow_digest=workflow_digest),
+        _binding(execute_at=execute_at),
         approver_user_id=approver,
         scheduled_for_text="9:00 AM EDT",
         any_arguments_offered=any_arguments_offered,
@@ -561,7 +561,7 @@ async def test_arming_requires_an_approved_unchanged_task_firing_on_time(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """Only the approved, unchanged task within its window arms; a denial skips the send."""
+    """A task without a card reports none; an undecided card or an edited task stays unarmed, and only approval arms."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
@@ -1075,13 +1075,12 @@ def _responders(
     )
 
 
-def _persisted_workflows(context: ToolRuntimeContext) -> list[tuple[str, ScheduledTaskRecord]]:
+def _persisted_workflows(context: ToolRuntimeContext) -> list[ScheduledTaskRecord]:
     records = []
     for put in context.client.room_put_state.await_args_list:
-        content = put.kwargs["content"]
-        record = _parse_scheduled_task_record(put.kwargs["room_id"], put.kwargs["state_key"], content)
+        record = _parse_scheduled_task_record(put.kwargs["room_id"], put.kwargs["state_key"], put.kwargs["content"])
         assert record is not None
-        records.append((str(content["status"]), record))
+        records.append(record)
     return records
 
 
@@ -1205,9 +1204,9 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     ):
         result = await _schedule_from_tool()
 
-    [(status, record)] = _persisted_workflows(context)
+    [record] = _persisted_workflows(context)
     workflow = record.workflow
-    assert status == "pending"
+    assert record.status == "pending"
     assert workflow.schedule_type == "once"
     assert workflow.execute_at == datetime(2030, 1, 2, 14, 0, tzinfo=UTC)
     assert workflow.room_id == "!room:localhost"
@@ -1260,7 +1259,7 @@ async def test_schedule_tool_call_stores_and_shows_the_agents_timezone() -> None
     ):
         result = await _schedule_from_tool()
 
-    [(_status, record)] = _persisted_workflows(context)
+    [record] = _persisted_workflows(context)
     assert record.workflow.timezone == "Asia/Tokyo"
     # 14:00 UTC is 23:00 in Tokyo.
     assert request.await_args.kwargs["scheduled_for_text"] == "2030-01-02 23:00 JST"
@@ -1290,7 +1289,7 @@ async def test_schedule_tool_call_offers_only_exact_approval_where_any_arguments
     ):
         await _schedule_from_tool(agent=_live_agent(authored_confirmation=authored_confirmation))
 
-    [(_status, record)] = _persisted_workflows(context)
+    [record] = _persisted_workflows(context)
     assert request.await_args.kwargs["any_arguments_offered"] is False
     assert "arguments_json" not in record.workflow.message
 
@@ -1544,6 +1543,64 @@ def test_workflow_digest_survives_matrix_state_round_trip() -> None:
     )
 
 
+@dataclass(frozen=True)
+class _FiredTask:
+    """What one due one-time task left behind: its workflow, how often it was sent, and the status last saved."""
+
+    workflow: ScheduledWorkflow
+    executions: int
+    status: str
+
+
+async def _fire_once(
+    *,
+    outcome: str = "delivered",
+    pre_approved_call: bool = True,
+    **approvals: AsyncMock,
+) -> _FiredTask:
+    """Run one due one-time task to its end, its send ending as ``outcome`` and the named approval methods faked."""
+    client = make_matrix_client_mock()
+    client.room_get_state_event.side_effect = joined_member_state
+    client.room_put_state = AsyncMock()
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="@general call it",
+        description="Morning DM",
+        room_id="!test:server",
+        thread_id="$thread123",
+        pre_approved_call=pre_approved_call,
+    )
+    record = ScheduledTaskRecord(
+        task_id="task1234",
+        room_id="!test:server",
+        status="pending",
+        created_at=datetime.now(UTC),
+        workflow=workflow,
+    )
+    failure_reason = None if outcome == "delivered" else "no"
+
+    with (
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        scheduled_call_approvals(**approvals),
+        patch(
+            "mindroom.scheduling.executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status=outcome, failure_reason=failure_reason)),
+        ) as execute,
+    ):
+        await run_once_task(
+            client,
+            "task1234",
+            workflow,
+            Config(),
+            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+            AsyncMock(),
+        )
+
+    return _FiredTask(workflow, execute.await_count, client.room_put_state.await_args.kwargs["content"]["status"])
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("approval_state", "fires", "final_status"),
@@ -1560,223 +1617,99 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
     final_status: str,
 ) -> None:
     """The runner arms the exact unchanged task; a send the requester denied never fires."""
-    client = make_matrix_client_mock()
-    client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state = AsyncMock()
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="once",
-        execute_at=datetime.now(UTC) - timedelta(seconds=1),
-        message="@general call it",
-        description="Morning DM",
-        room_id="!test:server",
-        thread_id="$thread123",
-        pre_approved_call=True,
-    )
-    record = ScheduledTaskRecord(
-        task_id="task1234",
-        room_id="!test:server",
-        status="pending",
-        created_at=datetime.now(UTC),
-        workflow=workflow,
-    )
     arm = AsyncMock(return_value=approval_state)
 
-    with (
-        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        scheduled_call_approvals(arm_scheduled_call_approval=arm),
-        patch(
-            "mindroom.scheduling.executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
-        ) as execute,
-    ):
-        await run_once_task(
-            client,
-            "task1234",
-            workflow,
-            Config(),
-            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-            AsyncMock(),
-        )
+    fired = await _fire_once(arm_scheduled_call_approval=arm)
 
     arm.assert_awaited_once_with(
         "task1234",
-        scheduled_call_workflow_digest("task1234", workflow),
+        scheduled_call_workflow_digest("task1234", fired.workflow),
         any_arguments_allowed=True,
     )
-    assert execute.await_count == int(fires)
-    assert client.room_put_state.await_args.kwargs["content"]["status"] == final_status
+    assert fired.executions == int(fires)
+    assert fired.status == final_status
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("approval_state", "outcome", "withdraws"),
+    ("approval_state", "outcome", "withdraw_error", "withdraws"),
     [
-        ("armed", "suppressed", True),
-        ("armed", "failed", True),
-        ("armed", "delivered", False),
-        ("unarmed", "failed", False),
+        ("armed", "suppressed", None, True),
+        ("armed", "failed", None, True),
+        ("armed", "delivered", None, False),
+        ("unarmed", "failed", None, False),
+        ("armed", "failed", RuntimeError("journal unavailable"), True),
     ],
+    ids=["suppressed", "failed", "delivered", "unarmed", "withdrawal-fails"],
 )
 async def test_a_trigger_that_never_went_out_leaves_no_armed_approval(
     approval_state: str,
     outcome: str,
+    withdraw_error: Exception | None,
     withdraws: bool,
 ) -> None:
-    """A suppressed or failed fire withdraws its armed approval, so no other call can use it."""
-    client = make_matrix_client_mock()
-    client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state = AsyncMock()
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="once",
-        execute_at=datetime.now(UTC) - timedelta(seconds=1),
-        message="@general call it",
-        description="Morning DM",
-        room_id="!test:server",
-        thread_id="$thread123",
-        pre_approved_call=True,
-    )
-    record = ScheduledTaskRecord(
-        task_id="task1234",
-        room_id="!test:server",
-        status="pending",
-        created_at=datetime.now(UTC),
-        workflow=workflow,
-    )
-    withdraw = AsyncMock()
+    """A suppressed or failed fire withdraws its armed approval, and a withdrawal that fails still records the fire."""
+    withdraw = AsyncMock(side_effect=withdraw_error)
 
-    with (
-        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        scheduled_call_approvals(
-            arm_scheduled_call_approval=AsyncMock(return_value=approval_state),
-            withdraw_scheduled_call_approval=withdraw,
-        ),
-        patch(
-            "mindroom.scheduling.executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status=outcome, failure_reason="no")),
-        ),
-    ):
-        await run_once_task(
-            client,
-            "task1234",
-            workflow,
-            Config(),
-            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-            AsyncMock(),
-        )
+    fired = await _fire_once(
+        outcome=outcome,
+        arm_scheduled_call_approval=AsyncMock(return_value=approval_state),
+        withdraw_scheduled_call_approval=withdraw,
+    )
 
     assert withdraw.await_count == int(withdraws)
-    expected = "completed" if outcome == "delivered" else "failed"
-    assert client.room_put_state.await_args.kwargs["content"]["status"] == expected
+    assert fired.status == ("completed" if outcome == "delivered" else "failed")
 
 
-@pytest.mark.asyncio
-async def test_a_failed_withdrawal_of_an_unsent_trigger_still_records_the_failed_fire() -> None:
-    """An armed approval that cannot be withdrawn after a failed fire is logged, and the task is still marked failed."""
-    client = make_matrix_client_mock()
-    client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state = AsyncMock()
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="once",
-        execute_at=datetime.now(UTC) - timedelta(seconds=1),
-        message="@general call it",
-        description="Morning DM",
+async def _cancel(client: AsyncMock) -> str:
+    return await cancel_scheduled_task(
+        client=client,
         room_id="!test:server",
-        thread_id="$thread123",
-        pre_approved_call=True,
-    )
-    record = ScheduledTaskRecord(
         task_id="task1234",
-        room_id="!test:server",
-        status="pending",
-        created_at=datetime.now(UTC),
-        workflow=workflow,
+        runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
     )
-
-    with (
-        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        scheduled_call_approvals(
-            arm_scheduled_call_approval=AsyncMock(return_value="armed"),
-            withdraw_scheduled_call_approval=AsyncMock(side_effect=RuntimeError("journal unavailable")),
-        ),
-        patch(
-            "mindroom.scheduling.executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="failed", failure_reason="no")),
-        ),
-    ):
-        await run_once_task(
-            client,
-            "task1234",
-            workflow,
-            Config(),
-            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-            AsyncMock(),
-        )
-
-    assert client.room_put_state.await_args.kwargs["content"]["status"] == "failed"
 
 
 @pytest.mark.asyncio
-async def test_failed_withdrawal_reports_a_failed_cancel_without_publishing_it() -> None:
-    """Cancelling keeps its error result when the approval cannot be withdrawn, and publishes nothing."""
-    client = AsyncMock()
-
-    with (
-        patch(
-            "mindroom.scheduling.tasks._read_scheduled_task_state",
-            new=AsyncMock(return_value={"status": "pending", "workflow": "{}"}),
-        ),
-        scheduled_call_approvals(
-            withdraw_scheduled_call_approval=AsyncMock(side_effect=RuntimeError("journal unavailable")),
-        ),
-        pytest.raises(SchedulingError) as exc_info,
-    ):
-        await cancel_scheduled_task(
-            client=client,
-            room_id="!test:server",
-            task_id="task1234",
-            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-        )
-
-    assert str(exc_info.value) == (
-        "Failed to cancel task `task1234`: could not withdraw the approval for its scheduled call (journal unavailable)"
-    )
-    client.room_put_state.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("runtime", ["missing", "unbound"])
-async def test_cancelling_fails_closed_while_the_approval_runtime_is_not_ready(
+@pytest.mark.parametrize(
+    ("runtime", "reason"),
+    [
+        ("failing", "journal unavailable"),
+        ("missing", approval_manager.RUNTIME_NOT_READY_REASON),
+        ("unbound", approval_manager.RUNTIME_NOT_READY_REASON),
+    ],
+    ids=["failing", "missing", "unbound"],
+)
+async def test_cancelling_fails_closed_while_the_approval_cannot_be_withdrawn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     runtime: str,
+    reason: str,
 ) -> None:
-    """A task whose approval cannot be withdrawn yet stays uncancelled, rather than keeping a usable approval."""
+    """A task whose approval cannot be withdrawn stays uncancelled, publishing nothing, rather than keeping a usable approval."""
     client = AsyncMock()
-    if runtime == "missing":
+    approvals: AbstractContextManager[object] = nullcontext()
+    if runtime == "failing":
+        approvals = scheduled_call_approvals(
+            withdraw_scheduled_call_approval=AsyncMock(side_effect=RuntimeError("journal unavailable")),
+        )
+    elif runtime == "missing":
         monkeypatch.setattr(approval_manager, "get_approval_store", lambda: None)
     else:
         initialize_approval_store_for_test(test_runtime_paths(tmp_path))
 
     with (
+        approvals,
         patch(
             "mindroom.scheduling.tasks._read_scheduled_task_state",
             new=AsyncMock(return_value={"status": "pending", "workflow": "{}"}),
         ),
         pytest.raises(SchedulingError) as exc_info,
     ):
-        await cancel_scheduled_task(
-            client=client,
-            room_id="!test:server",
-            task_id="task1234",
-            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-        )
+        await _cancel(client)
 
     assert str(exc_info.value) == (
-        "Failed to cancel task `task1234`: could not withdraw the approval for its scheduled call "
-        f"({approval_manager.RUNTIME_NOT_READY_REASON})"
+        f"Failed to cancel task `task1234`: could not withdraw the approval for its scheduled call ({reason})"
     )
     client.room_put_state.assert_not_awaited()
 
@@ -1831,57 +1764,19 @@ async def test_tasks_fire_without_an_armed_approval(
     armed: bool,
 ) -> None:
     """Plain reminders never touch call approvals, and a failed arming still fires a scheduled call."""
-    client = make_matrix_client_mock()
-    client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state = AsyncMock()
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="once",
-        execute_at=datetime.now(UTC) - timedelta(seconds=1),
-        message="Remind me",
-        description="Reminder",
-        room_id="!test:server",
-        thread_id="$thread123",
-        pre_approved_call=pre_approved_call,
-    )
-    record = ScheduledTaskRecord(
-        task_id="task1234",
-        room_id="!test:server",
-        status="pending",
-        created_at=datetime.now(UTC),
-        workflow=workflow,
-    )
     arm = AsyncMock(side_effect=arm_error)
 
-    with (
-        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        scheduled_call_approvals(arm_scheduled_call_approval=arm),
-        patch(
-            "mindroom.scheduling.executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
-        ) as execute,
-    ):
-        await run_once_task(
-            client,
-            "task1234",
-            workflow,
-            Config(),
-            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-            AsyncMock(),
-        )
+    fired = await _fire_once(pre_approved_call=pre_approved_call, arm_scheduled_call_approval=arm)
 
     assert arm.await_count == int(armed)
-    execute.assert_awaited_once()
-    assert client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
+    assert fired.executions == 1
+    assert fired.status == "completed"
 
 
 @pytest.mark.asyncio
 async def test_cancelling_a_task_settles_its_scheduled_call_card() -> None:
     """Cancelling withdraws the approval before the cancellation is published, so a crash between them fails closed."""
     client = AsyncMock()
-    client.room_put_state = AsyncMock(
-        return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!test:server"),
-    )
     existing = {"status": "pending", "workflow": "{}"}
     order: list[str] = []
     cancel = AsyncMock(side_effect=lambda *_args, **_kwargs: order.append("withdraw"))
@@ -1893,12 +1788,7 @@ async def test_cancelling_a_task_settles_its_scheduled_call_card() -> None:
         patch("mindroom.scheduling.tasks._read_scheduled_task_state", new=AsyncMock(return_value=existing)),
         scheduled_call_approvals(withdraw_scheduled_call_approval=cancel),
     ):
-        result = await cancel_scheduled_task(
-            client=client,
-            room_id="!test:server",
-            task_id="task1234",
-            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-        )
+        result = await _cancel(client)
 
     assert result == "✅ Cancelled task `task1234`"
     cancel.assert_awaited_once_with("task1234", reason="Schedule cancelled.")
@@ -1928,12 +1818,7 @@ async def test_cancelling_a_pre_approved_task_says_its_approval_is_withdrawn() -
         patch("mindroom.scheduling.tasks._read_scheduled_task_state", new=AsyncMock(return_value=existing)),
         scheduled_call_approvals(withdraw_scheduled_call_approval=AsyncMock()),
     ):
-        result = await cancel_scheduled_task(
-            client=client,
-            room_id="!test:server",
-            task_id="task1234",
-            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-        )
+        result = await _cancel(client)
 
     assert result == "✅ Cancelled task `task1234`; any approval given for its scheduled call is withdrawn."
 
@@ -2075,12 +1960,7 @@ async def test_cancelling_a_plain_reminder_leaves_call_approvals_alone() -> None
         ),
         scheduled_call_approvals(withdraw_scheduled_call_approval=withdraw),
     ):
-        result = await cancel_scheduled_task(
-            client=client,
-            room_id="!test:server",
-            task_id="task1234",
-            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-        )
+        result = await _cancel(client)
 
     assert result == "✅ Cancelled task `task1234`"
     withdraw.assert_not_awaited()
@@ -2319,18 +2199,8 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
     config.defaults.tools = []
     if offered is not None:
         config.agents[_AGENT].tools = [{"scheduler": {"include_tools": [offered]}}]
-    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
 
-    build = create_agent(
-        _AGENT,
-        config,
-        runtime_paths_for(config),
-        None,
-        supports_native_tool_approval=True,
-        knowledge=None,
-        model=turn_model(config, runtime_paths_for(config), _AGENT),
-        plugins=config_plugins(config, runtime_paths_for(config)),
-    )
+    build = _agent_build(config, monkeypatch)
 
     functions = build.spec.functions
     assert {"schedule_tool_call", "run_scheduled_call"} & set(functions) == ({offered} if offered else set())
@@ -2772,8 +2642,8 @@ async def test_reused_task_id_never_borrows_or_withdraws_another_tasks_approval(
 
 
 @pytest.mark.asyncio
-async def test_editing_a_pre_approved_task_through_chat_is_refused_before_parsing() -> None:
-    """The edit command says to cancel and schedule again, without spending a model call on the new text."""
+async def test_editing_a_pre_approved_task_through_tool_is_refused_before_parsing() -> None:
+    """The edit tool says to cancel and schedule again, without spending a model call on the new text."""
     context = _tool_context(_gated_config())
     workflow = ScheduledWorkflow(
         created_by="@user:localhost",

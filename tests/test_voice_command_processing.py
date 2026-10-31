@@ -349,13 +349,7 @@ async def test_a_sidecar_relay_the_router_sent_stays_conversation(tmp_path) -> N
         },
     )
 
-    with (
-        patch(
-            "mindroom.commands.handler.schedule_task",
-            new_callable=AsyncMock,
-            return_value="scheduled",
-        ) as mock_schedule,
-    ):
+    with patch("mindroom.commands.handler.schedule_task", new_callable=AsyncMock) as mock_schedule:
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
         await bot._coalescing_gate.drain_all()

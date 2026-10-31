@@ -20,7 +20,7 @@ from mindroom.hooks import HookBindings
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling.errors import ScheduledTaskNotFoundError, SchedulingError
 from mindroom.scheduling.tasks import SchedulingRuntime, _extract_mentioned_agents_from_text
-from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,
@@ -48,6 +48,10 @@ def _bind_runtime_paths(config: Config) -> Config:
     return bound
 
 
+def _general_config() -> Config:
+    return _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+
+
 def _make_context(config: Config, *, matrix_admin: object | None = None) -> ToolRuntimeContext:
     return make_test_tool_runtime_context(
         agent_name="general",
@@ -70,7 +74,7 @@ def _make_context(config: Config, *, matrix_admin: object | None = None) -> Tool
 
 def test_extract_mentioned_agents_from_text() -> None:
     """Agent mentions should be extracted from scheduling text."""
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    config = _general_config()
     result = _extract_mentioned_agents_from_text(
         "in 5 minutes @general check deployment",
         config,
@@ -102,7 +106,7 @@ def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
 async def test_scheduler_tool_uses_shared_backend() -> None:
     """Tool should call the same scheduling backend path as !schedule, running saved tasks on the orchestrator's runtime."""
     tools = SchedulerTools()
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    config = _general_config()
     orchestrator = MagicMock()
     context = replace(_make_context(config), config_provider=lambda: config, orchestrator=orchestrator)
 
@@ -215,7 +219,7 @@ async def test_scheduler_tool_reuses_failed_turn_membership_snapshot() -> None:
 async def test_scheduler_tool_uses_current_config_for_authorization() -> None:
     """A long-lived tool context must not schedule with its construction-time policy."""
     tools = SchedulerTools()
-    old_config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    old_config = _general_config()
     current_config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="Current Agent")}))
     context = replace(
         _make_context(old_config),
@@ -239,7 +243,7 @@ async def test_scheduler_tool_uses_current_config_for_authorization() -> None:
 async def test_edit_schedule_tool_calls_backend() -> None:
     """Edit tool should call edit_scheduled_task with correct arguments."""
     tools = SchedulerTools()
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    config = _general_config()
     context = replace(_make_context(config), config_provider=lambda: config)
 
     with (
@@ -310,7 +314,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
 async def test_list_schedules_tool_calls_backend() -> None:
     """List tool should call list_scheduled_tasks with correct arguments."""
     tools = SchedulerTools()
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    config = _general_config()
     context = _make_context(config)
 
     with (
@@ -336,7 +340,7 @@ async def test_list_schedules_tool_calls_backend() -> None:
 async def test_cancel_schedule_tool_calls_backend() -> None:
     """Cancel tool should call cancel_scheduled_task with correct arguments, ending the runner on the orchestrator's runtime."""
     tools = SchedulerTools()
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    config = _general_config()
     orchestrator = MagicMock()
     context = replace(_make_context(config), orchestrator=orchestrator)
 
@@ -359,8 +363,14 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
     )
 
 
-def _call_context() -> ToolCallContext:
-    return ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None)
+async def _call(name: str, arguments: dict[str, object]) -> CallResult:
+    """Run one scheduler function as an agent run calls it, under no tool-call policy."""
+    return await run_tool_call(
+        toolkit_offers(SchedulerTools(), name),
+        arguments,
+        ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
+        middleware=(),
+    )
 
 
 _NEEDS_ROOM = [
@@ -390,7 +400,7 @@ _NEEDS_ROOM = [
 )
 async def test_scheduler_call_outside_a_conversation_fails(name: str, arguments: dict[str, object]) -> None:
     """A scheduler call made where scheduling cannot run is a failed call that says why."""
-    result = await run_tool_call(toolkit_offers(SchedulerTools(), name), arguments, _call_context(), middleware=())
+    result = await _call(name, arguments)
 
     assert result.status == "failed"
     assert result.failure_text == "Scheduler tool is unavailable in this context."
@@ -398,35 +408,31 @@ async def test_scheduler_call_outside_a_conversation_fails(name: str, arguments:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("name", "operation", "arguments", "error", "text"),
+    ("name", "operation", "arguments", "error"),
     [
         (
             "schedule",
             "schedule_task",
             {"request": "next message", "new_thread": False},
             SchedulingError("Failed to schedule: schedule is not valid"),
-            "Failed to schedule: schedule is not valid",
         ),
         (
             "edit_schedule",
             "edit_scheduled_task",
             {"task_id": "task123", "request": "tomorrow at 9am check deployment"},
             SchedulingError("Failed to edit task `task123`."),
-            "Failed to edit task `task123`.",
         ),
         (
             "list_schedules",
             "list_scheduled_tasks",
             {},
             SchedulingError("Unable to retrieve scheduled tasks."),
-            "Unable to retrieve scheduled tasks.",
         ),
         (
             "cancel_schedule",
             "cancel_scheduled_task",
             {"task_id": "task123"},
             ScheduledTaskNotFoundError("task123"),
-            "Task `task123` not found.",
         ),
     ],
 )
@@ -435,28 +441,27 @@ async def test_scheduler_operation_failure_is_a_failed_call_with_its_reason(
     operation: str,
     arguments: dict[str, object],
     error: SchedulingError,
-    text: str,
 ) -> None:
     """A scheduling operation that did not happen fails the call with the operation's reason as its text."""
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    config = _general_config()
     with (
         patch(f"mindroom.custom_tools.scheduler.{operation}", new=AsyncMock(side_effect=error)),
         tool_runtime_context(_make_context(config)),
     ):
-        result = await run_tool_call(toolkit_offers(SchedulerTools(), name), arguments, _call_context(), middleware=())
+        result = await _call(name, arguments)
 
     assert result.status == "failed"
-    assert result.failure_text == text
+    assert result.failure_text == str(error)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("name", "arguments"), _NEEDS_ROOM)
 async def test_creating_or_editing_a_schedule_without_a_room_fails(name: str, arguments: dict[str, object]) -> None:
     """Creating or editing a schedule needs the conversation's room."""
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    config = _general_config()
 
     with tool_runtime_context(replace(_make_context(config), room=None)):
-        result = await run_tool_call(toolkit_offers(SchedulerTools(), name), arguments, _call_context(), middleware=())
+        result = await _call(name, arguments)
 
     assert (result.status, result.failure_text) == ("failed", "Scheduler tool is unavailable in this context.")
 
@@ -464,17 +469,12 @@ async def test_creating_or_editing_a_schedule_without_a_room_fails(name: str, ar
 @pytest.mark.asyncio
 async def test_listing_schedules_needs_no_room() -> None:
     """Listing schedules needs only the conversation's context, not its room."""
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    config = _general_config()
 
     with (
         patch("mindroom.custom_tools.scheduler.list_scheduled_tasks", new=AsyncMock(return_value="listed")),
         tool_runtime_context(replace(_make_context(config), room=None)),
     ):
-        result = await run_tool_call(
-            toolkit_offers(SchedulerTools(), "list_schedules"),
-            {},
-            _call_context(),
-            middleware=(),
-        )
+        result = await _call("list_schedules", {})
 
     assert (result.status, result.value) == ("ok", "listed")

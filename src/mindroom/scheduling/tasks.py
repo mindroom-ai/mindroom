@@ -172,7 +172,7 @@ def _shift_cron_weekdays(field: str, shift: int) -> str | None:
 # Legacy format: Scheduled workflows omitted new_thread and therefore reused their persisted thread by default.
 # Last legacy release: v2026.3.109; replacement: v2026.3.110 persisted explicit thread-creation mode.
 # Handling: Pydantic defaults missing new_thread to false, preserving the old same-thread behavior.
-# Coverage: tests/test_workflow_scheduling.py::TestScheduledWorkflow::test_workflow_old_payload_defaults_new_thread_false.
+# Coverage: tests/test_workflow_scheduling.py::TestWorkflowSerialization::test_workflow_old_payload_defaults_new_thread_false.
 
 
 # LEGACY_COMPAT: Scheduled workflows without a history limit.

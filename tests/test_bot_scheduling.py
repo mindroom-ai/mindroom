@@ -201,9 +201,6 @@ class TestBotScheduleCommands:
         with patch("mindroom.commands.handler.schedule_task") as mock_schedule:
             mock_schedule.return_value = "✅ Scheduled: 5 minutes from now"
 
-            # Mock response tracker for the test
-            _sync_turn_policy_runtime(mock_agent_bot)
-
             await _execute_command(mock_agent_bot, room, event, "@user:server", command)
 
             # Verify schedule_task was called correctly
@@ -225,37 +222,12 @@ class TestBotScheduleCommands:
             assert "✅ Scheduled: 5 minutes from now" in call_args.kwargs["response_text"]
 
     @pytest.mark.asyncio
-    async def test_handle_schedule_command_no_message(self, mock_agent_bot: AgentBot) -> None:
-        """Test schedule command with no message uses default."""
-        _sync_turn_policy_runtime(mock_agent_bot)
-        room = MagicMock()
-        room.room_id = "!test:server"
-
-        event = MagicMock()
-        event.event_id = "$event123"
-        event.sender = "@user:server"
-        event.body = "!schedule tomorrow"
-        event.source = {"content": {"m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"}}}
-
-        command = Command(type=CommandType.SCHEDULE, args={"full_text": "tomorrow"}, raw_text=event.body)
-
-        with patch("mindroom.commands.handler.schedule_task") as mock_schedule:
-            mock_schedule.return_value = "✅ Scheduled for tomorrow"
-
-            await _execute_command(mock_agent_bot, room, event, "@user:server", command)
-
-            # Verify the full text was passed
-            call_args = mock_schedule.call_args
-            assert call_args[1]["full_text"] == "tomorrow"
-
-    @pytest.mark.asyncio
     async def test_handle_list_schedules_command(
         self,
         mock_agent_bot: AgentBot,
         send_response_mock: AsyncMock,
     ) -> None:
         """Test bot handles list schedules command."""
-        _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -284,7 +256,6 @@ class TestBotScheduleCommands:
     @pytest.mark.asyncio
     async def test_handle_cancel_schedule_command(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles cancel schedule command."""
-        _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -315,7 +286,6 @@ class TestBotScheduleCommands:
         send_response_mock: AsyncMock,
     ) -> None:
         """Test bot handles cancel all scheduled tasks command."""
-        _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -353,7 +323,6 @@ class TestBotScheduleCommands:
         send_response_mock: AsyncMock,
     ) -> None:
         """Test bot handles edit schedule command."""
-        _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -396,7 +365,6 @@ class TestBotScheduleCommands:
         send_response_mock: AsyncMock,
     ) -> None:
         """Test that schedule commands auto-create threads when used in main room."""
-        _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -417,9 +385,8 @@ class TestBotScheduleCommands:
         # Should successfully schedule the task (auto-creates thread)
         send_response_mock.assert_called_once()
         call_args = send_response_mock.call_args
-        assert "✅" in call_args.kwargs["response_text"] or "Task ID" in call_args.kwargs["response_text"]
-        target = call_args[1].get("target")
-        assert target is not None
+        assert call_args.kwargs["response_text"] == "✅ Scheduled: 5 minutes from now"
+        target = call_args.kwargs["target"]
         assert target.room_id == room.room_id
         assert target.reply_to_event_id == event.event_id
         assert target.resolved_thread_id == event.event_id
@@ -431,7 +398,6 @@ class TestBotScheduleCommands:
         send_response_mock: AsyncMock,
     ) -> None:
         """Command delivery should use the resolved command target instead of rebuilding from the command event."""
-        _sync_turn_policy_runtime(mock_agent_bot)
         room = MagicMock()
         room.room_id = "!test:server"
 

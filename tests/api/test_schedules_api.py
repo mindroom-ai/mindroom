@@ -5,6 +5,7 @@ from typing import Literal
 from unittest.mock import AsyncMock, patch
 
 import nio
+import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
 
@@ -17,7 +18,6 @@ from tests.scheduling_helpers import SCHEDULE_WRITER_ID, serve_task_state_events
 def _task(
     task_id: str,
     *,
-    room_id: str = "test_room",
     schedule_type: Literal["once", "cron"] = "once",
     execute_at: datetime | None = None,
     cron_fields: dict[str, str] | None = None,
@@ -41,7 +41,7 @@ def _task(
         description=description,
         history_limit=history_limit,
         thread_id=thread_id,
-        room_id=room_id,
+        room_id="test_room",
         created_by="@user:localhost",
         new_thread=new_thread,
         silent=silent,
@@ -49,22 +49,15 @@ def _task(
     )
     return ScheduledTaskRecord(
         task_id=task_id,
-        room_id=room_id,
+        room_id="test_room",
         status="pending",
         created_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
         workflow=workflow,
     )
 
 
-def _mock_matrix_client() -> AsyncMock:
-    client = AsyncMock()
-    client.close = AsyncMock()
-    return client
-
-
 def test_list_schedules_success(test_client: TestClient) -> None:
     """List schedules should return serialized pending tasks."""
-    mock_client = _mock_matrix_client()
     tasks = [
         _task(
             "once1234",
@@ -85,7 +78,7 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     ]
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
         patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
     ):
         response = test_client.get("/api/schedules")
@@ -108,7 +101,6 @@ def test_list_schedules_success(test_client: TestClient) -> None:
 
 def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> None:
     """Invalid stored cron values should not crash schedule listing."""
-    mock_client = _mock_matrix_client()
     tasks = [
         _task(
             "badcron1",
@@ -120,7 +112,7 @@ def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> N
     ]
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
         patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
     ):
         response = test_client.get("/api/schedules")
@@ -134,7 +126,6 @@ def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> N
 
 def test_list_schedules_describes_each_task_in_its_own_timezone(test_client: TestClient) -> None:
     """A task stored with a timezone is described in it; one without falls back to the global timezone (UTC here)."""
-    mock_client = _mock_matrix_client()
     midnight_utc = {"minute": "0", "hour": "0", "day": "*", "month": "*", "weekday": "*"}
     tasks = [
         _task("tokyo123", schedule_type="cron", cron_fields=midnight_utc, timezone="Asia/Tokyo"),
@@ -142,7 +133,7 @@ def test_list_schedules_describes_each_task_in_its_own_timezone(test_client: Tes
     ]
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
         patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
     ):
         response = test_client.get("/api/schedules")
@@ -155,7 +146,6 @@ def test_list_schedules_describes_each_task_in_its_own_timezone(test_client: Tes
 
 def test_update_schedule_once_success(test_client: TestClient) -> None:
     """Update endpoint should persist prompt and once schedule changes."""
-    mock_client = _mock_matrix_client()
     existing_task = _task(
         "abc12345",
         execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC),
@@ -185,7 +175,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     save_mock = AsyncMock(return_value=updated_task)
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
         patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
@@ -219,7 +209,6 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
 
 def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> None:
     """Invalid cron expressions should return 400."""
-    mock_client = _mock_matrix_client()
     existing_task = _task(
         "cronbad1",
         schedule_type="cron",
@@ -229,7 +218,7 @@ def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> Non
     )
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
         patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(
@@ -247,10 +236,9 @@ def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> Non
 
 def test_cancel_schedule_success(test_client: TestClient) -> None:
     """Cancel endpoint should return success wrapper."""
-    mock_client = _mock_matrix_client()
     cancel_mock = AsyncMock(return_value="✅ Cancelled task `abc12345`")
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
         patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
     ):
         response = test_client.delete("/api/schedules/abc12345?room_id=test_room")
@@ -261,60 +249,39 @@ def test_cancel_schedule_success(test_client: TestClient) -> None:
     assert cancel_mock.await_args.kwargs["room_id"] == "test_room"
 
 
-def test_update_schedule_once_to_cron(test_client: TestClient) -> None:
-    """Switching from once to cron is rejected by the API."""
-    mock_client = _mock_matrix_client()
-    existing_task = _task(
-        "switch01",
-        execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC),
-        thread_id=None,
-        new_thread=True,
-    )
+@pytest.mark.parametrize(
+    ("existing_task", "request_json"),
+    [
+        (
+            _task("switch01", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC), thread_id=None, new_thread=True),
+            {"room_id": "test_room", "schedule_type": "cron", "cron_expression": "30 8 * * 1-5"},
+        ),
+        (
+            _task(
+                "switch02",
+                schedule_type="cron",
+                cron_fields={"minute": "0", "hour": "9", "day": "*", "month": "*", "weekday": "*"},
+                execute_at=None,
+            ),
+            {"room_id": "test_room", "schedule_type": "once", "execute_at": "2026-04-01T12:00:00Z"},
+        ),
+    ],
+    ids=["once-to-cron", "cron-to-once"],
+)
+def test_update_schedule_cannot_switch_schedule_type(
+    test_client: TestClient,
+    existing_task: ScheduledTaskRecord,
+    request_json: dict[str, str],
+) -> None:
+    """Switching a task between once and cron is rejected by the API."""
     save_mock = AsyncMock()
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
         patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
-        response = test_client.put(
-            "/api/schedules/switch01",
-            json={
-                "room_id": "test_room",
-                "schedule_type": "cron",
-                "cron_expression": "30 8 * * 1-5",
-            },
-        )
-
-    assert response.status_code == 400
-    assert "Changing schedule_type is not supported" in response.json()["detail"]
-    save_mock.assert_not_awaited()
-
-
-def test_update_schedule_cron_to_once(test_client: TestClient) -> None:
-    """Switching from cron to once is rejected by the API."""
-    mock_client = _mock_matrix_client()
-    existing_task = _task(
-        "switch02",
-        schedule_type="cron",
-        cron_fields={"minute": "0", "hour": "9", "day": "*", "month": "*", "weekday": "*"},
-        execute_at=None,
-    )
-    save_mock = AsyncMock()
-
-    with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
-        patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
-        patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
-    ):
-        response = test_client.put(
-            "/api/schedules/switch02",
-            json={
-                "room_id": "test_room",
-                "schedule_type": "once",
-                "execute_at": "2026-04-01T12:00:00Z",
-            },
-        )
+        response = test_client.put(f"/api/schedules/{existing_task.task_id}", json=request_json)
 
     assert response.status_code == 400
     assert "Changing schedule_type is not supported" in response.json()["detail"]
@@ -323,7 +290,6 @@ def test_update_schedule_cron_to_once(test_client: TestClient) -> None:
 
 def test_update_schedule_conflicting_fields(test_client: TestClient) -> None:
     """Sending execute_at with cron schedule_type should return 400."""
-    mock_client = _mock_matrix_client()
     existing_task = _task(
         "conflict1",
         schedule_type="cron",
@@ -332,7 +298,7 @@ def test_update_schedule_conflicting_fields(test_client: TestClient) -> None:
     )
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
         patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(
@@ -350,14 +316,13 @@ def test_update_schedule_conflicting_fields(test_client: TestClient) -> None:
 
 def test_update_schedule_empty_message(test_client: TestClient) -> None:
     """Updating with an empty message should return 400."""
-    mock_client = _mock_matrix_client()
     existing_task = _task(
         "empty_msg",
         execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC),
     )
 
     with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=AsyncMock()),
         patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(

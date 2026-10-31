@@ -121,10 +121,10 @@ async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(
     if caller == "schedule":
         with pytest.raises(SchedulingError, match="Failed to parse the schedule request"):
             await invoke()
+    elif caller == "topic":
+        await invoke()
     else:
-        rejected = await invoke()
-        if caller in {"routing", "summary"}:
-            assert rejected is None
+        assert await invoke() is None
 
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 55

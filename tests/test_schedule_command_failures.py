@@ -27,6 +27,7 @@ from tests.scheduling_helpers import (
     SCHEDULE_WRITER_ID,
     schedule_runtime_paths,
     scheduled_task_state_event,
+    serve_full_room_state,
     serve_task_state_events,
 )
 
@@ -296,7 +297,7 @@ def _serve_pending_tasks(client: AsyncMock, *task_ids: str) -> None:
         )
         for task_id in task_ids
     ]
-    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events, room_id=ROOM_ID))
+    serve_full_room_state(client, ROOM_ID, events)
 
 
 @pytest.mark.asyncio
@@ -343,7 +344,7 @@ async def test_an_agent_may_run_every_schedule_command_for_a_human(tmp_path: Pat
     """Schedule commands an agent posts for a human run as that human's own, unlike admin and pairing commands."""
     client = make_matrix_client_mock()
     _serve_task(client, None)
-    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict([], room_id=ROOM_ID))
+    serve_full_room_state(client, ROOM_ID)
 
     reply = await _reply(tmp_path, body, client=client, responders=[], acts_for_requester=True)
 
