@@ -31,6 +31,7 @@ from mindroom.matrix.personal_room_store import (
     PersonalRoomAdoption,
     PersonalRoomRecord,
     _personal_room_records,
+    personal_room_cleanup_exclusions,
     personal_room_digest,
     personal_room_record_path,
     read_personal_room,
@@ -1205,7 +1206,7 @@ async def test_cleanup_waits_for_an_in_flight_create_instead_of_leaving_its_room
 ) -> None:
     """A cleanup that sees the creator joined before the alias resolves keeps the room the create records."""
     server = MatrixServer()
-    _, target = bots(tmp_path, server, monkeypatch)
+    owner = service(tmp_path, server, monkeypatch)
     create_room = server.room_create
     creator_joined = asyncio.Event()
     create_returns = asyncio.Event()
@@ -1219,19 +1220,14 @@ async def test_cleanup_waits_for_an_in_flight_create_instead_of_leaving_its_room
         return response
 
     monkeypatch.setattr(server, "room_create", join_before_alias_resolves)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.get_joined_rooms",
-        AsyncMock(side_effect=lambda _client: list(server.state)),
-    )
-    create = asyncio.create_task(target.personal_rooms.ensure("@alice:localhost", "!lobby:localhost", server))
+    create = asyncio.create_task(owner.ensure("@alice:localhost", "!lobby:localhost", server))
     await creator_joined.wait()
-    cleanup = asyncio.create_task(target._room_lifecycle._rooms_to_leave())
+    cleanup = asyncio.create_task(personal_room_cleanup_exclusions(server, owner.runtime_paths, "helper"))
     done, _ = await asyncio.wait({cleanup}, timeout=0.5)
     assert not done
     create_returns.set()
-    room_id = await create
-    assert room_id == "!personal1:localhost"
-    assert await cleanup == []
+    assert await create == "!personal1:localhost"
+    assert await cleanup == {"!personal1:localhost"}
 
 
 @pytest.mark.asyncio

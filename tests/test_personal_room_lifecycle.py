@@ -26,6 +26,7 @@ from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
+from tests.access_schema_support import joined_members_response
 from tests.conftest import test_runtime_paths
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
@@ -142,10 +143,7 @@ def template_coordination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Te
 
 def set_lobby_members(lifecycle: PersonalRoomLifecycle, *user_ids: str) -> None:
     """Replace who the router sees in the lobby."""
-    lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
-        {"joined": {user_id: {} for user_id in user_ids}},
-        "!lobby:localhost",
-    )
+    lifecycle.runtime.client.joined_members.return_value = joined_members_response("!lobby:localhost", *user_ids)
 
 
 def add_alices_agent(lifecycle: PersonalRoomLifecycle, source_room_id: str = "!lobby:localhost") -> None:
@@ -882,10 +880,7 @@ async def test_backfill_failure_does_not_block_recorded_user(coordination: Coord
     lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersError("unavailable", "M_UNKNOWN")
     await lifecycle._reconcile()
     coordination.owner.ensure.assert_awaited_once()
-    lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
-        {"joined": {"@alice:localhost": {"display_name": "Alice", "avatar_url": None}}},
-        "!lobby:localhost",
-    )
+    set_lobby_members(lifecycle, "@alice:localhost")
     await lifecycle._reconcile()
     assert coordination.owner.ensure.await_count == 1
 
@@ -1003,21 +998,25 @@ async def test_template_join_provisions_and_settles_without_holding_the_lane(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("lobby", ["left", "unavailable"])
+@pytest.mark.parametrize(
+    ("lobby", "retried"),
+    [
+        (joined_members_response("!lobby:localhost"), {}),
+        (nio.JoinedMembersError("unavailable"), {("@alice:localhost", "!lobby:localhost"): False}),
+    ],
+    ids=["left", "unavailable"],
+)
 async def test_template_join_gets_no_agent_unless_its_sender_is_still_in_the_lobby(
     template_coordination: TemplateCoordination,
-    lobby: str,
+    lobby: object,
+    retried: dict[tuple[str, str], bool],
 ) -> None:
     """A join seen after its sender left the lobby settles without an agent; an unknown lobby retries it."""
     lifecycle = template_coordination.lifecycle
-    if lobby == "left":
-        set_lobby_members(lifecycle)
-    else:
-        lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersError("unavailable")
+    lifecycle.runtime.client.joined_members.return_value = lobby
     await lifecycle.baseline_join(_ALICE_JOIN)
     template_coordination.provision.assert_not_awaited()
     template_coordination.config_reload.request_reload.assert_not_called()
-    retried = {} if lobby == "left" else {("@alice:localhost", "!lobby:localhost"): False}
     assert lifecycle._retry_candidates == retried
 
 
