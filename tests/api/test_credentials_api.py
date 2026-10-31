@@ -82,7 +82,7 @@ def client(tmp_path: Path) -> TestClient:
 
 
 @pytest.fixture
-def mock_credentials_manager() -> Generator[MagicMock, None, None]:
+def mock_credentials_manager() -> Generator[MagicMock]:
     """Mock the credentials manager."""
     with patch("mindroom.api.credentials_target.get_runtime_credentials_manager") as mock:
         mock_manager = MagicMock()

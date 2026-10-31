@@ -156,7 +156,7 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+        async def mock_streaming_response() -> AsyncGenerator[str]:
             yield "15% of 200 is 30"
 
         mock_ai = MagicMock(return_value=mock_streaming_response())

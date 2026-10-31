@@ -1054,7 +1054,7 @@ async def stream_response_turn[ChunkT](
     *,
     continuation: TurnContinuationRunState,
     resume: TurnResume | None = None,
-) -> AsyncGenerator[ChunkT | FailedReply, None]:
+) -> AsyncGenerator[ChunkT | FailedReply]:
     """Own the whole response while binding context only during pulls and close; a failed turn ends with its reply."""
     lifetime = CliTurnLifetime()
     stream = context_bound_async_stream(
@@ -1084,7 +1084,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     continuation: TurnContinuationRunState,
     cli_lifetime: CliTurnLifetime,
     resume: TurnResume,
-) -> AsyncGenerator[ChunkT | FailedReply, None]:
+) -> AsyncGenerator[ChunkT | FailedReply]:
     """Run one response turn, yielding the attempt chunks as they arrive.
 
     The driver is the only writer of the turn's record: it settles the record before it yields the text that ends the

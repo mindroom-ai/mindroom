@@ -65,7 +65,7 @@ class _NightlySoakSDKClient:
         self._session_counter += 1
         type(self).active_queries -= 1
 
-    async def receive_response(self) -> AsyncGenerator[AssistantMessage | ResultMessage, None]:
+    async def receive_response(self) -> AsyncGenerator[AssistantMessage | ResultMessage]:
         yield AssistantMessage(content=[TextBlock(text=self._last_text)], model="claude-soak")
         yield ResultMessage(
             subtype="success",

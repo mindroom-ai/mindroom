@@ -1138,7 +1138,7 @@ async def _process_stream_events(  # noqa: C901
     show_tool_calls: bool,
     agent_name: str,
     pipeline_timing: DispatchPipelineTiming | None = None,
-) -> AsyncGenerator[AIStreamChunk, None]:
+) -> AsyncGenerator[AIStreamChunk]:
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
     try:
         async for event in events:
@@ -1202,7 +1202,7 @@ async def _stream_agent_attempt_chunks(
     storage: RunStorage,
     state: _StreamingAttemptState,
     on_attempt_start: Callable[[str, str], None] | None,
-) -> AsyncGenerator[AIStreamChunk, None]:
+) -> AsyncGenerator[AIStreamChunk]:
     """Start and consume one streaming agent attempt."""
     show_tool_calls = run_context.turn.show_tool_calls
     pipeline_timing = run_context.turn.pipeline_timing
@@ -1265,7 +1265,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     async def _run_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
-    ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
+    ) -> AsyncGenerator[AIStreamChunk | AttemptResolved]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
         try:
             run_context = await _prepare_agent_run_context(

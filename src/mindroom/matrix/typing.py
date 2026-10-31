@@ -215,7 +215,7 @@ async def typing_indicator(
     timeout_seconds: int = 30,
     *,
     log_context: Mapping[str, object],
-) -> AsyncGenerator[None, None]:
+) -> AsyncGenerator[None]:
     """Context manager for showing typing indicator while processing.
 
     Usage:

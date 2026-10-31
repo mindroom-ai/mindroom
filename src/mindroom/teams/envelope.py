@@ -521,7 +521,7 @@ class _TeamTurn:
         self,
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
-    ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved, None]:
+    ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
         attempt, events = await self.start_attempt(run, continuation_state)
         shown: str | None = None

@@ -354,7 +354,7 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, config: Config, copies: list
                 if record.team not in rejected and (record.key in merged if keep else record.key not in kept_keys)
             ]
             try:
-                for batch in batched(removed, copy.client.get_max_batch_size()):
+                for batch in batched(removed, copy.client.get_max_batch_size(), strict=False):
                     copy.collection.delete(ids=list(batch))
             except Exception as error:
                 # The runtime reads only an agent's own records from its store, so a copy left there is never read.
@@ -420,7 +420,7 @@ def _write_team_records(chroma_path: Path, collection_name: str, records: list[_
             held_facts.add((record.team, record.fact))
             written.append(record)
             merged.add(record.key)
-    for batch in batched(written, target.get_max_batch_size()):
+    for batch in batched(written, target.get_max_batch_size(), strict=False):
         collection.upsert(
             ids=[record.id for record in batch],
             embeddings=[record.embedding for record in batch],

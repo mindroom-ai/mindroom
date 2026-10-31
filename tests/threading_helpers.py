@@ -375,7 +375,7 @@ class ThreadingBehaviorTestBase:
     """Shared fixtures and helpers for the split TestThreadingBehavior modules."""
 
     @pytest_asyncio.fixture
-    async def bot(self, tmp_path: Path) -> AsyncGenerator[AgentBot, None]:
+    async def bot(self, tmp_path: Path) -> AsyncGenerator[AgentBot]:
         """Create an AgentBot for testing."""
         agent_user = AgentMatrixUser(
             user_id="@mindroom_general:localhost",
