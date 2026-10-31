@@ -19,6 +19,7 @@ import aiohttp
 import nio
 import pytest
 
+from mindroom.desktop import session as session_module
 from mindroom.desktop.session import (
     DesktopLoginMethod,
     DesktopMatrixSession,
@@ -35,6 +36,7 @@ from mindroom.desktop.session import (
     save_desktop_session,
 )
 from tests.conftest import test_runtime_paths as make_runtime_paths
+from tests.desktop_helpers import fake_cloudflare_access
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,6 +49,20 @@ def _session() -> DesktopMatrixSession:
         device_id="DESKTOP",
         access_token="secret-access-token",
     )
+
+
+@pytest.mark.parametrize("raw", [["not", "an", "object"], {**_session().to_payload(), "v": 2}])
+def test_session_payload_requires_an_object_of_the_current_version(raw: object) -> None:
+    """A saved session in another shape or format version is refused, never partly read."""
+    with pytest.raises(DesktopSessionError, match="unsupported format"):
+        DesktopMatrixSession.from_payload(raw)
+
+
+def _headers_file(tmp_path: Path, payload: str = '{"X-Access-Client": "test-secret"}', mode: int = 0o600) -> Path:
+    path = tmp_path / "matrix-http-headers.json"
+    path.write_text(payload, encoding="utf-8")
+    path.chmod(mode)
+    return path
 
 
 def test_session_round_trip_uses_owner_only_permissions(tmp_path: Path) -> None:
@@ -65,13 +81,7 @@ def test_session_round_trip_remembers_interactive_access_transport(
 ) -> None:
     """Bridge startup can renew Access without requiring the flag again."""
     path = tmp_path / "desktop" / "matrix_session.json"
-    session = DesktopMatrixSession(
-        homeserver="https://matrix.example.org",
-        user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        access_token="secret-access-token",
-        cloudflare_access=True,
-    )
+    session = replace(_session(), cloudflare_access=True)
 
     save_desktop_session(path, session)
 
@@ -122,8 +132,6 @@ def test_session_login_writer_waits_for_pending_metadata_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An older setup write cannot overwrite a login published during its transaction."""
-    from mindroom.desktop import session as session_module  # noqa: PLC0415
-
     path = tmp_path / "matrix_session.json"
     original = _session()
     updated = replace(original, cloudflare_access=True)
@@ -295,9 +303,7 @@ def test_session_preserves_unexpected_filesystem_errors(
 
 def test_http_headers_file_loads_string_mapping(tmp_path: Path) -> None:
     """Proxy credentials remain in a separate private file instead of session state."""
-    path = tmp_path / "matrix-http-headers.json"
-    path.write_text('{"X-Access-Client": "test-secret"}', encoding="utf-8")
-    path.chmod(0o600)
+    path = _headers_file(tmp_path)
 
     assert desktop_http_headers("https://matrix.example.org", path, cloudflare_access=False) == {
         "X-Access-Client": "test-secret",
@@ -310,16 +316,8 @@ def test_cloudflare_access_adds_its_token_for_the_homeserver_to_the_file_headers
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Choosing Access keeps the file's headers and authenticates against the given homeserver."""
-    path = tmp_path / "matrix-http-headers.json"
-    path.write_text('{"X-Access-Client": "test-secret"}', encoding="utf-8")
-    path.chmod(0o600)
-    applications: list[str] = []
-
-    def create(app_url: str) -> SimpleNamespace:
-        applications.append(app_url)
-        return SimpleNamespace(current_token=lambda: "access-token")
-
-    monkeypatch.setattr("mindroom.desktop.cloudflare_access.CloudflareAccessTokenProvider.create", create)
+    path = _headers_file(tmp_path)
+    applications = fake_cloudflare_access(monkeypatch)
 
     headers = desktop_http_headers("https://matrix.example.org", path, cloudflare_access=True)
 
@@ -333,9 +331,7 @@ def test_cloudflare_access_adds_its_token_for_the_homeserver_to_the_file_headers
 )
 def test_http_headers_file_refuses_group_readable_secrets(tmp_path: Path) -> None:
     """An exposed proxy credential file stops before any Matrix request."""
-    path = tmp_path / "matrix-http-headers.json"
-    path.write_text('{"X-Access-Client": "test-secret"}', encoding="utf-8")
-    path.chmod(0o640)
+    path = _headers_file(tmp_path, mode=0o640)
 
     with pytest.raises(DesktopSessionError, match="must not be readable"):
         desktop_http_headers("https://matrix.example.org", path, cloudflare_access=False)
@@ -347,9 +343,7 @@ def test_http_headers_file_requires_string_mapping(
     payload: str,
 ) -> None:
     """Malformed header configuration fails before nio receives it."""
-    path = tmp_path / "matrix-http-headers.json"
-    path.write_text(payload, encoding="utf-8")
-    path.chmod(0o600)
+    path = _headers_file(tmp_path, payload)
 
     with pytest.raises(DesktopSessionError, match="JSON object of string values"):
         desktop_http_headers("https://matrix.example.org", path, cloudflare_access=False)
@@ -586,8 +580,6 @@ async def test_owned_session_rejects_mismatched_binding(tmp_path: Path, field: s
 
 def test_concurrent_first_open_preserves_one_consumer_binding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Concurrent processes must not persist competing consumer identities before adoption."""
-    from mindroom.desktop import session as session_module  # noqa: PLC0415
-
     write = session_module.write_json_file_durable
     start = Barrier(8)
 

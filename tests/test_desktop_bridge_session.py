@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import time
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
-import nio
 import pytest
 from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 from nio.durable import RecordKind, SyncBatch, SyncRecord
@@ -36,15 +33,25 @@ from mindroom.desktop.native_config import (
     NativeShellConfig,
 )
 from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE
-from mindroom.desktop.session import DesktopMatrixSession
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest
 from mindroom.matrix.device_identity import PinnedMatrixDevice
-from tests.desktop_helpers import IdleSource
+from tests.desktop_helpers import (
+    SAVED_SESSION,
+    FakeMatrixOwner,
+    IdleSource,
+    ManualBridge,
+    empty_selected_root,
+    offline_session_deps,
+    runtime_paths,
+)
+from tests.desktop_helpers import login_environment as login_environment  # noqa: PLC0414
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-_SAVED_SESSION = DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token")
+selected_root = empty_selected_root
+
+_CONTROLLER = PinnedMatrixDevice("@controller:example.org", "CLOUD", "fingerprint")
 
 
 def _config(
@@ -56,7 +63,7 @@ def _config(
     return NativeDesktopConfig(
         revision=3,
         enabled=True,
-        controller=PinnedMatrixDevice("@controller:example.org", "CLOUD", "fingerprint"),
+        controller=_CONTROLLER,
         allowed_requester_ids=("@person:example.org",),
         allowed_agent_names=("mind",),
         allowed_app_ids=apps,
@@ -67,34 +74,6 @@ def _config(
     )
 
 
-def _runtime_paths(tmp_path: Path) -> SimpleNamespace:
-    return SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None)
-
-
-class _Owner:
-    """Owned Matrix session stand-in that records closing."""
-
-    def __init__(self, lifecycle: list[str], source: object | None = None) -> None:
-        self.client = nio.AsyncClient(
-            "https://matrix.example.org",
-            config=nio.AsyncClientConfig(encryption_enabled=False),
-        )
-        self.source = source or IdleSource()
-        self.lifecycle = lifecycle
-
-    async def close(self) -> None:
-        self.lifecycle.append("owner_close")
-        await self.client.close()
-
-
-def _offline(owner: _Owner, prepare: AsyncMock | None = None) -> DesktopBridgeSessionDeps:
-    async def open_client(*_args: object) -> _Owner:
-        owner.lifecycle.append("open")
-        return owner
-
-    return DesktopBridgeSessionDeps(open_client=open_client, prepare_client=prepare or AsyncMock())
-
-
 async def _start(
     tmp_path: Path,
     config: NativeDesktopConfig,
@@ -103,28 +82,12 @@ async def _start(
 ) -> DesktopBridgeSession:
     return await start_desktop_bridge_session(
         config,
-        _SAVED_SESSION,
-        runtime_paths=_runtime_paths(tmp_path),
+        SAVED_SESSION,
+        runtime_paths=runtime_paths(tmp_path),
         http_headers=None,
         deps=deps,
         **grants,
     )
-
-
-@pytest.fixture
-def selected_root(tmp_path: Path) -> Path:
-    """Create one selected folder."""
-    root = (tmp_path / "selected").resolve()
-    root.mkdir()
-    return root
-
-
-@pytest.fixture
-def login_environment(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    """Replace the account login-shell capture with a fixed environment."""
-    capture = AsyncMock(return_value={"PATH": os.environ["PATH"], "MINDROOM_CAPTURED": "from-login-shell"})
-    monkeypatch.setattr("mindroom.desktop.login_environment.capture_login_environment", capture)
-    return capture
 
 
 class _RecordingBrowser:
@@ -133,6 +96,10 @@ class _RecordingBrowser:
 
     async def close(self) -> None:
         self.lifecycle.append("browser_close")
+
+
+def _patch_browser(monkeypatch: pytest.MonkeyPatch, browser: object) -> None:
+    monkeypatch.setattr("mindroom.desktop.bridge_session.PlaywrightMCPBrowserProvider", lambda **_kwargs: browser)
 
 
 @pytest.mark.asyncio
@@ -157,15 +124,12 @@ async def test_failed_construction_closes_every_built_provider_and_the_matrix_ow
 
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopFilesystem", RecordingFilesystem)
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopShell", RecordingShell)
-    monkeypatch.setattr(
-        "mindroom.desktop.bridge_session.PlaywrightMCPBrowserProvider",
-        lambda **_kwargs: _RecordingBrowser(lifecycle),
-    )
+    _patch_browser(monkeypatch, _RecordingBrowser(lifecycle))
     (tmp_path / "desktop_bridge" / "commands.sqlite3").mkdir(parents=True)
-    owner = _Owner(lifecycle)
+    owner = FakeMatrixOwner(lifecycle)
 
     with pytest.raises(DesktopCommandJournalError):
-        await _start(tmp_path, _config(selected_root, browser=True), _offline(owner))
+        await _start(tmp_path, _config(selected_root, browser=True), offline_session_deps(owner))
 
     assert lifecycle == ["open", "shell_close", "filesystem_close", "browser_close", "owner_close"]
     assert owner.client.to_device_callbacks == []
@@ -185,7 +149,12 @@ async def test_saved_capabilities_define_the_bridge_without_a_gui_provider(
 
     monkeypatch.setattr("mindroom.desktop.bridge_session.PyAutoGuiDesktopProvider", forbidden_gui_provider)
 
-    session = await _start(tmp_path, _config(selected_root), _offline(_Owner([])), control_lease_seconds=600)
+    session = await _start(
+        tmp_path,
+        _config(selected_root),
+        offline_session_deps(FakeMatrixOwner()),
+        control_lease_seconds=600,
+    )
 
     bridge = session.bridge
     try:
@@ -237,7 +206,11 @@ async def test_without_posix_folder_and_shell_access_are_refused_before_building
     lifecycle: list[str] = []
 
     with pytest.raises(NativeConfigError, match="need macOS or Linux") as refused:
-        await _start(tmp_path, _config(*roots, apps=("primary-screen",), shell=shell), _offline(_Owner(lifecycle)))
+        await _start(
+            tmp_path,
+            _config(*roots, apps=("primary-screen",), shell=shell),
+            offline_session_deps(FakeMatrixOwner(lifecycle)),
+        )
 
     assert "`mindroom desktop access --clear-folders --no-shell`" in str(refused.value)
     assert lifecycle == ["open", "owner_close"]
@@ -250,24 +223,23 @@ async def test_without_posix_screenshot_only_app_observation_still_starts(
 ) -> None:
     """Screenshot-only app observation is the Windows target and loads no POSIX-only shell module."""
     provider = object()
-    provider_options: list[dict[str, object]] = []
-
-    def gui_provider(**kwargs: object) -> object:
-        provider_options.append(kwargs)
-        return provider
-
+    gui_provider = Mock(return_value=provider)
     monkeypatch.setattr("mindroom.desktop.bridge_session.PyAutoGuiDesktopProvider", gui_provider)
     monkeypatch.setattr(native_config, "_LOCAL_ACCESS_SUPPORTED", False)
     monkeypatch.setitem(sys.modules, "mindroom.desktop.login_environment", None)
     # App observation reads the session's macOS application events, which this test does not need.
     monkeypatch.setattr("mindroom.desktop.bridge._run_macos_application_events", asyncio.Event().wait)
 
-    session = await _start(tmp_path, _config(apps=("primary-screen",), shell=False), _offline(_Owner([])))
+    session = await _start(
+        tmp_path,
+        _config(apps=("primary-screen",), shell=False),
+        offline_session_deps(FakeMatrixOwner()),
+    )
 
     bridge = session.bridge
     try:
         assert bridge.provider is provider
-        assert provider_options[0]["allowed_app_ids"] == frozenset({"primary-screen"})
+        assert gui_provider.call_args_list[0].kwargs["allowed_app_ids"] == frozenset({"primary-screen"})
         assert (bridge.filesystem, bridge.shell, session.browser) == (None, None, None)
         assert (bridge.policy.allowed_file_roots, bridge.policy.shell_enabled) == ((), False)
         assert bridge.policy.allow_control is False
@@ -311,14 +283,14 @@ async def test_session_admits_before_acknowledging_and_closes_in_dependency_orde
             lifecycle.append("ack")
             acked.set()
 
-    class Bridge(DesktopBridge):
+    class Bridge(ManualBridge):
         async def on_to_device_event(self, event: object) -> None:  # noqa: ARG002
             lifecycle.append("admit")
             admitted.set()
 
         async def run(self) -> None:
             try:
-                await asyncio.Event().wait()
+                await super().run()
             finally:
                 lifecycle.append("workers_cancelled")
 
@@ -334,11 +306,11 @@ async def test_session_admits_before_acknowledging_and_closes_in_dependency_orde
             lifecycle.append("bridge_close")
             super().close()
 
-    owner = _Owner(lifecycle, Source())
+    owner = FakeMatrixOwner(lifecycle, Source())
 
     async def prepare(prepared_client: object, controller: PinnedMatrixDevice) -> None:
         assert prepared_client is owner.client
-        assert controller == _config().controller
+        assert controller == _CONTROLLER
         assert owner.client.to_device_callbacks
         lifecycle.append("prepare")
 
@@ -348,7 +320,7 @@ async def test_session_admits_before_acknowledging_and_closes_in_dependency_orde
     session = await _start(
         tmp_path,
         _config(selected_root, shell=False),
-        _offline(owner, AsyncMock(side_effect=prepare)),
+        offline_session_deps(owner, prepare),
     )
     await asyncio.wait_for(acked.wait(), 5)
     assert session.live
@@ -379,15 +351,12 @@ async def test_startup_failure_before_workers_releases_everything_without_stoppi
             pytest.fail("A bridge whose controller was never verified must not deliver replies")
 
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", Bridge)
-    monkeypatch.setattr(
-        "mindroom.desktop.bridge_session.PlaywrightMCPBrowserProvider",
-        lambda **_kwargs: _RecordingBrowser(lifecycle),
-    )
-    owner = _Owner(lifecycle)
+    _patch_browser(monkeypatch, _RecordingBrowser(lifecycle))
+    owner = FakeMatrixOwner(lifecycle)
     prepare = AsyncMock(side_effect=RuntimeError("controller device changed"))
 
     with pytest.raises(RuntimeError, match="controller device changed"):
-        await _start(tmp_path, _config(selected_root, browser=True), _offline(owner, prepare))
+        await _start(tmp_path, _config(selected_root, browser=True), offline_session_deps(owner, prepare))
 
     [bridge] = bridges
     assert lifecycle == ["open", "browser_close", "owner_close"]
@@ -420,7 +389,7 @@ async def test_concurrent_closes_share_one_teardown_that_a_cancelled_caller_cann
             await super().stop()
 
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", Bridge)
-    session = await _start(tmp_path, _config(selected_root), _offline(_Owner(lifecycle)))
+    session = await _start(tmp_path, _config(selected_root), offline_session_deps(FakeMatrixOwner(lifecycle)))
     first = asyncio.create_task(session.close())
     await stopping.wait()
     first.cancel()
@@ -446,7 +415,7 @@ async def test_close_fences_admission_and_ends_control_before_it_yields(
     session = await _start(
         tmp_path,
         _config(selected_root, shell=False),
-        _offline(_Owner([])),
+        offline_session_deps(FakeMatrixOwner()),
         control_lease_seconds=600,
     )
     assert session.bridge.policy.allow_control is True
@@ -475,11 +444,12 @@ async def test_a_failing_release_still_releases_the_rest_and_is_the_close_outcom
             msg = "browser would not close"
             raise RuntimeError(msg)
 
-    monkeypatch.setattr(
-        "mindroom.desktop.bridge_session.PlaywrightMCPBrowserProvider",
-        lambda **_kwargs: FailingBrowser(lifecycle),
+    _patch_browser(monkeypatch, FailingBrowser(lifecycle))
+    session = await _start(
+        tmp_path,
+        _config(selected_root, browser=True),
+        offline_session_deps(FakeMatrixOwner(lifecycle)),
     )
-    session = await _start(tmp_path, _config(selected_root, browser=True), _offline(_Owner(lifecycle)))
 
     with pytest.raises(RuntimeError, match="browser would not close"):
         await session.close()

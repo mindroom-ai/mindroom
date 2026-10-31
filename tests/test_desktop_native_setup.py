@@ -84,6 +84,15 @@ def _fake_access(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+async def _assert_setup_headers(headers: object, *, access: bool) -> None:
+    assert headers["x-static-header"] == "static-value"
+    if access:
+        assert isinstance(headers, CloudflareAccessHeaders)
+        # The Matrix client prepares the token before every request.
+        await headers.prepare()
+        assert headers["cf-access-token"] == "access-token"
+
+
 @pytest.mark.parametrize("access", [False, True])
 def test_login_authenticates_with_configured_headers_and_saves_access_mode(
     tmp_path: Path,
@@ -96,13 +105,7 @@ def test_login_authenticates_with_configured_headers_and_saves_access_mode(
 
     async def resolve(requested: DesktopLoginMethod, **kwargs: object) -> DesktopLoginMethod:
         assert requested is DesktopLoginMethod.AUTO
-        headers = kwargs["http_headers"]
-        assert headers["x-static-header"] == "static-value"
-        if access:
-            assert isinstance(headers, CloudflareAccessHeaders)
-            # The Matrix client prepares the token before every request.
-            await headers.prepare()
-            assert headers["cf-access-token"] == "access-token"
+        await _assert_setup_headers(kwargs["http_headers"], access=access)
         return DesktopLoginMethod.PASSWORD
 
     async def login(**kwargs: object) -> tuple[object, DesktopMatrixSession]:
@@ -141,12 +144,7 @@ def test_pair_preserves_or_upgrades_saved_access_only_after_claim(
 
     async def open_client(session: DesktopMatrixSession, **kwargs: object) -> object:
         assert session.cloudflare_access is saved_access
-        headers = kwargs["http_headers"]
-        assert headers["x-static-header"] == "static-value"
-        if saved_access or requested_access:
-            assert isinstance(headers, CloudflareAccessHeaders)
-            await headers.prepare()
-            assert headers["cf-access-token"] == "access-token"
+        await _assert_setup_headers(kwargs["http_headers"], access=bool(saved_access or requested_access))
         return owner
 
     async def claim(_owner: object, controller: PinnedMatrixDevice, *, code: str) -> str:
