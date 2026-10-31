@@ -124,11 +124,6 @@ class TestDelegateTools:
         assert tuple(tools.functions) == DELEGATION_FUNCTIONS
         assert builtin_tool_registry().entries["delegate"].function_names == DELEGATION_FUNCTIONS
 
-    def test_toolkit_has_delegate_task(self, tools: DelegateTools) -> None:
-        """Test that the toolkit exposes the run_subagent function."""
-        func_names = list(tools.functions)
-        assert "run_subagent" in func_names
-
     def test_schema_requires_task_and_allows_omitted_or_null_agent_name(self, tools: DelegateTools) -> None:
         """The model must be able to request a self subagent using only its task."""
         function = toolkit_offers(tools, "run_subagent")
@@ -174,10 +169,7 @@ class TestDelegateTools:
     async def test_delegate_to_unknown_agent(self, tools: DelegateTools) -> None:
         """Test that delegating to an unknown agent returns an error."""
         result = await tools.run_subagent(agent_name="unknown_agent", task="do something")
-        assert "Cannot delegate to 'unknown_agent'" in result
-        assert "code" in result
-        assert "research" in result
-        assert "Allowed subagents: code, research." in result
+        assert result == "Cannot delegate to 'unknown_agent'. Allowed subagents: code, research."
 
     @pytest.mark.asyncio
     async def test_delegate_empty_task(self, tools: DelegateTools) -> None:

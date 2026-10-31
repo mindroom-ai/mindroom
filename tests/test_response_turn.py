@@ -304,7 +304,6 @@ def test_a_stored_delegation_pause_with_a_separate_tool_list_presents_its_requir
         tool_name="run_subagent",
         tool_args={"task": "Check"},
         requires_confirmation=True,
-        approval_type="policy_confirmation",
     )
     child_call = ToolExecution(tool_call_id="delegation:child-call", tool_name="write", requires_confirmation=True)
     child = {

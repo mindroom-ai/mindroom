@@ -7,7 +7,6 @@ import json
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-from uuid import uuid4
 
 import pytest
 
@@ -97,7 +96,6 @@ async def test_audit_snapshot_cannot_settle_child_or_release_followup(tmp_path: 
     config = _config()
     paths = test_runtime_paths(tmp_path)
     child = _child()
-    child.subagent_id = uuid4().hex
     await reserve_subagent_turn(child, owner=_identity("leader", "parent-session"), runtime_paths=paths)
     await start_child_turn(
         child,
@@ -231,7 +229,6 @@ async def test_interruption_recovery_keeps_a_settlement_saved_before_a_crash(tmp
     config = _config()
     paths = test_runtime_paths(tmp_path)
     child = _child()
-    child.subagent_id = uuid4().hex
     await reserve_subagent_turn(child, owner=_identity("leader", "parent-session"), runtime_paths=paths)
     await start_child_turn(
         child,

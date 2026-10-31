@@ -872,11 +872,8 @@ class MaskedBackend(StoreBackend):
     def _old_delegation_states(self, view: dict[str, Any]) -> None:
         """Show each delegation state with the tool list the Agno-layout store's writers kept beside its requirements."""
         for state in _delegation_states(view):
-            if "pending_tools" not in state:
-                state["pending_tools"] = [
-                    requirement["tool_execution"] for requirement in state["pending_requirements"]
-                ]
-                self.used.add("delegation_pause_stores_its_calls_once")
+            state["pending_tools"] = [requirement["tool_execution"] for requirement in state["pending_requirements"]]
+            self.used.add("delegation_pause_stores_its_calls_once")
 
     def _old_session_totals(self, view: dict[str, Any]) -> None:
         """Show the usage totals the Agno-layout store kept beside its ledger, the sum of the ledger's run rows."""
