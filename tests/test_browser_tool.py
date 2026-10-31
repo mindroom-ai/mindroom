@@ -192,26 +192,14 @@ def test_persistent_launch_kwargs_runtime_env_wins_over_shell(
     assert "chromium_sandbox" not in launch_kwargs
 
 
-def test_validate_target_accepts_none_host_and_desktop() -> None:
-    """MindRoom browser target validation accepts both supported runtimes."""
-    BrowserTools._validate_target(target=None, node=None)
-    BrowserTools._validate_target(target="host", node=None)
-    BrowserTools._validate_target(target="desktop", node=None)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["sandbox", "node", "unknown", "Desktop", " host "])
+async def test_browser_target_takes_only_host_or_desktop(target: str) -> None:
+    """Call validation refuses any target besides host and desktop, spelled exactly."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
 
-
-def test_validate_target_rejects_invalid_node_and_non_host_targets() -> None:
-    """MindRoom browser target validation rejects unsupported modes."""
-    with pytest.raises(ValueError, match="node parameter is not supported in MindRoom"):
-        BrowserTools._validate_target(target="host", node="node-1")
-
-    with pytest.raises(ValueError, match="does not support sandbox or node"):
-        BrowserTools._validate_target(target="sandbox", node=None)
-
-    with pytest.raises(ValueError, match="does not support sandbox or node"):
-        BrowserTools._validate_target(target="node", node=None)
-
-    with pytest.raises(ValueError, match="Unsupported target"):
-        BrowserTools._validate_target(target="unknown", node=None)
+    with pytest.raises(ValidationError, match="target"):
+        await toolkit_offers(tool, "browser_control").entrypoint(action="status", target=target)
 
 
 def test_resolve_selector_prefers_ref_mapping() -> None:
@@ -371,27 +359,13 @@ def test_resolve_output_dir_does_not_reuse_previous_context_storage_path(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_browser_unknown_action_raises() -> None:
-    """Unknown browser actions are rejected."""
+@pytest.mark.parametrize("action", ["nope", "click", "STATUS", " status "])
+async def test_browser_refuses_actions_outside_its_vocabulary(action: str) -> None:
+    """Call validation refuses unknown actions and case or space variants of known ones, naming the valid ones."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
-    with pytest.raises(ValueError, match="Unknown action: nope"):
-        await tool.browser(action="nope")
-
-
-@pytest.mark.asyncio
-async def test_browser_unknown_action_lists_valid_actions() -> None:
-    """Unknown browser actions should point callers at the valid action vocabulary."""
-    tool = BrowserTools(TEST_RUNTIME_PATHS)
-
-    with pytest.raises(ValueError, match="Unknown action: click") as exc_info:
-        await tool.browser(action="click")
-
-    message = str(exc_info.value)
-    assert "Unknown action: click" in message
-    assert "Valid actions:" in message
-    assert "act" in message
-    assert "request.kind='click'" in message
+    with pytest.raises(ValidationError, match="'act', 'actions'"):
+        await toolkit_offers(tool, "browser_control").entrypoint(action=action)
 
 
 @pytest.mark.asyncio
@@ -441,16 +415,24 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     assert "request.kind" in request_description
     assert "click" in request_description
     assert "evaluate" in request_description
+    assert "action='act' with request.kind" in action_schema["description"]
+    assert properties["target"]["enum"] == ["host", "desktop"]
     assert "start, stop, open" in properties["target"]["description"]
     assert "stable targeting" in properties["target"]["description"]
     for field_name in ("compact", "frame", "interactive", "labels", "limit", "mode", "refs", "snapshotFormat"):
         assert "Host-target" in properties[field_name]["description"]
 
 
-def test_browser_docstring_lists_discovery_actions() -> None:
-    """The source docstring should match the browser action vocabulary."""
-    assert BrowserTools.browser.__doc__ is not None
-    assert "/act/help/actions" in BrowserTools.browser.__doc__
+@pytest.mark.asyncio
+async def test_browser_help_agrees_with_the_function_schema() -> None:
+    """Help lists the schema's actions and reads the act request shapes from the schema."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    properties = toolkit_offers(tool, "browser_control").parameters["properties"]
+
+    payload = json.loads(await tool.browser(action="help"))
+
+    assert payload["actions"] == properties["action"]["enum"]
+    assert payload["actRequestDescription"] == properties["request"]["description"]
 
 
 def test_browser_metadata_documents_default_output_dir() -> None:
@@ -688,14 +670,8 @@ async def test_browser_navigate_rejects_unsupported_target_url(monkeypatch: pyte
 
 @pytest.mark.asyncio
 async def test_browser_rejects_unsupported_or_unconfigured_targets() -> None:
-    """Desktop browser routing requires a pinned device and still rejects node targets."""
+    """Desktop browser routing requires a pinned device and still rejects the node parameter."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
-
-    with pytest.raises(ValueError, match="does not support sandbox or node"):
-        await tool.browser(action="status", target="sandbox")
-
-    with pytest.raises(ValueError, match="does not support sandbox or node"):
-        await tool.browser(action="status", target="node")
 
     with pytest.raises(ValueError, match="configured Matrix desktop device identity"):
         await tool.browser(action="status", target="desktop")

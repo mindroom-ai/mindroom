@@ -13,11 +13,11 @@ import re
 import shutil
 import time
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from itertools import count
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from uuid import uuid4
 
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
@@ -53,7 +53,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import (
     ToolValue,  # noqa: TC001 - The schema reads the tool's annotations at runtime.
 )
-from mindroom.tool_system.tool_schema import closed_parameters
+from mindroom.tool_system.tool_schema import tool_parameters
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
 from mindroom.worker_computer.browser_proxy import (
     PROXIED_WEBRTC_ONLY_ARG,
@@ -70,7 +70,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.tool_function import ToolFunction
 
 _DEFAULT_PROFILE = "mindroom"
 _DEFAULT_SNAPSHOT_LIMIT = 200
@@ -93,26 +92,26 @@ _UNIX_SOCKET_PATH_MAX_BYTES = 107
 
 logger = get_logger(__name__)
 
-_BROWSER_ACTIONS = {
-    "actions",
-    "status",
-    "start",
-    "stop",
-    "profiles",
-    "tabs",
-    "open",
-    "focus",
-    "close",
-    "snapshot",
-    "screenshot",
-    "navigate",
-    "console",
-    "pdf",
-    "upload",
-    "dialog",
+_BrowserAction = Literal[
     "act",
+    "actions",
+    "close",
+    "console",
+    "dialog",
+    "focus",
     "help",
-}
+    "navigate",
+    "open",
+    "pdf",
+    "profiles",
+    "screenshot",
+    "snapshot",
+    "start",
+    "status",
+    "stop",
+    "tabs",
+    "upload",
+]
 
 # Actions that only return reference data and never use a browser.
 _REFERENCE_ACTIONS = frozenset({"actions", "help"})
@@ -174,17 +173,6 @@ _BROWSER_ACTION_TABLE = (
     },
     {"action": "help", "description": "Return this browser action and request-kind table."},
     {"action": "actions", "description": "Alias for help."},
-)
-
-_ACT_REQUEST_DESCRIPTION = (
-    "Act request object for action='act'. Set request.kind to one of: click, type, press, hover, drag, select, "
-    "fill, resize, wait, evaluate, close. "
-    "Common shapes: click {kind, ref, doubleClick?, button?, modifiers?}; "
-    "type {kind, ref, text, submit?, slowly?}; press {kind, key}; "
-    "hover {kind, ref}; drag {kind, startRef, endRef}; "
-    "select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]}; "
-    "resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; "
-    "evaluate {kind, fn, ref?}; close {kind}. Refs come from action='snapshot'."
 )
 
 _SNAPSHOT_JS = """
@@ -378,23 +366,12 @@ def _browser_help_payload(action: str) -> dict[str, Any]:
     """Return a compact browser action discovery payload."""
     return {
         "action": action,
-        "actions": sorted(_BROWSER_ACTIONS),
+        "actions": list(get_args(_BrowserAction)),
         "actKinds": list(_ACT_REQUEST_KINDS),
-        "actRequestDescription": _ACT_REQUEST_DESCRIPTION,
+        "actRequestDescription": tool_parameters(BrowserTools.browser)["properties"]["request"]["description"],
         "actionTable": list(_BROWSER_ACTION_TABLE),
         "status": "ok",
     }
-
-
-def _unknown_browser_action_message(action: str) -> str:
-    """Return an actionable unknown-action error for browser callers."""
-    valid_actions = ", ".join(sorted(_BROWSER_ACTIONS))
-    return (
-        f"Unknown action: {action}. Valid actions: {valid_actions}. "
-        "For click/type/press/hover/drag/select/fill/resize/wait/evaluate/close interactions, "
-        "use action='act' with request.kind='click' (or another act kind). "
-        "Use action='help' to inspect the full table."
-    )
 
 
 def _desktop_browser_parameters(  # noqa: C901
@@ -707,55 +684,6 @@ class BrowserTools(Toolkit):
                 if isinstance(result, BaseException):
                     raise result
 
-    def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Describe the browser actions, targets, and screenshot options the model routes a call by."""
-        parameters = dict(function.parameters)
-        properties = dict(parameters.get("properties") or {})
-
-        action_schema = dict(properties.get("action") or {})
-        action_schema["description"] = (
-            f"Browser action. Valid actions: {', '.join(sorted(_BROWSER_ACTIONS))}. "
-            "Use action='help' to inspect the full table."
-        )
-        action_schema["enum"] = sorted(_BROWSER_ACTIONS)
-        properties["action"] = action_schema
-
-        request_schema = dict(properties.get("request") or {})
-        request_schema["description"] = _ACT_REQUEST_DESCRIPTION
-        properties["request"] = request_schema
-
-        target_schema = dict(properties.get("target") or {})
-        target_schema["description"] = (
-            "Execution target. Use host for MindRoom's own browser profile or desktop for the pinned local "
-            "Playwright extension in the user's existing profile. Desktop supports observation and start, stop, open; "
-            "existing-page control requires upstream stable targeting. Reconnecting or reselecting does not enable it."
-        )
-        target_schema["enum"] = ["host", "desktop"]
-        properties["target"] = target_schema
-
-        target_id_schema = dict(properties.get("targetId") or {})
-        target_id_schema["description"] = (
-            "Opaque host-browser tab ID. The desktop target rejects targetId because Playwright MCP exposes mutable "
-            "numeric indices, not stable page identity. Desktop observations refer to its current tab only."
-        )
-        properties["targetId"] = target_id_schema
-
-        attachment_schema = dict(properties.get("returnAttachment") or {})
-        attachment_schema["description"] = (
-            "For action=screenshot with target=desktop, return a turn-scoped att_* handle so matrix_message can "
-            "send the captured image without saving plaintext to disk."
-        )
-        properties["returnAttachment"] = attachment_schema
-
-        save_only_schema = dict(properties.get("saveOnly") or {})
-        save_only_schema["description"] = (
-            "For host action=screenshot, return only the saved artifact metadata instead of model-visible image bytes."
-        )
-        properties["saveOnly"] = save_only_schema
-
-        parameters["properties"] = properties
-        return replace(function, parameters=closed_parameters(self.browser, parameters))
-
     async def _close_profiles(self) -> None:
         """Close all active browser profiles."""
         errors: list[Exception] = []
@@ -781,8 +709,8 @@ class BrowserTools(Toolkit):
     @tool(name="browser_control")
     async def browser(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
-        action: str,
-        target: str | None = None,
+        action: _BrowserAction,
+        target: Literal["host", "desktop"] | None = None,
         node: str | None = None,
         profile: str | None = None,
         targetUrl: str | None = None,
@@ -820,12 +748,18 @@ class BrowserTools(Toolkit):
         The user's local browser is separate and requires the configured desktop target.
 
         Args:
-            action: Browser action (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act/help/actions)
-            target: Browser target location: ``host`` or the configured ``desktop`` Matrix device.
+            action: Browser action. Page interactions such as click or type use action='act' with request.kind.
+                Use action='help' to inspect the full table.
+            target: Execution target. Use host for MindRoom's own browser profile or desktop for the pinned local
+                Playwright extension in the user's existing profile.
+                Desktop supports observation and start, stop, open;
+                existing-page control requires upstream stable targeting.
+                Reconnecting or reselecting does not enable it.
             node: Node id compatibility field; unsupported in MindRoom runtime.
             profile: Host-target browser profile name (defaults to ``mindroom``).
             targetUrl: URL for ``open`` and ``navigate`` actions.
-            targetId: Opaque host-browser tab id. Desktop cannot bind existing-page control to stable identity.
+            targetId: Opaque host-browser tab ID. The desktop target rejects targetId because Playwright MCP exposes
+                mutable numeric indices, not stable page identity. Desktop observations refer to its current tab only.
             limit: Host-target snapshot item limit.
             maxChars: Snapshot text limit.
             mode: Host-target snapshot mode (supports ``efficient``).
@@ -841,8 +775,10 @@ class BrowserTools(Toolkit):
             ref: Snapshot ref id or CSS selector.
             element: CSS selector for element-specific actions.
             type: Screenshot type (``png`` or ``jpeg``).
-            saveOnly: For host screenshots, return saved artifact metadata without model-visible image bytes.
-            returnAttachment: For desktop screenshots, expose an ephemeral handle that matrix_message can send.
+            saveOnly: For host action=screenshot, return only the saved artifact metadata instead of model-visible
+                image bytes.
+            returnAttachment: For action=screenshot with target=desktop, return a turn-scoped att_* handle so
+                matrix_message can send the captured image without saving plaintext to disk.
             level: Console log level filter.
             paths: Browser artifact or workspace file paths, or att_* context attachment IDs to upload.
                 Workspace-relative paths are allowed; use ./ for a workspace file named att_*.
@@ -852,22 +788,24 @@ class BrowserTools(Toolkit):
             timeoutMs: Host-target timeout for upload/dialog actions.
             accept: Whether to accept dialog.
             promptText: Prompt text for dialog accept.
-            request: Act request object.
+            request: Act request object for action='act'. Set request.kind to one of: click, type, press, hover,
+                drag, select, fill, resize, wait, evaluate, close.
+                Common shapes: click {kind, ref, doubleClick?, button?, modifiers?};
+                type {kind, ref, text, submit?, slowly?}; press {kind, key}; hover {kind, ref};
+                drag {kind, startRef, endRef}; select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]};
+                resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; evaluate {kind, fn, ref?};
+                close {kind}. Refs come from action='snapshot'.
 
         Returns:
             JSON-encoded result payload.
 
         """
-        normalized_action = action.strip().lower()
-        if normalized_action not in _BROWSER_ACTIONS:
-            msg = _unknown_browser_action_message(action)
-            raise ValueError(msg)
-        if normalized_action in _REFERENCE_ACTIONS:
-            return json.dumps(_browser_help_payload(normalized_action), sort_keys=True)
-        if returnAttachment and normalized_action != "screenshot":
+        if action in _REFERENCE_ACTIONS:
+            return json.dumps(_browser_help_payload(action), sort_keys=True)
+        if returnAttachment and action != "screenshot":
             msg = "returnAttachment is only supported for action=screenshot."
             raise ValueError(msg)
-        if saveOnly and normalized_action != "screenshot":
+        if saveOnly and action != "screenshot":
             msg = "saveOnly is only supported for action=screenshot."
             raise ValueError(msg)
 
@@ -878,13 +816,13 @@ class BrowserTools(Toolkit):
         if saveOnly and resolved_target == "desktop":
             msg = "saveOnly requires target=host because desktop captures do not retain a local artifact path."
             raise ValueError(msg)
-        if resolved_target == "desktop" and normalized_action == "open" and paths:
+        if resolved_target == "desktop" and action == "open" and paths:
             msg = "Opening a file requires target=host."
             raise ValueError(msg)
         if resolved_target == "desktop":
-            if normalized_action not in SUPPORTED_BROWSER_ACTIONS:
+            if action not in SUPPORTED_BROWSER_ACTIONS:
                 msg = (
-                    f"Browser target=desktop does not support action={normalized_action}: existing-page control "
+                    f"Browser target=desktop does not support action={action}: existing-page control "
                     "requires upstream stable targeting. Supported desktop actions: "
                     f"{', '.join(sorted(SUPPORTED_BROWSER_ACTIONS))}."
                 )
@@ -909,7 +847,7 @@ class BrowserTools(Toolkit):
                 msg = f"Browser target=desktop does not support: {', '.join(provided_unsupported)}."
                 raise ValueError(msg)
             return await self._desktop_browser(
-                action=normalized_action,
+                action=action,
                 target_url=targetUrl,
                 target_id=targetId,
                 max_chars=maxChars,
@@ -924,22 +862,22 @@ class BrowserTools(Toolkit):
             )
         profile_name = _clean_str(profile) or _DEFAULT_PROFILE
 
-        if normalized_action == "status":
+        if action == "status":
             return json.dumps(await self._status_payload(profile_name), sort_keys=True)
-        if normalized_action == "start":
+        if action == "start":
             state = await self._ensure_profile(profile_name)
             payload = await self._profile_status(profile_name, state)
             payload["action"] = "start"
             return json.dumps(payload, sort_keys=True)
-        if normalized_action == "stop":
+        if action == "stop":
             await self._stop_profile(profile_name)
             return json.dumps({"action": "stop", "profile": profile_name, "status": "ok"}, sort_keys=True)
-        if normalized_action == "profiles":
+        if action == "profiles":
             return json.dumps(await self._profiles_payload(profile_name), sort_keys=True)
-        if normalized_action == "tabs":
+        if action == "tabs":
             state = await self._ensure_profile(profile_name)
             return json.dumps(await self._tabs_payload(profile_name, state), sort_keys=True)
-        if normalized_action == "open":
+        if action == "open":
             target_url = _clean_str(targetUrl)
             if paths:
                 if target_url is not None or len(paths) != 1:
@@ -959,15 +897,15 @@ class BrowserTools(Toolkit):
                 allow_loopback=self._worker_display is not None,
             )
             return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
-        if normalized_action == "focus":
+        if action == "focus":
             target_id = _clean_str(targetId)
             if target_id is None:
                 msg = "targetId required for action=focus"
                 raise ValueError(msg)
             return json.dumps(await self._focus_tab(profile_name, target_id), sort_keys=True)
-        if normalized_action == "close":
+        if action == "close":
             return json.dumps(await self._close_tab(profile_name, _clean_str(targetId)), sort_keys=True)
-        if normalized_action == "snapshot":
+        if action == "snapshot":
             return json.dumps(
                 await self._snapshot(
                     profile_name=profile_name,
@@ -986,7 +924,7 @@ class BrowserTools(Toolkit):
                 ),
                 sort_keys=True,
             )
-        if normalized_action == "screenshot":
+        if action == "screenshot":
             screenshot, image_bytes = await self._screenshot(
                 profile_name=profile_name,
                 target_id=_clean_str(targetId),
@@ -999,7 +937,7 @@ class BrowserTools(Toolkit):
                 return json.dumps(screenshot, sort_keys=True)
             result = await asyncio.to_thread(image_result, image_bytes, metadata=screenshot)
             return await asyncio.to_thread(finalize_tool_media, result)
-        if normalized_action == "navigate":
+        if action == "navigate":
             target_url = _clean_str(targetUrl)
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
@@ -1014,7 +952,7 @@ class BrowserTools(Toolkit):
                 await self._navigate(profile_name, target_url, _clean_str(targetId)),
                 sort_keys=True,
             )
-        if normalized_action == "console":
+        if action == "console":
             return json.dumps(
                 await self._console(
                     profile_name=profile_name,
@@ -1023,9 +961,9 @@ class BrowserTools(Toolkit):
                 ),
                 sort_keys=True,
             )
-        if normalized_action == "pdf":
+        if action == "pdf":
             return json.dumps(await self._pdf(profile_name, _clean_str(targetId)), sort_keys=True)
-        if normalized_action == "upload":
+        if action == "upload":
             if not paths:
                 msg = "paths required for action=upload"
                 raise ValueError(msg)
@@ -1041,7 +979,7 @@ class BrowserTools(Toolkit):
                 ),
                 sort_keys=True,
             )
-        if normalized_action == "dialog":
+        if action == "dialog":
             return json.dumps(
                 await self._dialog(
                     profile_name=profile_name,
@@ -1052,7 +990,7 @@ class BrowserTools(Toolkit):
                 ),
                 sort_keys=True,
             )
-        if normalized_action == "act":
+        if action == "act":
             if request is None:
                 msg = "request required for action=act"
                 raise ValueError(msg)
@@ -1068,22 +1006,11 @@ class BrowserTools(Toolkit):
         msg = f"Unhandled action: {action}"
         raise ValueError(msg)
 
-    @staticmethod
-    def _validate_target(*, target: str | None, node: str | None) -> None:
-        normalized_target = _clean_str(target)
-        if node is not None and normalized_target not in {None, "node"}:
+    def _resolve_target(self, *, target: str | None, node: str | None) -> str:
+        if node is not None:
             msg = "node parameter is not supported in MindRoom."
             raise ValueError(msg)
-        if normalized_target in {"sandbox", "node"} or node is not None:
-            msg = "MindRoom browser tool does not support sandbox or node targets."
-            raise ValueError(msg)
-        if normalized_target not in {None, "host", "desktop"}:
-            msg = f"Unsupported target: {target}"
-            raise ValueError(msg)
-
-    def _resolve_target(self, *, target: str | None, node: str | None) -> str:
-        self._validate_target(target=target, node=node)
-        resolved = _clean_str(target) or self._default_target
+        resolved = target or self._default_target
         if self._worker_workspace is not None and resolved != "host":
             msg = "Worker browser does not support desktop routing."
             raise ValueError(msg)

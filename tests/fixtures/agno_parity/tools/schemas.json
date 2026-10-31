@@ -1772,7 +1772,6 @@
           "properties": {
             "action": {
               "type": "string",
-              "description": "Browser action. Valid actions: act, actions, close, console, dialog, focus, help, navigate, open, pdf, profiles, screenshot, snapshot, start, status, stop, tabs, upload. Use action='help' to inspect the full table.",
               "enum": [
                 "act",
                 "actions",
@@ -1792,22 +1791,16 @@
                 "stop",
                 "tabs",
                 "upload"
-              ]
+              ],
+              "description": "Browser action. Page interactions such as click or type use action='act' with request.kind.\nUse action='help' to inspect the full table."
             },
             "target": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Execution target. Use host for MindRoom's own browser profile or desktop for the pinned local Playwright extension in the user's existing profile. Desktop supports observation and start, stop, open; existing-page control requires upstream stable targeting. Reconnecting or reselecting does not enable it.",
+              "type": "string",
               "enum": [
                 "host",
                 "desktop"
-              ]
+              ],
+              "description": "Execution target. Use host for MindRoom's own browser profile or desktop for the pinned local\nPlaywright extension in the user's existing profile.\nDesktop supports observation and start, stop, open;\nexisting-page control requires upstream stable targeting.\nReconnecting or reselecting does not enable it."
             },
             "node": {
               "anyOf": [
@@ -1851,7 +1844,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Opaque host-browser tab ID. The desktop target rejects targetId because Playwright MCP exposes mutable numeric indices, not stable page identity. Desktop observations refer to its current tab only."
+              "description": "Opaque host-browser tab ID. The desktop target rejects targetId because Playwright MCP exposes\nmutable numeric indices, not stable page identity. Desktop observations refer to its current tab only."
             },
             "limit": {
               "anyOf": [
@@ -2020,11 +2013,11 @@
             },
             "saveOnly": {
               "type": "boolean",
-              "description": "For host action=screenshot, return only the saved artifact metadata instead of model-visible image bytes."
+              "description": "For host action=screenshot, return only the saved artifact metadata instead of model-visible\nimage bytes."
             },
             "returnAttachment": {
               "type": "boolean",
-              "description": "For action=screenshot with target=desktop, return a turn-scoped att_* handle so matrix_message can send the captured image without saving plaintext to disk."
+              "description": "For action=screenshot with target=desktop, return a turn-scoped att_* handle so\nmatrix_message can send the captured image without saving plaintext to disk."
             },
             "level": {
               "anyOf": [
@@ -2108,7 +2101,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Act request object for action='act'. Set request.kind to one of: click, type, press, hover, drag, select, fill, resize, wait, evaluate, close. Common shapes: click {kind, ref, doubleClick?, button?, modifiers?}; type {kind, ref, text, submit?, slowly?}; press {kind, key}; hover {kind, ref}; drag {kind, startRef, endRef}; select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]}; resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; evaluate {kind, fn, ref?}; close {kind}. Refs come from action='snapshot'."
+              "description": "Act request object for action='act'. Set request.kind to one of: click, type, press, hover,\ndrag, select, fill, resize, wait, evaluate, close.\nCommon shapes: click {kind, ref, doubleClick?, button?, modifiers?};\ntype {kind, ref, text, submit?, slowly?}; press {kind, key}; hover {kind, ref};\ndrag {kind, startRef, endRef}; select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]};\nresize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; evaluate {kind, fn, ref?};\nclose {kind}. Refs come from action='snapshot'."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2125,8 +2118,7 @@
           },
           "required": [
             "action"
-          ],
-          "additionalProperties": false
+          ]
         },
         "strict": false,
         "requires_confirmation": false,
