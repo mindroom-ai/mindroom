@@ -12,6 +12,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.knowledge import file_listing
 from mindroom.knowledge.corpus_signature import file_signature
 from mindroom.knowledge.file_indexer import _knowledge_source_snapshot
 from mindroom.knowledge.file_listing import knowledge_files_from_relative_paths, list_knowledge_files
@@ -216,8 +217,9 @@ def test_a_knowledge_file_above_the_read_cap_warns_once_per_base(tmp_path: Path)
     """Refreshes that list the same oversized file again do not repeat the warning, which names the base."""
     root = (tmp_path / "kb").resolve()
     root.mkdir()
-    with (root / "huge.md").open("wb") as huge:
-        huge.truncate(65 << 20)
+    for name in ("a.md", "b.md"):
+        with (root / name).open("wb") as huge:
+            huge.truncate(65 << 20)
     config = Config(
         knowledge_bases={"kb": KnowledgeBaseConfig(path=str(root)), "other": KnowledgeBaseConfig(path=str(root))},
     )
@@ -225,13 +227,43 @@ def test_a_knowledge_file_above_the_read_cap_warns_once_per_base(tmp_path: Path)
     with capture_logs() as logs:
         assert list_knowledge_files(config, "kb", root) == []
         assert list_knowledge_files(config, "kb", root) == []
-        assert knowledge_files_from_relative_paths(config, "kb", root, ["huge.md"]) == []
+        assert knowledge_files_from_relative_paths(config, "kb", root, ["a.md"]) == []
         assert list_knowledge_files(config, "other", root) == []
 
-    assert [(entry["log_level"], entry["base_id"]) for entry in logs] == [
-        ("warning", "kb"),
-        ("debug", "kb"),
-        ("debug", "kb"),
-        ("warning", "other"),
+    a, b = str(root / "a.md"), str(root / "b.md")
+    # A directory walk lists files in no fixed order.
+    assert sorted((entry["base_id"], entry["path"], entry["log_level"]) for entry in logs) == [
+        ("kb", a, "debug"),
+        ("kb", a, "debug"),
+        ("kb", a, "warning"),
+        ("kb", b, "debug"),
+        ("kb", b, "warning"),
+        ("other", a, "warning"),
+        ("other", b, "warning"),
     ]
-    assert logs[0]["path"] == str(root / "huge.md")
+
+
+def test_oversized_files_beyond_the_warning_set_keep_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full warning set keeps the files it holds quiet, and only files outside it warn again."""
+    monkeypatch.setattr(file_listing, "_WARNED_OVERSIZED_FILES", set())
+    monkeypatch.setattr(file_listing, "_MAX_WARNED_OVERSIZED_FILES", 1)
+    root = (tmp_path / "kb").resolve()
+    root.mkdir()
+    for name in ("a.md", "b.md"):
+        with (root / name).open("wb") as huge:
+            huge.truncate(65 << 20)
+    config = Config(knowledge_bases={"kb": KnowledgeBaseConfig(path=str(root))})
+
+    with capture_logs() as logs:
+        for _ in range(3):
+            assert knowledge_files_from_relative_paths(config, "kb", root, ["a.md", "b.md"]) == []
+
+    a, b = str(root / "a.md"), str(root / "b.md")
+    assert [(entry["path"], entry["log_level"]) for entry in logs] == [
+        (a, "warning"),
+        (b, "warning"),
+        (a, "debug"),
+        (b, "warning"),
+        (a, "debug"),
+        (b, "warning"),
+    ]

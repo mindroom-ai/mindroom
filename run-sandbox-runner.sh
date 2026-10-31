@@ -5,7 +5,7 @@ cd /app/workspace 2>/dev/null || true
 
 if [[ -z "${MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH:-}" ]]; then
   startup_manifest_path="$(
-    /app/.venv/bin/python - <<'PY'
+    /app/.venv/bin/python -P -s - <<'PY'
 import os
 
 from mindroom.constants import resolve_primary_runtime_paths, write_startup_manifest
@@ -17,4 +17,5 @@ PY
   export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH="${startup_manifest_path}"
 fi
 
-exec /app/.venv/bin/python -m mindroom.api.sandbox_runner_app
+# `-P -s`: the workspace cwd or `HOME` must not shadow MindRoom modules or inject site code.
+exec /app/.venv/bin/python -P -s -m mindroom.api.sandbox_runner_app

@@ -134,10 +134,9 @@ class _BelowWarning(logging.Filter):
 
 
 def _uvicorn_log_config() -> dict[str, Any]:
-    """Return uvicorn's default logging with records below WARNING on stdout instead of stderr.
+    """Return uvicorn's default logging with records below WARNING on stdout, like the runner's own records.
 
-    Container log collectors read stderr as errors, so uvicorn's startup and shutdown lines would count as failures.
-    The runner's own records already go to stdout; uvicorn's warnings and errors stay on stderr.
+    Container log collectors read stderr as errors, so only uvicorn's warnings and errors go there.
     """
     config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
     handlers = config["handlers"]

@@ -94,7 +94,7 @@ _TEXT_LIKE_EXTENSIONS = {
 
 logger = get_logger(__name__)
 # Every refresh lists the same files again, so each file above the read cap warns once per process for its base.
-# Worker code can create sparse files without limit, so a full set starts over at the cost of one repeat warning per file.
+# Worker code can create sparse files without limit, so once the set is full, files outside it warn on every listing.
 _MAX_WARNED_OVERSIZED_FILES = 4096
 _WARNED_OVERSIZED_FILES: set[tuple[str, Path]] = set()
 
@@ -253,9 +253,8 @@ def _log_oversized_file(base_id: str, path: Path, size: int) -> None:
     warning_key = (base_id, path)
     log = logger.debug
     if warning_key not in _WARNED_OVERSIZED_FILES:
-        if len(_WARNED_OVERSIZED_FILES) >= _MAX_WARNED_OVERSIZED_FILES:
-            _WARNED_OVERSIZED_FILES.clear()
-        _WARNED_OVERSIZED_FILES.add(warning_key)
+        if len(_WARNED_OVERSIZED_FILES) < _MAX_WARNED_OVERSIZED_FILES:
+            _WARNED_OVERSIZED_FILES.add(warning_key)
         log = logger.warning
     log("Skipping a knowledge file above the read cap", base_id=base_id, path=str(path), size=size)
 

@@ -131,10 +131,11 @@ def test_sandbox_runner_script_writes_startup_manifest_expected_by_app() -> None
 
 
 def test_sandbox_runner_script_serves_through_the_runner_entrypoint() -> None:
-    """The sidecar starts uvicorn through the runner's entrypoint, which owns its logging."""
+    """The sidecar starts uvicorn through the runner's entrypoint, and no workspace module can shadow MindRoom's."""
     text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
 
-    assert "exec /app/.venv/bin/python -m mindroom.api.sandbox_runner_app\n" in text
+    assert "exec /app/.venv/bin/python -P -s -m mindroom.api.sandbox_runner_app\n" in text
+    assert "/app/.venv/bin/python -P -s - <<'PY'\n" in text
     assert "-m uvicorn" not in text
 
 
