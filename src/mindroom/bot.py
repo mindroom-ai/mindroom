@@ -1139,21 +1139,12 @@ class AgentBot:
         call_manager = self._call_manager
         return () if call_manager is None else call_manager.active_call_requesters
 
-    async def reconcile_reply_authorized_calls(self) -> None:
-        """Recheck this bot's active calls against the shared reply policy."""
-        call_manager = self._call_manager
-        if call_manager is not None:
-            await call_manager.reconcile_reply_authorization()
-
-    async def reconcile_pending_invites(self) -> None:
-        """Recheck cached room invites against this entity's invitation policy."""
-        if self.client is not None:
-            await self._room_lifecycle.reconcile_pending_invites()
-
     def schedule_pending_invite_reconciliation(self) -> None:
-        """Recheck cached invites without making config publication await Matrix work."""
+        """Recheck cached invites in the background while this bot accepts work, so its own drain covers the task."""
+        if not self._accepting_work or self.client is None:
+            return
         create_background_task(
-            self.reconcile_pending_invites(),
+            self._room_lifecycle.reconcile_pending_invites(),
             name=f"pending_invite_reconciliation_{self.agent_name}",
             owner=self._runtime_view,
         )
@@ -1165,21 +1156,23 @@ class AgentBot:
             await call_manager.revoke_reply_authorization()
 
     def schedule_reply_authorized_call_reconciliation(self) -> None:
-        """Schedule this bot's active-call authorization reconciliation."""
-        if self._call_manager is None:
+        """Recheck this bot's calls in the background while it accepts work, starting the ones that became allowed."""
+        call_manager = self._call_manager
+        if call_manager is None or not self._accepting_work:
             return
         create_background_task(
-            self.reconcile_reply_authorized_calls(),
+            call_manager.reconcile_reply_authorization(),
             name=f"matrix_rtc_reply_authorization_{self.agent_name}",
             owner=self._runtime_view,
         )
 
     def schedule_reply_authorized_call_revocation(self) -> None:
-        """Schedule this bot's fail-closed active-call revocation."""
-        if self._call_manager is None:
+        """End this bot's denied calls in the background, in every phase, since revocation is cleanup."""
+        call_manager = self._call_manager
+        if call_manager is None:
             return
         create_background_task(
-            self.revoke_reply_authorized_calls(),
+            call_manager.revoke_reply_authorization(),
             name=f"matrix_rtc_reply_authorization_revoke_{self.agent_name}",
             owner=self._runtime_view,
         )
@@ -1447,7 +1440,12 @@ class AgentBot:
             first_sync_response=first_sync_response,
         )
         call_manager = self._call_manager
-        if call_manager is None or (not self._calls_full_reconcile_pending and not self._call_rooms_reconcile_pending):
+        # Draining can begin during the awaits above; pending call work then waits for the next accepting frame.
+        if (
+            call_manager is None
+            or not self._accepting_work
+            or (not self._calls_full_reconcile_pending and not self._call_rooms_reconcile_pending)
+        ):
             return
         reconcile_all = self._calls_full_reconcile_pending
         room_ids = frozenset(self._call_rooms_reconcile_pending)
@@ -2000,9 +1998,9 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMemberEvent,
     ) -> None:
-        """Expose live human room joins and self-leaves to router-owned hooks."""
+        """Forward one live room member event to the call manager, the personal-room lifecycle, and the router's hooks."""
         call_manager = self._call_manager
-        if call_manager is not None and event.state_key != self.matrix_id.full_id:
+        if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
         await self._personal_room_lifecycle.member_event(room, event)
         if self._router is not None:

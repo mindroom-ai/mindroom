@@ -347,7 +347,10 @@ class _MultiAgentOrchestrator:
         )
         self._knowledge_refresh_scheduler = runtime_refresh_scheduler(self.runtime_paths)
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler, self.runtime_paths)
-        self.agent_reply_membership_sync = AgentReplyMembershipSync(self.agent_reply_memberships)
+        self.agent_reply_membership_sync = AgentReplyMembershipSync(
+            self.agent_reply_memberships,
+            lambda: self.agent_bots.values(),
+        )
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
         self.turn_recovery = TurnJournalRecovery(
             config=lambda: self.config,
@@ -771,7 +774,7 @@ class _MultiAgentOrchestrator:
         self._computer_runtime.unbind()
         if ROUTER_AGENT_NAME in entity_names:
             # Fence room-backed grants before stopping their sole control client.
-            self.invalidate_agent_reply_memberships(reason="router_replacement")
+            self.agent_reply_membership_sync.invalidate(self.config, reason="router_replacement")
         await self.scheduled_tasks.release(entity_names)
 
     async def _reconcile_removed_entities(self, entity_names: set[str]) -> set[str]:
@@ -891,7 +894,7 @@ class _MultiAgentOrchestrator:
         new_config = plan.new_config
         self.config = new_config
         if plan.reply_membership_policy_changed:
-            self.invalidate_agent_reply_memberships(reason="config_reload")
+            self.agent_reply_membership_sync.invalidate(new_config, reason="config_reload")
         if staged is None:
             # Equal plugin entries compose the hooks already live.
             self.plugin_watch.sync_roots(new_config)
@@ -1033,42 +1036,16 @@ class _MultiAgentOrchestrator:
                 router.personal_room_target_ready()
         self.turn_recovery.schedule()
 
-    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
-        """Synchronously revoke every room-backed reply grant."""
-        if not self.agent_reply_membership_sync.invalidate(self.config, reason=reason):
-            return
-        for bot in self.agent_bots.values():
-            bot.schedule_reply_authorized_call_revocation()
-
-    async def reconcile_reply_authorized_calls(self) -> None:
-        """Recheck every active MatrixRTC call against current reply access."""
-        await asyncio.gather(*(bot.reconcile_reply_authorized_calls() for bot in self.agent_bots.values()))
-
-    async def reconcile_pending_invites(self) -> None:
-        """Recheck cached invites against each router, agent, or team policy."""
-        await asyncio.gather(*(bot.reconcile_pending_invites() for bot in self.agent_bots.values()))
-
-    async def revoke_reply_authorized_calls(self) -> None:
-        """End active MatrixRTC calls that no longer pass current reply access."""
-        await asyncio.gather(*(bot.revoke_reply_authorized_calls() for bot in self.agent_bots.values()))
-
     async def refresh_agent_reply_memberships(self) -> None:
         """Refresh room-backed reply grants through the router's Matrix client."""
         config = self.config
         router_client = self._router_client()
         if router_client is None:
-            self.invalidate_agent_reply_memberships(reason="router_unavailable")
+            self.agent_reply_membership_sync.invalidate(config, reason="router_unavailable")
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_client)
-        self.agent_reply_membership_sync.record_authoritative_refresh(config)
         self.turn_recovery.schedule()
-        for bot in self.agent_bots.values():
-            bot.schedule_pending_invite_reconciliation()
-        await self.revoke_reply_authorized_calls()
-        if self.agent_reply_memberships.needs_refresh(config):
-            return
-        for bot in self.agent_bots.values():
-            bot.schedule_reply_authorized_call_reconciliation()
+        await self.agent_reply_membership_sync.apply_authoritative_refresh(config)
 
     async def _end_unconfigured_entity_replies(self, config: Config) -> None:
         """End the replies of entities removed while MindRoom was stopped; no bot finishes them."""
@@ -1531,7 +1508,7 @@ class _MultiAgentOrchestrator:
         failures = [*fleet_shutdown.failures, *journal_failures]
         if failures:
             raise failures[0]
-        self.invalidate_agent_reply_memberships(reason="shutdown")
+        self.agent_reply_membership_sync.invalidate(self.config, reason="shutdown")
         logger.info("All agent bots stopped")
 
 
