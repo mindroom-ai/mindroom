@@ -345,11 +345,7 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
     """Spellings config load accepts group under the runtime's route and get that route's checks."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
-        process_env={
-            "OLLAMA_HOST": "http://localhost:11434",
-            "ANTHROPIC_VERTEX_PROJECT_ID": "project",
-            "CLOUD_ML_REGION": "global",
-        },
+        process_env={"ANTHROPIC_VERTEX_PROJECT_ID": "project", "CLOUD_ML_REGION": "global"},
     )
     probed = _ollama_servers(monkeypatch)
     vertex_models: list[str] = []

@@ -978,24 +978,19 @@ def _models_with_a_key(config: Config, runtime_paths: RuntimePaths) -> set[str]:
     """Return the names of the models that need no key from the environment, by the runtime's lookups.
 
     A model has a key of its own, or its route's shared key in the credential store, as the dashboard's missing-key
-    check asks; an Ollama model's "key" is the server saved in the credential store.
+    check asks; that check needs nothing for an Ollama model, which without a server of its own reaches the local one.
     """
     # The credential modules open the credential store, which CLI startup must not import.
-    from mindroom.credentials.sync import saved_ollama_host  # noqa: PLC0415
     from mindroom.providers.credentials import missing_model_api_key_provider  # noqa: PLC0415
 
     with_key: set[str] = set()
-    for name, model in config.models.items():
+    for name in config.models:
         try:
-            if provider_route(model.provider) == "ollama":
-                found = bool(saved_ollama_host(runtime_paths))
-            else:
-                found = missing_model_api_key_provider(config, runtime_paths, name) is None
+            if missing_model_api_key_provider(config, runtime_paths, name) is None:
+                with_key.add(name)
         except (OSError, ValueError):
             # Without the credential store, the model's stored values are unknown, so it needs its route's variable.
             continue
-        if found:
-            with_key.add(name)
     return with_key
 
 
@@ -1031,10 +1026,7 @@ def _variables_a_model_reads(route: str, model: ModelConfig, *, has_key: bool) -
             (env_key,) for setting, env_key in VERTEXAI_CLAUDE_ENV_BY_KEY.items() if not _model_sets(model, setting)
         ]
     env_key = constants.env_key_for_provider(route)
-    # OLLAMA_HOST is the server of an Ollama model that sets none, as ``host`` or ``client_params.host``, and the
-    # credential store saved none.
-    needed = not (has_key or (route == "ollama" and (model.host or _model_sets(model, "host"))))
-    return [(env_key,)] if env_key and needed else []
+    return [(env_key,)] if env_key and not has_key else []
 
 
 def find_missing_env_variables(config: Config, runtime_paths: RuntimePaths) -> list[_MissingEnvVariable]:
