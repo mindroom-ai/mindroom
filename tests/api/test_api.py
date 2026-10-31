@@ -2227,6 +2227,25 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     assert "agent_name=general" not in params["redirect_uri"][0]
 
 
+def _connect_homeassistant_oauth_behind_proxy(tmp_path: Path, public_url: str) -> httpx.Response:
+    """Start Home Assistant OAuth through a TLS-terminating proxy, which forwards plain HTTP with the browser's Host."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_OWNER_USER_ID": "@owner:example.org",
+            "MINDROOM_API_KEY": "test-key",
+            "MINDROOM_PUBLIC_URL": public_url,
+        },
+    )
+    _publish_committed_runtime_config(main.app, runtime_paths, _config_with_worker_scope("shared").model_dump())
+    bind_test_embedded_runtime(main.app)
+    return TestClient(main.app, base_url="http://mindroom.example.com").post(
+        "/api/homeassistant/connect/oauth",
+        headers={"Authorization": "Bearer test-key"},
+        json={"instance_url": "127.0.0.1:8123", "allow_private_url": True},
+    )
+
+
 @pytest.mark.parametrize(
     ("public_url", "origin"),
     [
@@ -2240,23 +2259,7 @@ def test_homeassistant_connect_oauth_identifies_mindroom_by_its_public_origin(
     origin: str,
 ) -> None:
     """Behind a proxy that terminates TLS, the Client ID and redirect URI share the public origin, not the request's."""
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        process_env={
-            "MINDROOM_OWNER_USER_ID": "@owner:example.org",
-            "MINDROOM_API_KEY": "test-key",
-            "MINDROOM_PUBLIC_URL": public_url,
-        },
-    )
-    _publish_committed_runtime_config(main.app, runtime_paths, _config_with_worker_scope("shared").model_dump())
-    bind_test_embedded_runtime(main.app)
-    # The proxy forwards plain HTTP with the browser's Host, so the request itself names the http origin.
-    with TestClient(main.app, base_url="http://mindroom.example.com") as client:
-        response = client.post(
-            "/api/homeassistant/connect/oauth",
-            headers={"Authorization": "Bearer test-key"},
-            json={"instance_url": "127.0.0.1:8123", "allow_private_url": True},
-        )
+    response = _connect_homeassistant_oauth_behind_proxy(tmp_path, public_url)
 
     assert response.status_code == 200, response.text
     params = parse_qs(urlparse(response.json()["auth_url"]).query)
@@ -2266,22 +2269,7 @@ def test_homeassistant_connect_oauth_identifies_mindroom_by_its_public_origin(
 
 def test_homeassistant_connect_oauth_refuses_an_invalid_public_url(tmp_path: Path) -> None:
     """A `MINDROOM_PUBLIC_URL` without an origin gives Home Assistant no Client ID to accept."""
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        process_env={
-            "MINDROOM_OWNER_USER_ID": "@owner:example.org",
-            "MINDROOM_API_KEY": "test-key",
-            "MINDROOM_PUBLIC_URL": "mindroom.example.com",
-        },
-    )
-    _publish_committed_runtime_config(main.app, runtime_paths, _config_with_worker_scope("shared").model_dump())
-    bind_test_embedded_runtime(main.app)
-    with TestClient(main.app, base_url="http://mindroom.example.com") as client:
-        response = client.post(
-            "/api/homeassistant/connect/oauth",
-            headers={"Authorization": "Bearer test-key"},
-            json={"instance_url": "127.0.0.1:8123", "allow_private_url": True},
-        )
+    response = _connect_homeassistant_oauth_behind_proxy(tmp_path, "mindroom.example.com")
 
     assert response.status_code == 503
     assert response.json()["detail"] == "MINDROOM_PUBLIC_URL is not a valid URL"
