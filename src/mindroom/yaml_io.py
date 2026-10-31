@@ -198,18 +198,19 @@ def write_text_atomic(path: Path, content: str, *, copy_when_rename_fails: bool 
     A single-file bind mount cannot be renamed over; ``copy_when_rename_fails`` copies the content in place instead
     of raising.
     """
-    with tempfile.NamedTemporaryFile(
-        mode="wb",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as temp_file:
-        temp_path = Path(temp_file.name)
-        temp_file.write(content.encode("utf-8"))
-        temp_file.flush()
-        os.fsync(temp_file.fileno())
+    temp_path: Path | None = None
     try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(content.encode("utf-8"))
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
         with suppress(FileNotFoundError):
             temp_path.chmod(path.stat().st_mode & 0o777)
         if copy_when_rename_fails:
@@ -217,4 +218,5 @@ def write_text_atomic(path: Path, content: str, *, copy_when_rename_fails: bool 
         else:
             temp_path.replace(path)
     finally:
-        temp_path.unlink(missing_ok=True)
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)

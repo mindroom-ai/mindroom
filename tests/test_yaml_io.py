@@ -195,6 +195,26 @@ def test_write_text_atomic_refuses_a_bind_mount_unless_copying_is_allowed(
     assert list(tmp_path.iterdir()) == [path]
 
 
+def test_write_text_atomic_leaves_no_temp_file_when_writing_it_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write that fails before the replace, such as on a full disk, keeps the old content and removes its temp file."""
+    path = tmp_path / "config.yaml"
+    path.write_text("old\n", encoding="utf-8")
+
+    def fail_fsync(_fd: int) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(yaml_io.os, "fsync", fail_fsync)
+
+    with pytest.raises(OSError, match="No space left"):
+        yaml_io.write_text_atomic(path, "new\n", copy_when_rename_fails=True)
+
+    assert path.read_text(encoding="utf-8") == "old\n"
+    assert list(tmp_path.iterdir()) == [path]
+
+
 def test_write_text_atomic_creates_a_missing_file_readable_only_by_its_owner(tmp_path: Path) -> None:
     """A file that does not exist yet gets owner-only permissions."""
     path = tmp_path / "config.yaml"
