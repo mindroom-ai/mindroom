@@ -8,13 +8,13 @@ from urllib.parse import urlsplit
 
 from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.custom_tools.dynamic_workflow_context import (
-    AGENT_SCOPE,
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
 from mindroom.custom_tools.json_schemas import JSON_OBJECT_SCHEMA
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.dynamic_workflows.spec import DynamicWorkflowError
+from mindroom.dynamic_workflows.store import AGENT_SCOPE
 from mindroom.report_publishing.store import (
     ARTIFACT_KIND_STATIC_SITE,
     PublishableReport,

@@ -34,7 +34,8 @@ if TYPE_CHECKING:
     from mindroom.dynamic_workflows.runner import WorkflowExecution
 
 _REVISION_RE = re.compile(r"^[0-9]{6}$")
-_SCOPES = frozenset({"agent"})
+# The one scope workflows live in: the calling agent's own.
+AGENT_SCOPE = "agent"
 _REVISION_METADATA_KEYS = frozenset({"revision", "revision_reason", "updated_by", "updated_at"})
 
 
@@ -548,7 +549,7 @@ def _run_from_json(data: dict[str, object]) -> DynamicWorkflowRun:
 
 
 def _validate_scope(scope: str) -> None:
-    if scope not in _SCOPES:
+    if scope != AGENT_SCOPE:
         msg = f"Unsupported Dynamic Workflow scope '{scope}'."
         raise DynamicWorkflowError(msg)
 

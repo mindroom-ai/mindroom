@@ -12,12 +12,9 @@ from mindroom.runtime_resolution import resolve_agent_execution
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-# The store scope of every workflow an agent tool reads or writes: the calling agent's own.
-AGENT_SCOPE = "agent"
-
 
 def dynamic_workflow_store_and_owner(context: ToolRuntimeContext) -> tuple[DynamicWorkflowStore, str]:
-    """Return the Dynamic Workflow store and the caller's owner ID in its ``AGENT_SCOPE``."""
+    """Return the Dynamic Workflow store and the caller's owner ID in the store's ``AGENT_SCOPE``."""
     if not context.agent_name:
         msg = "Agent name is missing in the tool runtime context."
         raise DynamicWorkflowError(msg)

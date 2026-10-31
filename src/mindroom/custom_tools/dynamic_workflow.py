@@ -20,7 +20,6 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.resolution import authored_tool_entries
 from mindroom.custom_tools.dynamic_workflow_context import (
-    AGENT_SCOPE,
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
@@ -53,6 +52,7 @@ from mindroom.dynamic_workflows.spec import (
     granted_tool_error,
     parse_workflow_spec,
 )
+from mindroom.dynamic_workflows.store import AGENT_SCOPE
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_run_usage
 from mindroom.llm.messages import Message
