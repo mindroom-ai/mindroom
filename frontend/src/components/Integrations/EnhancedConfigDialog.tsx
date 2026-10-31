@@ -65,8 +65,6 @@ interface EnhancedConfigDialogProps {
   isEditing?: boolean;
   docsUrl?: string | null;
   helperText?: string | null;
-  icon?: any;
-  iconColor?: string;
   agentName?: string | null;
   executionScope?: WorkerScope | null;
 }
@@ -82,8 +80,6 @@ export function EnhancedConfigDialog({
   isEditing = false,
   docsUrl,
   helperText,
-  icon: Icon,
-  iconColor,
   agentName,
   executionScope,
 }: EnhancedConfigDialogProps) {
@@ -502,11 +498,6 @@ export function EnhancedConfigDialog({
       <DialogContent className="sm:max-w-[600px]">
         <DialogHeader className="space-y-3">
           <div className="flex items-center space-x-3">
-            {Icon && (
-              <div className={cn("p-2 rounded-lg bg-muted", iconColor)}>
-                <Icon className="h-5 w-5" />
-              </div>
-            )}
             <div>
               <DialogTitle className="text-xl">
                 {isEditing ? "Edit" : "Configure"} {displayName}

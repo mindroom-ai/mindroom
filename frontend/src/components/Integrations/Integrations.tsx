@@ -45,10 +45,9 @@ import { getIconForTool } from "./iconMapping";
 import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 import {
   Integration,
-  IntegrationCard,
-  IntegrationConfig,
   IntegrationProvider,
   IntegrationStatus,
+  ProviderCard,
   GenericOAuthIntegrationProvider,
   builtInProviderCards,
 } from "./integrations/index";
@@ -58,19 +57,25 @@ import { FilterSelector } from "@/components/shared/FilterSelector";
 
 const SHARED_ONLY_PROVIDER_IDS = new Set(["spotify", "homeassistant"]);
 
+type FilterMode = "all" | "available" | "unconfigured" | "configured";
+
+const CATEGORIES = [
+  { id: "email", name: "Email & Calendar" },
+  { id: "communication", name: "Communication" },
+  { id: "entertainment", name: "Entertainment" },
+  { id: "social", name: "Social" },
+  { id: "development", name: "Development" },
+  { id: "research", name: "Research" },
+  { id: "smart_home", name: "Smart Home" },
+  { id: "information", name: "Information" },
+];
+
 const titleFromProviderId = (providerId: string) =>
   providerId
     .split(/[_-]+/)
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
-
-const oauthProviderDisplayName = (
-  providerId: string,
-  providerTool?: ToolInfo,
-) =>
-  providerTool?.display_name.replace(/\s+Tool$/, "") ??
-  titleFromProviderId(providerId);
 
 // Several tools can share one provider connection, so no single tool's settings can stand for its card.
 const providersSharedByTools = (tools: ToolInfo[]) => {
@@ -96,7 +101,7 @@ const builtInCardsById = new Map(
 );
 
 const providerForIntegration = (
-  integration: IntegrationCard,
+  integration: ProviderCard,
 ): IntegrationProvider | null => {
   if (integration.id === "homeassistant") {
     return homeAssistantIntegration;
@@ -114,17 +119,16 @@ const providerForIntegration = (
 const discoveredOAuthCard = (
   providerId: string,
   providerTool?: ToolInfo,
-): IntegrationCard => {
-  const name = oauthProviderDisplayName(providerId, providerTool);
+): ProviderCard => {
+  const name =
+    providerTool?.display_name.replace(/\s+Tool$/, "") ??
+    titleFromProviderId(providerId);
   return {
     id: providerId,
     name,
     description: `Connect ${name} OAuth for ${providerTool?.display_name ?? "this tool"}.`,
     category: providerTool?.category ?? "productivity",
-    icon: getIconForTool(
-      providerTool?.icon ?? null,
-      providerTool?.icon_color ?? null,
-    ),
+    icon: getIconForTool(providerTool?.icon ?? null, providerTool?.icon_color),
     setup_type: "oauth",
     oauth_provider_id: providerId,
   };
@@ -146,7 +150,7 @@ const hasConfiguredOAuthFallback = (integration?: {
   integration?.environment_auth_configured === true;
 
 const withProviderState = (
-  card: IntegrationCard,
+  card: ProviderCard,
   providerTool: ToolInfo | undefined,
   status: IntegrationStatus,
 ): Integration => {
@@ -155,7 +159,6 @@ const withProviderState = (
     ...card,
     config_fields: providerTool?.config_fields,
     docs_url: providerTool?.docs_url,
-    icon_color: providerTool?.icon_color,
     oauth_fallback_fields: providerTool?.oauth_fallback_fields,
     manual_auth_configured: providerTool?.manual_auth_configured,
     environment_auth_configured: providerTool?.environment_auth_configured,
@@ -251,9 +254,13 @@ export function Integrations() {
     currentScopeKeyRef.current === scopeKey;
   const isCurrentLoadRequest = (requestId: number, scopeKey: string) =>
     requestId === loadRequestIdRef.current && isCurrentScope(scopeKey);
+  const scope = {
+    agentName: effectiveScopeAgentName,
+    executionScope: selectedExecutionScope,
+  };
   const [activeDialog, setActiveDialog] = useState<{
     integration: Integration;
-    config: IntegrationConfig;
+    SetupComponent: NonNullable<IntegrationProvider["SetupComponent"]>;
   } | null>(null);
   const [configDialog, setConfigDialog] = useState<{
     service: string;
@@ -263,13 +270,9 @@ export function Integrations() {
     isEditing?: boolean;
     docsUrl?: string | null;
     helperText?: string | null;
-    icon?: any;
-    iconColor?: string;
     useSelectedScope?: boolean;
   } | null>(null);
-  const [filterMode, setFilterMode] = useState<
-    "all" | "available" | "unconfigured" | "configured"
-  >("all");
+  const [filterMode, setFilterMode] = useState<FilterMode>("all");
   const [searchTerm, setSearchTerm] = useState("");
   const { toast } = useToast();
 
@@ -296,8 +299,7 @@ export function Integrations() {
     const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     try {
-      // Optionally refetch tools from backend to get updated statuses
-      // This is important after Google OAuth to get the new status for Google tools
+      // Refetch tools after a setup dialog saved credentials, so their statuses update
       if (forceRefresh) {
         await refetchTools();
         // Return early since refetchTools will trigger this useEffect again via backendTools update
@@ -305,10 +307,6 @@ export function Integrations() {
       }
 
       const loadedIntegrations: Integration[] = [];
-      const scope = {
-        agentName: effectiveScopeAgentName,
-        executionScope: selectedExecutionScope,
-      };
       const backendToolsByName = new Map<string, ToolInfo>(
         backendTools.map((tool) => [tool.name, tool]),
       );
@@ -347,18 +345,14 @@ export function Integrations() {
         .filter(
           (tool) =>
             !providerIds.has(tool.name) &&
-            !(
-              tool.auth_provider &&
-              providerIds.has(tool.auth_provider) &&
-              !sharedProviderIds.has(tool.auth_provider)
-            ),
+            (!tool.auth_provider || sharedProviderIds.has(tool.auth_provider)),
         )
         .filter(
           (tool) =>
             !hidesSharedOnlyIntegrations ||
             tool.execution_scope_supported !== false,
         )
-        .map((tool) => {
+        .map((tool): Integration => {
           const mapped = mapToolToIntegration(tool);
           return {
             ...mapped,
@@ -370,9 +364,7 @@ export function Integrations() {
                 : mapped.status,
             auth_provider: tool.auth_provider ?? undefined,
             config_service: tool.name,
-            oauth_fallback_fields: tool.oauth_fallback_fields,
-            manual_auth_configured: tool.manual_auth_configured,
-          } as Integration & { auth_provider?: string };
+          };
         });
 
       if (!isCurrentLoadRequest(requestId, scopeKey)) {
@@ -408,15 +400,11 @@ export function Integrations() {
     );
   };
 
-  const integrationHasScopedOAuthProvider = (integration: Integration) =>
-    integration.setup_type === "oauth" &&
-    providerForIntegration(integration) != null &&
-    !SHARED_ONLY_PROVIDER_IDS.has(integration.id);
-
+  // OAuth cards connect for the selected agent's scope; other credentials stay shared-only.
   const blocksScopedDashboardCredentials = (integration: Integration) =>
     disablesDashboardCredentialManagement &&
     integrationNeedsDashboardCredentials(integration) &&
-    !integrationHasScopedOAuthProvider(integration);
+    !integration.oauth_provider_id;
 
   const openToolConfigDialog = (integration: Integration) => {
     if (!integration.config_fields || integration.config_fields.length === 0) {
@@ -430,8 +418,6 @@ export function Integrations() {
       isEditing: integration.status === "connected",
       docsUrl: integration.docs_url || null,
       helperText: integration.helper_text || null,
-      icon: null,
-      iconColor: integration.icon_color || undefined,
     });
     return true;
   };
@@ -471,9 +457,7 @@ export function Integrations() {
         label: "Redirect URI",
         type: "text",
         required: false,
-        placeholder: `${oauthRedirectPlaceholderOrigin()}/api/oauth/${
-          integration.oauth_provider_id ?? integration.id
-        }/callback`,
+        placeholder: `${oauthRedirectPlaceholderOrigin()}/api/oauth/${integration.id}/callback`,
         description: "Optional provider-specific redirect URI",
       });
     }
@@ -485,8 +469,6 @@ export function Integrations() {
       isEditing: hasCustomClientConfig,
       docsUrl: integration.docs_url || null,
       helperText: null,
-      icon: null,
-      iconColor: integration.icon_color || undefined,
       useSelectedScope: false,
     });
     return true;
@@ -503,19 +485,13 @@ export function Integrations() {
       return;
     }
 
-    // Check if we have a provider for this integration
     const provider = providerForIntegration(integration);
-    const scope = {
-      agentName: effectiveScopeAgentName,
-      executionScope: selectedExecutionScope,
-    };
-
     if (provider) {
-      const config = provider.getConfig(scope);
-
-      // If there's a custom config component, show it in a dialog
-      if (config.ConfigComponent) {
-        setActiveDialog({ integration, config });
+      if (provider.SetupComponent) {
+        setActiveDialog({
+          integration,
+          SetupComponent: provider.SetupComponent,
+        });
         return;
       }
 
@@ -533,11 +509,10 @@ export function Integrations() {
         return;
       }
 
-      // Otherwise, execute the action directly
-      if (config.onAction) {
+      if (provider.connect) {
         setLoading(true);
         try {
-          await config.onAction();
+          await provider.connect(scope);
           await loadIntegrations(); // Reload status
         } catch (error) {
           toast({
@@ -552,25 +527,11 @@ export function Integrations() {
           setLoading(false);
         }
       }
-    } else if (
-      integration.setup_type === "api_key" ||
-      integration.setup_type === "oauth" ||
-      integration.setup_type === "special" ||
-      integration.setup_type === "none"
-    ) {
+    } else if (!openToolConfigDialog(integration)) {
       // Show generic config dialog for tools with config_fields
-      if (!openToolConfigDialog(integration)) {
-        toast({
-          title: "Configuration Error",
-          description: `${integration.name} requires configuration but no fields are specified.`,
-          variant: "destructive",
-        });
-      }
-    } else {
-      // Fallback for integrations without providers yet
       toast({
-        title: "Not Implemented",
-        description: `${integration.name} integration is not yet implemented.`,
+        title: "Configuration Error",
+        description: `${integration.name} requires configuration but no fields are specified.`,
         variant: "destructive",
       });
     }
@@ -617,7 +578,7 @@ export function Integrations() {
 
   const handleProviderDisconnect = (
     integration: Integration,
-    disconnect: NonNullable<IntegrationConfig["onDisconnect"]>,
+    disconnect: () => Promise<void>,
   ) =>
     runDisconnectOperation(
       integration,
@@ -657,12 +618,12 @@ export function Integrations() {
       );
     }
 
-    const providerDisconnect = providerForIntegration(integration)?.getConfig({
-      agentName: effectiveScopeAgentName,
-      executionScope: selectedExecutionScope,
-    }).onDisconnect;
-    const disconnectProvider = providerDisconnect
-      ? () => handleProviderDisconnect(integration, providerDisconnect)
+    const provider = providerForIntegration(integration);
+    const disconnectProvider = provider
+      ? () =>
+          handleProviderDisconnect(integration, () =>
+            provider.disconnect(scope),
+          )
       : undefined;
 
     const canConfigureOAuthClient =
@@ -743,11 +704,10 @@ export function Integrations() {
       ) : null;
 
     // Handle tools with delegated authentication
-    const tool = integration;
-    if (tool.auth_provider) {
+    if (integration.auth_provider) {
       // Check if the auth provider is connected
       const authProvider = integrations.find(
-        (i) => i.id === tool.auth_provider,
+        (i) => i.id === integration.auth_provider,
       );
 
       if (
@@ -756,7 +716,7 @@ export function Integrations() {
         authProvider?.status === "connected"
       ) {
         // Auth provider is connected
-        if (tool.config_fields && tool.config_fields.length > 0) {
+        if (integration.config_fields && integration.config_fields.length > 0) {
           return (
             <div className="flex gap-2 items-center">
               <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
@@ -788,7 +748,7 @@ export function Integrations() {
         return (
           <div className="flex items-center gap-2">
             <Badge variant="outline" className="text-muted-foreground">
-              Requires {authProvider?.name || tool.auth_provider}
+              Requires {authProvider?.name || integration.auth_provider}
             </Badge>
             <Button
               onClick={() => {
@@ -796,8 +756,8 @@ export function Integrations() {
                   handleIntegrationAction(authProvider);
                 } else {
                   toast({
-                    title: `Connect ${tool.auth_provider} first`,
-                    description: `Please connect to ${tool.auth_provider} to use this tool.`,
+                    title: `Connect ${integration.auth_provider} first`,
+                    description: `Please connect to ${integration.auth_provider} to use this tool.`,
                   });
                 }
               }}
@@ -913,7 +873,7 @@ export function Integrations() {
           {oauthClientConfigButton}
           {manualFallbackButton}
           <Button
-            onClick={() => void loadIntegrations(false)}
+            onClick={() => void loadIntegrations()}
             disabled={loading}
             variant="outline"
             size="sm"
@@ -1059,9 +1019,7 @@ export function Integrations() {
 
   const IntegrationCard = ({ integration }: { integration: Integration }) => {
     const isConnected = integration.status === "connected";
-    const usesGoogleUserData = (
-      integration.oauth_provider_id ?? integration.id
-    ).startsWith("google_");
+    const usesGoogleUserData = integration.id.startsWith("google_");
     const statusLabel = integration.status_error
       ? "Status error"
       : integration.status === "not_connected"
@@ -1174,56 +1132,11 @@ export function Integrations() {
   const categories = useMemo(() => {
     const allCategories = [
       { id: "all", name: "All", count: filteredIntegrations.length },
-      {
-        id: "email",
-        name: "Email & Calendar",
-        count: filteredIntegrations.filter((i) => i.category === "email")
+      ...CATEGORIES.map((category) => ({
+        ...category,
+        count: filteredIntegrations.filter((i) => i.category === category.id)
           .length,
-      },
-      {
-        id: "communication",
-        name: "Communication",
-        count: filteredIntegrations.filter(
-          (i) => i.category === "communication",
-        ).length,
-      },
-      {
-        id: "entertainment",
-        name: "Entertainment",
-        count: filteredIntegrations.filter(
-          (i) => i.category === "entertainment",
-        ).length,
-      },
-      {
-        id: "social",
-        name: "Social",
-        count: filteredIntegrations.filter((i) => i.category === "social")
-          .length,
-      },
-      {
-        id: "development",
-        name: "Development",
-        count: filteredIntegrations.filter((i) => i.category === "development")
-          .length,
-      },
-      {
-        id: "research",
-        name: "Research",
-        count: filteredIntegrations.filter((i) => i.category === "research")
-          .length,
-      },
-      {
-        id: "smart_home",
-        name: "Smart Home",
-        count: filteredIntegrations.filter((i) => i.category === "smart_home")
-          .length,
-      },
-      {
-        id: "information",
-        name: "Information",
-        count: filteredIntegrations.filter((i) => i.category === "information")
-          .length,
-      },
+      })),
     ];
 
     return filterMode !== "all"
@@ -1292,12 +1205,7 @@ export function Integrations() {
                   { value: "configured", label: "Configured" },
                 ]}
                 value={filterMode}
-                onChange={(value) =>
-                  setFilterMode(
-                    value as
-                      "all" | "available" | "unconfigured" | "configured",
-                  )
-                }
+                onChange={(value) => setFilterMode(value as FilterMode)}
                 size="sm"
               />
             </div>
@@ -1391,18 +1299,14 @@ export function Integrations() {
                 {activeDialog.integration.description}
               </DialogDescription>
             </DialogHeader>
-            {activeDialog.config.ConfigComponent && (
-              <activeDialog.config.ConfigComponent
-                onClose={() => setActiveDialog(null)}
-                agentName={effectiveScopeAgentName}
-                executionScope={selectedExecutionScope}
-                onSuccess={async () => {
-                  setActiveDialog(null);
-                  // Force refresh to get updated Google tools status
-                  await loadIntegrations(true);
-                }}
-              />
-            )}
+            <activeDialog.SetupComponent
+              agentName={effectiveScopeAgentName}
+              executionScope={selectedExecutionScope}
+              onSuccess={async () => {
+                setActiveDialog(null);
+                await loadIntegrations(true);
+              }}
+            />
           </DialogContent>
         </Dialog>
       )}
@@ -1419,8 +1323,6 @@ export function Integrations() {
           isEditing={configDialog.isEditing}
           docsUrl={configDialog.docsUrl}
           helperText={configDialog.helperText}
-          icon={configDialog.icon}
-          iconColor={configDialog.iconColor}
           agentName={
             configDialog.useSelectedScope === false
               ? null

@@ -198,8 +198,7 @@ describe("Generic OAuth integration provider", () => {
       json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
     });
 
-    const config = drive.getConfig();
-    const connectPromise = config.onAction!();
+    const connectPromise = drive.connect();
 
     await vi.waitFor(() => {
       expect(global.window.open).toHaveBeenCalled();
@@ -259,17 +258,16 @@ describe("Generic OAuth integration provider", () => {
           origin: window.location.origin,
         }),
       );
-    const config = drive.getConfig();
 
     const connected = openPopup();
-    const connect = config.onAction!();
+    const connect = drive.connect();
     await vi.waitFor(() => expect(global.window.open).toHaveBeenCalled());
     say(connected, "connected");
     await connect;
     expect(connected.close).toHaveBeenCalledOnce();
 
     const cancelled = openPopup();
-    const cancel = config.onAction!();
+    const cancel = drive.connect();
     const rejection = expect(cancel).rejects.toThrow(
       "Google Drive authorization was cancelled",
     );
@@ -299,8 +297,7 @@ describe("Generic OAuth integration provider", () => {
       }),
     });
 
-    const config = drive.getConfig();
-    const connectPromise = config.onAction!();
+    const connectPromise = drive.connect();
 
     await vi.waitFor(() => {
       expect(global.window.open).toHaveBeenCalled();
@@ -339,8 +336,7 @@ describe("Generic OAuth integration provider", () => {
       json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
     });
 
-    const config = drive.getConfig();
-    const connectPromise = config.onAction!();
+    const connectPromise = drive.connect();
 
     await vi.waitFor(() => {
       expect(global.window.open).toHaveBeenCalled();
@@ -384,8 +380,7 @@ describe("Generic OAuth integration provider", () => {
       json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
     });
 
-    const config = drive.getConfig();
-    const connectPromise = config.onAction!();
+    const connectPromise = drive.connect();
 
     await vi.waitFor(() => {
       expect(global.window.open).toHaveBeenCalled();
@@ -497,6 +492,20 @@ describe("Generic OAuth integration provider", () => {
     });
   });
 
+  it("reports why connect or disconnect failed", async () => {
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({ detail: "Client is not allowed" }),
+      })
+      .mockResolvedValueOnce({ ok: false, json: async () => ({}) });
+
+    await expect(drive.connect()).rejects.toThrow("Client is not allowed");
+    await expect(drive.disconnect()).rejects.toThrow(
+      "Failed to disconnect Google Drive",
+    );
+  });
+
   it("sends the selected agent scope with status, connect, and disconnect", async () => {
     const scope = { agentName: "mind", executionScope: "user" as const };
     (global.fetch as any)
@@ -509,9 +518,10 @@ describe("Generic OAuth integration provider", () => {
     (global.window.open as any).mockReturnValue(null);
 
     await drive.loadStatus(scope);
-    const config = drive.getConfig(scope);
-    await expect(config.onAction!()).rejects.toThrow("OAuth popup was blocked");
-    await config.onDisconnect!();
+    await expect(drive.connect(scope)).rejects.toThrow(
+      "OAuth popup was blocked",
+    );
+    await drive.disconnect(scope);
 
     expect((global.fetch as any).mock.calls).toEqual([
       ["/api/oauth/google_drive/status?agent_name=mind&execution_scope=user"],

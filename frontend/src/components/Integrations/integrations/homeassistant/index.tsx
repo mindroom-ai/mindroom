@@ -1,64 +1,38 @@
-import {
-  IntegrationProvider,
-  IntegrationConfig,
-  IntegrationScope,
-  IntegrationStatus,
-} from "../types";
-import { HomeAssistantIntegration as HomeAssistantIntegrationComponent } from "@/components/HomeAssistantIntegration/HomeAssistantIntegration";
+import { IntegrationProvider, IntegrationScope } from "../types";
+import { HomeAssistantIntegration } from "@/components/HomeAssistantIntegration/HomeAssistantIntegration";
 import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 
-class HomeAssistantIntegrationProvider implements IntegrationProvider {
-  getConfig(scope?: IntegrationScope): IntegrationConfig {
-    const agentName = scope?.agentName ?? null;
-    const executionScope = scope?.executionScope;
-    return {
-      onDisconnect: async () => {
-        const response = await fetch(
-          withAgentExecutionScope(
-            `${API_BASE_URL}/api/homeassistant/disconnect`,
-            agentName,
-            executionScope,
-          ),
-          {
-            method: "POST",
-          },
-        );
-        if (!response.ok) {
-          throw new Error("Failed to disconnect Home Assistant");
-        }
-      },
-      ConfigComponent: (props) => (
-        <HomeAssistantIntegrationComponent
-          onSuccess={props.onSuccess}
-          agentName={agentName}
-          executionScope={executionScope}
-        />
-      ),
-    };
-  }
+const homeAssistantUrl = (
+  action: "disconnect" | "status",
+  scope?: IntegrationScope,
+) =>
+  withAgentExecutionScope(
+    `${API_BASE_URL}/api/homeassistant/${action}`,
+    scope?.agentName,
+    scope?.executionScope,
+  );
 
-  async loadStatus(scope?: IntegrationScope): Promise<IntegrationStatus> {
-    const agentName = scope?.agentName ?? null;
-    const executionScope = scope?.executionScope;
+export const homeAssistantIntegration: IntegrationProvider = {
+  SetupComponent: HomeAssistantIntegration,
+
+  async disconnect(scope) {
+    const response = await fetch(homeAssistantUrl("disconnect", scope), {
+      method: "POST",
+    });
+    if (!response.ok) {
+      throw new Error("Failed to disconnect Home Assistant");
+    }
+  },
+
+  async loadStatus(scope) {
     try {
-      const response = await fetch(
-        withAgentExecutionScope(
-          `${API_BASE_URL}/api/homeassistant/status`,
-          agentName,
-          executionScope,
-        ),
-      );
-      if (response.ok) {
-        const data = await response.json();
-        if (data.connected) {
-          return { status: "connected" };
-        }
+      const response = await fetch(homeAssistantUrl("status", scope));
+      if (response.ok && (await response.json()).connected) {
+        return { status: "connected" };
       }
     } catch (error) {
       console.error("Failed to load Home Assistant status:", error);
     }
     return { status: "available" };
-  }
-}
-
-export const homeAssistantIntegration = new HomeAssistantIntegrationProvider();
+  },
+};

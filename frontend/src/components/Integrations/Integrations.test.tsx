@@ -71,6 +71,7 @@ const {
   mockOAuthProviderCreated,
   mockHomeAssistantLoadStatus,
   mockHomeAssistantDisconnect,
+  mockHomeAssistantSetup,
   mockEnhancedConfigDialogProps,
 } = vi.hoisted(() => ({
   mockUseTools: vi.fn(),
@@ -80,6 +81,7 @@ const {
   mockOAuthProviderCreated: vi.fn(),
   mockHomeAssistantLoadStatus: vi.fn(),
   mockHomeAssistantDisconnect: vi.fn(),
+  mockHomeAssistantSetup: vi.fn(),
   mockEnhancedConfigDialogProps: vi.fn(),
 }));
 
@@ -184,7 +186,6 @@ vi.mock("./EnhancedConfigDialog", () => ({
     service,
     docsUrl,
     helperText,
-    iconColor,
   }: any) => {
     mockEnhancedConfigDialogProps({ configFields, service });
     // Auto-call success when dialog opens
@@ -196,7 +197,6 @@ vi.mock("./EnhancedConfigDialog", () => ({
         <div>Fields: {JSON.stringify(configFields)}</div>
         <div>Docs: {docsUrl}</div>
         <div>Helper: {helperText}</div>
-        <div>Icon color: {iconColor}</div>
       </>
     );
   },
@@ -213,11 +213,12 @@ vi.mock("./integrations/index", async (importOriginal) => ({
       mockOAuthProviderCreated(providerId, displayName);
     }
 
-    getConfig(scope?: unknown) {
-      return {
-        onAction: () => mockOAuthConnect(this.providerId, scope),
-        onDisconnect: () => mockOAuthDisconnect(this.providerId, scope),
-      };
+    connect(scope?: unknown) {
+      return mockOAuthConnect(this.providerId, scope);
+    }
+
+    disconnect(scope?: unknown) {
+      return mockOAuthDisconnect(this.providerId, scope);
     }
 
     loadStatus(scope?: unknown) {
@@ -227,12 +228,13 @@ vi.mock("./integrations/index", async (importOriginal) => ({
 }));
 vi.mock("./integrations/homeassistant", () => ({
   homeAssistantIntegration: {
-    getConfig: () => ({
-      onDisconnect: mockHomeAssistantDisconnect,
-      ConfigComponent: ({ onSuccess }: { onSuccess?: () => void }) => (
-        <button onClick={onSuccess}>Finish Home Assistant setup</button>
-      ),
-    }),
+    SetupComponent: (props: { onSuccess: () => void }) => {
+      mockHomeAssistantSetup(props);
+      return (
+        <button onClick={props.onSuccess}>Finish Home Assistant setup</button>
+      );
+    },
+    disconnect: mockHomeAssistantDisconnect,
     loadStatus: mockHomeAssistantLoadStatus,
   },
 }));
@@ -774,6 +776,9 @@ describe("Integrations", () => {
       within(dialog).getByText("Control and monitor your smart home devices"),
     ).toBeInTheDocument();
 
+    expect(mockHomeAssistantSetup).toHaveBeenLastCalledWith(
+      expect.objectContaining(sharedScope),
+    );
     fireEvent.click(
       within(dialog).getByRole("button", {
         name: "Finish Home Assistant setup",
@@ -784,6 +789,52 @@ describe("Integrations", () => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       expect(refetch).toHaveBeenCalledOnce();
     });
+  });
+
+  it("sets up Home Assistant for an agent with a shared runtime scope", async () => {
+    useConfigStore.setState({
+      agents: [
+        {
+          id: "code",
+          display_name: "Scoped Agent",
+          role: "test",
+          tools: ["homeassistant"],
+          skills: [],
+          instructions: [],
+          rooms: ["lobby"],
+          worker_scope: "shared",
+        },
+      ],
+      agentPoliciesByAgent: {
+        code: makeAgentPolicy("code", {
+          effective_execution_scope: "shared",
+          scope_label: "worker_scope=shared",
+          scope_source: "agent.worker_scope",
+        }),
+      },
+    });
+
+    render(<Integrations />);
+
+    fireEvent.keyDown(screen.getByRole("combobox"), {
+      key: "ArrowDown",
+      code: "ArrowDown",
+    });
+    fireEvent.click(await screen.findByText("Scoped Agent"));
+    await screen.findByText(
+      "Configuring tools for Scoped Agent (worker_scope=shared).",
+    );
+    const homeAssistantCard = (
+      await screen.findByText("Home Assistant")
+    ).closest(".h-full") as HTMLElement;
+    fireEvent.click(
+      within(homeAssistantCard).getByRole("button", { name: "Setup" }),
+    );
+
+    await screen.findByRole("dialog");
+    expect(mockHomeAssistantSetup).toHaveBeenLastCalledWith(
+      expect.objectContaining({ agentName: "code", executionScope: "shared" }),
+    );
   });
 
   it("should show correct status badges", async () => {
@@ -1261,6 +1312,43 @@ describe("Integrations", () => {
         expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
       });
     }
+  });
+
+  it("reports a tool that needs configuration but lists no fields", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "empty_tool",
+          display_name: "Empty Tool",
+          description: "A tool without config fields",
+          icon: null,
+          icon_color: null,
+          category: "information",
+          status: "requires_config",
+          setup_type: "api_key",
+          config_fields: null,
+          helper_text: null,
+          docs_url: null,
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    const card = (await screen.findByText("Empty Tool")).closest(
+      ".h-full",
+    ) as HTMLElement;
+    fireEvent.click(within(card).getByRole("button", { name: "Configure" }));
+
+    expect(mockToast).toHaveBeenCalledWith({
+      title: "Configuration Error",
+      description:
+        "Empty Tool requires configuration but no fields are specified.",
+      variant: "destructive",
+    });
   });
 
   it("should handle disconnect action", async () => {
@@ -2060,7 +2148,6 @@ describe("Integrations", () => {
       expect(
         screen.getByText("Docs: https://docs.example.test/gmail"),
       ).toBeInTheDocument();
-      expect(screen.getByText("Icon color: text-red-500")).toBeInTheDocument();
     });
     expect(mockOAuthConnect).not.toHaveBeenCalled();
   });
@@ -2109,6 +2196,12 @@ describe("Integrations", () => {
 
     await waitFor(() => {
       expect(mockOAuthConnect).toHaveBeenCalledWith("acme_drive", sharedScope);
+    });
+    // The card reloads its status once the connection flow finishes.
+    await waitFor(() => {
+      expect(
+        mockOAuthLoadStatus.mock.calls.filter(([id]) => id === "acme_drive"),
+      ).toHaveLength(2);
     });
     expect(
       screen.queryByText(/Connect acme_drive first/i),

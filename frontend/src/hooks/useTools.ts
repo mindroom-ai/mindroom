@@ -121,7 +121,6 @@ export function mapToolToIntegration(tool: ToolInfo) {
     description: tool.description,
     category: tool.category,
     icon: tool.icon, // This will need to be mapped to React components
-    icon_color: tool.icon_color,
     status,
     setup_type,
     config_fields: tool.config_fields,

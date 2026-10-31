@@ -16,13 +16,11 @@ import {
 } from "react-icons/si";
 import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 import { watchOAuthCompletion } from "@/lib/oauthCompletion";
-import type { WorkerScope } from "@/types/config";
 import {
-  IntegrationCard,
-  IntegrationConfig,
   IntegrationProvider,
   IntegrationScope,
   IntegrationStatus,
+  ProviderCard,
 } from "./types";
 
 type OAuthStatus = {
@@ -35,6 +33,16 @@ type OAuthStatus = {
   resetRequired: boolean;
   statusError?: string;
 };
+
+const unavailableStatus = (statusError: string): OAuthStatus => ({
+  connected: false,
+  hasClientConfig: false,
+  hasCustomClientConfig: false,
+  hasServiceAccountConfig: false,
+  clientConfigRedirectUriSupported: false,
+  resetRequired: false,
+  statusError,
+});
 
 function oauthCompletionOrigin(rawOrigin: unknown): string {
   if (typeof rawOrigin === "string" && rawOrigin.length > 0) {
@@ -52,20 +60,19 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     private readonly displayName: string,
   ) {}
 
-  getConfig(scope?: IntegrationScope): IntegrationConfig {
-    const agentName = scope?.agentName ?? null;
-    const executionScope = scope?.executionScope;
-    return {
-      onAction: () => this.connect(agentName, executionScope),
-      onDisconnect: () => this.disconnect(agentName, executionScope),
-    };
+  private url(
+    action: "connect" | "disconnect" | "status",
+    scope?: IntegrationScope,
+  ): string {
+    return withAgentExecutionScope(
+      `${API_BASE_URL}/api/oauth/${this.providerId}/${action}`,
+      scope?.agentName,
+      scope?.executionScope,
+    );
   }
 
   async loadStatus(scope?: IntegrationScope): Promise<IntegrationStatus> {
-    const status = await this.checkConnection(
-      scope?.agentName ?? null,
-      scope?.executionScope,
-    );
+    const status = await this.checkConnection(scope);
     const integrationStatus: IntegrationStatus = {
       status: status.connected
         ? "connected"
@@ -91,23 +98,8 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     return integrationStatus;
   }
 
-  private async connect(
-    agentName?: string | null,
-    executionScope?: WorkerScope | null,
-  ): Promise<void> {
-    const response = await fetch(
-      withAgentExecutionScope(
-        `${API_BASE_URL}/api/oauth/${this.providerId}/connect`,
-        agentName,
-        executionScope,
-      ),
-      { method: "POST" },
-    );
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail || `Failed to connect ${this.displayName}`);
-    }
-    const data = await response.json();
+  async connect(scope?: IntegrationScope): Promise<void> {
+    const data = await (await this.post("connect", scope)).json();
     if (typeof data.auth_url !== "string" || data.auth_url.length === 0) {
       throw new Error(`Failed to connect ${this.displayName}`);
     }
@@ -117,38 +109,29 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     );
   }
 
-  private async disconnect(
-    agentName?: string | null,
-    executionScope?: WorkerScope | null,
-  ): Promise<void> {
-    const response = await fetch(
-      withAgentExecutionScope(
-        `${API_BASE_URL}/api/oauth/${this.providerId}/disconnect`,
-        agentName,
-        executionScope,
-      ),
-      { method: "POST" },
-    );
+  async disconnect(scope?: IntegrationScope): Promise<void> {
+    await this.post("disconnect", scope);
+  }
+
+  private async post(
+    action: "connect" | "disconnect",
+    scope?: IntegrationScope,
+  ): Promise<Response> {
+    const response = await fetch(this.url(action, scope), { method: "POST" });
     if (!response.ok) {
       const error = await response.json();
       throw new Error(
-        error.detail || `Failed to disconnect ${this.displayName}`,
+        error.detail || `Failed to ${action} ${this.displayName}`,
       );
     }
+    return response;
   }
 
   private async checkConnection(
-    agentName?: string | null,
-    executionScope?: WorkerScope | null,
+    scope?: IntegrationScope,
   ): Promise<OAuthStatus> {
     try {
-      const response = await fetch(
-        withAgentExecutionScope(
-          `${API_BASE_URL}/api/oauth/${this.providerId}/status`,
-          agentName,
-          executionScope,
-        ),
-      );
+      const response = await fetch(this.url("status", scope));
       if (!response.ok) {
         let detail = `Failed to load ${this.displayName} OAuth status.`;
         try {
@@ -159,15 +142,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         } catch {
           // Keep the generic status error when the response body is not JSON.
         }
-        return {
-          connected: false,
-          hasClientConfig: false,
-          hasCustomClientConfig: false,
-          hasServiceAccountConfig: false,
-          clientConfigRedirectUriSupported: false,
-          resetRequired: false,
-          statusError: detail,
-        };
+        return unavailableStatus(detail);
       }
       const data = await response.json();
       return {
@@ -185,15 +160,9 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       };
     } catch (error) {
       console.error(`Failed to load ${this.providerId} status:`, error);
-      return {
-        connected: false,
-        hasClientConfig: false,
-        hasCustomClientConfig: false,
-        hasServiceAccountConfig: false,
-        clientConfigRedirectUriSupported: false,
-        resetRequired: false,
-        statusError: `Failed to load ${this.displayName} OAuth status.`,
-      };
+      return unavailableStatus(
+        `Failed to load ${this.displayName} OAuth status.`,
+      );
     }
   }
 
@@ -231,7 +200,7 @@ const googleCard = (
   category: string,
   icon: IconType,
   iconColor: string,
-): IntegrationCard => ({
+): ProviderCard => ({
   id,
   name,
   description,
@@ -242,8 +211,8 @@ const googleCard = (
 });
 
 // Built-in cards show whether or not the tools list names their provider, so also before it loads.
-// Discovered OAuth providers follow them, named after their tools; Google Cloud's card is named after the connection, not its BigQuery tool.
-export const builtInProviderCards: IntegrationCard[] = [
+// Google Cloud's card is named after the connection, not after its BigQuery tool.
+export const builtInProviderCards: ProviderCard[] = [
   googleCard(
     "google_calendar",
     "Google Calendar",
@@ -312,9 +281,8 @@ export const builtInProviderCards: IntegrationCard[] = [
 
 export type {
   Integration,
-  IntegrationCard,
-  IntegrationConfig,
   IntegrationProvider,
   IntegrationScope,
   IntegrationStatus,
+  ProviderCard,
 } from "./types";

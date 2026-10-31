@@ -1,19 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render } from "@testing-library/react";
-
-const { mockHomeAssistantComponent } = vi.hoisted(() => ({
-  mockHomeAssistantComponent: vi.fn(),
-}));
-
-vi.mock(
-  "@/components/HomeAssistantIntegration/HomeAssistantIntegration",
-  () => ({
-    HomeAssistantIntegration: (props: unknown) => {
-      mockHomeAssistantComponent(props);
-      return null;
-    },
-  }),
-);
 
 vi.mock("@/lib/api", () => ({
   API_BASE_URL: "https://backend.example.test",
@@ -41,24 +26,6 @@ global.fetch = vi.fn();
 describe("HomeAssistantIntegrationProvider", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-  });
-
-  describe("getConfig", () => {
-    it("binds the setup component to the selected scope", () => {
-      const onSuccess = vi.fn();
-      const Setup = homeAssistantIntegration.getConfig({
-        agentName: "code",
-        executionScope: "shared",
-      }).ConfigComponent!;
-
-      render(<Setup onClose={vi.fn()} onSuccess={onSuccess} />);
-
-      expect(mockHomeAssistantComponent).toHaveBeenCalledWith({
-        onSuccess,
-        agentName: "code",
-        executionScope: "shared",
-      });
-    });
   });
 
   describe("loadStatus", () => {
@@ -121,14 +88,21 @@ describe("HomeAssistantIntegrationProvider", () => {
   });
 
   describe("disconnect", () => {
+    it("fails when the backend rejects the disconnect", async () => {
+      (global.fetch as any).mockResolvedValueOnce({ ok: false });
+
+      await expect(homeAssistantIntegration.disconnect()).rejects.toThrow(
+        "Failed to disconnect Home Assistant",
+      );
+    });
+
     it("appends agent_name and execution_scope to the disconnect request", async () => {
       (global.fetch as any).mockResolvedValueOnce({ ok: true });
 
-      const config = homeAssistantIntegration.getConfig({
+      await homeAssistantIntegration.disconnect({
         agentName: "code",
         executionScope: "shared",
       });
-      await config.onDisconnect!();
 
       expect(global.fetch).toHaveBeenCalledWith(
         "https://backend.example.test/api/homeassistant/disconnect?agent_name=code&execution_scope=shared",

@@ -16,7 +16,6 @@ export interface Integration {
   docs_url?: string | null;
   helper_text?: string | null;
   config_fields?: ToolFieldSchema[] | null;
-  icon_color?: string | null;
   auth_provider?: string;
   oauth_provider_id?: string;
   oauth_client_configured?: boolean;
@@ -32,8 +31,8 @@ export interface Integration {
   environment_auth_configured?: boolean;
 }
 
-/** A card before its provider reports a status. */
-export type IntegrationCard = Omit<Integration, "status">;
+/** A provider's card before the provider reports its status. */
+export type ProviderCard = Omit<Integration, "status">;
 
 /** What a provider reports about its connection, always including the card status. */
 export type IntegrationStatus = Partial<Integration> &
@@ -44,36 +43,16 @@ export interface IntegrationScope {
   executionScope?: WorkerScope | null;
 }
 
-export interface IntegrationConfig {
-  /**
-   * Handler for when the integration is selected/clicked
-   */
-  onAction?: () => Promise<void>;
-
-  /**
-   * Handler for disconnecting the integration
-   */
-  onDisconnect?: () => Promise<void>;
-
-  /**
-   * Custom component to render when configuring this integration
-   */
-  ConfigComponent?: React.ComponentType<{
-    onClose: () => void;
-    onSuccess?: () => void;
-    agentName?: string | null;
-    executionScope?: WorkerScope | null;
-  }>;
-}
-
 export interface IntegrationProvider {
-  /**
-   * Get the configuration for this integration
-   */
-  getConfig(scope?: IntegrationScope): IntegrationConfig;
-
-  /**
-   * Load the current status of this integration
-   */
   loadStatus(scope?: IntegrationScope): Promise<IntegrationStatus>;
+
+  /** Start the provider's own connection flow; providers set up in a dialog have none. */
+  connect?(scope?: IntegrationScope): Promise<void>;
+
+  disconnect(scope?: IntegrationScope): Promise<void>;
+
+  /** Dialog content that sets up this integration. */
+  SetupComponent?: React.ComponentType<
+    IntegrationScope & { onSuccess: () => void }
+  >;
 }
