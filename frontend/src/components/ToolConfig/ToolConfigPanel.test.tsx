@@ -48,7 +48,6 @@ function seedStore({
         rooms: [],
       } as unknown as Agent,
     ],
-    isDirty: false,
   });
 }
 
@@ -56,13 +55,13 @@ function agentOverrides(toolName = "shell"): ToolOverrides | null {
   return useConfigStore.getState().getAgentToolOverrides("openclaw", toolName);
 }
 
-function renderShellPanel(fields: ToolFieldSchema[] = shellFields) {
+function renderShellPanel() {
   render(
     <ToolConfigPanel
       target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
       toolName="shell"
       toolDisplayName="Shell Commands"
-      overrideFields={fields}
+      overrideFields={shellFields}
     />,
   );
 }

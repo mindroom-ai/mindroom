@@ -106,19 +106,10 @@ function normalizePersistedValue(
   return trimmed.length > 0 ? trimmed : null;
 }
 
-type DraftValues = Record<string, string | string[]>;
+type DraftValues = Partial<Record<string, string | string[]>>;
 
 // An authored value that drops the field's defaults.tools setting.
 const INHERIT = "__MINDROOM_INHERIT__";
-
-// Tool entries keep lazy-loading flags beside the override values; a null
-// entry in the merge patch below removes the flag.
-function lazyFlagPatch(defer: boolean, initial: boolean) {
-  return {
-    defer: defer ? true : null,
-    initial: defer && initial ? true : null,
-  };
-}
 
 export function ToolConfigPanel({
   target,
@@ -187,18 +178,19 @@ export function ToolConfigPanel({
     }
   };
 
+  // Tool entries keep lazy-loading flags beside the override values; a null
+  // flag removes it.
   const setLazyLoading = (defer: boolean, initial: boolean) =>
-    commitOverrides(lazyFlagPatch(defer, initial));
+    commitOverrides({
+      defer: defer ? true : null,
+      initial: defer && initial ? true : null,
+    });
 
   const setFieldDraft = (
     field: ToolFieldSchema,
     value: string | string[] | undefined,
   ) => {
-    const { [field.name]: _previous, ...rest } = drafts;
-    setDraftState({
-      owner,
-      drafts: value === undefined ? rest : { ...rest, [field.name]: value },
-    });
+    setDraftState({ owner, drafts: { ...drafts, [field.name]: value } });
     commitOverrides({
       [field.name]:
         value === undefined ? null : normalizePersistedValue(field, value),
@@ -217,16 +209,12 @@ export function ToolConfigPanel({
     value: string | string[] | null,
   ) => {
     const isEnabled = value !== null;
-    const draftValue = value ?? (field.type === "string[]" ? [] : "");
+    const text = typeof value === "string" ? value : "";
     const defaultValue = field.default;
     const fieldId = `override-${field.name}`;
 
     if (field.type === "string[]") {
-      const items = isEnabled
-        ? Array.isArray(draftValue)
-          ? draftValue
-          : []
-        : [];
+      const items = Array.isArray(value) ? value : [];
       const defaultItems = Array.isArray(defaultValue) ? defaultValue : [];
 
       return (
@@ -300,13 +288,13 @@ export function ToolConfigPanel({
             <div className="flex items-center space-x-2">
               <Checkbox
                 id={fieldId}
-                checked={draftValue === "true"}
+                checked={text === "true"}
                 onCheckedChange={(checked) =>
                   setFieldDraft(field, checked ? "true" : "false")
                 }
               />
               <Label htmlFor={fieldId} className="cursor-pointer text-sm">
-                {draftValue === "true" ? "Enabled" : "Disabled"}
+                {text === "true" ? "Enabled" : "Disabled"}
               </Label>
             </div>
           ) : (
@@ -321,12 +309,11 @@ export function ToolConfigPanel({
     }
 
     if (field.type === "select" && field.options) {
-      const displayValue = typeof draftValue === "string" ? draftValue : "";
       return (
         <div>
           {isEnabled ? (
             <Select
-              value={displayValue || (field.default as string | undefined)}
+              value={text || (field.default as string | undefined)}
               onValueChange={(val) => setFieldDraft(field, val)}
             >
               <SelectTrigger id={fieldId}>
@@ -355,7 +342,6 @@ export function ToolConfigPanel({
     }
 
     // text, password, number, url
-    const displayValue = typeof draftValue === "string" ? draftValue : "";
     return (
       <div>
         {isEnabled ? (
@@ -370,7 +356,7 @@ export function ToolConfigPanel({
                     ? "url"
                     : "text"
             }
-            value={displayValue}
+            value={text}
             placeholder={field.placeholder ?? field.label}
             onChange={(e) => {
               setFieldDraft(field, e.target.value);
