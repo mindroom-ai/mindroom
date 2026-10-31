@@ -31,6 +31,7 @@ from mindroom.matrix.personal_room_store import (
     PersonalRoomAdoption,
     PersonalRoomRecord,
     _personal_room_records,
+    personal_room_cleanup_exclusions,
     personal_room_digest,
     personal_room_record_path,
     read_personal_room,
@@ -1196,6 +1197,48 @@ async def test_retention_recovers_create_before_local_receipt(tmp_path: Path, mo
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     await target._room_lifecycle.join_configured_rooms()
     join_room.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_waits_for_an_in_flight_create_but_not_the_rest_of_onboarding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup that sees the creator joined before the alias resolves keeps the room once the create records it."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch)
+    create_room = server.room_create
+    invite = server.room_invite
+    creator_joined = asyncio.Event()
+    create_returns = asyncio.Event()
+    invite_started = asyncio.Event()
+    invite_returns = asyncio.Event()
+
+    async def join_before_alias_resolves(**kwargs: Any) -> object:
+        # A homeserver such as Tuwunel makes the creator a member before the new alias resolves.
+        response = await create_room(**kwargs)
+        del server.aliases[f"#{kwargs['alias']}:localhost"]
+        creator_joined.set()
+        await create_returns.wait()
+        return response
+
+    async def stalled_invite(room_id: str, user_id: str) -> object:
+        invite_started.set()
+        await invite_returns.wait()
+        return await invite(room_id, user_id)
+
+    monkeypatch.setattr(server, "room_create", join_before_alias_resolves)
+    monkeypatch.setattr(server, "room_invite", stalled_invite)
+    create = asyncio.create_task(owner.ensure("@alice:localhost", "!lobby:localhost", server))
+    await creator_joined.wait()
+    cleanup = asyncio.create_task(personal_room_cleanup_exclusions(server, owner.runtime_paths, "helper"))
+    done, _ = await asyncio.wait({cleanup}, timeout=0.5)
+    assert not done
+    create_returns.set()
+    await invite_started.wait()
+    assert await asyncio.wait_for(cleanup, timeout=5) == {"!personal1:localhost"}
+    invite_returns.set()
+    assert await create == "!personal1:localhost"
 
 
 @pytest.mark.asyncio

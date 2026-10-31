@@ -26,6 +26,7 @@ from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
+from tests.access_schema_support import joined_members_response
 from tests.conftest import test_runtime_paths
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
@@ -138,6 +139,11 @@ def template_coordination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Te
         config_reload := Mock(status=ConfigReloadStatus(status="applied")),
     )
     return TemplateCoordination(lifecycle, target, lookup, provision, config_reload)
+
+
+def set_lobby_members(lifecycle: PersonalRoomLifecycle, *user_ids: str) -> None:
+    """Replace who the router sees in the lobby."""
+    lifecycle.runtime.client.joined_members.return_value = joined_members_response("!lobby:localhost", *user_ids)
 
 
 def add_alices_agent(lifecycle: PersonalRoomLifecycle, source_room_id: str = "!lobby:localhost") -> None:
@@ -874,10 +880,7 @@ async def test_backfill_failure_does_not_block_recorded_user(coordination: Coord
     lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersError("unavailable", "M_UNKNOWN")
     await lifecycle._reconcile()
     coordination.owner.ensure.assert_awaited_once()
-    lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
-        {"joined": {"@alice:localhost": {"display_name": "Alice", "avatar_url": None}}},
-        "!lobby:localhost",
-    )
+    set_lobby_members(lifecycle, "@alice:localhost")
     await lifecycle._reconcile()
     assert coordination.owner.ensure.await_count == 1
 
@@ -992,6 +995,29 @@ async def test_template_join_provisions_and_settles_without_holding_the_lane(
     assert call("mind") not in template_coordination.lookup.call_args_list
     assert lifecycle._retry_candidates == {("@alice:localhost", "!lobby:localhost"): trigger == "rejoin"}
     assert [(entry["event"], entry["log_level"]) for entry in logs] == [("Personal agent is starting", "info")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lobby", "retried"),
+    [
+        (joined_members_response("!lobby:localhost"), {}),
+        (nio.JoinedMembersError("unavailable"), {("@alice:localhost", "!lobby:localhost"): False}),
+    ],
+    ids=["left", "unavailable"],
+)
+async def test_template_join_gets_no_agent_unless_its_sender_is_still_in_the_lobby(
+    template_coordination: TemplateCoordination,
+    lobby: object,
+    retried: dict[tuple[str, str], bool],
+) -> None:
+    """A join seen after its sender left the lobby settles without an agent; an unknown lobby retries it."""
+    lifecycle = template_coordination.lifecycle
+    lifecycle.runtime.client.joined_members.return_value = lobby
+    await lifecycle.baseline_join(_ALICE_JOIN)
+    template_coordination.provision.assert_not_awaited()
+    template_coordination.config_reload.request_reload.assert_not_called()
+    assert lifecycle._retry_candidates == retried
 
 
 @pytest.mark.asyncio
@@ -1131,6 +1157,7 @@ async def test_template_bridge_alias_onboards_onto_its_persons_agent(
     data["authorization"] = {"aliases": {"@alice:localhost": ["@bridge_alice:localhost"]}}
     lifecycle.runtime.config = Config.validate_with_runtime(data, paths)
     alias = "@bridge_alice:localhost"
+    set_lobby_members(lifecycle, alias)
     await lifecycle.baseline_join(RoomMemberJoin(LOBBY.room_id, "$join", alias, alias, None, None, "join", None))
     assert template_coordination.provisioned() == [("mind", "@alice:localhost", alias, "!lobby:localhost")]
 
@@ -1179,6 +1206,7 @@ async def test_one_users_provisioning_failure_does_not_stop_another_in_the_same_
     """A registration failure for one user still lets the next candidate in that pass onboard."""
     lifecycle = template_coordination.lifecycle
     add_alices_agent(lifecycle)
+    set_lobby_members(lifecycle, "@aaron:localhost", "@alice:localhost")
     # Sorted before alice, so her candidate runs after the failure.
     lifecycle._queue_retry(("@aaron:localhost", "!lobby:localhost"), reinvite_departed_owner=False)
     template_coordination.provision.side_effect = RuntimeError("Failed to register personal agent account")
