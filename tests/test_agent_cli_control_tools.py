@@ -216,8 +216,9 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
             original_prompt="task",
             continuation_count=0,
         )
-        assert decision.should_continue
-        assert decision.model_switch_name == (None if raises else "next")
+        # Only the switch that succeeded continues the turn, on its model.
+        continued = decision.continuation
+        assert (None if continued is None else continued.model_name) == (None if raises else "next")
     else:
         assert effects == ["outer-0", "outer-1"]
         assert not owner.control_calls

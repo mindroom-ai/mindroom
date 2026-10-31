@@ -2746,6 +2746,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.thread_models",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.tool_function",
     "mindroom.turn_model",
 ]
 
@@ -2962,7 +2963,7 @@ depends_on = ["mindroom.providers.extra_kwargs"]
 
 [[modules]]
 path = "mindroom.providers.anthropic.repairs"
-depends_on = ["mindroom.providers.claude_wire_blocks"]
+depends_on = ["mindroom.llm", "mindroom.providers.claude_wire_blocks"]
 visibility = [
     "mindroom.providers.anthropic.legacy_stored_turns",
     "mindroom.providers.anthropic.prompt_cache",
@@ -6122,10 +6123,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.media_attachments"
-depends_on = [
-    "mindroom.providers.registry",
-    "mindroom.tool_system.runtime_context",
-]
+depends_on = ["mindroom.tool_system.runtime_context"]
 
 [[modules]]
 path = "mindroom.tool_system.media_transport"

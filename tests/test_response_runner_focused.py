@@ -7873,7 +7873,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
     async def attempt(_run, _continuation):  # noqa: ANN001, ANN202
         attempts.append(True)
         if len(attempts) <= spent:
-            return CompletedAttempt(control_calls=(_model_switch_execution("next-turn").call,))
+            return CompletedAttempt(control_calls=(_model_switch_execution("after-toolcall").call,))
         lifetime = current_cli_lifetime()
         assert lifetime is not None
         lifetime.grant_expires_at_ns = 1

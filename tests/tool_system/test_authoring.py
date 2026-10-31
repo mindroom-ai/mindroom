@@ -292,8 +292,8 @@ def test_an_owned_toolkit_adapts_without_agnos_entrypoint_processing(monkeypatch
     adapted = adapt_toolkit(GreeterTools(tools=[shout]), key="greeter")
     functions = _by_name(adapted.functions)
 
-    # Agno's async-run order: the synchronous functions, then the asynchronous ones.
-    assert list(functions) == ["farewell", "shout", "greet"]
+    # The order the class defines its functions in, then the functions passed as ``tools``.
+    assert list(functions) == ["greet", "farewell", "shout"]
     instructions = "Greet people by the name they gave."
     assert (adapted.name, adapted.instructions, adapted.guidance) == ("greeter", instructions, instructions)
     assert functions["farewell"].description == "Say goodbye to someone."

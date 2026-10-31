@@ -100,7 +100,7 @@ def test_the_tool_goldens_cover_every_registered_tool(golden_runtime: tuple[Path
 
 @pytest.mark.parametrize("tool_name", sorted(SCHEMAS))
 def test_adapted_tool_matches_golden(tool_name: str, golden_runtime: tuple[Path, Config, RuntimePaths]) -> None:
-    """Each registered tool adapts to the golden functions, in Agno's async-run order, with the golden instructions."""
+    """Each registered tool adapts to the golden functions, in the order it offers them, with golden instructions."""
     root, config, runtime_paths = golden_runtime
     with support.isolated_process(root):
         if (missing := support.missing_dependencies(tool_name)) is not None:

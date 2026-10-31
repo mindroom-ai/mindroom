@@ -207,6 +207,22 @@ def canonical_mime_type(mime_type: str | None) -> str | None:
     return normalized or None
 
 
+# The longest attachment name or type that model-facing text prints.
+_MAX_RENDERED_LABEL_LENGTH = 80
+
+
+def rendered_label(value: str) -> str:
+    """Return a sender-chosen attachment name or type as text the model reads, so it cannot forge lines or quotes.
+
+    Characters that do not print, such as newlines, are dropped, double quotes become single ones, and long values
+    are cut short.
+    """
+    sanitized = "".join(char for char in value if char.isprintable()).replace('"', "'").strip()
+    if len(sanitized) > _MAX_RENDERED_LABEL_LENGTH:
+        sanitized = f"{sanitized[: _MAX_RENDERED_LABEL_LENGTH - 1]}…"
+    return sanitized
+
+
 # The audio formats chat audio inputs name, by the MIME types that mean them.
 _AUDIO_FORMATS = {
     "audio/mpeg": "mp3",
@@ -395,5 +411,6 @@ __all__ = [
     "image_format",
     "image_mime_type",
     "named_by_resource",
+    "rendered_label",
     "url_file_name",
 ]

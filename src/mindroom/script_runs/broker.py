@@ -34,7 +34,7 @@ from mindroom.script_runs.store import (
     ScriptRunNotFoundError,
     ScriptRunStore,
 )
-from mindroom.tool_system.agno_toolkits import requires_connect, toolkit_function
+from mindroom.tool_system.agno_toolkits import requires_connect
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.invocation import (
     DETACHED_SESSION_ID,
@@ -699,22 +699,21 @@ class ScriptToolBroker:
             raise _CurrentGrantRevokedError
         if call.grant not in run.grants:
             raise _CurrentGrantRevokedError
-        toolkit = resolve_current_script_tool(
+        resolved = resolve_current_script_tool(
             context,
             call.grant,
             rejected_toolkit_cleanup=self._close_rejected_toolkit,
         )
-        if toolkit is None:
+        if resolved is None:
             raise _CurrentGrantRevokedError
         worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
         _validate_resolved_authority(run, context, worker_authority)
-        function = _toolkit_function(toolkit, call.grant.function_name)
         return _PreparedExecution(
             context=context,
             correlation_id=correlation_id,
             source_config=source_config,
-            toolkit=toolkit,
-            function=replace(function, registered_toolkit=call.grant.toolkit_name),
+            toolkit=resolved.toolkit,
+            function=resolved.function,
             approval_config=_background_approval_config(context, run),
         )
 
@@ -929,14 +928,6 @@ def _launch_function_owners(run: ScriptRunRecord) -> dict[str, frozenset[str]]:
     for grant in run.grants:
         owners.setdefault(grant.function_name, set()).add(grant.toolkit_name)
     return {function_name: frozenset(toolkit_owners) for function_name, toolkit_owners in owners.items()}
-
-
-def _toolkit_function(toolkit: AnyToolkit, function_name: str) -> ToolFunction:
-    function = toolkit_function(toolkit, function_name)
-    if function is None:
-        msg = "The requested tool is no longer available to this script run."
-        raise ScriptCapabilityError(msg)
-    return function
 
 
 def _strict_json_result(result: object) -> object:

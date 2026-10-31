@@ -23,7 +23,7 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution
 from mindroom.delegation.lifecycle import authorize_delegation
@@ -97,6 +97,8 @@ def _config(paths: RuntimePaths, *, child_tools: Sequence[str] = ("report",), ga
             },
             defaults=DefaultsConfig(tools=[]),
             memory={"backend": "none"},
+            # A configured model the child's ``switch_thread_model`` calls can switch to.
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval={"rules": rules},
         ),
         "code",
@@ -107,7 +109,7 @@ def _config(paths: RuntimePaths, *, child_tools: Sequence[str] = ("report",), ga
 
 
 def _leader_identity() -> ToolExecutionIdentity:
-    return ToolExecutionIdentity("matrix", "leader", REQUESTER, "!room:example.org", None, None, "parent")
+    return ToolExecutionIdentity("matrix", "leader", REQUESTER, "!room:example.org", "$thread", "$thread", "parent")
 
 
 def _provider_failure(text: str) -> Await:
@@ -1662,8 +1664,8 @@ async def test_a_run_keeps_its_hooks_across_its_delegation_continuations(
     assert len(leader.requests) == 5
 
 
-# A rejected model switch continues the turn on the current model.
-_SWITCH = tool_call("switch_thread_model", "call-switch", model_name="missing", when="next-turn")
+# A switch of the current response to the model it runs on, which ends the attempt for a continuation.
+_SWITCH = tool_call("switch_thread_model", "call-switch", model_name="default", when="after-toolcall")
 
 
 def _child_turn_usage(tmp_path: Path, config: Config, paths: RuntimePaths) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -1817,6 +1819,40 @@ async def _approve_the_child_s_pending_call(
         denial_reasons={call_id: None},
         approval_id=approval_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_an_approved_child_s_switch_for_the_current_response_continues_it_on_the_new_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resumed run stops after the switch, and the child's continuation runs on the model the switch names."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=("report", "thread_model"))
+    config.models["alternate"] = ModelConfig(provider="openai", id="alternate-model")
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")), answer("Parent done")],
+    )
+    switch = tool_call("switch_thread_model", "call-switch", model_name="alternate", when="after-toolcall")
+    code = ScriptedModel([calls(tool_call("write_report", "same-call")), calls(switch), answer("child result")])
+    agents = ScriptedAgents({"leader": leader, "code": code})
+    agents.install(monkeypatch)
+
+    with registered_report_tool():
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=_leader_identity(),
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        result = await _approve_the_child_s_pending_call(config, paths, paused, "card-0")
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert len(code.requests) == 3
+    assert agents.built_models[-1] == "alternate"
 
 
 @pytest.mark.asyncio

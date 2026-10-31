@@ -90,7 +90,7 @@ def _cli_callable(function: ToolFunction) -> bool:
     Approval-gated functions were removed already where approvals cannot pause. The job controls stay with the reply:
     a job read through the CLI is never saved as the reply's own call, so it would be reported again.
     """
-    return not (function.gate is not None or is_job_function(function) or function.stop_after_call)
+    return not (function.gate is not None or is_job_function(function) or function.controls_run)
 
 
 async def bind_standard_cli(

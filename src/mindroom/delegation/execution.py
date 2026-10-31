@@ -415,20 +415,15 @@ async def _execute_child(
             original_prompt=child.task,
             continuation_count=0,
         )
-        if decision.next_prompt is not None:
-            model_name = (
-                decision.model_switch_name
-                if decision.model_switch_when == "after-toolcall" and decision.model_switch_name is not None
-                else child.model_name
-            )
-            note_child_run_id(child, uuid4().hex, runtime_paths, model_name=model_name)
+        if decision.continuation is not None:
+            note_child_run_id(child, uuid4().hex, runtime_paths, model_name=decision.continuation.model_name)
             return await _start_child_envelope(
                 child,
                 observation,
                 run_child,
                 config,
                 runtime_paths,
-                prompt=decision.next_prompt,
+                prompt=decision.continuation.prompt,
                 refresh_scheduler=refresh_scheduler,
                 # The continuation's runs follow the resumed run and the attempts its turn spent before it.
                 prior_usage=(*prior_usage_of(response), *(() if response.metrics is None else (response.metrics,))),

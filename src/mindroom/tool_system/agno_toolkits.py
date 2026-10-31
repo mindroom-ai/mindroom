@@ -267,7 +267,7 @@ def adapt_toolkit(
     key: str | None = None,
     registered: str | None = None,
 ) -> AdaptedToolkit:
-    """Adapt the functions ``toolkit`` offers, one per name, in Agno's async-run order; they share one ``actor_state``.
+    """Adapt the functions ``toolkit`` offers, one per name, in the order offered; they share one ``actor_state``.
 
     Each function is offered as its builder configured it (``configure_toolkit_functions``). ``key`` is the authored
     toolkit an agent is offered the functions from, which each one carries as its ``toolkit``; None for a toolkit
@@ -307,14 +307,12 @@ def adapt_callable(entrypoint: Callable[..., Any]) -> ToolFunction:
 
 
 def toolkit_function_names(toolkit: AnyToolkit) -> tuple[str, ...]:
-    """Return the names of the functions ``toolkit`` offers, in Agno's async-run order: synchronous ones first."""
+    """Return the names of the functions ``toolkit`` offers.
+
+    An owned toolkit offers them in its ``functions`` order, and an Agno toolkit in Agno's async-run order.
+    """
     offered = _FINISHING.get(toolkit, _Finishing()).offered
-    if isinstance(toolkit, authoring.Toolkit):
-        # TODO(simplify): an owned toolkit offers its synchronous functions before its async ones, as Agno's toolkit
-        # registers them; the order the class defines them in would reorder the tools of requests.
-        names = sorted(toolkit.functions, key=lambda name: inspect.iscoroutinefunction(toolkit.functions[name]))
-    else:
-        names = list(toolkit.get_async_functions())
+    names = toolkit.functions if isinstance(toolkit, authoring.Toolkit) else toolkit.get_async_functions()
     return tuple(name for name in names if offered is None or name in offered)
 
 
