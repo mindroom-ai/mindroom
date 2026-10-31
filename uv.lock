@@ -4663,7 +4663,7 @@ requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = ">=2.3,<3" },
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=2.2.1" },
-    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio?rev=e34ca640690096842269c0044053c3cc82d8a8d5" },
+    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio?rev=4d57fa3df4f4c4ab12b0663ab5159b09608beaa6" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4761,7 +4761,7 @@ desktop-helper = [
     { name = "certifi" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.3,<3" },
-    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio?rev=e34ca640690096842269c0044053c3cc82d8a8d5" },
+    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio?rev=4d57fa3df4f4c4ab12b0663ab5159b09608beaa6" },
     { name = "pillow", specifier = ">=10.2" },
     { name = "pyautogui", specifier = ">=0.9.54" },
     { name = "pyinstaller", specifier = "==6.16" },
@@ -4799,7 +4799,7 @@ dev = [
 [[package]]
 name = "mindroom-nio"
 version = "1.2.1"
-source = { git = "https://github.com/mindroom-ai/mindroom-nio?rev=e34ca640690096842269c0044053c3cc82d8a8d5#e34ca640690096842269c0044053c3cc82d8a8d5" }
+source = { git = "https://github.com/mindroom-ai/mindroom-nio?rev=4d57fa3df4f4c4ab12b0663ab5159b09608beaa6#4d57fa3df4f4c4ab12b0663ab5159b09608beaa6" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
