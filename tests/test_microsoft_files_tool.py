@@ -405,11 +405,16 @@ def test_download_checks_the_size_before_fetching_content(tmp_path: Path, monkey
     assert len(graph.requests) == 1
 
 
-def test_replace_sends_the_etag_and_streams_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("etag", [ETAG, f" {ETAG} "])
+def test_replace_sends_the_etag_and_streams_the_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    etag: str,
+) -> None:
     _workspace_file(tmp_path, "edited/report.docx", b"new content")
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.microsoft_files_replace_file(ITEM_PATH, "edited/report.docx", ETAG, WEB_URL))
+    result = _payload(tools.microsoft_files_replace_file(ITEM_PATH, "edited/report.docx", etag, WEB_URL))
 
     put = graph.requests[-1]
     assert (put.method, put.url.path) == ("PUT", f"/v1.0{ITEM_PATH}/content")

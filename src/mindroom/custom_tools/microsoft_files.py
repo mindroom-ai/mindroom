@@ -469,7 +469,7 @@ class MicrosoftFilesTools(Toolkit):
                         f"{item.path}/content",
                         source,
                         max_bytes=_MAX_UPLOAD_BYTES,
-                        headers={"If-Match": expected_etag.strip()},
+                        headers={"If-Match": _etag(expected_etag)},
                     ),
                 ),
             }
