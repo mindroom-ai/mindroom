@@ -1352,3 +1352,27 @@ def test_every_creation_path_stores_one_item_shape(tmp_path: Path) -> None:
     assert items[0]["priority"] == "high"
     assert items[1]["title"] == "Write tests"
     assert items[1]["priority"] == "low"
+
+
+def test_a_failed_todo_write_keeps_the_stored_plan_and_leaves_no_temp_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write that cannot reach the disk leaves the stored plan in place, with no partial file beside it."""
+    config = _config(tmp_path)
+    tool = _todo(config)
+    path = _todos_path(config, room_id="!room:localhost", thread_id="$thread-root")
+
+    def fail_fsync(_fd: int) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.add_todo(title="Write tests")
+        stored = path.read_bytes()
+        monkeypatch.setattr("mindroom.durable_write.os.fsync", fail_fsync)
+        with pytest.raises(OSError, match="disk full"):
+            tool.add_todo(title="Lost on the way to disk")
+
+    assert path.read_bytes() == stored
+    assert sorted(entry.name for entry in path.parent.iterdir()) == ["todos.json", "todos.json.lock"]

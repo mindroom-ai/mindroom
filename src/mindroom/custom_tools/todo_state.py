@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
+from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 
 if TYPE_CHECKING:
@@ -177,9 +177,8 @@ def locked_update_json(
     *,
     recover_invalid: bool = False,
 ) -> _T:
-    """Mutate and atomically replace one locked JSON object."""
+    """Mutate and durably replace one locked JSON object."""
     with advisory_file_lock(_lock_path(path), exclusive=True):
-        path.parent.mkdir(parents=True, exist_ok=True)
         try:
             loaded: object = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         except ValueError:
@@ -195,9 +194,14 @@ def locked_update_json(
         result = mutate(data)
         if isinstance(result, NoWriteResult):
             return result.value
-        temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        temp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        temp_path.replace(path)
+        write_json_file_durable(
+            path,
+            data,
+            strict_atomic_replace=True,
+            indent=2,
+            sort_keys=True,
+            trailing_newline=True,
+        )
         return result
 
 
