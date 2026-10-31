@@ -85,10 +85,9 @@ def tool_parameters(entrypoint: Callable[..., Any], *, filled: Collection[str] =
 def closed_parameters(entrypoint: Callable[..., Any], parameters: Mapping[str, Any]) -> dict[str, Any]:
     """Return ``parameters``, the schema a toolkit authored for ``entrypoint`` in place of the derived one, completed.
 
-    As Agno completes an authored schema whose arguments it still validates, it requires each of its properties the
+    A call's arguments are still validated against the signature, so the schema requires each of its properties the
     signature gives no default, and admits no other property.
     """
-    # TODO(simplify): the toolkits that author a schema could state its required properties and closure themselves.
     properties = parameters.get("properties") or {}
     required = [
         name
