@@ -234,7 +234,6 @@ async def _run(
     compaction_hook = mid_turn_compaction_hook(
         config=agent.config,
         runtime_paths=agent.runtime_paths,
-        entity_name="test_agent",
         scope=TEST_AGENT_SCOPE,
         model_name="default",
         model=agent.model,

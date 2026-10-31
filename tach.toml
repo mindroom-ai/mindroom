@@ -777,7 +777,6 @@ depends_on = ["mindroom.durable_write", "mindroom.path_confinement"]
 [[modules]]
 path = "mindroom.ai"
 depends_on = [
-    "mindroom.ai_runtime",
     "mindroom.agent_loop",
     "mindroom.agent_loop.build",
     "mindroom.agent_run_context",
@@ -1253,20 +1252,12 @@ path = "mindroom.ai_runtime"
 depends_on = [
     "mindroom.history.run_visibility",
     "mindroom.llm",
-    "mindroom.background_tasks",
-    "mindroom.session_storage.lanes",
 ]
 visibility = [
     "mindroom.tool_jobs.runtime",
-    "mindroom.ai",
-    "mindroom.api.openai_compat",
-    "mindroom.approval.execution",
-    "mindroom.execution_preparation",
-    "mindroom.history.runtime",
     "mindroom.loop_hooks",
     "mindroom.response_lifecycle",
     "mindroom.response_turn",
-    "mindroom.teams",
     "mindroom.reply_turn.locked_turn",
 ]
 
@@ -1389,7 +1380,6 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_run_metadata",
-    "mindroom.ai_runtime",
     "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
@@ -2822,7 +2812,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.execution_preparation"
 depends_on = [
-    "mindroom.ai_runtime",
     "mindroom.agent_loop",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -3677,7 +3666,6 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_run_metadata",
-    "mindroom.ai_runtime",
     "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
@@ -8364,7 +8352,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.ai",
-    "mindroom.ai_runtime",
     "mindroom.api.openai_compat",
     "mindroom.approval.execution",
     "mindroom.conversation_state_writer",

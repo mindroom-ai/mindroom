@@ -18,14 +18,13 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.agents import create_agent
-from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
+from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.execution_preparation import render_prepared_messages_text
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
-from mindroom.history.session_context import load_bound_scope_session
 from mindroom.history.storage import read_scope_seen_event_ids, remove_runs_answering
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
@@ -46,14 +45,13 @@ from mindroom.mid_turn import QueuedMessage
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval, TurnSinks
-from mindroom.teams.envelope import prepare_materialized_team_execution, team_response_stream
+from mindroom.teams.envelope import team_response_stream
 from mindroom.teams.formation import resolve_live_shared_agent_names
 from mindroom.teams.members import build_team_spec, resolve_team_members
 from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.events import FailedReply
-from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.conftest import install_model_providers, make_visible_message, seed_session, unstored_team_scope_context
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.history_helpers import _completed_team_run, _team_session
@@ -864,7 +862,7 @@ def _notice(response_turn_id: str) -> Message:
     )
 
 
-def _notices(team: TeamTurn, response_turn_id: str) -> list[tuple[str, bool | str, str]]:
+def _notices(team: TeamTurn, response_turn_id: str) -> list[tuple[str, object, str]]:
     """Return the stored notices of one reply: the run each sits in, its marker, and its text."""
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
@@ -878,11 +876,11 @@ def _notices(team: TeamTurn, response_turn_id: str) -> list[tuple[str, bool | st
 
 
 @pytest.mark.asyncio
-async def test_a_team_turn_recovers_an_earlier_reply_s_notice_and_keeps_its_own_once(
+async def test_a_team_turn_stores_its_own_notice_once_and_leaves_an_earlier_one_as_stored(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A notice an interrupted reply left live is persisted before the turn; the turn's own notice is stored once.
+    """A notice an earlier reply stored replays unchanged; the turn's own notice is stored once, as the leader read it.
 
     The leader reads the configured notice text after its delegation, while a newer message waits.
     """
@@ -897,11 +895,10 @@ async def test_a_team_turn_recovers_an_earlier_reply_s_notice_and_keeps_its_own_
 
     with queued_message_signal_context(_PendingMessages()) as notice_context:
         await team.respond()
-        await finalize_queued_notice_response_turn_async(notice_context)
 
     assert _leader(team).requests[-1].messages[-1].content == "Custom team queued notice."
-    assert _notices(team, "prior-response") == [("run-earlier", "persisted", QUEUED_MESSAGE_NOTICE_TEXT)]
-    assert _notices(team, notice_context.response_turn_id) == [("run-1", "persisted", "Custom team queued notice.")]
+    assert _notices(team, "prior-response") == [("run-earlier", True, QUEUED_MESSAGE_NOTICE_TEXT)]
+    assert _notices(team, notice_context.response_turn_id) == [("run-1", True, "Custom team queued notice.")]
 
 
 def _resolved_members(team: TeamTurn) -> ResolvedExactTeamMembers:
@@ -930,42 +927,6 @@ def _built_spec(team: TeamTurn, members: ResolvedExactTeamMembers, scope_context
     )
 
 
-@pytest.mark.asyncio
-async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A caller that prepares the turn itself, as the OpenAI-compatible API does, recovers the live notice too."""
-    team = _team(tmp_path, monkeypatch)
-    _seed_history(team, messages=[Message(role="user", content="Earlier"), _notice("prior-response")])
-    members = _resolved_members(team)
-
-    scope_context = load_bound_scope_session(
-        member_names=team.member_names,
-        team_name=None,
-        session_id=SESSION_ID,
-        runtime_paths=team.runtime_paths,
-        config=team.config,
-        execution_identity=team.identity,
-    )
-    built = _built_spec(team, members, scope_context)
-    await prepare_materialized_team_execution(
-        team.ctx(),
-        scope_context=scope_context,
-        built=built,
-        message="Hello",
-        thread_history=[],
-        config=team.config,
-        runtime_paths=team.runtime_paths,
-        runtime_model=resolve_turn_model(team.config, team.runtime_paths, ModelScope(entity=None), None),
-        response_sender_id=None,
-        current_sender_id=None,
-        configured_team_name=None,
-    )
-
-    assert _notices(team, "prior-response") == [("run-earlier", "persisted", QUEUED_MESSAGE_NOTICE_TEXT)]
-
-
 def test_a_member_s_roster_role_is_its_authored_role_not_its_rendered_prompt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -983,14 +944,11 @@ def test_a_member_s_roster_role_is_its_authored_role_not_its_rendered_prompt(
 
 
 @pytest.mark.asyncio
-async def test_a_notice_delivered_before_the_team_run_failed_is_not_left_live(
+async def test_a_team_run_that_failed_after_its_notice_stores_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed run's notice is dropped rather than kept live or moved to another run.
-
-    The turn driver stores the failed turn as its interrupted record, in the failed run's place.
-    """
+    """A failed run's notice goes with it: the turn driver stores the failed turn as its interrupted record, in its place."""
     team = _team(
         tmp_path,
         monkeypatch,
@@ -1001,7 +959,6 @@ async def test_a_notice_delivered_before_the_team_run_failed_is_not_left_live(
 
     with queued_message_signal_context(_PendingMessages()) as notice_context:
         text = await team.respond()
-        await finalize_queued_notice_response_turn_async(notice_context)
 
     assert "boom" in text
     assert _leader(team).requests[-1].messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT

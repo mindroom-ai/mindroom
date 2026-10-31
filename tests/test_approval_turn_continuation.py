@@ -13,7 +13,6 @@ import mindroom.approval.execution as approval_execution_module
 from mindroom.agents import create_agent
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_run_metadata import prior_usage_of, with_prior_usage
-from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.execution import (
     AgentApprovalExecution,
     _collect_agent_continuation,
@@ -1252,11 +1251,11 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
 
 
 @pytest.mark.asyncio
-async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
+async def test_an_approved_run_settles_its_job_claims_once_it_ends(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The continuation registers the agent session it resumed, so a notice delivered during it is finalized there."""
+    """The continuation settles the reply's job claims against the run it resumed once that run has ended."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     config = bind_runtime_paths(
         Config.model_validate(
@@ -1270,12 +1269,12 @@ async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
         ),
         paths,
     )
-    identity = _identity("notice-session")
+    identity = _identity("settled-session")
     model = _CheckedModel([_call("add", "approved", a=2, b=3), answer("Five.")])
     install_model_providers(monkeypatch, {"default": model})
     paused = await _paused_turn(config, paths, identity, "Add them.")
     continuation = approval_continuation(
-        approval_id="approval-notice",
+        approval_id="approval-settled",
         run_id=paused.run_id,
         session_id=identity.session_id,
         room_id=identity.room_id,
@@ -1296,19 +1295,23 @@ async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
         request_body="Add them.",
     )
     execution = _approval_execution(tmp_path, config, paths)
+    settled: list[int] = []
 
-    with queued_message_signal_context(None) as notices:
-        result = await execution.continue_run(
-            continuation,
-            paused_answer=PausedAnswer(),
-            tool_context=turn_tool_context(config, paths, identity),
-            tool_trace_collector=[],
-            typing_log_context={},
-            progress=None,
-        )
+    async def finalize_consumption() -> None:
+        settled.append(len(model.requests))
+
+    monkeypatch.setattr(approval_execution_module, "finalize_consumption", finalize_consumption)
+    result = await execution.continue_run(
+        continuation,
+        paused_answer=PausedAnswer(),
+        tool_context=turn_tool_context(config, paths, identity),
+        tool_trace_collector=[],
+        typing_log_context={},
+        progress=None,
+    )
 
     assert isinstance(result, CompletedApprovalRun)
-    assert list(notices.storage_targets) == [("general", identity.session_id, "agent")]
+    assert settled == [len(model.requests)]
 
 
 @pytest.mark.asyncio

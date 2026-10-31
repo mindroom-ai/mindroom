@@ -12,7 +12,7 @@ from operator import attrgetter
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
+from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.receipt_readers import without_approval_receipt
 from mindroom.background_tasks import (
     run_blocking_until_complete,
@@ -589,14 +589,14 @@ class ToolJobRuntime:
                     # The reply span that started the job may end first; the job owns its calls' outcome.
                     recording_tool_calls(None),
                     job_control_context(entry.control),
-                    queued_message_signal_context(None) as notice,
+                    # A run the job makes is told of no newer message: the reply that waits for the job is.
+                    queued_message_signal_context(None),
                 ):
                     try:
                         async with execution_resources():
                             outcome = await operation()
                     finally:
                         returned = True
-                        await finalize_queued_notice_response_turn_async(notice)
             except Exception as error:
                 outcome = BackgroundOutcome("failed", failure_text(error))
             except asyncio.CancelledError:

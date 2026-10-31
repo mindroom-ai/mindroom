@@ -13,7 +13,6 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
-from mindroom import ai_runtime
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import prior_usage_of
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
@@ -404,7 +403,6 @@ async def continue_paused_team_run(
                     replay_plan=plan,
                     prompt_id=None,
                 ),
-                entity_name=team_name,
             ),
             request_template=with_native_history(ModelRequest(messages=()), native),
             model_name=model_name,
@@ -464,10 +462,7 @@ async def continue_paused_team_run(
             ),
         )
     finally:
-        try:
-            await finalize_consumption()
-        finally:
-            ai_runtime.register_scope_notice_storage(scope_context=scope, entity_name=entity_name)
+        await finalize_consumption()
 
 
 __all__ = [

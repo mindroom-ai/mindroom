@@ -46,13 +46,14 @@ _STORED_DIFFERENTLY = frozenset(
         "delegation_state_is_a_key_patch",
         "folded_calls_go_with_their_run",
         "force_request_only_in_metadata",
+        "queued_notices_stored_once",
     },
 )
 # The sequences whose native end state differs from their converted recorded one.
 _APART = frozenset(
     {
-        *(f"generated/{seed}" for seed in (2, 3, 5, 8, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 25)),
-        *(f"generated/{seed}" for seed in (27, 28, 29, 31, 32, 34, 35, 36, 38, 39)),
+        *(f"generated/{seed}" for seed in (2, 3, 4, 5, 8, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 25)),
+        *(f"generated/{seed}" for seed in (27, 28, 29, 31, 32, 34, 35, 36, 37, 38, 39)),
         "named/delegation_state_after_continuation",
         "named/interrupted_after_fold",
         "named/interrupted_voice_playout",

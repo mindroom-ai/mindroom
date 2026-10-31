@@ -60,7 +60,6 @@ from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.teams import envelope
 from mindroom.teams import leader as leader_module
 from mindroom.teams.members import _as_member
 from mindroom.teams.presentation import NO_TEAM_RESPONSE
@@ -196,28 +195,6 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert EVENT_ID in read_scope_seen_event_ids(team.storage, session)
-
-
-@pytest.mark.asyncio
-async def test_only_a_team_turn_whose_attempt_started_hands_its_session_to_queued_notice_finalization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A turn that fails while preparing its first attempt ran nothing in the team session, so it registers none."""
-    team = squad_turn(tmp_path, monkeypatch, leader=[answer("Done.", usage(10, 1))])
-
-    with ai_runtime.queued_message_signal_context(None) as notices:
-        assert await team.respond() == f"{HEADER}\n**Team Consensus**:\n\nDone."
-    assert list(notices.storage_targets) == [("squad", SESSION_ID, "team")]
-
-    async def history_unavailable(*_args: object, **_kwargs: object) -> None:
-        msg = "history unavailable"
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr(envelope, "prepare_materialized_team_execution", history_unavailable)
-    with ai_runtime.queued_message_signal_context(None) as notices:
-        assert "history unavailable" in await team.respond()
-    assert notices.storage_targets == {}
 
 
 @pytest.mark.asyncio
@@ -921,7 +898,7 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     assert (len(hooks.after_tool_batch), len(hooks.on_resume_entry)) == (1, 1)
     assert hooks.tool_middleware == ()
     [compaction] = [kwargs for kwargs in compactions if kwargs["scope"].kind == "team"]
-    assert (compaction["scope"], compaction["entity_name"]) == (TEAM_SCOPE, "squad")
+    assert compaction["scope"] == TEAM_SCOPE
     assert compaction["storage"].scope == TEAM_SCOPE
     assert compaction["model"] is team.models["default"]
     assert compaction["prompt_id"] is not None
