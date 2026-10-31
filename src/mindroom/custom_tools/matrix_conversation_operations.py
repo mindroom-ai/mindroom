@@ -235,7 +235,7 @@ class MatrixMessageOperations:
                     ),
                 ),
             )
-        text = message.strip() if message and message.strip() else None
+        text = (message or "").strip() or None
         if text is None and message_extras:
             return self._result("error", action="send", message="message_extras requires a non-empty message body.")
         if text is None and not attachments:

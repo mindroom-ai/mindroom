@@ -1459,13 +1459,12 @@ class MatrixApiTools(Toolkit):
 
         resolved_room_id, room_id_error = self._resolve_room_id(context, room_id)
         if room_id_error is not None:
-            room_id_payload: dict[str, object] = {}
-            if room_id is not None:
-                room_id_payload["room_id"] = room_id.strip()
+            # Only an explicit room_id can be invalid; an omitted one defaults to the current room.
+            assert room_id is not None
             return self._error_payload(
                 action=normalized_action,
+                room_id=room_id.strip(),
                 message=room_id_error,
-                **room_id_payload,
             )
 
         assert resolved_room_id is not None
