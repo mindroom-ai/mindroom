@@ -36,18 +36,15 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.test_dynamic_workflows import _RESEARCH_BRIEF_STEPS, file_work_waiting_for_the_loop
 from tests.test_dynamic_workflows import _workflow_spec as dynamic_workflow_spec
-from tests.test_dynamic_workflows import file_work_waiting_for_the_loop
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def _workflow_spec() -> dict[str, object]:
-    return dynamic_workflow_spec(
-        workflow=[{"id": "research", "type": "transform_step", "template": "Research brief for {input.topic}."}],
-        outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
-    )
+    return dynamic_workflow_spec(**_RESEARCH_BRIEF_STEPS)
 
 
 def _make_context(
