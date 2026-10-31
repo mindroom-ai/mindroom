@@ -4,9 +4,14 @@ from datetime import UTC, datetime
 from typing import Literal
 from unittest.mock import AsyncMock, patch
 
+import nio
 from fastapi.testclient import TestClient
+from httpx import Response
 
+from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
 from mindroom.scheduling.tasks import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
+from tests.conftest import make_matrix_client_mock
+from tests.scheduling_helpers import SCHEDULE_WRITER_ID, serve_task_state_events
 
 
 def _task(
@@ -412,3 +417,96 @@ def test_update_schedule_empty_message(test_client: TestClient) -> None:
 
     assert response.status_code == 400
     assert "message" in response.json()["detail"]
+
+
+def _matrix_client_storing(content: dict[str, object] | None, *, put_error: bool = False) -> AsyncMock:
+    """Return a Matrix client whose room stores one bot-written task with ``content``, or none."""
+    client = make_matrix_client_mock()
+    client.homeserver = "http://localhost:8008"
+    serve_task_state_events(client)
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError(message="not found", status_code="M_NOT_FOUND")
+        if content is None
+        else nio.RoomGetStateEventResponse(content, SCHEDULED_TASK_EVENT_TYPE, "abc12345", "test_room"),
+    )
+    if put_error:
+        client.room_put_state = AsyncMock(
+            return_value=nio.RoomPutStateError(message="denied", status_code="M_FORBIDDEN"),
+        )
+    else:
+        client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse(event_id="$put", room_id="test_room"))
+    return client
+
+
+def _stored(status: str = "pending") -> dict[str, object]:
+    workflow = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC)).workflow
+    return {"task_id": "abc12345", "status": status, "workflow": workflow.model_dump_json()}
+
+
+def _send_with(test_client: TestClient, client: AsyncMock, method: str, **kwargs: object) -> Response:
+    with (
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=client),
+        patch("mindroom.scheduling.tasks.persisted_bot_user_ids", return_value=frozenset({SCHEDULE_WRITER_ID})),
+    ):
+        return test_client.request(method, "/api/schedules/abc12345", **kwargs)
+
+
+def test_cancel_of_a_missing_task_is_not_found(test_client: TestClient) -> None:
+    """Cancelling a task the room does not store answers 404 with the scheduler's reason."""
+    response = _send_with(test_client, _matrix_client_storing(None), "DELETE", params={"room_id": "test_room"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Task `abc12345` not found"
+
+
+def test_cancel_whose_state_write_is_refused_is_a_server_error(test_client: TestClient) -> None:
+    """A cancellation Matrix refuses to store answers 500 with the scheduler's reason."""
+    client = _matrix_client_storing(_stored(), put_error=True)
+
+    response = _send_with(test_client, client, "DELETE", params={"room_id": "test_room"})
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == (
+        "Failed to cancel task `abc12345`: Failed to persist scheduled task state for task `abc12345`: "
+        f"RoomPutStateError: M_FORBIDDEN denied. Ensure {client.user_id} is joined with permission to write room "
+        "state, then retry."
+    )
+
+
+def test_edit_of_a_missing_task_is_not_found(test_client: TestClient) -> None:
+    """Editing a task the room does not store answers 404."""
+    response = _send_with(
+        test_client,
+        _matrix_client_storing(None),
+        "PUT",
+        json={"room_id": "test_room", "message": "updated"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Task `abc12345` not found"
+
+
+def test_edit_of_a_cancelled_task_is_a_bad_request(test_client: TestClient) -> None:
+    """Editing a task that no longer runs answers 400 with its status."""
+    response = _send_with(
+        test_client,
+        _matrix_client_storing(_stored("cancelled")),
+        "PUT",
+        json={"room_id": "test_room", "message": "updated"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Task `abc12345` cannot be edited because it is `cancelled`."
+
+
+def test_edit_whose_state_write_is_refused_is_a_bad_request(test_client: TestClient) -> None:
+    """An edit Matrix refuses to store answers 400 with the scheduler's reason."""
+    client = _matrix_client_storing(_stored(), put_error=True)
+
+    response = _send_with(test_client, client, "PUT", json={"room_id": "test_room", "message": "updated"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Failed to persist scheduled task state for task `abc12345`: RoomPutStateError: M_FORBIDDEN denied. "
+        f"Ensure {client.user_id} is joined with permission to write room state, then retry."
+    )
