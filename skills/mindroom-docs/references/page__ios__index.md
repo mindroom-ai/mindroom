@@ -45,6 +45,7 @@ Set up the homeserver (examples use `chat.example.com`):
     ```
 
    Write the origin into the config rather than taking it from the request; the app refuses a token whose callback names no origin or another one.
+   Without `origin` the app's Access sign-in fails with "Cloudflare Access sign-in returned no valid token."; earlier app releases ignore it, so add it before users update the app.
 
    If the same origin serves the MindRoom Chat web app, exclude `/native` from its service worker's navigation fallback (`serviceWorker.navigationFallbackExcludePaths` in the client chart, or `window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__`), or a Safari that has opened the web app answers the handoff with its own page.
    The page also answers when opened in Safari, where iOS hands the token to whichever app handles `mindroom://`.
