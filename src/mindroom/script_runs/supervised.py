@@ -10,7 +10,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.constants import CONTROL_STATE_PATH_ENV
+from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV
 from mindroom.script_runs import launch_contract
 from mindroom.script_runs.models import supervisor_handle_for_run
 from mindroom.script_runs.wire import ScriptWorkerError, WorkerScriptCancel, WorkerScriptStatus

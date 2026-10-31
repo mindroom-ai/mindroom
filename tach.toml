@@ -2462,7 +2462,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.script_runs.supervised"
 depends_on = [
-    "mindroom.constants",
+    "mindroom.runtime_env_policy",
     "mindroom.script_runs.launch_contract",
     "mindroom.script_runs.models",
     "mindroom.script_runs.wire",

@@ -30,6 +30,7 @@ from mindroom.script_runs.manager import (
     ScriptRunManager,
     ScriptRunManagerError,
     script_execution_uses_worker,
+    script_gateway_isolated,
 )
 from mindroom.script_runs.models import (
     TERMINAL_SCRIPT_RUN_STATES,
@@ -941,8 +942,7 @@ class ScriptRuntimeLifecycle:
         """Retain new Kubernetes process ownership while its primary is detached."""
         return (
             self.api_enabled
-            and self.runtime_paths.env_flag("MINDROOM_SCRIPT_GATEWAY_ISOLATED")
-            and bool((self.runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip())
+            and script_gateway_isolated(self.runtime_paths)
             and not run.local_unsafe
             and run.recovery_signature is not None
             and run.cancel_requested_at is None

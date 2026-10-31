@@ -1485,6 +1485,33 @@ async def test_worker_status_reports_pending_cancellation_when_its_worker_is_unr
 
 
 @pytest.mark.asyncio
+async def test_status_reports_an_exited_run_whose_worker_could_not_be_removed_yet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded exit is reported even when retiring the run's worker still fails; cleanup retries later."""
+    manager, backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    manager.store.request_cancel(run.run_id, reason="Cancellation requested by the owning agent.")
+    client.next_status = WorkerScriptStatus(state="exited", output="done", exit_code=-15)
+
+    def refuse_retirement(worker_key: str) -> None:
+        del worker_key
+        msg = "Worker container could not be removed."
+        raise WorkerBackendError(msg)
+
+    monkeypatch.setattr(backend, "retire_worker", refuse_retirement)
+
+    status = await manager.status(context, run_id=run.run_id)
+
+    assert status.run.finished_at is not None
+    assert status.run.exit_code == -15
+    assert status.output == "done"
+    assert status.run.worker_key is not None
+
+
+@pytest.mark.asyncio
 async def test_unconfirmed_cancellation_fails_the_request_but_keeps_its_cause_for_reconciliation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

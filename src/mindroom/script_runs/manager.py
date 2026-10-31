@@ -87,6 +87,7 @@ __all__ = [
     "ScriptRunManagerError",
     "ScriptRunStatus",
     "script_execution_uses_worker",
+    "script_gateway_isolated",
 ]
 
 logger = get_logger(__name__)
@@ -142,6 +143,13 @@ def script_execution_uses_worker(
     if proxy_config.execution_mode in _WORKER_EXECUTION_MODES:
         return True
     return proxy_config.execution_mode is None and (worker_backend_configured or proxy_config.proxy_url is not None)
+
+
+def script_gateway_isolated(runtime_paths: RuntimePaths) -> bool:
+    """Return whether workers reach the primary only through an explicit gateway-only listener."""
+    return runtime_paths.env_flag("MINDROOM_SCRIPT_GATEWAY_ISOLATED") and bool(
+        (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip(),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,7 +537,7 @@ class ScriptRunManager:
                     run,
                     reason=run.cancellation_reason or OWNER_CANCELLATION,
                 )
-            except (ScriptRunManagerError, ScriptWorkerError):
+            except (ScriptRunManagerError, *_REQUEST_FAILURES):
                 pending = await self._owned_run(context, run.run_id)
                 if pending.finished_at is not None:
                     return ScriptRunStatus(run=pending, output=pending.output)
@@ -1276,10 +1284,9 @@ def _require_script_launch_backend(
     runtime_paths: RuntimePaths,
 ) -> _RetiringWorkerBackend:
     admitted_backend = _require_script_worker_backend(backend)
-    isolated_kubernetes_gateway = runtime_paths.env_flag(
-        "MINDROOM_SCRIPT_GATEWAY_ISOLATED",
-    ) and bool((runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip())
-    if worker_backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES and not isolated_kubernetes_gateway:
+    if worker_backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES and not script_gateway_isolated(
+        runtime_paths,
+    ):
         msg = (
             "Kubernetes background scripts require a gateway-only listener; "
             "use Docker or explicit unsafe-local mode until that boundary is configured."
