@@ -154,9 +154,8 @@ def model_token_counter(
     *,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> TokenCounter:
-    """Return how the model configured as ``model_name`` counts tokens, without building its request pipeline."""
-    model_config = configured_model(config, runtime_paths, model_name)
-    return _build_adapter(model_config, config, runtime_paths, execution_identity=execution_identity).token_counter
+    """Return how the model configured as ``model_name`` counts tokens."""
+    return build_model_provider(config, runtime_paths, model_name, execution_identity=execution_identity).token_counter
 
 
 def _sets_base_url(value: object) -> bool:
