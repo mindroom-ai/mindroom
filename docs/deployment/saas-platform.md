@@ -206,7 +206,7 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 A crash-looping instance therefore shows `provisioning`, and the admin dashboard still offers Stop and Restart for it.
 An instance without a deployment becomes `error`, except a `provisioning` or `deprovisioned` one, which keeps its status.
 When kubectl cannot reach the cluster, the sync leaves each instance unchanged and counts it under `errors`.
-A `provisioning` instance whose deployment never appears belongs to a provision that stopped before Helm ran, such as one interrupted by a backend restart or a failed step before the deployment; the platform backend logs show which.
+A `provisioning` instance whose deployment never appears belongs to a provision that stopped before Helm ran, such as one interrupted by a backend restart or a failed step before the deployment; the platform backend logs show which, and that no provision of it is still running.
 To retry it, set its `status` to `error` in Supabase and provision it again from the admin dashboard; do not uninstall it, because uninstalling deletes its volumes.
 
 For new instances, supply the real account UUID, subscription row UUID, and matching tier, and omit `instance_id`.
