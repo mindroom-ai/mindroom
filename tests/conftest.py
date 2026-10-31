@@ -71,6 +71,7 @@ import mindroom.reply_turn.locked_turn as locked_turn_module
 import mindroom.reply_turn.request as reply_request_module
 import mindroom.response_runner as response_runner_module
 import mindroom.streaming as streaming_module
+import mindroom.token_counting.counts as token_counts_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import ai as mindroom_ai
@@ -3725,6 +3726,12 @@ def _homeserver_without_live_frames(monkeypatch: pytest.MonkeyPatch) -> None:
 def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a conversation's kept MEMORY.md copy from leaking into later tests."""
     monkeypatch.setattr(memory_entrypoint_snapshots_module, "_snapshots", {})
+
+
+@pytest.fixture(autouse=True)
+def _reset_token_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a test's cached exact counts, calibration, and cooldowns from leaking into later tests."""
+    monkeypatch.setattr(token_counts_module, "_state", token_counts_module._Counts())
 
 
 @pytest.fixture(autouse=True)

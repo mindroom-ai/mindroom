@@ -63,6 +63,25 @@ class Capabilities:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TokenCounter:
+    """How a route counts the tokens of text its model receives; ``mindroom.token_counting`` reads it for every count.
+
+    ``key`` identifies the counts: two counters with one key count the same text alike, so exact counts, calibration,
+    and a failing endpoint's pause are kept per key. ``estimate`` counts locally and never over the network; it
+    returns None while its encoder is still loading. ``exact_locally`` says the estimate is the model's own tokenizer.
+    ``count`` counts text exactly through the provider, without the framing of the message it sends the text in;
+    None when the route has no counting endpoint. ``replay`` is how the route sizes explicitly replayed history,
+    or None to size it canonically.
+    """
+
+    key: str
+    estimate: Callable[[str], int | None]
+    exact_locally: bool = False
+    count: Callable[[str], Awaitable[int]] | None = None
+    replay: PortableReplayEstimator | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ToolSpec:
     """A model-facing tool definition; ``parameters`` is the final JSON schema.
 
@@ -428,6 +447,7 @@ __all__ = [
     "StreamProgress",
     "StructuredOutput",
     "TextDelta",
+    "TokenCounter",
     "ToolCallReady",
     "ToolChoice",
     "ToolSpec",
