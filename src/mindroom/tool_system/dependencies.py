@@ -91,7 +91,6 @@ def optional_dependency_environment(*, exclusive: bool = False) -> Iterator[None
 _PIP_TO_IMPORT: dict[str, str] = {
     "atlassian-python-api": "atlassian",
     "beautifulsoup4": "bs4",
-    "e2b-code-interpreter": "e2b",
     "firecrawl-py": "firecrawl",
     "linkup-sdk": "linkup",
     "mem0ai": "mem0",
@@ -256,7 +255,7 @@ def _get_current_uv_tool_extras() -> list[str]:
     return []
 
 
-def _install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
+def _install_via_uv_tool(extras: list[str]) -> bool:
     extras_str = ",".join(extras)
     package_spec = f"{_PACKAGE_NAME}[{extras_str}]"
     # Pin the exact interpreter this environment was created from (what stdlib `venv` uses) and skip
@@ -265,12 +264,8 @@ def _install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
     # uv updates the environment in place, syncing it exactly to `extras`; callers pass the receipt's
     # extras merged with the new ones so installed extras are kept.
     base_python = sys._base_executable  # ty: ignore[unresolved-attribute]  # typeshed omits it
-    cmd = ["uv", "tool", "install", package_spec, "--python", base_python]
-    if quiet:
-        cmd.append("-q")
-    env = os.environ.copy()
-    env.update(vendor_telemetry_env_values())
-    result = subprocess.run(cmd, check=False, env=env)
+    cmd = ["uv", "tool", "install", package_spec, "--python", base_python, "-q"]
+    result = subprocess.run(cmd, check=False, env={**os.environ, **vendor_telemetry_env_values()})
     return result.returncode == 0
 
 
@@ -297,51 +292,45 @@ def install_command_for_current_python() -> list[str]:
     return cmd
 
 
-def _install_via_uv_sync(extras: list[str], *, quiet: bool) -> bool:
+def _install_via_uv_sync(extras: list[str]) -> bool:
     """Install extras using ``uv sync --locked --inexact`` for pinned versions from uv.lock."""
     cmd = ["uv", "sync", "--locked", "--inexact", "--no-dev"]
-    env = os.environ.copy()
-    env.update(vendor_telemetry_env_values())
+    env = {**os.environ, **vendor_telemetry_env_values()}
     if _in_virtualenv():
         # Ensure uv targets the interpreter that is currently running MindRoom.
         cmd.extend(["--active", "--python", sys.executable])
         env["VIRTUAL_ENV"] = sys.prefix
     for extra in extras:
         cmd.extend(["--extra", extra])
-    if quiet:
-        cmd.append("-q")
-    result = subprocess.run(cmd, check=False, capture_output=quiet, cwd=_PROJECT_ROOT, env=env)
+    cmd.append("-q")
+    result = subprocess.run(cmd, check=False, capture_output=True, cwd=_PROJECT_ROOT, env=env)
     return result.returncode == 0
 
 
-def _install_in_environment(extras: list[str], *, quiet: bool) -> bool:
+def _install_in_environment(extras: list[str]) -> bool:
     extras_str = ",".join(extras)
     package_spec = f"{_PACKAGE_NAME}[{extras_str}]"
     cmd = [*install_command_for_current_python(), package_spec]
-    env = os.environ.copy()
-    env.update(vendor_telemetry_env_values())
-    result = subprocess.run(cmd, check=False, capture_output=quiet, env=env)
+    result = subprocess.run(cmd, check=False, capture_output=True, env={**os.environ, **vendor_telemetry_env_values()})
     return result.returncode == 0
 
 
-def _install_optional_extras(extras: list[str], *, quiet: bool = False) -> bool:
+def _install_optional_extras(extras: list[str]) -> bool:
     """Install one or more optional extras into the current environment.
 
     Prefers ``uv sync --locked`` when uv.lock is available (exact pinned versions).
     Falls back to ``uv pip install`` or ``pip install`` otherwise.
     """
-    if not extras:
-        return False
     with optional_dependency_environment(exclusive=True):
         if _is_uv_tool_install():
             current_extras = _get_current_uv_tool_extras()
             merged_by_name = {_normalize_extra_name(extra): extra for extra in current_extras}
             merged_by_name.update({_normalize_extra_name(extra): extra for extra in extras})
             merged = sorted(merged_by_name.values())
-            return _install_via_uv_tool(merged, quiet=quiet)
+            return _install_via_uv_tool(merged)
         if _has_lockfile() and shutil.which("uv") and _in_virtualenv():
-            return _install_via_uv_sync(extras, quiet=quiet)
-        return _install_in_environment(extras, quiet=quiet)
+            return _install_via_uv_sync(extras)
+        return _install_in_environment(extras)
 
 
 def _auto_install_optional_extra(extra_name: str, runtime_paths: RuntimePaths) -> bool:
@@ -352,7 +341,7 @@ def _auto_install_optional_extra(extra_name: str, runtime_paths: RuntimePaths) -
         resolved_extra_name = _resolve_optional_extra_name(extra_name)
     if resolved_extra_name is None:
         return False
-    return _install_optional_extras([resolved_extra_name], quiet=True)
+    return _install_optional_extras([resolved_extra_name])
 
 
 def auto_install_optional_extra_for_import_retry(extra_name: str, runtime_paths: RuntimePaths) -> bool:
