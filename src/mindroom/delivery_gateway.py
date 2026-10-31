@@ -495,7 +495,6 @@ class DeliveryGatewayDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     logger: structlog.stdlib.BoundLogger
-    redact_message_event: Callable[..., Awaitable[bool]]
     resolver: ConversationResolver
     response_hooks: ResponseHookService
     outbox: MatrixDeliveryView
@@ -1467,25 +1466,32 @@ class DeliveryGateway:
             reply = await self.deps.outbox.replies.load(reply_id)
             if reply is None:
                 return
-            if reply.redaction_pending:
-                done = [
-                    event_id for event_id in reply.redaction_pending if await self._redact_owed(reply.room_id, event_id)
-                ]
-                if done:
-                    await self.deps.outbox.replies.update(
-                        reply_id,
-                        lambda current: rl.redactions_done(current, tuple(done), now_ns=time.time_ns()),
-                    )
+            done = [
+                event_id for event_id in reply.redaction_pending if await self._redact_owed(reply.room_id, event_id)
+            ]
+            if done:
+                await self.deps.outbox.replies.update(
+                    reply_id,
+                    lambda current: rl.redactions_done(current, tuple(done), now_ns=time.time_ns()),
+                )
             if reply.owed_write is not None:
                 await self._flush_owed_write(reply_id)
 
     async def _redact_owed(self, room_id: str, event_id: str) -> bool:
         """Redact one event a reply owes removed; a failed attempt stays owed for the next settlement."""
+        client = self.deps.runtime.client
+        if client is None:
+            return False
         try:
-            return await self.deps.redact_message_event(room_id=room_id, event_id=event_id, reason="Reply removed")
+            response = await client.room_redact(room_id, event_id, reason="Reply removed")
         except Exception as error:
             self.deps.logger.warning("Owed reply redaction failed", event_id=event_id, error=str(error))
             return False
+        if isinstance(response, nio.RoomRedactError) and response.status_code != "M_NOT_FOUND":
+            self.deps.logger.error("Failed to redact message", event_id=event_id, error=str(response))
+            return False
+        # Gone already, with `M_NOT_FOUND`, is what the redaction was for.
+        return True
 
     async def _flush_owed_write(self, reply_id: str) -> None:
         """Render and send the note a reply-authored transition owed."""

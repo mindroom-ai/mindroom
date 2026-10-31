@@ -11,7 +11,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.constants import ROUTER_AGENT_NAME, ROUTER_DISPLAY_NAME
+from mindroom.constants import ROUTER_AGENT_NAME
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -132,8 +132,7 @@ def entity_names(config: Config, agent_keys: Mapping[str, str]) -> EntityNames:
     entries = {name: _entry(name, aliases) for name, aliases in configured.items()}
     agents: dict[str, KnownEntity] = {}
     for key in [*config.agents, *config.teams, ROUTER_AGENT_NAME]:
-        display_name = ROUTER_DISPLAY_NAME if key == ROUTER_AGENT_NAME else config.entity_display_name(key)
-        shown = _canonical_name(display_name, key)
+        shown = _canonical_name(config.entity_display_name(key), key)
         ids = [matrix_id for matrix_id, owner in agent_keys.items() if owner == key]
         # An entry listing the agent's key or Matrix ID names it, and then stands for the agent.
         linked = [entries[entry_of[identity.casefold()]] for identity in (key, *ids) if identity.casefold() in entry_of]

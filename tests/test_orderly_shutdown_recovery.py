@@ -566,9 +566,7 @@ async def test_process_shutdown_fence_survives_late_sync_start(  # noqa: C901, P
 
     async def start_bot() -> None:
         with (
-            patch.object(bot, "ensure_user_account", AsyncMock()),
             patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=bot.client)),
-            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "refresh_presence", side_effect=pause_startup),
         ):
             await bot.start()

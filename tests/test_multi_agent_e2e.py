@@ -587,7 +587,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     mock_config.teams = {}
     bind_mock_config_event_journal(mock_config)
 
-    with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+    with patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()):
         orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), config=mock_config)
         await orchestrator.initialize()
 
@@ -598,10 +598,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
         assert "router" in orchestrator.agent_bots
 
         # Test that agents can be started
-        with (
-            patch("mindroom.bot.login_agent_owned_session") as mock_login,
-            patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock()),
-        ):
+        with patch("mindroom.bot.login_agent_owned_session") as mock_login:
             mock_client = AsyncMock()
             mock_client.add_event_callback = MagicMock()
             mock_client.add_response_callback = MagicMock()
@@ -652,8 +649,8 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_room.inviter = mock_event.sender
         bot.client.invited_rooms = {invite_room: mock_room}
 
-        await bot._room_lifecycle.record_pending_room_invite(mock_room.room_id, mock_event.sender)
-        await bot._room_lifecycle.handle_recorded_invite(mock_room, mock_event.sender)
+        await bot._room_lifecycle._record_pending_room_invite(mock_room.room_id, mock_event.sender)
+        await bot._room_lifecycle._handle_recorded_invite(mock_room, mock_event.sender)
 
         # Verify new room was joined (not the initial room)
         bot.client.join.assert_called_with(invite_room)

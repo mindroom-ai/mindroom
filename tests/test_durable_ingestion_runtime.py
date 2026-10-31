@@ -508,7 +508,7 @@ async def test_invite_completion_keeps_a_replacement_pending_inviter(
     replacement = "@replacement:localhost"
 
     async def welcome(_room_id: str, _sender: str) -> None:
-        await bot._room_lifecycle.record_pending_room_invite(room.room_id, replacement)
+        await bot._room_lifecycle._record_pending_room_invite(room.room_id, replacement)
 
     monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", welcome)
     monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock())

@@ -17,9 +17,13 @@ from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import resolve_avatar_path
 from mindroom.logging_config import get_logger
+from mindroom.matrix.avatar import set_user_avatar_from_file, user_has_avatar
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import nio
+    import structlog
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -163,7 +167,7 @@ def _stock_pick(seed: str) -> str:
     return _STOCK_POOL[int.from_bytes(digest[:8], "big") % len(_STOCK_POOL)]
 
 
-async def entity_avatar_path(
+async def _entity_avatar_path(
     entity_type: Literal["agents", "teams"],
     entity_name: str,
     runtime_paths: RuntimePaths,
@@ -175,6 +179,30 @@ async def entity_avatar_path(
     if entity_type == "agents" and entity_name in _STOCK_AVATAR_NAMES:
         return await _stock_avatar_path(entity_name, runtime_paths)
     return await _stock_avatar_path(_stock_pick(f"{entity_type}/{entity_name}"), runtime_paths)
+
+
+async def ensure_entity_avatar(
+    client: nio.AsyncClient,
+    entity_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    logger: structlog.stdlib.BoundLogger,
+) -> None:
+    """Give an agent or team its avatar when its Matrix profile has none yet; a failure only logs, as avatars are cosmetic."""
+    entity_type: Literal["agents", "teams"] = "teams" if entity_name in config.teams else "agents"
+    try:
+        if await user_has_avatar(client):
+            return
+        avatar_path = await _entity_avatar_path(entity_type, entity_name, runtime_paths)
+        if avatar_path is None:
+            return
+        if await set_user_avatar_from_file(client, avatar_path):
+            logger.info("avatar_set")
+        else:
+            logger.warning("avatar_set_failed")
+    except Exception as e:
+        logger.warning("avatar_set_failed", error=str(e))
 
 
 async def room_avatar_path(room_key: str, config: Config, runtime_paths: RuntimePaths) -> Path | None:
@@ -192,7 +220,7 @@ async def room_avatar_path(room_key: str, config: Config, runtime_paths: Runtime
     ]
     entities.extend(("teams", name) for name, team in config.teams.items() if room_key in team.rooms)
     if len(entities) == 1:
-        return await entity_avatar_path(*entities[0], runtime_paths)
+        return await _entity_avatar_path(*entities[0], runtime_paths)
     return await _stock_avatar_path(_stock_pick(f"rooms/{room_key}"), runtime_paths)
 
 

@@ -30,7 +30,7 @@ from mindroom.custom_tools.todo_poke import (
 )
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
 from mindroom.entity_resolution import MissingManagedEntityAccountError, mindroom_user_id
-from mindroom.hooks.sender import send_hook_message
+from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -153,9 +153,9 @@ def test_idle_check_includes_direct_and_running_team_bots(tmp_path: Path) -> Non
 async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
     """Todo poke I/O uses the assigned agent that owns membership in the target room."""
     router_bot = _bot()
-    router_bot.hook_send_message = AsyncMock(return_value="$event")
+    router_bot.hook_context.send_message = AsyncMock(return_value="$event")
     agent_bot = _bot()
-    agent_bot.hook_send_message = AsyncMock(return_value="$event")
+    agent_bot.hook_context.send_message = AsyncMock(return_value="$event")
     coordinator = _coordinator(
         test_runtime_paths(tmp_path),
         _config(tmp_path),
@@ -184,7 +184,7 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
     assert pending == frozenset({"$scheduled"})
     schedule_query.assert_awaited_once_with(agent_bot.client, "!room:localhost", coordinator.runtime_paths)
     assert event_id == "$event"
-    agent_bot.hook_send_message.assert_awaited_once_with(
+    agent_bot.hook_context.send_message.assert_awaited_once_with(
         "!room:localhost",
         "@code Todo work is ready.",
         "$thread",
@@ -192,12 +192,12 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
         {ORIGINAL_SENDER_KEY: "@mindroom_user:localhost"},
         trigger_dispatch=True,
     )
-    router_bot.hook_send_message.assert_not_awaited()
+    router_bot.hook_context.send_message.assert_not_awaited()
 
-    agent_bot.hook_send_message.reset_mock()
+    agent_bot.hook_context.send_message.reset_mock()
     await coordinator._send_poke("code", "!room:localhost", "@code Todo work is ready.", "$thread", "@alice:localhost")
 
-    agent_bot.hook_send_message.assert_awaited_once_with(
+    agent_bot.hook_context.send_message.assert_awaited_once_with(
         "!room:localhost",
         "@code Todo work is ready.",
         "$thread",
@@ -335,30 +335,13 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         sent_contents.append(content)
         return DeliveredMatrixEvent(event_id=f"$poke-{len(sent_contents)}", content_sent=content)
 
-    async def hook_send_message(
-        room_id: str,
-        body: str,
-        thread_id: str | None,
-        source_hook: str,
-        extra_content: dict[str, Any] | None,
-        *,
-        trigger_dispatch: bool = False,
-    ) -> str | None:
-        return await send_hook_message(
-            MagicMock(),
-            config,
-            runtime_paths,
-            room_id,
-            body,
-            thread_id,
-            source_hook,
-            extra_content,
-            trigger_dispatch=trigger_dispatch,
-            conversation_reader=make_conversation_reader_mock(),
-        )
-
     agent_bot = _bot()
-    agent_bot.hook_send_message = hook_send_message
+    agent_bot.hook_context.send_message = build_hook_message_sender(
+        MagicMock(),
+        config,
+        runtime_paths,
+        conversation_reader=make_conversation_reader_mock(),
+    )
     coordinator = _coordinator(runtime_paths, config, {"secret": agent_bot})
     with patch("mindroom.matrix.client_delivery.send_message_result", new=send_message_result):
         for requester_id in ("@alice:localhost", "@mallory:localhost", None):
@@ -453,9 +436,9 @@ async def test_send_skips_unjoined_todo_owner_without_using_other_candidate(tmp_
     unjoined_client = _client()
     joined_client = _client("!room:localhost")
     unjoined_bot = _bot(client=unjoined_client)
-    unjoined_bot.hook_send_message = AsyncMock(return_value="$wrong")
+    unjoined_bot.hook_context.send_message = AsyncMock(return_value="$wrong")
     joined_bot = _bot(client=joined_client)
-    joined_bot.hook_send_message = AsyncMock(return_value="$event")
+    joined_bot.hook_context.send_message = AsyncMock(return_value="$event")
     coordinator = _coordinator(
         test_runtime_paths(tmp_path),
         _config(tmp_path),
@@ -477,8 +460,8 @@ async def test_send_skips_unjoined_todo_owner_without_using_other_candidate(tmp_
             None,
         )
 
-    unjoined_bot.hook_send_message.assert_not_awaited()
-    joined_bot.hook_send_message.assert_not_awaited()
+    unjoined_bot.hook_context.send_message.assert_not_awaited()
+    joined_bot.hook_context.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -534,7 +517,7 @@ async def test_send_rejects_stale_joined_room_cache(tmp_path: Path) -> None:
     """Cached room state must not authorize delivery after membership ended."""
     stale_client = _client(cached_room_ids=("!room:localhost",))
     stale_bot = _bot(client=stale_client)
-    stale_bot.hook_send_message = AsyncMock(return_value="$wrong")
+    stale_bot.hook_context.send_message = AsyncMock(return_value="$wrong")
     coordinator = _coordinator(
         test_runtime_paths(tmp_path),
         _config(tmp_path),
@@ -550,7 +533,7 @@ async def test_send_rejects_stale_joined_room_cache(tmp_path: Path) -> None:
             None,
         )
 
-    stale_bot.hook_send_message.assert_not_awaited()
+    stale_bot.hook_context.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -559,7 +542,7 @@ async def test_send_maps_membership_probe_failure_to_delivery_unavailable(tmp_pa
     failing_client = _client()
     failing_client.joined_rooms = AsyncMock(side_effect=RuntimeError("membership unavailable"))
     failing_bot = _bot(client=failing_client)
-    failing_bot.hook_send_message = AsyncMock(return_value="$wrong")
+    failing_bot.hook_context.send_message = AsyncMock(return_value="$wrong")
     coordinator = _coordinator(
         test_runtime_paths(tmp_path),
         _config(tmp_path),
@@ -575,7 +558,7 @@ async def test_send_maps_membership_probe_failure_to_delivery_unavailable(tmp_pa
             None,
         )
 
-    failing_bot.hook_send_message.assert_not_awaited()
+    failing_bot.hook_context.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -7,16 +7,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.requester_identity import is_managed_entity_id
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, describe_job
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, describe_job, get_background_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    import nio
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.runtime_protocols import SupportsConfig
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
-
-BACKGROUND_JOB_CANCEL_EVENT_TYPE = "io.mindroom.background_job_cancel"
 
 
 @dataclass(frozen=True)
@@ -62,25 +63,38 @@ def _live_jobs(runtime: ToolJobRuntime, *, agent_name: str, room_id: str) -> lis
 
 
 async def handle_job_cancel_event(
-    runtime: ToolJobRuntime,
+    room: nio.MatrixRoom,
+    event: nio.UnknownEvent,
     *,
     agent_name: str,
-    room_id: str,
-    content: Mapping[str, object],
-    sender_may_cancel: bool,
-) -> tuple[BackgroundJob, ...]:
-    """Cancel the agent's live jobs a client's cancel event names in a room, when its sender may talk to the agent."""
-    request = _parse_job_cancel(content)
-    if request is None or not sender_may_cancel:
-        return ()
-    live = _live_jobs(runtime, agent_name=agent_name, room_id=room_id)
+    runtime: SupportsConfig,
+    runtime_paths: RuntimePaths,
+    may_talk: Callable[[str, str], bool],
+) -> None:
+    """Cancel the agent's live jobs a client's cancel event names in a room, when its sender may talk to the agent.
+
+    ``may_talk(sender_id, room_id)`` is the agent's reply policy, read with the live config like the sender check.
+    """
+    jobs = get_background_runtime(runtime_paths)
+    sender = event.source.get("sender")
+    content = event.source.get("content")
+    if jobs is None or not isinstance(sender, str) or not isinstance(content, Mapping):
+        return
+    request = _parse_job_cancel(cast("Mapping[str, object]", content))
+    if request is None or not person_may_cancel(
+        sender,
+        config=runtime.config,
+        runtime_paths=runtime_paths,
+        may_talk=lambda sender_id: may_talk(sender_id, room.room_id),
+    ):
+        return
+    live = _live_jobs(jobs, agent_name=agent_name, room_id=room.room_id)
     if request.job_id is None:
         targets = [job for job in live if request.thread_id in {None, job.owner.resolved_thread_id}]
     else:
         targets = [job for job in live if job.job_id == request.job_id]
     for job in targets:
-        await runtime.request_cancel(job.job_id)
-    return tuple(targets)
+        await jobs.request_cancel(job.job_id)
 
 
 async def cancel_room_jobs(runtime: ToolJobRuntime, *, agent_name: str, room_id: str) -> None:
