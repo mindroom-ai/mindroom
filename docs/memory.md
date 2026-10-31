@@ -42,7 +42,7 @@ With `none`, the agent gets no memories in its prompt, stores none after its tur
 Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript sent to `mem0`; the transcript file itself is kept as spoken.
 What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written.
 Conversation history is separate and stays in the session; see [History & Compaction](configuration/history.md).
-Memories retrieved for a reply stay in that conversation's history unless `num_history_messages` is set, so its later replies still see them even after the memory is deleted, until the history is compacted; a [native compaction](configuration/history.md#native-compaction) summary can still mention them.
+Memories retrieved for a reply [stay in that conversation's history](configuration/history.md#history-settings), so its later replies can still see them after the memory is deleted, until the history is compacted; a [native compaction](configuration/history.md#native-compaction) summary can still mention them.
 OpenClaw-compatible agents use this same backend selection.
 
 ## Memory Scopes

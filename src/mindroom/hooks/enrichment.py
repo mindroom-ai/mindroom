@@ -74,7 +74,7 @@ def strip_enrichment_blocks(text: str) -> str:
 
 
 def render_transient_context(parts: Sequence[str]) -> str:
-    """Wrap non-persisted current-turn context in one recognizable block."""
+    """Wrap a turn's context, sent as its own message after the prompt, in one recognizable block."""
     body = "\n\n".join(part for part in parts if part)
     if not body:
         return ""
