@@ -40,16 +40,15 @@ from tests.desktop_helpers import (
     FakeMatrixOwner,
     IdleSource,
     ManualBridge,
-    empty_selected_root,
     offline_session_deps,
     runtime_paths,
 )
+from tests.desktop_helpers import empty_selected_root as empty_selected_root  # noqa: PLC0414
 from tests.desktop_helpers import login_environment as login_environment  # noqa: PLC0414
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-selected_root = empty_selected_root
 
 _CONTROLLER = PinnedMatrixDevice("@controller:example.org", "CLOUD", "fingerprint")
 
@@ -106,7 +105,7 @@ def _patch_browser(monkeypatch: pytest.MonkeyPatch, browser: object) -> None:
 @pytest.mark.usefixtures("login_environment")
 async def test_failed_construction_closes_every_built_provider_and_the_matrix_owner(
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A bridge that cannot open its journal leaves no pinned folder, shell, browser, or Matrix owner behind."""
@@ -129,7 +128,7 @@ async def test_failed_construction_closes_every_built_provider_and_the_matrix_ow
     owner = FakeMatrixOwner(lifecycle)
 
     with pytest.raises(DesktopCommandJournalError):
-        await _start(tmp_path, _config(selected_root, browser=True), offline_session_deps(owner))
+        await _start(tmp_path, _config(empty_selected_root, browser=True), offline_session_deps(owner))
 
     assert lifecycle == ["open", "shell_close", "filesystem_close", "browser_close", "owner_close"]
     assert owner.client.to_device_callbacks == []
@@ -138,7 +137,7 @@ async def test_failed_construction_closes_every_built_provider_and_the_matrix_ow
 @pytest.mark.asyncio
 async def test_saved_capabilities_define_the_bridge_without_a_gui_provider(
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     login_environment: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -151,7 +150,7 @@ async def test_saved_capabilities_define_the_bridge_without_a_gui_provider(
 
     session = await _start(
         tmp_path,
-        _config(selected_root),
+        _config(empty_selected_root),
         offline_session_deps(FakeMatrixOwner()),
         control_lease_seconds=600,
     )
@@ -160,7 +159,7 @@ async def test_saved_capabilities_define_the_bridge_without_a_gui_provider(
     try:
         assert bridge.provider is None
         assert session.browser is None
-        assert bridge.policy.allowed_file_roots == (selected_root,)
+        assert bridge.policy.allowed_file_roots == (empty_selected_root,)
         assert bridge.policy.shell_enabled is True
         assert bridge.policy.allow_control is True
         assert bridge.policy.control_lease_expires_at_ms is not None
@@ -189,7 +188,7 @@ async def test_saved_capabilities_define_the_bridge_without_a_gui_provider(
 @pytest.mark.parametrize(("folders", "shell"), [(True, False), (False, True), (True, True)])
 async def test_without_posix_folder_and_shell_access_are_refused_before_building_them(
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     folders: bool,
     shell: bool,
@@ -202,7 +201,7 @@ async def test_without_posix_folder_and_shell_access_are_refused_before_building
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopFilesystem", forbidden)
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopShell", forbidden)
     monkeypatch.setattr(native_config, "_LOCAL_ACCESS_SUPPORTED", False)
-    roots = (selected_root,) if folders else ()
+    roots = (empty_selected_root,) if folders else ()
     lifecycle: list[str] = []
 
     with pytest.raises(NativeConfigError, match="need macOS or Linux") as refused:
@@ -250,7 +249,7 @@ async def test_without_posix_screenshot_only_app_observation_still_starts(
 @pytest.mark.asyncio
 async def test_session_admits_before_acknowledging_and_closes_in_dependency_order(  # noqa: C901
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Admission is registered before the controller check, persists before ack, and close drains before releasing."""
@@ -319,7 +318,7 @@ async def test_session_admits_before_acknowledging_and_closes_in_dependency_orde
 
     session = await _start(
         tmp_path,
-        _config(selected_root, shell=False),
+        _config(empty_selected_root, shell=False),
         offline_session_deps(owner, prepare),
     )
     await asyncio.wait_for(acked.wait(), 5)
@@ -335,7 +334,7 @@ async def test_session_admits_before_acknowledging_and_closes_in_dependency_orde
 @pytest.mark.usefixtures("login_environment")
 async def test_startup_failure_before_workers_releases_everything_without_stopping_the_bridge(
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A run that never verified its controller delivers nothing, yet closes its shell, folders, browser, and owner."""
@@ -356,7 +355,7 @@ async def test_startup_failure_before_workers_releases_everything_without_stoppi
     prepare = AsyncMock(side_effect=RuntimeError("controller device changed"))
 
     with pytest.raises(RuntimeError, match="controller device changed"):
-        await _start(tmp_path, _config(selected_root, browser=True), offline_session_deps(owner, prepare))
+        await _start(tmp_path, _config(empty_selected_root, browser=True), offline_session_deps(owner, prepare))
 
     [bridge] = bridges
     assert lifecycle == ["open", "browser_close", "owner_close"]
@@ -373,7 +372,7 @@ async def test_startup_failure_before_workers_releases_everything_without_stoppi
 @pytest.mark.usefixtures("login_environment")
 async def test_concurrent_closes_share_one_teardown_that_a_cancelled_caller_cannot_cut_short(
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stop that cancels a closing supervisor still waits for that same close to finish."""
@@ -389,7 +388,7 @@ async def test_concurrent_closes_share_one_teardown_that_a_cancelled_caller_cann
             await super().stop()
 
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", Bridge)
-    session = await _start(tmp_path, _config(selected_root), offline_session_deps(FakeMatrixOwner(lifecycle)))
+    session = await _start(tmp_path, _config(empty_selected_root), offline_session_deps(FakeMatrixOwner(lifecycle)))
     first = asyncio.create_task(session.close())
     await stopping.wait()
     first.cancel()
@@ -407,14 +406,14 @@ async def test_concurrent_closes_share_one_teardown_that_a_cancelled_caller_cann
 @pytest.mark.asyncio
 async def test_close_fences_admission_and_ends_control_before_it_yields(
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Closing revokes the control lease and stops the bridge at once, before any release step can yield."""
     monkeypatch.setitem(sys.modules, "mindroom.desktop.login_environment", None)
     session = await _start(
         tmp_path,
-        _config(selected_root, shell=False),
+        _config(empty_selected_root, shell=False),
         offline_session_deps(FakeMatrixOwner()),
         control_lease_seconds=600,
     )
@@ -432,7 +431,7 @@ async def test_close_fences_admission_and_ends_control_before_it_yields(
 @pytest.mark.usefixtures("login_environment")
 async def test_a_failing_release_still_releases_the_rest_and_is_the_close_outcome(
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One release that raises never keeps the Matrix owner open, and every caller learns of the failure."""
@@ -447,7 +446,7 @@ async def test_a_failing_release_still_releases_the_rest_and_is_the_close_outcom
     _patch_browser(monkeypatch, FailingBrowser(lifecycle))
     session = await _start(
         tmp_path,
-        _config(selected_root, browser=True),
+        _config(empty_selected_root, browser=True),
         offline_session_deps(FakeMatrixOwner(lifecycle)),
     )
 

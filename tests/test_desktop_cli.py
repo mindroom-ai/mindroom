@@ -40,10 +40,10 @@ from tests.desktop_helpers import (
     SAVED_SESSION,
     FailingSource,
     FakeMatrixOwner,
-    empty_selected_root,
     offline_session_deps,
     runtime_paths,
 )
+from tests.desktop_helpers import empty_selected_root as empty_selected_root  # noqa: PLC0414
 from tests.desktop_helpers import login_environment as login_environment  # noqa: PLC0414
 
 if TYPE_CHECKING:
@@ -87,7 +87,6 @@ _SETUP_ARGS = [
     "https://matrix.example.org",
     *_PAIRING_ARGS,
 ]
-selected_root = empty_selected_root
 
 
 @pytest.fixture
@@ -659,7 +658,7 @@ def _run_offline(
 async def test_run_without_shell_skips_shell_prompt_and_login_capture_and_fails_when_a_worker_returns(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
 ) -> None:
     """The control lease lasts the chosen minutes, and a worker returning on its own is never a clean exit."""
     policies: list[DesktopBridgePolicy] = []
@@ -678,7 +677,12 @@ async def test_run_without_shell_skips_shell_prompt_and_login_capture_and_fails_
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", Bridge)
 
     with pytest.raises(DesktopWorkerStoppedError):
-        await _run_offline(tmp_path, _run_config(roots=(selected_root,)), _offline_run_deps(owner), allow_control=True)
+        await _run_offline(
+            tmp_path,
+            _run_config(roots=(empty_selected_root,)),
+            _offline_run_deps(owner),
+            allow_control=True,
+        )
 
     # Stopping the bridge revokes control, so the lease is read as the run started it.
     [policy] = policies
@@ -705,7 +709,7 @@ def test_desktop_run_reports_a_stopped_worker_as_a_failure(monkeypatch: pytest.M
 async def test_cli_drains_native_work_before_releasing_owner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     shutdown: str,
 ) -> None:
     """Neither transport failure nor cancellation may release ownership over live input."""
@@ -738,7 +742,9 @@ async def test_cli_drains_native_work_before_releasing_owner(
     source = FailingSource()
     owner = Owner(source=source)
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", ActiveBridge)
-    task = asyncio.create_task(_run_offline(tmp_path, _run_config(roots=(selected_root,)), _offline_run_deps(owner)))
+    task = asyncio.create_task(
+        _run_offline(tmp_path, _run_config(roots=(empty_selected_root,)), _offline_run_deps(owner)),
+    )
     try:
         await asyncio.wait_for(started.wait(), 2)
         if shutdown == "cancellation":
@@ -767,7 +773,7 @@ async def test_cli_drains_native_work_before_releasing_owner(
 )
 async def test_only_application_access_requests_gui_permissions_before_matrix_opens(
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     apps: tuple[str, ...],
     expected_calls: list[str],
 ) -> None:
@@ -784,7 +790,7 @@ async def test_only_application_access_requests_gui_permissions_before_matrix_op
         session=DesktopBridgeSessionDeps(open_client=unavailable_matrix),
     )
     with pytest.raises(ConnectionError, match="Matrix unavailable"):
-        await _run_offline(tmp_path, _run_config(apps=apps, roots=(selected_root,), shell_enabled=True), deps)
+        await _run_offline(tmp_path, _run_config(apps=apps, roots=(empty_selected_root,), shell_enabled=True), deps)
 
     assert calls == expected_calls
 
@@ -793,7 +799,7 @@ async def test_only_application_access_requests_gui_permissions_before_matrix_op
 @pytest.mark.usefixtures("login_environment")
 async def test_folder_and_shell_bridge_revokes_shell_access_on_stop(
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A terminal bridge serves folders and shell without a GUI provider, and stopping it ends the local grant."""
@@ -806,7 +812,7 @@ async def test_folder_and_shell_bridge_revokes_shell_access_on_stop(
     task = asyncio.create_task(
         _run_offline(
             tmp_path,
-            _run_config(roots=(selected_root,), shell_enabled=True),
+            _run_config(roots=(empty_selected_root,), shell_enabled=True),
             _offline_run_deps(owner, prepare_client),
             shell_auto_approve_minutes=5,
         ),
@@ -829,7 +835,7 @@ async def test_folder_and_shell_bridge_revokes_shell_access_on_stop(
     assert owner.client.to_device_callbacks == []
     output = " ".join(capsys.readouterr().out.split())
     assert "Applications: none" in output
-    assert f"Read-only folders: {selected_root}" in output
+    assert f"Read-only folders: {empty_selected_root}" in output
     assert "every locally allowed requester and agent" in output
     assert "for 5 minutes" in output
     assert "observe-only" not in output
@@ -841,7 +847,7 @@ async def test_folder_and_shell_bridge_revokes_shell_access_on_stop(
 async def test_terminal_approver_stops_reading_before_the_bridge_settles_pending_approval(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    selected_root: Path,
+    empty_selected_root: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Stopping a shell run cancels terminal approval first, then drains the bridge and reports the revoked grant."""
@@ -862,7 +868,7 @@ async def test_terminal_approver_stops_reading_before_the_bridge_settles_pending
 
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", Bridge)
     monkeypatch.setattr("mindroom.desktop.shell_prompt.serve_terminal_shell_approvals", approvals)
-    config = _run_config(roots=(selected_root,), shell_enabled=True)
+    config = _run_config(roots=(empty_selected_root,), shell_enabled=True)
     task = asyncio.create_task(_run_offline(tmp_path, config, _offline_run_deps(FakeMatrixOwner())))
     await asyncio.wait_for(approving.wait(), 5)
     task.cancel()
