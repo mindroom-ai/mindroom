@@ -264,6 +264,34 @@ class TestConfigInit:
         assert config["room_defaults"]["invite_users"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
         assert config["room_defaults"]["admins"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
 
+    @pytest.mark.parametrize(
+        ("provider", "matrix_server", "hint"),
+        [
+            ("codex", "mindroom.chat", "Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)"),
+            ("codex", "self-hosted", "Set your Matrix homeserver and run `codex login` before starting MindRoom"),
+            ("openai", "mindroom.chat", "Set your API keys (Matrix homeserver is prefilled)"),
+            ("openai", "self-hosted", "Set your API keys and Matrix homeserver"),
+        ],
+    )
+    def test_init_next_steps_name_the_setup_for_the_preset_and_matrix_server(
+        self,
+        tmp_path: Path,
+        provider: str,
+        matrix_server: str,
+        hint: str,
+    ) -> None:
+        """The `.env` next step says what the chosen preset needs, worded for the Matrix server choice."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", provider, "--matrix-server", matrix_server],
+            input="\n",
+            terminal_width=200,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert f"Edit {tmp_path.resolve() / '.env'} {hint}" in normalize_console_output(result.output)
+
     def test_init_defaults_to_openai_for_mindroom_chat(self, tmp_path: Path) -> None:
         """mindroom.chat should default to OpenAI without prompting for a provider."""
         target = tmp_path / "config.yaml"
@@ -1852,6 +1880,29 @@ class TestConfigShow:
         assert result.exit_code == 0
         assert "agents:" in result.output
 
+    @pytest.mark.parametrize("found_by", ["path", "environment"])
+    def test_show_and_path_never_read_the_env_file_beside_the_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        found_by: str,
+    ) -> None:
+        """An unreadable `.env` must not block inspecting the config it sits beside, however it was found."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\n")
+        (tmp_path / ".env").write_bytes(b"\xff\xfe broken\n")
+        if found_by == "environment":
+            monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(cfg))
+        path_args = ["--path", str(cfg)] if found_by == "path" else []
+
+        shown = runner.invoke(app, ["config", "show", *path_args, "--raw"])
+        resolved = runner.invoke(app, ["config", "path", *path_args], terminal_width=200)
+
+        assert shown.exit_code == 0, shown.output
+        assert shown.output == "agents: {}\n"
+        assert resolved.exit_code == 0, resolved.output
+        assert f"Resolved config path: {cfg.resolve()} (exists)" in normalize_console_output(resolved.output)
+
     def test_show_missing_config(self, tmp_path: Path) -> None:
         """Config show exits 1 when config is missing."""
         missing = tmp_path / "nonexistent.yaml"
@@ -3255,6 +3306,21 @@ class TestRunErrorHandling:
         assert result.exit_code == 1
         assert "Invalid configuration" in result.output
         assert "Could not read configuration text" in result.output
+
+    def test_run_explains_a_refused_connection_and_reraises_other_os_errors(self, tmp_path: Path) -> None:
+        """A connection-looking OS error gets the homeserver checklist; any other one is not hidden behind it."""
+        cfg = tmp_path / "config.yaml"
+        _write_minimal_runtime_config(cfg)
+
+        with patch("mindroom.orchestrator.main", AsyncMock(side_effect=OSError("Connection refused"))):
+            refused = _invoke_with_runtime(["run"], cfg)
+        with patch("mindroom.orchestrator.main", AsyncMock(side_effect=OSError("No space left on device"))):
+            other = _invoke_with_runtime(["run"], cfg)
+
+        assert refused.exit_code == 1
+        assert "Could not connect to the Matrix homeserver" in refused.output
+        assert isinstance(other.exception, OSError)
+        assert "Could not connect to the Matrix homeserver" not in other.output
 
     def test_run_permanent_startup_error_prints_message_without_traceback(self, tmp_path: Path) -> None:
         """Permanent startup failures should not dump an implementation traceback."""
