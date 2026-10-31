@@ -33,7 +33,7 @@ from mindroom.providers import registry as provider_registry
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
-from mindroom.token_counting.counts import count
+from mindroom.token_counting.counts import count, fit_text
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.tool_schema import validated_entrypoint
@@ -119,9 +119,17 @@ def _review_transcript(
         transcript = render_transcript(messages, summary=summary, budget_chars=budget_chars)
         tokens = count(counter, transcript).tokens
         if tokens <= budget_tokens:
-            break
+            return transcript
         budget_chars = budget_chars * budget_tokens // tokens
-    return transcript
+    # The renderer keeps whole recent messages up to a floor, which a small budget can be below; the newest text is
+    # the evidence a review needs most, so the start gives way.
+    return fit_text(
+        transcript,
+        budget_tokens,
+        lambda text: count(counter, text).tokens,
+        notice="[Earlier transcript omitted to fit the review budget.]\n",
+        keep="end",
+    )
 
 
 def _review_input_budget_tokens(config: Config, model_name: str) -> int:

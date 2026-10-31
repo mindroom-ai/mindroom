@@ -213,8 +213,27 @@ def test_counter_keys_tell_the_routes_of_one_model_apart(tmp_path: Path) -> None
         tmp_path,
         _Wire(dict),
     )
-    keys = {direct.token_counter.key, vertex.token_counter.key, other_project.token_counter.key}
-    assert len(keys) == 3
+    client_override = build_adapter(
+        {
+            "provider": "google",
+            "id": "gemini-3.8-flash",
+            "extra_kwargs": {
+                "vertexai": True,
+                "project_id": "one",
+                "location": "us-central1",
+                "client_params": {"project": "three"},
+            },
+        },
+        tmp_path,
+        _Wire(dict),
+    )
+    keys = {
+        direct.token_counter.key,
+        vertex.token_counter.key,
+        other_project.token_counter.key,
+        client_override.token_counter.key,
+    }
+    assert len(keys) == 4
 
     east = dict(ROUTE_CONFIGS["bedrock_claude"])
     west = {**east, "extra_kwargs": {**east["extra_kwargs"], "aws_region": "us-west-2"}}

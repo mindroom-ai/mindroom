@@ -86,8 +86,13 @@ class GeminiProvider:
     @property
     def token_counter(self) -> TokenCounter:
         """Gemini counts through its free ``countTokens`` endpoint."""
-        settings = self.settings
-        endpoint = f"vertexai:{settings.project_id}:{settings.location}" if settings.vertexai else "gemini-api"
+        # The client's own parameters, which ``client_params`` may override, name where counts go.
+        params = self._client_params()
+        endpoint = (
+            f"vertexai:{params.get('project')}:{params.get('location')}"
+            if params["vertexai"]
+            else f"gemini-api:{params['http_options'].get('base_url', '')}"
+        )
         return counter_for_model(
             self.identity,
             count=partial(text_tokens, self._count_content_tokens),

@@ -52,7 +52,8 @@ Provider tokens per o200k_base token on those samples:
   Reported usage is a different quantity: it carries message framing, content the provider adds (Claude's structured-output tool, Gemini's cached content, earlier thinking), and per-route cache accounting, so a ratio learned from it would skew every text count.
   History sizing keeps the reported size of the latest request as its own anchor ([compaction](compaction.md)).
   Calibration is kept per route, not per agent, because a per-agent key would thread an agent name through every count for a second-order difference in content mix.
-- Every local encode on a reply's path runs in a worker thread, and text is encoded in pieces of at most 8,192 characters cut at a newline or space: tiktoken's cost grows with the square of a run without whitespace (200,000 such characters took 18 s in one piece), while the pieces counted 85 repository files exactly as one encode did.
+- Every local encode on a reply's path runs in a worker thread, and text is encoded in pieces of at most 8,192 characters, cut just before a word: tiktoken's cost grows with the square of a run without whitespace (200,000 such characters took 18 s in one piece), while the pieces counted 829 repository files exactly as one encode did.
+  A stretch of 8,192 characters with no word start is cut anyway, which can add a token per cut; such counts keep the exact label, since the error stays far below the provider's own framing.
 - While o200k_base loads, and for good when it cannot, estimates count a quarter token per character.
   The UTF-8 byte count is an upper bound but triples history estimates, which would compact conversations that fit on the first reply after a start.
 - The `MEMORY.md` preload selects whole lines by their uncalibrated estimates, then counts the preload they make, which the provider counts exactly in the background, and rescales the line estimates until the preload fits.

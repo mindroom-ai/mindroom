@@ -631,6 +631,23 @@ def test_the_review_transcript_fits_its_token_budget_as_rendered() -> None:
     assert "最近のメッセージ 29 " in transcript
 
 
+def test_a_small_review_budget_still_fits_keeping_the_newest_messages() -> None:
+    """The renderer keeps whole recent messages up to a floor, so a small budget is met by cutting from the start."""
+    recent = [
+        Message(role="user", content=f"最近のメッセージ {index} " + "東京で会議の議事録をまとめました。" * 80)
+        for index in range(5)
+    ]
+    run = _run("r1", *recent)
+    run.user_id = "@alice:x"
+    messages = conversation_messages(_stored("session", run))
+    counter = openai_model_counter("gpt-4o")
+
+    transcript = reviewer_module._review_transcript(messages, "An earlier summary. " * 200, counter, 768)
+
+    assert count(counter, transcript).tokens <= 768
+    assert transcript.rstrip().endswith("東京で会議の議事録をまとめました。")
+
+
 def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> None:
     """Hermes' digest keeps the newest messages whole, never opens on a tool result, and marks omissions."""
     older = [Message(role="user", content=f"old request {index} " + "x" * 400) for index in range(30)]

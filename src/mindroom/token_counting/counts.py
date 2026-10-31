@@ -228,10 +228,18 @@ async def text_tokens(count_message: Callable[[str], Awaitable[int]], text: str)
     return max(0, tokens - (framed_one - 1))
 
 
-def fit_text(text: str, max_tokens: int, count_tokens: Callable[[str], int], *, notice: str = "") -> str:
-    """Return ``text``, or its longest prefix found that fits ``max_tokens`` together with ``notice``.
+def fit_text(
+    text: str,
+    max_tokens: int,
+    count_tokens: Callable[[str], int],
+    *,
+    notice: str = "",
+    keep: Literal["start", "end"] = "start",
+) -> str:
+    """Return ``text``, or its longest start (or end) found that fits ``max_tokens`` together with ``notice``.
 
-    Every returned value was measured with ``count_tokens``; when not even ``notice`` alone fits, the result is empty.
+    ``notice`` follows a kept start and precedes a kept end. Every returned value was measured with ``count_tokens``;
+    when not even ``notice`` alone fits, the result is empty.
     """
     measured = count_tokens(text)
     if measured <= max_tokens:
@@ -239,7 +247,7 @@ def fit_text(text: str, max_tokens: int, count_tokens: Callable[[str], int], *, 
     kept = len(text)
     while kept:
         kept = min(int(kept * 0.95), int(kept * max_tokens / max(measured, 1)))
-        candidate = text[:kept] + notice
+        candidate = text[:kept] + notice if keep == "start" else notice + text[len(text) - kept :]
         measured = count_tokens(candidate)
         if measured <= max_tokens:
             return candidate
