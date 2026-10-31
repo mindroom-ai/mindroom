@@ -9,10 +9,9 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
 
-from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
 from mindroom.scheduling.tasks import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
 from tests.conftest import make_matrix_client_mock
-from tests.scheduling_helpers import SCHEDULE_WRITER_ID, serve_task_state_events
+from tests.scheduling_helpers import SCHEDULE_WRITER_ID, serve_stored_task
 
 
 def _task(
@@ -341,12 +340,7 @@ def _matrix_client_storing(content: dict[str, object] | None, *, put_error: bool
     """Return a Matrix client whose room stores one bot-written task with ``content``, or none."""
     client = make_matrix_client_mock()
     client.homeserver = "http://localhost:8008"
-    serve_task_state_events(client)
-    client.room_get_state_event = AsyncMock(
-        return_value=nio.RoomGetStateEventError(message="not found", status_code="M_NOT_FOUND")
-        if content is None
-        else nio.RoomGetStateEventResponse(content, SCHEDULED_TASK_EVENT_TYPE, "abc12345", "test_room"),
-    )
+    serve_stored_task(client, "test_room", "abc12345", content)
     if put_error:
         client.room_put_state = AsyncMock(
             return_value=nio.RoomPutStateError(message="denied", status_code="M_FORBIDDEN"),

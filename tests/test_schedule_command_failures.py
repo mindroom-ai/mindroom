@@ -16,7 +16,6 @@ from mindroom.commands.parsing import command_parser
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
@@ -29,7 +28,7 @@ from tests.scheduling_helpers import (
     scheduled_task_state_event,
     serve_full_room_state,
     serve_room_schedule_state,
-    serve_task_state_events,
+    serve_stored_task,
 )
 
 if TYPE_CHECKING:
@@ -78,16 +77,10 @@ def _workflow(**overrides: Any) -> ScheduledWorkflow:  # noqa: ANN401
 
 def _serve_task(client: AsyncMock, workflow: ScheduledWorkflow | None, *, status: str = "pending") -> None:
     """Serve one stored task to the scheduler's single-task reads, or report it missing."""
-    serve_task_state_events(client)
-    if workflow is None:
-        client.room_get_state_event = AsyncMock(
-            return_value=nio.RoomGetStateEventError(message="not found", status_code="M_NOT_FOUND"),
-        )
-        return
-    content = {"task_id": TASK_ID, "status": status, "workflow": workflow.model_dump_json()}
-    client.room_get_state_event = AsyncMock(
-        return_value=nio.RoomGetStateEventResponse(content, SCHEDULED_TASK_EVENT_TYPE, TASK_ID, ROOM_ID),
+    content = (
+        None if workflow is None else {"task_id": TASK_ID, "status": status, "workflow": workflow.model_dump_json()}
     )
+    serve_stored_task(client, ROOM_ID, TASK_ID, content)
 
 
 def _parse_returning(workflow: ScheduledWorkflow) -> AsyncMock:
