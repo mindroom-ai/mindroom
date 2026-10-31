@@ -12,6 +12,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.calculator import CalculatorTools
+from mindroom.delegation.execution import answered_delegation_calls
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, child_execution_identity
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
@@ -293,6 +294,11 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
             for tool in result.tools
         )
         cards.append([(call.invoking_agent, call.tool_name) for call in calls_for_cards])
+        if index == 1:
+            # The parent asks about its own call only once the delegation's answer is on its stored call.
+            [(key, answer_text)] = answered_delegation_calls(_stored_parent(config, paths, "parent-run")).items()
+            assert key == (None, "delegate")
+            assert "Child finished." in answer_text
         result = await resume(
             executor,
             result,

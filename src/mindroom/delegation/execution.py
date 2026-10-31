@@ -1460,12 +1460,11 @@ async def _drive_delegations[R: AnyRunRecord](
             )
             if result is None:
                 return response
+        await persist(state)
         # Ask for ordinary calls last, so the approval that covers them belongs to the continuation that runs them; the
         # approval asks about the parent's own waiting calls, which the parent holds.
         if ordinary:
-            await persist(state)
             return response
-        await persist(state)
         awaiting = _awaiting_answers(response)
         response = await forward_resume(
             continue_parent.events(awaiting, replace(own, external_results=answered_delegation_calls(response))),
