@@ -1313,3 +1313,42 @@ def test_workspace_template_is_not_read_through_a_replaced_workspace(tmp_path: P
         tool.apply_template(name="swapped", params={})
 
     assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+def test_every_creation_path_stores_one_item_shape(tmp_path: Path) -> None:
+    """Plan, add, and template items persist the same keys, in the same file encoding, so readers see one shape."""
+    config = _config(tmp_path)
+    tool = _todo(config)
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.plan(tasks="[high] Design API")
+        tool.add_todo(title="Write tests", priority="low")
+        tool.apply_template(name="mindroom-dev", params={"ISSUE_REF": "ISSUE-9", "REPO": "mindroom"})
+
+    path = _todos_path(config, room_id="!room:localhost", thread_id="$thread-root")
+    raw = path.read_text(encoding="utf-8")
+    state = json.loads(raw)
+    assert raw == json.dumps(state, indent=2, sort_keys=True) + "\n"
+    items = cast("list[dict[str, object]]", state["items"])
+    assert len(items) > 2
+    for item in items:
+        assert set(item) == {
+            "id",
+            "title",
+            "status",
+            "priority",
+            "depends_on",
+            "assigned_agent",
+            "requester_id",
+            "created_at",
+            "updated_at",
+            "completed_at",
+        }
+        assert item["status"] == "open"
+        assert item["requester_id"] == "@user:localhost"
+        assert item["created_at"] == item["updated_at"]
+        assert item["completed_at"] is None
+    assert items[0]["title"] == "Design API"
+    assert items[0]["priority"] == "high"
+    assert items[1]["title"] == "Write tests"
+    assert items[1]["priority"] == "low"
