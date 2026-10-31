@@ -193,7 +193,11 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
         "LoopEnded",
     ]
     started = [event.call for event in events if isinstance(event, ToolStarted)]
-    completed = [event.call for event in events if isinstance(event, ToolCompleted)]
+    # Each call announces its completion as it finishes, so the two may complete in either order.
+    completed = sorted(
+        (event.call for event in events if isinstance(event, ToolCompleted)),
+        key=lambda c: c.tool_call_id,
+    )
     assert [call.tool_call_id for call in started] == ["c1", "c2"] == [call.tool_call_id for call in completed]
     assert record.tools is not None
     # A start reports the call before it ran; its completion reports the call as the run's record holds it.
