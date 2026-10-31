@@ -5308,7 +5308,7 @@ A calls-enabled agent shows `📞 Voice calls` in its Matrix presence status whe
 |-------|------|---------|-------------|
 | `calls.enabled` | bool | `false` | Lets agents join voice calls. |
 | `calls.profiles` | map of name to profile | `{}` | Reusable, complete voice pipelines; each has a `backend` and the fields below. |
-| `calls.agents` | map of agent name to profile name | `{}` | Each calls-enabled agent uses exactly one profile. |
+| `calls.agents` | map of agent name to profile name | `{}` | Each calls-enabled agent uses exactly one profile. A [`personal_agents`](https://docs.mindroom.chat/personal-agents/#voice-calls) template key gives every user's agent from that template the profile. |
 | `calls.livekit_service_url` | string | discovered | MatrixRTC authorization service URL to use instead of discovering it from the agent homeserver's `.well-known/matrix/client`. |
 
 `enabled` and `livekit_service_url` are global and cannot be set per agent.
@@ -5320,6 +5320,7 @@ Configuration loading fails with one of these errors when references are wrong:
 - `calls.agents references unknown profile(s): ...`
 - `calls.agents references unknown agent(s): ...`
 - `calls.agents configures multiple agents for room(s): ...`, because a room can have at most one calls-enabled agent.
+- `calls.agents names personal_agents.<key>, whose agent lists rooms; ...`, because every user's agent from that template would join the same rooms.
 - `calls.profiles references unknown cascaded model(s): ...` or `calls.profiles references unknown Live agent model(s): ...`, when a profile's model alias is not in the top-level `models` mapping.
 
 ### Realtime profile fields
@@ -7171,6 +7172,27 @@ With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onb
 > Anyone the template's `access` admits can work with the owner's agent, including its memory, its files, and its shared credentials.
 > That includes the admitted person's own agent acting for them, because an agent mentioned in a reply acts for the person who requested that reply (see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents)).
 > Admit only people you would trust with everything an owner gives their agent.
+
+## Voice Calls
+
+Name the template key in [`calls.agents`](https://docs.mindroom.chat/voice-calls/#calls-configuration) to let every user call their own agent:
+
+```yaml
+calls:
+  enabled: true
+  profiles:
+    openai-live:
+      backend: live
+      model: gpt-live-1
+      credentials_service: openai-live
+      voice: marin
+  agents:
+    mind: openai-live
+```
+
+Each generated agent then uses that profile in its owner's personal room, including agents of people onboarded after the config was loaded.
+The saved config keeps `mind`, not the generated agent names.
+The template's `agent` must not list `rooms`, because every user's agent would join those rooms and a room takes only one calls-enabled agent; config loading fails with `calls.agents names personal_agents.mind, whose agent lists rooms`.
 
 ## Onboarding Behavior
 

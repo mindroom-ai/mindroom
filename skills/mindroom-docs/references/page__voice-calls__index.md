@@ -42,7 +42,7 @@ A calls-enabled agent shows `📞 Voice calls` in its Matrix presence status whe
 |-------|------|---------|-------------|
 | `calls.enabled` | bool | `false` | Lets agents join voice calls. |
 | `calls.profiles` | map of name to profile | `{}` | Reusable, complete voice pipelines; each has a `backend` and the fields below. |
-| `calls.agents` | map of agent name to profile name | `{}` | Each calls-enabled agent uses exactly one profile. |
+| `calls.agents` | map of agent name to profile name | `{}` | Each calls-enabled agent uses exactly one profile. A [`personal_agents`](https://docs.mindroom.chat/personal-agents/#voice-calls) template key gives every user's agent from that template the profile. |
 | `calls.livekit_service_url` | string | discovered | MatrixRTC authorization service URL to use instead of discovering it from the agent homeserver's `.well-known/matrix/client`. |
 
 `enabled` and `livekit_service_url` are global and cannot be set per agent.
@@ -54,6 +54,7 @@ Configuration loading fails with one of these errors when references are wrong:
 - `calls.agents references unknown profile(s): ...`
 - `calls.agents references unknown agent(s): ...`
 - `calls.agents configures multiple agents for room(s): ...`, because a room can have at most one calls-enabled agent.
+- `calls.agents names personal_agents.<key>, whose agent lists rooms; ...`, because every user's agent from that template would join the same rooms.
 - `calls.profiles references unknown cascaded model(s): ...` or `calls.profiles references unknown Live agent model(s): ...`, when a profile's model alias is not in the top-level `models` mapping.
 
 ### Realtime profile fields

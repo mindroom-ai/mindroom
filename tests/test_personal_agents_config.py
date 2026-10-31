@@ -369,3 +369,43 @@ def test_invalid_roster_error_names_the_file(tmp_path: Path, content: str) -> No
         read_personal_agent_roster(paths)
     with pytest.raises(ConfigRuntimeValidationError, match=r"Personal agent roster .* is invalid"):
         Config.validate_with_runtime(deepcopy(BASE), paths)
+
+
+_CALLS: dict[str, Any] = {
+    "enabled": True,
+    "profiles": {
+        "voice": {"backend": "live", "model": "gpt-live-1", "credentials_service": "openai-live", "voice": "marin"},
+    },
+    "agents": {"mind": "voice"},
+}
+
+
+def test_calls_template_key_enables_calls_for_each_generated_agent(tmp_path: Path) -> None:
+    """A template key in calls.agents gives every user's agent from that template the profile."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    config = _runtime_config(tmp_path, data, roster=(_entry(), _entry("@bob:example.org")))
+    assert config.calls.agents == {"mind_alice_smith": "voice", "mind_bob": "voice"}
+    assert config.calls.resolve_agent_config("mind_bob").backend == "live"
+
+
+def test_calls_template_key_loads_before_anyone_is_onboarded(tmp_path: Path) -> None:
+    """A calls-enabled template with no users yet loads and enables nobody."""
+    config = _runtime_config(tmp_path, deepcopy(BASE) | {"calls": deepcopy(_CALLS)})
+    assert config.calls.agents == {}
+
+
+def test_authored_dump_keeps_calls_template_key(tmp_path: Path) -> None:
+    """Saving the config keeps the template key, not the generated agents it expanded to."""
+    config = _runtime_config(tmp_path, deepcopy(BASE) | {"calls": deepcopy(_CALLS)}, roster=(_entry(),))
+    assert config.authored_model_dump()["calls"]["agents"] == {"mind": "voice"}
+
+
+def test_calls_template_whose_agent_lists_rooms_is_rejected(tmp_path: Path) -> None:
+    """Every user's agent would join the same rooms, and a room takes only one calls-enabled agent."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    data["personal_agents"]["mind"]["agent"]["rooms"] = ["lobby"]
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"calls\.agents names personal_agents\.mind, whose agent lists rooms",
+    ):
+        _runtime_config(tmp_path, data)

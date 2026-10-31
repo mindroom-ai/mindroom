@@ -957,11 +957,11 @@
             "type": "string"
           },
           "default": {},
-          "description": "Call profile name by agent name (at most one agent per room)",
+          "description": "Call profile name by agent name, or by personal_agents template key for every user's agent from that template (at most one agent per room)",
           "title": "Agents",
           "type": "object",
           "x-mindroom": {
-            "key_reference": "agent"
+            "key_reference": "personal_room_agent"
           }
         },
         "livekit_service_url": {
