@@ -6303,30 +6303,32 @@ def _proxied_shell(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("function_name", "arguments", "expected_timeout"),
+    ("tool_name", "function_name", "arguments", "expected_timeout"),
     [
-        ("run_shell_command", {"args": "make", "timeout": 600}, 630.0),
-        ("run_shell_command", {"args": "make"}, 150.0),
+        ("shell", "run_shell_command", {"args": "make", "timeout": 600}, 630.0),
+        ("shell", "run_shell_command", {"args": "make"}, 150.0),
+        ("browser", "browser_control", {"action": "status"}, 150.0),
     ],
 )
-async def test_a_worker_shell_call_waits_as_long_as_its_runner(
+async def test_a_worker_call_waits_as_long_as_its_runner(
     monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
     function_name: str,
     arguments: dict[str, object],
     expected_timeout: float,
 ) -> None:
-    """The primary waits for a worker shell command as long as the runner lets it run, so the command's answer arrives."""
+    """The primary waits for a worker call as long as the runner lets it run, so the call's own answer arrives."""
     captured: dict[str, Any] = {}
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
         proxy_url="http://sandbox-runner:8765",
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="selective",
-        proxy_tools={"shell"},
+        proxy_tools={tool_name},
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _recording_client_class(captured=captured))
     entrypoint = _offered_entrypoint(
-        get_tool_by_name("shell", runtime_paths, worker_target=None, tools=builtin_tool_registry()),
+        get_tool_by_name(tool_name, runtime_paths, worker_target=None, tools=builtin_tool_registry()),
         function_name,
     )
 
@@ -6335,26 +6337,9 @@ async def test_a_worker_shell_call_waits_as_long_as_its_runner(
     assert captured["timeout"] == expected_timeout
 
 
-@pytest.mark.asyncio
-async def test_a_worker_browser_call_waits_past_the_browsers_own_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The primary outwaits a worker browser call's own limit, so the error saying the call ran out of time arrives."""
-    captured: dict[str, Any] = {}
-    runtime_paths = _configure_proxy_runtime(
-        monkeypatch,
-        proxy_url="http://sandbox-runner:8765",
-        proxy_token=_TEST_AUTH_TOKEN,
-        execution_mode="selective",
-        proxy_tools={"browser"},
-    )
-    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _recording_client_class(captured=captured))
-    entrypoint = _offered_entrypoint(
-        get_tool_by_name("browser", runtime_paths, worker_target=None, tools=builtin_tool_registry()),
-        "browser_control",
-    )
-
-    await entrypoint(action="status")
-
-    assert captured["timeout"] == 150.0
+def test_only_the_browser_tool_waits_for_its_own_time_limit() -> None:
+    """Native browser MCP calls have no limit of their own, so they keep the configured timeouts."""
+    assert browser_request_budget_seconds("browser", "browser_control") == 150.0
     assert browser_request_budget_seconds("browser_mcp", "browser_snapshot") == 0.0
 
 

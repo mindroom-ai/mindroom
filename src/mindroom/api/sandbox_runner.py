@@ -1695,6 +1695,16 @@ async def _execute_worker_browser(
             tool_output_workspace_root=workspace,
         )
         browser_toolkit = provider.validate_toolkit(toolkit)
+
+        async def invoke(
+            retained_toolkit: AnyToolkit,
+            entrypoint: Callable[..., object],
+            args: list[object],
+            kwargs: dict[str, object],
+        ) -> object:
+            async with asyncio.timeout(timeout_seconds):
+                return await _run_toolkit_entrypoint(retained_toolkit, entrypoint, args, kwargs)
+
         try:
             if isinstance(computer, WorkerBrowserRuntime):
                 process_env = _prepare_subprocess_context(prepared_context).subprocess_env or {}
@@ -1703,31 +1713,12 @@ async def _execute_worker_browser(
                     workspace,
                     process_env,
                 )
-
-                async def execute_current() -> object:
-                    async with asyncio.timeout(timeout_seconds):
-                        return await _run_toolkit_entrypoint(
-                            headless_toolkit,
-                            current_entrypoint,
-                            prepared.args,
-                            prepared.kwargs,
-                        )
-
                 result = await computer.run(
                     headless_toolkit,
                     (browser_config_key, tuple(sorted(process_env.items()))),
-                    execute_current,
+                    partial(invoke, headless_toolkit, current_entrypoint, prepared.args, prepared.kwargs),
                 )
                 return ExecuteResponse(ok=True, result=provider.encode_result(result))
-
-            async def invoke(
-                retained_toolkit: AnyToolkit,
-                entrypoint: Callable[..., object],
-                args: list[object],
-                kwargs: dict[str, object],
-            ) -> object:
-                async with asyncio.timeout(timeout_seconds):
-                    return await _run_toolkit_entrypoint(retained_toolkit, entrypoint, args, kwargs)
 
             browser_config_key, session = provider.bind(
                 browser_toolkit,

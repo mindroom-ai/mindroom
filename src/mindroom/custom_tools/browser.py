@@ -65,7 +65,7 @@ from mindroom.worker_computer.browser_proxy import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Coroutine, Mapping
+    from collections.abc import Awaitable, Mapping
     from typing import BinaryIO
 
     from playwright.async_api import Download
@@ -431,7 +431,7 @@ async def _within_seconds[T](seconds: float, call: Awaitable[T]) -> T:
     return await asyncio.wait_for(asyncio.ensure_future(call), seconds)
 
 
-async def _host_call_within_time_limit[T](action: str, call: Coroutine[Any, Any, T]) -> T:
+async def _host_call_within_time_limit[T](action: str, call: Awaitable[T]) -> T:
     """Stop a host call at its time limit, since the reply that started it, or started its job, may wait for it."""
     task = asyncio.ensure_future(call)
     try:

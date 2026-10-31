@@ -695,7 +695,7 @@ async def test_host_call_that_never_settles_stops_at_its_time_limit(
         await tool.browser(action="close")
         await tool.browser(action="tabs")
         gc.collect()
-        assert [context["message"] for context in unhandled] == []
+        assert unhandled == []
     finally:
         loop.set_exception_handler(None)
         await tool.aclose()
@@ -3323,7 +3323,7 @@ async def test_a_tab_frozen_by_its_script_lists_as_unresponsive_and_closes_clean
         await call(action="close", targetId=frozen_id)
         assert [tab["targetId"] for tab in (await call(action="tabs"))["tabs"]] == [healthy_id]
         gc.collect()
-        assert [context["message"] for context in unhandled] == []
+        assert unhandled == []
     finally:
         loop.set_exception_handler(None)
         await tool.aclose()
