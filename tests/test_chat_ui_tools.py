@@ -522,12 +522,13 @@ async def test_show_computer_once_sends_the_show_computer_notice_once_per_thread
     announced = _context(tmp_path)
     explicit = _context(tmp_path)
 
-    with tool_runtime_context(announced):
+    with tool_runtime_context(announced), capture_logs() as logs:
         await show_computer_once()
         await show_computer_once()
     with tool_runtime_context(explicit):
         await ChatUITools().open_panel(panel="computer")
 
+    assert [log for log in logs if log["log_level"] == "warning"] == []
     announced.client.room_send.assert_awaited_once()
     content = _sent_content(announced)
     assert content == _sent_content(explicit)

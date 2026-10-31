@@ -139,8 +139,9 @@ def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], b
     }
 
 
-def _computer_conversation(context: ToolRuntimeContext, requester_id: str) -> tuple[str, str, str, str | None]:
-    return (context.client.user_id, requester_id, context.room_id, context.resolved_thread_id)
+def _computer_notice(context: ToolRuntimeContext, requester_id: str) -> _ComputerNotice:
+    conversation = (context.client.user_id, requester_id, context.room_id, context.resolved_thread_id)
+    return _SHOWN_COMPUTERS.setdefault(conversation, _ComputerNotice())
 
 
 def _canvas_title_is_valid(title: str) -> bool:
@@ -373,7 +374,7 @@ class ChatUITools(Toolkit):
         if isinstance(validated, str):
             return validated
         context, requester_id = validated
-        notice = _SHOWN_COMPUTERS.setdefault(_computer_conversation(context, requester_id), _ComputerNotice())
+        notice = _computer_notice(context, requester_id)
         async with notice.lock:
             if notice.delivered and context.correlation_id is not None and notice.reply == context.correlation_id:
                 # This reply's first browser call, or an earlier Computer panel request, already delivered the notice.
@@ -382,16 +383,7 @@ class ChatUITools(Toolkit):
                     action="show_computer",
                     message="A Computer panel request was already sent in this reply.",
                 )
-            result = await self._send_validated_action(
-                context,
-                requester_id,
-                "show_computer",
-                _SHOW_COMPUTER_BODY,
-                {},
-            )
-            if json.loads(result)["status"] == "ok":
-                notice.delivered, notice.reply = True, context.correlation_id
-            return result
+            return await _send_computer_notice(context, requester_id, notice)
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
         """Open the user's MindRoom Chat Settings dialog at one section.
@@ -861,6 +853,14 @@ class ChatUITools(Toolkit):
         return metadata
 
 
+async def _send_computer_notice(context: ToolRuntimeContext, requester_id: str, notice: _ComputerNotice) -> str:
+    """Send the show_computer notice; a delivered one counts for this conversation and reply."""
+    result = await ChatUITools._send_validated_action(context, requester_id, "show_computer", _SHOW_COMPUTER_BODY, {})
+    if json.loads(result)["status"] == "ok":
+        notice.delivered, notice.reply = True, context.correlation_id
+    return result
+
+
 async def show_computer_once() -> None:
     """Send the show_computer notice unless this agent already showed the requester its computer here.
 
@@ -871,22 +871,14 @@ async def show_computer_once() -> None:
     if isinstance(validated, str):
         return
     context, requester_id = validated
-    notice = _SHOWN_COMPUTERS.setdefault(_computer_conversation(context, requester_id), _ComputerNotice())
+    notice = _computer_notice(context, requester_id)
     # Sends for one conversation take turns, so concurrent first calls send one notice. An
     # undelivered or cancelled notice does not count, so the next browser call tries again.
     async with notice.lock:
         if notice.delivered:
             return
-        result = await ChatUITools._send_validated_action(
-            context,
-            requester_id,
-            "show_computer",
-            _SHOW_COMPUTER_BODY,
-            {},
-        )
-        payload = json.loads(result)
+        payload = json.loads(await _send_computer_notice(context, requester_id, notice))
         if payload["status"] == "ok":
-            notice.delivered, notice.reply = True, context.correlation_id
             return
         logger.warning(
             "The worker computer notice was not delivered",
