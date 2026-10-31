@@ -199,15 +199,12 @@ def _fake_kubectl(deployments: dict[str, dict[str, Any]], *, unreachable: frozen
     async def run_cmd(cmd: list[str], **_kwargs: Any) -> tuple[int, str, str]:  # noqa: ANN401
         assert cmd[:2] == ["kubectl", "get"]
         assert "-o=json" in cmd
-        name = cmd[2].removeprefix("deployment/")
-        if name.removeprefix("mindroom-") in unreachable:
+        assert "--ignore-not-found" in cmd
+        instance_id = cmd[2].removeprefix("deployment/mindroom-")
+        if instance_id in unreachable:
             return 1, "", "The connection to the server was refused - did you specify the right host or port?"
-        deployment = deployments.get(name.removeprefix("mindroom-"))
-        if deployment is not None:
-            return 0, json.dumps(deployment), ""
-        if "--ignore-not-found" in cmd:
-            return 0, "", ""
-        return 1, "", f'Error from server (NotFound): deployments.apps "{name}" not found'
+        deployment = deployments.get(instance_id)
+        return 0, "" if deployment is None else json.dumps(deployment), ""
 
     return run_cmd
 

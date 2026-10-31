@@ -52,48 +52,27 @@ async def list_user_instances(
     instances = instances_data.get_instances_for_account(sb, account_id)
     db_time = (time.perf_counter() - db_start) * 1000
 
+    # A row whose Kubernetes status is missing or older than 30 seconds is refreshed in the background.
+    stale_threshold = datetime.now(UTC) - timedelta(seconds=30)
     enhanced_instances: list[dict[str, Any]] = []
     for instance in instances:
         status = instance.get("status")
+        synced_at = instance.get("kubernetes_synced_at")
         hint: str | None = None
-
         if status == "provisioning":
             hint = (
                 "Provisioning in progress. First boot can take several minutes while "
                 "containers pull images and TLS certificates issue."
             )
-        elif status == "restarting":
-            hint = "Restarting MindRoom pods; the workspace will be available again shortly."
-        elif status == "running" and not instance.get("kubernetes_synced_at"):
+        elif status == "running" and not synced_at:
             hint = "Running (awaiting initial Kubernetes health check)."
-
         enhanced_instances.append({**instance, "status_hint": hint})
 
-    # Check if any instance needs a background sync (older than 30 seconds)
-    stale_threshold = datetime.now(UTC) - timedelta(seconds=30)
-    for instance in enhanced_instances:
-        instance_id = instance.get("instance_id")
-        if not instance_id:
-            continue
-
-        # Skip if already being synced
-        if str(instance_id) in _syncing_instances:
-            continue
-
-        # Check if kubernetes_synced_at is missing or stale
-        synced_at = instance.get("kubernetes_synced_at")
-        if not synced_at:
-            needs_sync = True
-        else:
-            # Parse ISO timestamp (handle both Z and +00:00 formats)
-            if synced_at.endswith("Z"):
-                synced_at = synced_at[:-1] + "+00:00"
-            synced_time = datetime.fromisoformat(synced_at)
-            needs_sync = synced_time < stale_threshold
-
-        if needs_sync:
+        instance_id = str(instance["instance_id"])
+        stale = not synced_at or datetime.fromisoformat(synced_at) < stale_threshold
+        if stale and instance_id not in _syncing_instances:
             logger.info("Instance %s has stale K8s status, scheduling background sync", instance_id)
-            background_tasks.add_task(_background_sync_instance_status, str(instance_id))
+            background_tasks.add_task(_background_sync_instance_status, instance_id)
 
     # Log cache effectiveness
     total_time = (time.perf_counter() - start) * 1000

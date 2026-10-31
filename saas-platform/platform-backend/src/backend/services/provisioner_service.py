@@ -1196,12 +1196,12 @@ async def uninstall_instance(instance_id: int) -> dict[str, Any]:
 
 def _deployment_status(deployment: Mapping[str, Any]) -> str:
     """Return the status a deployment shows: running once every desired pod is ready, available, and updated."""
-    desired = int(deployment["spec"]["replicas"])
+    desired = deployment["spec"]["replicas"]
     if desired == 0:
         return "stopped"
     # Kubernetes omits replica counts that are zero.
-    counts = deployment.get("status") or {}
-    ready = min(int(counts.get(key) or 0) for key in ("readyReplicas", "availableReplicas", "updatedReplicas"))
+    counts = deployment.get("status", {})
+    ready = min(counts.get(key, 0) for key in ("readyReplicas", "availableReplicas", "updatedReplicas"))
     return "running" if ready >= desired else "provisioning"
 
 
