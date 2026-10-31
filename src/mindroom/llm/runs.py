@@ -126,7 +126,7 @@ class ToolExecution:
         # Legacy format: a stored tool execution holds ``external_execution_silent``, in run rows, summary-row
         # segments, delegation state, and CLI approval payloads; it is true on a paused delegation, which kept Agno's
         # pause notice out of the reply text, and no MindRoom code read it.
-        # Last legacy release: v2026.10.747, which wrote it for every paused delegation as every earlier release did;
+        # Last legacy release: v2026.10.750, which wrote it for every paused delegation as every earlier release did;
         # replacement: the next release, whose tool executions do not store it.
         # Handling: the key is ignored on read and never written again, so a paused delegation stored with it resumes
         # as one stored without it, and a rewritten row drops it.
