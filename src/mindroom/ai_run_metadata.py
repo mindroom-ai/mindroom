@@ -114,6 +114,8 @@ def _prepared_history_payload(prepared_history: PreparedHistoryState) -> dict[st
     payload: dict[str, Any] = {}
     if prepared_history.prepared_context_tokens is not None:
         payload["prepared_context"] = {"tokens": prepared_history.prepared_context_tokens}
+        if prepared_history.non_prompt_tokens is not None:
+            payload["prepared_context"]["non_prompt_tokens"] = prepared_history.non_prompt_tokens
     decision = prepared_history.compaction_decision
     compaction: dict[str, Any] = {
         "decision": decision.mode,
@@ -140,6 +142,14 @@ def _prepared_history_payload(prepared_history: PreparedHistoryState) -> dict[st
 def build_prepared_history_metadata_content(prepared_history: PreparedHistoryState) -> dict[str, Any]:
     """Build Matrix message metadata for prepared-context and compaction diagnostics."""
     return {AI_RUN_METADATA_KEY: {"version": _AI_RUN_METADATA_VERSION, **_prepared_history_payload(prepared_history)}}
+
+
+def recorded_non_prompt_tokens(run_metadata: Mapping[str, Any] | None) -> int | None:
+    """Return the system prompt and tools tokens a run's requests were sized with, if the run recorded them."""
+    payload = (run_metadata or {}).get(AI_RUN_METADATA_KEY)
+    prepared_context = payload.get("prepared_context") if isinstance(payload, dict) else None
+    tokens = prepared_context.get("non_prompt_tokens") if isinstance(prepared_context, dict) else None
+    return tokens if isinstance(tokens, int) else None
 
 
 def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -> dict[str, Any] | None:

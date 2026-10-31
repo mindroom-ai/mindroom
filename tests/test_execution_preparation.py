@@ -229,6 +229,7 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
             execution_plan=execution_plan,
         ),
         counter=fake_token_counter(),
+        non_prompt_tokens=0,
     )
 
 

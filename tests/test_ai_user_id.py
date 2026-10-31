@@ -2051,6 +2051,8 @@ class TestUserIdPassthrough:
         prepared_context = stored.metadata[AI_RUN_METADATA_KEY]["prepared_context"]
         assert isinstance(prepared_context["tokens"], int)
         assert prepared_context["tokens"] > 0
+        # The run records its system prompt and tools, which the next reply's reported-size anchor takes off.
+        assert 0 < prepared_context["non_prompt_tokens"] < prepared_context["tokens"]
         assert recorder.run_metadata is not None
         assert recorder.run_metadata[AI_RUN_METADATA_KEY]["prepared_context"] == prepared_context
 

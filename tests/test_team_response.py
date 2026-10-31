@@ -662,7 +662,10 @@ async def test_the_reply_metadata_and_timing_carry_the_prepared_context_and_comp
     await team.respond(pipeline_timing=timing, run_metadata_collector=collector)
 
     ai_run = collector[AI_RUN_METADATA_KEY]
-    assert ai_run["prepared_context"] == {"tokens": timing.metadata["prepared_context_tokens"]}
+    prepared_context = ai_run["prepared_context"]
+    assert prepared_context["tokens"] == timing.metadata["prepared_context_tokens"]
+    # The run records the leader's system prompt and tools, which the next reply's reported-size anchor takes off.
+    assert 0 < prepared_context["non_prompt_tokens"] < prepared_context["tokens"]
     compaction = ai_run["compaction"]
     assert (compaction["decision"], compaction["outcome"], compaction["reason"]) == (
         timing.metadata["compaction_decision"],

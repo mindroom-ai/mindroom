@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
+from mindroom.ai_run_metadata import recorded_non_prompt_tokens
 from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
     ConversationChangedError,
@@ -136,12 +137,17 @@ class PreparedScopeHistory:
     resolved_inputs: HistoryPreparationInputs
     # How the route the run's requests go to counts tokens, which the final replay plan sizes with.
     counter: TokenCounter
+    # The system prompt and tools tokens the run's requests are sized with.
+    non_prompt_tokens: int
     compaction_decision: CompactionDecision = field(
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     # The native settings the run's requests carry, when the provider route manages history of its own.
     native_history: NativeHistory | None = None
+    # The history size the provider reported for the scope's latest request, when it still describes the history the
+    # run replays; the final replay plan sizes with it as the compaction check did.
+    reported_history_tokens: int | None = None
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
@@ -173,6 +179,7 @@ async def prepare_scope_history(
                 runs=(),
             ),
             counter=counter,
+            non_prompt_tokens=non_prompt_tokens,
         )
 
     execution_plan = resolved_inputs.execution_plan
@@ -222,9 +229,9 @@ async def prepare_scope_history(
         if native_route is None and visible_runs
         else None
     )
-    # The provider's count only ever raises the estimate: a count that misses replayed content cannot hide it, and the
-    # request it counted carried the system prompt and tools of its day, so it cannot show that history shrank.
-    current_history_tokens = max(estimated_history_tokens, reported_history_tokens or 0)
+    # The provider's count of the latest request is closer than any estimate of the whole history, which one ratio per
+    # route cannot fit to every conversation's content.
+    current_history_tokens = estimated_history_tokens if reported_history_tokens is None else reported_history_tokens
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
@@ -317,6 +324,9 @@ async def prepare_scope_history(
         compaction_reply_outcome=compaction_reply_outcome,
         native_history=native_history,
         counter=counter,
+        non_prompt_tokens=non_prompt_tokens,
+        # A compaction rewrote the history that request held.
+        reported_history_tokens=reported_history_tokens if compaction_decision.mode != "required" else None,
     )
 
 
@@ -331,15 +341,18 @@ def _reported_history_tokens(
 ) -> int | None:
     """Size history from the request the provider reported for the scope's latest answer, or None when stale.
 
-    That request held the system prompt, the tools, and all the history this reply replays except the answer.
-    The replay budgets are what the window leaves after the static estimate, so taking off that estimate's system
-    prompt and tools share, ``non_prompt_tokens``, converts the count to their units.
+    That request held the system prompt and tools its run records it was sized with, and all the history this reply
+    replays except the answer. The replay budgets are what the window leaves after today's static estimate, whose
+    system prompt and tools are ``non_prompt_tokens``, so the smaller of the two is taken off: a system prompt grown
+    since then counts in today's estimate rather than as history that shrank, and one that shrank stays counted.
     """
     if (
         # Replay limits drop the oldest content as runs accrue, so that request held more than will replay.
         not resolved_inputs.history_settings.replays_whole_history
         # Another model counts with another tokenizer.
         or (latest_run.model, latest_run.model_provider) != (model.identity.id, model.identity.provider)
+        # Without what that request's system prompt and tools came to, its history cannot be told apart.
+        or (recorded_tokens := recorded_non_prompt_tokens(latest_run.metadata)) is None
     ):
         return None
     messages = latest_run.messages
@@ -364,7 +377,7 @@ def _reported_history_tokens(
     # Sized as the next request replays them: as history, whose earlier reasoning a model may render.
     replayed = [replace(message, from_history=True) for message in messages[anchor:]]
     newer_tokens = estimate_request_messages_tokens(replayed, counter=model.token_counter)
-    return reported + newer_tokens - non_prompt_tokens
+    return reported + newer_tokens - min(recorded_tokens, non_prompt_tokens)
 
 
 def reported_context_tokens(message: Message, *, model: ModelProvider, config: Config, model_name: str) -> int | None:
@@ -676,7 +689,9 @@ def finalize_history_preparation(
             history_settings=history_settings,
             counter=counter,
         )
-        current_history_tokens = estimate_history_tokens(native_route=native_history_route(native_history))
+        current_history_tokens = prepared_scope_history.reported_history_tokens
+        if current_history_tokens is None:
+            current_history_tokens = estimate_history_tokens(native_route=native_history_route(native_history))
         if history_budget is not None and current_history_tokens > history_budget:
             # Never trim a native checkpoint by run/message count. Fall back to the
             # existing canonical guard if the final dynamic prompt exhausts its room.
@@ -718,6 +733,7 @@ def finalize_history_preparation(
         compaction_decision=prepared_scope_history.compaction_decision,
         compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
         prepared_context_tokens=prepared_context_tokens,
+        non_prompt_tokens=prepared_scope_history.non_prompt_tokens,
         native_history=native_history,
     )
 
