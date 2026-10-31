@@ -16,6 +16,77 @@ describe("Generic OAuth integration provider", () => {
     (global.fetch as any).mockReset();
   });
 
+  it("lists the built-in provider cards in display order", () => {
+    expect(
+      Object.values(integrationProviders).map((provider) => {
+        const { id, name, description, category, setup_type } =
+          provider.getConfig().integration;
+        return { id, name, description, category, setup_type };
+      }),
+    ).toEqual([
+      {
+        id: "google_calendar",
+        name: "Google Calendar",
+        description:
+          "View and schedule meetings with your connected Google Calendar",
+        category: "productivity",
+        setup_type: "oauth",
+      },
+      {
+        id: "google_cloud",
+        name: "Google Cloud",
+        description:
+          "Connect Google Cloud with read-only access for Google Cloud tools",
+        category: "development",
+        setup_type: "oauth",
+      },
+      {
+        id: "google_docs",
+        name: "Google Docs",
+        description: "Create, read, and edit documents with Google Docs",
+        category: "productivity",
+        setup_type: "oauth",
+      },
+      {
+        id: "google_drive",
+        name: "Google Drive",
+        description:
+          "Search, read, upload, and organize files in your connected Google Drive",
+        category: "productivity",
+        setup_type: "oauth",
+      },
+      {
+        id: "google_gmail",
+        name: "Gmail",
+        description: "Read, search, and manage Gmail emails",
+        category: "email",
+        setup_type: "oauth",
+      },
+      {
+        id: "google_sheets",
+        name: "Google Sheets",
+        description: "Read, create, and update Google Sheets spreadsheets",
+        category: "development",
+        setup_type: "oauth",
+      },
+      {
+        id: "google_tasks",
+        name: "Google Tasks",
+        description:
+          "List, create, update, complete, and delete tasks with Google Tasks",
+        category: "productivity",
+        setup_type: "oauth",
+      },
+      {
+        id: "homeassistant",
+        name: "Home Assistant",
+        description: "Control and monitor your smart home devices",
+        category: "smart_home",
+        setup_type: "special",
+      },
+    ]);
+  });
+
   it("registers Google Docs as a first-class OAuth integration", () => {
     const config = integrationProviders.google_docs.getConfig();
 

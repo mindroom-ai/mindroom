@@ -616,6 +616,171 @@ describe("Integrations", () => {
     });
   });
 
+  it("orders built-in provider cards, then discovered providers, then tool cards", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        ...mockTools,
+        {
+          name: "acme_drive",
+          display_name: "Acme Drive",
+          description: "Search Acme Drive files",
+          icon: "AcmeIcon",
+          icon_color: null,
+          category: "productivity",
+          status: "requires_config",
+          setup_type: "oauth",
+          auth_provider: "acme_drive",
+          config_fields: null,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    const panel = await screen.findByRole("tabpanel");
+    await waitFor(() => {
+      expect(
+        within(panel)
+          .getAllByRole("heading", { level: 2 })
+          .map((heading) => heading.textContent),
+      ).toEqual([
+        "Google Cloud",
+        "Google Drive",
+        "Gmail",
+        "Jukebox",
+        "Home Assistant",
+        "Plex",
+        "Acme Drive",
+        "Weather",
+      ]);
+    });
+  });
+
+  it("shows built-in provider cards before any tools are listed", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [],
+      loading: true,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    expect(await screen.findByText("Google Drive")).toBeInTheDocument();
+    expect(screen.getByText("Home Assistant")).toBeInTheDocument();
+  });
+
+  it("takes a built-in card's settings from the tool named after its provider", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValue({
+      status: "connected",
+      connected: true,
+    });
+    const driveTool = (name: string, field: string) => ({
+      name,
+      display_name: name,
+      description: `${name} on Google Drive`,
+      icon: "SiGoogledrive",
+      icon_color: "text-green-600",
+      category: "productivity",
+      status: "available",
+      setup_type: "oauth",
+      auth_provider: "google_drive",
+      config_fields: [{ name: field, label: field, type: "text" }],
+      helper_text: null,
+      docs_url: null,
+      dependencies: null,
+    });
+    mockUseTools.mockReturnValue({
+      tools: [
+        driveTool("drive_extra", "extra_field"),
+        driveTool("google_drive", "drive_field"),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    const driveCard = (await screen.findByText("Google Drive")).closest(
+      ".h-full",
+    ) as HTMLElement;
+    expect(screen.queryByText("drive_extra")).not.toBeInTheDocument();
+    fireEvent.click(
+      await within(driveCard).findByRole("button", { name: "Edit" }),
+    );
+
+    await waitFor(() => {
+      expect(mockEnhancedConfigDialogProps).toHaveBeenLastCalledWith({
+        service: "google_drive",
+        configFields: [expect.objectContaining({ name: "drive_field" })],
+      });
+    });
+  });
+
+  it("merges the Home Assistant tool into the Home Assistant card", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        ...mockTools,
+        {
+          name: "homeassistant",
+          display_name: "Home Assistant",
+          description: "Control Home Assistant devices",
+          icon: "Home",
+          icon_color: "text-blue-500",
+          category: "smart_home",
+          status: "requires_config",
+          setup_type: "special",
+          config_fields: [
+            { name: "HOMEASSISTANT_URL", label: "URL", type: "url" },
+          ],
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weather")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText("Home Assistant")).toHaveLength(1);
+    expect(screen.getByText("Smart home control")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Control Home Assistant devices"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens a provider's setup component in a dialog titled by its card", async () => {
+    render(<Integrations />);
+
+    const plexCard = (await screen.findByText("Plex")).closest(
+      ".h-full",
+    ) as HTMLElement;
+    fireEvent.click(within(plexCard).getByRole("button", { name: "Edit" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Plex Setup")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Movie and TV show database"),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText("Plex Icon")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Plex Config Component"),
+    ).toBeInTheDocument();
+  });
+
   it("should show correct status badges", async () => {
     render(<Integrations />);
 
