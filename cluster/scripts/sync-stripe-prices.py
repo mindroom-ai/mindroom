@@ -79,33 +79,28 @@ def sync_product():
 
 
 def find_or_create_price(product_id, plan_key, plan_data, billing_cycle):
-    """Find or create a Stripe price for a plan."""
-    if plan_key == "free":
-        return None  # No Stripe price needed for free plan
-
-    if plan_key == "enterprise":
-        return None  # Enterprise is custom pricing
-
-    # Determine price amount
+    """Find or create the Stripe price that bills a plan's configured amount for one billing cycle."""
     amount = plan_data["price_monthly"] if billing_cycle == "monthly" else plan_data["price_yearly"]
 
-    # Search for existing price with matching metadata
-    prices = stripe.Price.list(product=product_id, limit=100)
+    # A Stripe price's amount never changes, so only an active price with the configured amount bills what the
+    # pricing page shows.
+    prices = stripe.Price.list(product=product_id, active=True, limit=100)
     for price in prices.data:
         metadata = as_dict(price.metadata)
-        if metadata.get("tier") == plan_key and metadata.get("billing_cycle") == billing_cycle:
+        if (
+            metadata.get("tier") == plan_key
+            and metadata.get("billing_cycle") == billing_cycle
+            and price.unit_amount == amount
+        ):
             print(f"  Found existing price for {plan_key} ({billing_cycle}): {price.id}")
             return price.id
-
-    # Create new price
-    interval = "month" if billing_cycle == "monthly" else "year"
 
     price_params = {
         "product": product_id,
         "currency": "usd",
         "unit_amount": amount,
         "recurring": {
-            "interval": interval if billing_cycle == "monthly" else "month",
+            "interval": "month",
             "interval_count": 1 if billing_cycle == "monthly" else 12,
         },
         "nickname": f"{plan_data['name']} ({billing_cycle.capitalize()})",
@@ -115,6 +110,8 @@ def find_or_create_price(product_id, plan_key, plan_data, billing_cycle):
             "platform": "mindroom",
         },
         "lookup_key": f"{plan_key}_{billing_cycle}",
+        # The price this one replaces after an amount change still holds the lookup key.
+        "transfer_lookup_key": True,
     }
 
     price = stripe.Price.create(**price_params)
@@ -130,11 +127,8 @@ def update_config_with_price_ids(price_ids):
 
     # Update price IDs
     for plan_key, ids in price_ids.items():
-        if plan_key in config["plans"]:
-            if ids.get("monthly"):
-                config["plans"][plan_key]["stripe_price_id_monthly"] = ids["monthly"]
-            if ids.get("yearly"):
-                config["plans"][plan_key]["stripe_price_id_yearly"] = ids["yearly"]
+        config["plans"][plan_key]["stripe_price_id_monthly"] = ids["monthly"]
+        config["plans"][plan_key]["stripe_price_id_yearly"] = ids["yearly"]
 
     # Write back to file
     with open(config_path, "w") as f:
@@ -154,20 +148,12 @@ def main():
     price_ids = {}
     for plan_key, plan_data in config["plans"].items():
         if plan_key in ["free", "enterprise"]:
-            continue  # Skip free and enterprise plans
+            continue  # The free plan needs no price, and enterprise pricing is custom.
 
         print(f"\nProcessing {plan_data['name']} plan...")
-        price_ids[plan_key] = {}
-
-        # Create monthly price
-        monthly_id = find_or_create_price(product_id, plan_key, plan_data, "monthly")
-        if monthly_id:
-            price_ids[plan_key]["monthly"] = monthly_id
-
-        # Create yearly price
-        yearly_id = find_or_create_price(product_id, plan_key, plan_data, "yearly")
-        if yearly_id:
-            price_ids[plan_key]["yearly"] = yearly_id
+        price_ids[plan_key] = {
+            cycle: find_or_create_price(product_id, plan_key, plan_data, cycle) for cycle in ("monthly", "yearly")
+        }
 
     # Update config file with price IDs
     update_config_with_price_ids(price_ids)

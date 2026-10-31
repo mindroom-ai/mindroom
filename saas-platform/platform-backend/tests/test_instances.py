@@ -48,20 +48,6 @@ class TestInstancesEndpoints:
         app.dependency_overrides.clear()
 
     @pytest.fixture
-    def mock_check_deployment(self):
-        """Mock deployment existence check."""
-        with patch("backend.routes.instances.check_deployment_exists") as mock:
-            mock.return_value = True  # Default exists
-            yield mock
-
-    @pytest.fixture
-    def mock_kubectl(self):
-        """Mock kubectl commands."""
-        with patch("backend.routes.instances.run_kubectl") as mock:
-            mock.return_value = (0, "1", "")  # Default success with 1 replica
-            yield mock
-
-    @pytest.fixture
     def mock_provision_instance(self):
         """Mock the provisioner service provision function."""
         with patch("backend.services.provisioner_service.provision_instance") as mock:
@@ -137,27 +123,38 @@ class TestInstancesEndpoints:
     def test_list_user_instances_triggers_background_sync(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
-        """Test that stale instances trigger background sync."""
-        # Setup - instance with stale sync time
-        stale_time = datetime.now(UTC) - timedelta(minutes=5)
-        instances = [
-            {
-                "id": "1",
-                "instance_id": "123",
-                "subscription_id": "sub_123",
+        """Only rows whose Kubernetes status is missing or stale, and not already syncing, get a background sync."""
+        from backend.routes.instances import _syncing_instances
+
+        now = datetime.now(UTC)
+        stale = (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+
+        def row(instance_id: int, synced_at: str | None) -> dict:
+            return {
+                "id": str(instance_id),
+                "instance_id": instance_id,
+                "subscription_id": f"sub_{instance_id}",
                 "account_id": "acc_test_123",
                 "status": "running",
-                "kubernetes_synced_at": stale_time.isoformat(),
+                "kubernetes_synced_at": synced_at,
             }
-        ]
-        mock_supabase.table().select().eq().execute.return_value = Mock(data=instances)
 
-        # Make request
-        response = client.get("/my/instances")
+        mock_supabase.table().select().eq().execute.return_value = Mock(
+            data=[row(1, stale), row(2, None), row(3, now.isoformat()), row(4, stale)]
+        )
+        sync = AsyncMock()
 
-        # Verify
+        _syncing_instances.add("4")
+        try:
+            with patch("backend.routes.instances._background_sync_instance_status", sync):
+                response = client.get("/my/instances")
+        finally:
+            _syncing_instances.discard("4")
+
         assert response.status_code == 200
-        # Background task would be scheduled for stale instance
+        assert [call.args for call in sync.await_args_list] == [("1",), ("2",)]
+        hints = [instance["status_hint"] for instance in response.json()["instances"]]
+        assert hints == [None, "Running (awaiting initial Kubernetes health check).", None, None]
 
     def test_list_user_instances_no_instances(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
@@ -584,74 +581,16 @@ class TestInstancesEndpoints:
         # Verify the provisioner service restart function was called
         mock_restart_instance.assert_called_once_with(456)
 
-    def test_background_sync_task(
-        self, mock_supabase: MagicMock, mock_check_deployment: AsyncMock, mock_kubectl: AsyncMock
-    ):
-        """Test background sync task functionality."""
-        from backend.routes.instances import _background_sync_instance_status
-
-        # Setup
-        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"status": "running"}])
-        mock_check_deployment.return_value = True
-        mock_kubectl.return_value = (0, "0", "")  # 0 replicas = stopped
-        mock_supabase.table().update().eq().execute.return_value = Mock()
-
-        # Run the background task
-        asyncio.run(_background_sync_instance_status("123"))
-
-        # Verify database was updated
-        update_call = mock_supabase.table().update.call_args[0][0]
-        assert update_call["status"] == "stopped"
-        assert "kubernetes_synced_at" in update_call
-
-    def test_background_sync_task_deployment_not_found(
-        self, mock_supabase: MagicMock, mock_check_deployment: AsyncMock
-    ):
-        """Test background sync when deployment doesn't exist."""
-        from backend.routes.instances import _background_sync_instance_status
-
-        # Setup
-        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"status": "running"}])
-        mock_check_deployment.return_value = False
-        mock_supabase.table().update().eq().execute.return_value = Mock()
-
-        # Run the background task
-        asyncio.run(_background_sync_instance_status("123"))
-
-        # Verify database was updated to error
-        update_call = mock_supabase.table().update.call_args[0][0]
-        assert update_call["status"] == "error"
-
-    def test_background_sync_keeps_a_claim_made_during_its_kubernetes_check(self):
-        """A provision claiming a deprovisioned instance during the sync is not undone by the status the sync read."""
-        from backend.routes.instances import _background_sync_instance_status
-
-        db = FakeSupabase({"instances": [{"instance_id": "789", "status": "deprovisioned"}]})
-
-        async def claim_during_check(_instance_id: str) -> bool:
-            db.row("instances", instance_id="789")["status"] = "provisioning"
-            return False
-
-        with (
-            patch("backend.routes.instances.ensure_supabase", return_value=db),
-            patch("backend.routes.instances.check_deployment_exists", side_effect=claim_during_check),
-        ):
-            asyncio.run(_background_sync_instance_status("789"))
-
-        assert db.row("instances", instance_id="789")["status"] == "provisioning"
-
-    def test_background_sync_task_instance_row_missing(
-        self, mock_supabase: MagicMock, mock_check_deployment: AsyncMock
-    ):
+    def test_background_sync_task_instance_row_missing(self, mock_supabase: MagicMock):
         """Background sync returns early when the instance row vanished from the database."""
         from backend.routes.instances import _background_sync_instance_status
 
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
 
-        asyncio.run(_background_sync_instance_status("123"))
+        with patch("backend.services.provisioner_service.sync_instance_status") as sync:
+            asyncio.run(_background_sync_instance_status("123"))
 
-        mock_check_deployment.assert_not_called()
-        mock_supabase.table().update.assert_not_called()
+        sync.assert_not_called()
 
     def test_background_sync_prevents_duplicate(self):
         """Test that background sync prevents duplicate syncs."""

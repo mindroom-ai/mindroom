@@ -131,6 +131,11 @@ def _create_no_op_limiter():  # noqa: C901, ANN202
     return MockLimiter()
 
 
+import os
+
+# The tests mock Kubernetes; an empty kubeconfig keeps any unmocked kubectl or helm call off real clusters.
+os.environ["KUBECONFIG"] = os.devnull
+
 # Patch the limiter IMMEDIATELY before any routes load
 import sys
 

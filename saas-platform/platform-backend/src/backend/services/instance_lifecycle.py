@@ -39,9 +39,9 @@ from backend.entitlements import (
     is_subscription_service_active,
     parse_timestamp,
 )
-from backend.k8s import check_deployment_exists, run_kubectl, tenant_stop_deployment_refs
+from backend.k8s import INSTANCES_NAMESPACE, check_deployment_exists, run_kubectl, tenant_stop_deployment_refs
 from backend.openrouter import OpenRouterKeyNotFoundError
-from backend.services.instances_data import get_instance, update_instance
+from backend.services.instances_data import get_instance, list_instances, update_instance
 from backend.services.legacy_instance_lifecycle import (
     adopt_legacy_soft_deleted_instance,
     legacy_soft_deleted_deployment_exists,
@@ -75,9 +75,7 @@ LIFECYCLE_INSTANCE_COLUMNS = (
     "openrouter_key_limit_reset,lifecycle_stopped_at,teardown_after,lifecycle_error,lifecycle_error_at"
 )
 _CLEARED_LIFECYCLE_ERROR = {"lifecycle_error": None, "lifecycle_error_at": None}
-_PAGE_SIZE = 1000
 _STRIPE_REFRESH_ATTEMPTS = 3
-_INSTANCES_NAMESPACE = "mindroom-instances"
 # Stripe subscriptions in these states have no paid period to finish, so a recorded account deletion cancels them;
 # otherwise a customer could still pay an open first invoice or resume a paused trial during the grace period.
 _UNBILLED_STRIPE_STATUSES = frozenset({"incomplete", "paused"})
@@ -290,7 +288,7 @@ async def reconcile_all_subscriptions(*, now: datetime | None = None) -> Lifecyc
     """Reconcile every subscription that owns an instance."""
     summary = LifecycleSummary()
     subscription_ids = dict.fromkeys(
-        row["subscription_id"] for row in _instance_rows(ensure_supabase(), "subscription_id")
+        row["subscription_id"] for row in list_instances(ensure_supabase(), "subscription_id")
     )
     for subscription_id in subscription_ids:
         try:
@@ -454,7 +452,7 @@ def lifecycle_overview(*, now: datetime | None = None) -> tuple[list[dict[str, A
     Each row carries the instance lifecycle columns, `account_email`, `subscription_status`, and `problem`.
     """
     now = now or datetime.now(UTC)
-    rows = _instance_rows(
+    rows = list_instances(
         ensure_supabase(),
         f"{LIFECYCLE_INSTANCE_COLUMNS},subscription:subscriptions(*),account:accounts(email,deleted_at)",
     )
@@ -504,24 +502,6 @@ def _lifecycle_problem(
     if not held and not entitled:
         return "Subscription is not entitled but the instance is not scheduled for teardown"
     return None
-
-
-def _instance_rows(sb: Client, columns: str) -> list[dict[str, Any]]:
-    """Return every instance row, paged past PostgREST's row limit."""
-    rows: list[dict[str, Any]] = []
-    while True:
-        page = (
-            sb.table("instances")
-            .select(columns)
-            .order("instance_id")
-            .range(len(rows), len(rows) + _PAGE_SIZE - 1)
-            .execute()
-            .data
-            or []
-        )
-        if not page:
-            return rows
-        rows.extend(page)
 
 
 async def _resume(
@@ -699,7 +679,7 @@ async def _teardown(
 async def _scale_down(instance_id: Any) -> None:
     """Scale every tenant deployment to zero; a deployment that does not exist is already stopped."""
     for deployment_ref in tenant_stop_deployment_refs(instance_id):
-        code, out, err = await run_kubectl(["scale", deployment_ref, "--replicas=0"], namespace=_INSTANCES_NAMESPACE)
+        code, out, err = await run_kubectl(["scale", deployment_ref, "--replicas=0"], namespace=INSTANCES_NAMESPACE)
         message = (err or out).strip()
         if code != 0 and "notfound" not in message.lower().replace(" ", ""):
             msg = f"kubectl scale failed for {deployment_ref}: {message}"

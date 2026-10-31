@@ -514,7 +514,7 @@ class TestProvisionerExtended:
             mock_db = MagicMock()
             mock_sb.return_value = mock_db
             # Make the select().execute() call raise an exception
-            mock_db.table().select().execute.side_effect = RuntimeError("Database connection failed")
+            mock_db.table.side_effect = RuntimeError("Database connection failed")
 
             response = client.post("/system/sync-instances", headers=valid_auth)
 

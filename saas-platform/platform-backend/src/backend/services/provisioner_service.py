@@ -57,7 +57,9 @@ from backend.config import (
 )
 from backend.deps import ensure_supabase
 from backend.k8s import (
+    INSTANCES_NAMESPACE,
     check_deployment_exists,
+    get_deployment,
     instance_deployment_ref,
     run_kubectl,
     tenant_start_deployment_refs,
@@ -116,7 +118,6 @@ _RESOURCE_PROFILE_HELM_VALUES = {
     }
 }
 
-_INSTANCES_NAMESPACE = "mindroom-instances"
 # Tenant pods run tenant code, so admission must reject privileged and host-reaching pods in their namespace.
 _POD_SECURITY_ENFORCE_LABEL = "pod-security.kubernetes.io/enforce=baseline"
 # PostgreSQL unique_violation of the constraint that allows one instance per subscription (migration 007).
@@ -134,7 +135,7 @@ def _env_flag_enabled(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-async def _background_mark_running_when_ready(instance_id: str, namespace: str = _INSTANCES_NAMESPACE) -> None:
+async def _background_mark_running_when_ready(instance_id: str, namespace: str = INSTANCES_NAMESPACE) -> None:
     """Background task: wait longer and mark instance running when ready, unless the lifecycle held it meanwhile."""
     try:
         ready = await wait_for_deployment_ready(instance_id, namespace=namespace, timeout_seconds=600)
@@ -589,7 +590,7 @@ async def _delete_resources_outside_release(instance_id: str | int) -> None:
     """Delete instance PVCs and Secrets that `helm uninstall` does not own or may leave behind."""
     for kind, names in (("pvc", _instance_pvc_names(instance_id)), ("secret", _instance_secret_names(instance_id))):
         code, out, err = await run_kubectl(
-            ["delete", kind, *names, "--ignore-not-found", "--wait=false"], namespace=_INSTANCES_NAMESPACE
+            ["delete", kind, *names, "--ignore-not-found", "--wait=false"], namespace=INSTANCES_NAMESPACE
         )
         if code != 0:
             msg = f"Failed to delete {kind} for instance {instance_id}: {err or out}"
@@ -801,7 +802,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     helm_release_name = f"instance-{customer_id}"
     logger.info("Provisioning instance for subscription %s, new id: %s, tier: %s", subscription_id, customer_id, tier)
 
-    namespace = _INSTANCES_NAMESPACE
+    namespace = INSTANCES_NAMESPACE
     try:
         await run_kubectl(["create", "namespace", namespace])
     except FileNotFoundError:
@@ -1014,7 +1015,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         return held_response
     if keep_stopped:
         await _scale_tenant_deployments(
-            tenant_stop_deployment_refs(customer_id), replicas=0, namespace=_INSTANCES_NAMESPACE
+            tenant_stop_deployment_refs(customer_id), replicas=0, namespace=INSTANCES_NAMESPACE
         )
         update_instance(sb, customer_id, {"status": "stopped", "tier": tier})
         return {**held_response, "message": "Instance redeployed and kept stopped"}
@@ -1077,9 +1078,7 @@ def _held_by_lifecycle(sb: Any, instance_id: str | int, *, resuming: bool = Fals
 
 async def _keep_held_instance_stopped(sb: Any, instance_id: str, tier: str) -> None:
     """Scale a freshly deployed instance the lifecycle holds back to zero with its platform key disabled."""
-    await _scale_tenant_deployments(
-        tenant_stop_deployment_refs(instance_id), replicas=0, namespace=_INSTANCES_NAMESPACE
-    )
+    await _scale_tenant_deployments(tenant_stop_deployment_refs(instance_id), replicas=0, namespace=INSTANCES_NAMESPACE)
     held_row = get_instance(sb, instance_id, columns="instance_id,openrouter_key_hash") or {}
     await set_instance_openrouter_key_disabled(held_row, disabled=True)
     update_instance(sb, instance_id, {"status": "stopped", "tier": tier})
@@ -1096,7 +1095,7 @@ async def start_instance(instance_id: int) -> dict[str, Any]:
 
     try:
         out = await _scale_tenant_deployments(
-            tenant_start_deployment_refs(instance_id), replicas=1, namespace=_INSTANCES_NAMESPACE
+            tenant_start_deployment_refs(instance_id), replicas=1, namespace=INSTANCES_NAMESPACE
         )
         logger.info("Started instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
@@ -1120,7 +1119,7 @@ async def stop_instance(instance_id: int) -> dict[str, Any]:
 
     try:
         out = await _scale_tenant_deployments(
-            tenant_stop_deployment_refs(instance_id), replicas=0, namespace=_INSTANCES_NAMESPACE
+            tenant_stop_deployment_refs(instance_id), replicas=0, namespace=INSTANCES_NAMESPACE
         )
         logger.info("Stopped instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
@@ -1144,7 +1143,7 @@ async def restart_instance(instance_id: int) -> dict[str, Any]:
 
     try:
         out = await _run_kubectl_for_deployments(
-            ["rollout", "restart"], tenant_start_deployment_refs(instance_id), namespace=_INSTANCES_NAMESPACE
+            ["rollout", "restart"], tenant_start_deployment_refs(instance_id), namespace=INSTANCES_NAMESPACE
         )
         logger.info("Restarted instance %s: %s", instance_id, out)
     except Exception as e:
@@ -1165,7 +1164,7 @@ async def uninstall_instance(instance_id: int) -> dict[str, Any]:
 
     try:
         helm_release_name = f"instance-{instance_id}"
-        code, stdout, stderr = await run_helm(["uninstall", helm_release_name, f"--namespace={_INSTANCES_NAMESPACE}"])
+        code, stdout, stderr = await run_helm(["uninstall", helm_release_name, f"--namespace={INSTANCES_NAMESPACE}"])
 
         if code != 0:
             error_msg = stderr
@@ -1193,76 +1192,64 @@ async def uninstall_instance(instance_id: int) -> dict[str, Any]:
     return {"success": True, "message": f"Instance {instance_id} uninstalled successfully", "instance_id": instance_id}
 
 
+def _deployment_status(deployment: Mapping[str, Any]) -> str:
+    """Return the status a deployment shows: running once every desired pod is ready, available, and updated."""
+    desired = deployment["spec"]["replicas"]
+    if desired == 0:
+        return "stopped"
+    # Kubernetes omits replica counts that are zero.
+    counts = deployment.get("status", {})
+    ready = min(counts.get(key, 0) for key in ("readyReplicas", "availableReplicas", "updatedReplicas"))
+    return "running" if ready >= desired else "provisioning"
+
+
+async def sync_instance_status(sb: Any, instance_id: int | str, stored_status: str) -> SyncUpdateOut | None:
+    """Record the status Kubernetes shows for an instance, unless its row left `stored_status` meanwhile.
+
+    Returns the change it recorded, or None when the status stayed or another writer changed the row first.
+    Raises when kubectl fails, before stamping the row, so the next dashboard poll checks again.
+    """
+    deployment = await get_deployment(instance_id)
+    if deployment is not None:
+        status, reason = _deployment_status(deployment), "status_mismatch"
+    elif stored_status in ("provisioning", "deprovisioned"):
+        # A provision records its row before Helm creates the deployment, and teardown deletes it.
+        status, reason = stored_status, "deployment_not_found"
+    else:
+        status, reason = "error", "deployment_not_found"
+    recorded = update_instance(
+        sb,
+        instance_id,
+        {"status": status, "kubernetes_synced_at": datetime.now(UTC).isoformat()},
+        expected_status=stored_status,
+    )
+    if not recorded or status == stored_status:
+        return None
+    logger.info("Instance %s status changed from %s to %s (%s)", instance_id, stored_status, status, reason)
+    return SyncUpdateOut(instance_id=instance_id, old_status=stored_status, new_status=status, reason=reason)
+
+
 async def sync_instances(sb: Any) -> dict[str, Any]:
-    """Sync instance states between database and Kubernetes cluster."""
+    """Record the status Kubernetes shows for every instance and summarize the changes."""
     logger.info("Starting instance sync")
-
     try:
-        instances = list_instances(sb)
-
-        sync_results: dict[str, Any] = {"total": len(instances), "synced": 0, "errors": 0, "updates": []}
-
-        for instance in instances:
-            instance_id = instance.get("instance_id") or instance.get("subdomain")
-            if not instance_id:
-                logger.warning("Instance %s has no instance_id or subdomain", instance.get("id"))
-                sync_results["errors"] += 1
-                continue
-
-            exists = await check_deployment_exists(instance_id)
-            current_status = instance.get("status", "unknown")
-
-            if not exists:
-                if current_status not in ["error", "deprovisioned"]:
-                    logger.info("Instance %s not found in cluster, marking as error", instance_id)
-                    now = datetime.now(UTC).isoformat()
-                    sb.table("instances").update(
-                        {"status": "error", "kubernetes_synced_at": now, "updated_at": now}
-                    ).eq("id", instance["id"]).execute()
-
-                    sync_results["updates"].append(
-                        SyncUpdateOut(
-                            instance_id=instance_id,
-                            old_status=current_status,
-                            new_status="error",
-                            reason="deployment_not_found",
-                        ).model_dump()
-                    )
-                    sync_results["synced"] += 1
-            else:
-                try:
-                    code, out, _ = await run_kubectl(
-                        ["get", instance_deployment_ref(instance_id), "-o=jsonpath={.spec.replicas}"],
-                        namespace=_INSTANCES_NAMESPACE,
-                    )
-                    if code == 0:
-                        replicas = int(out.strip() or "0")
-                        actual_status = "running" if replicas > 0 else "stopped"
-
-                        if current_status != actual_status:
-                            logger.info(
-                                "Instance %s status mismatch: DB=%s, K8s=%s", instance_id, current_status, actual_status
-                            )
-                            now = datetime.now(UTC).isoformat()
-                            sb.table("instances").update(
-                                {"status": actual_status, "kubernetes_synced_at": now, "updated_at": now}
-                            ).eq("id", instance["id"]).execute()
-
-                            sync_results["updates"].append(
-                                SyncUpdateOut(
-                                    instance_id=instance_id,
-                                    old_status=current_status,
-                                    new_status=actual_status,
-                                    reason="status_mismatch",
-                                ).model_dump()
-                            )
-                            sync_results["synced"] += 1
-                except Exception:
-                    logger.exception("Error checking instance %s state", instance_id)
-                    sync_results["errors"] += 1
-
-        logger.info("Instance sync completed: %s", sync_results)
-        return sync_results  # noqa: TRY300
+        instances = list_instances(sb, columns="instance_id,status")
     except Exception as e:
         logger.exception("Failed to sync instances")
         raise HTTPException(status_code=500, detail=f"Failed to sync instances: {e}") from e
+
+    updates: list[dict[str, Any]] = []
+    errors = 0
+    for instance in instances:
+        try:
+            update = await sync_instance_status(sb, instance["instance_id"], instance["status"])
+        except Exception:
+            logger.exception("Error checking instance %s state", instance["instance_id"])
+            errors += 1
+            continue
+        if update is not None:
+            updates.append(update.model_dump())
+
+    sync_results = {"total": len(instances), "synced": len(updates), "errors": errors, "updates": updates}
+    logger.info("Instance sync completed: %s", sync_results)
+    return sync_results

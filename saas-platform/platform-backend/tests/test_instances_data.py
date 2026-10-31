@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 from backend.services import instances_data
 
+from tests.fake_supabase import FakeSupabase
+
 
 @dataclass
 class StubResult:
@@ -131,18 +133,14 @@ class TestGetInstancesForAccount:
 
 
 class TestListInstances:
-    def test_selects_all_columns_by_default(self):
-        sb = StubSupabase([ROW_A, ROW_B])
-        assert instances_data.list_instances(sb) == [ROW_A, ROW_B]
-        assert ("select", "*") in sb.calls
-
-    def test_selects_column_subset(self):
-        sb = StubSupabase([{"status": "running"}])
-        assert instances_data.list_instances(sb, columns="status") == [{"status": "running"}]
-        assert ("select", "status") in sb.calls
+    def test_pages_past_the_row_limit_in_instance_order(self):
+        rows = [{"instance_id": n, "status": "running"} for n in (3, 1, 5, 2, 4)]
+        with patch.object(instances_data, "_PAGE_SIZE", 2):
+            listed = instances_data.list_instances(FakeSupabase({"instances": rows}), columns="instance_id")
+        assert [row["instance_id"] for row in listed] == [1, 2, 3, 4, 5]
 
     def test_returns_empty_list_when_data_is_none(self):
-        assert instances_data.list_instances(StubSupabase(None)) == []
+        assert instances_data.list_instances(FakeSupabase({})) == []
 
 
 class TestCreateInstance:

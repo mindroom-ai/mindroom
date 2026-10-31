@@ -13,6 +13,8 @@ interface InstanceActionsProps {
 
 export function InstanceActions({ instanceId, currentStatus }: InstanceActionsProps) {
   const [loading, setLoading] = useState<string | null>(null)
+  // A crash-looping instance shows provisioning, so an admin can stop or restart it instead of only uninstalling it.
+  const canStopOrRestart = currentStatus === 'running' || currentStatus === 'provisioning'
 
   const performAction = async (action: 'start' | 'stop' | 'restart' | 'uninstall' | 'provision') => {
     setLoading(action)
@@ -68,7 +70,7 @@ export function InstanceActions({ instanceId, currentStatus }: InstanceActionsPr
         </Button>
       )}
 
-      {currentStatus === 'running' && (
+      {canStopOrRestart && (
         <Button
           variant="ghost"
           size="sm"
@@ -81,7 +83,7 @@ export function InstanceActions({ instanceId, currentStatus }: InstanceActionsPr
         </Button>
       )}
 
-      {currentStatus === 'running' && (
+      {canStopOrRestart && (
         <Button
           variant="ghost"
           size="sm"
