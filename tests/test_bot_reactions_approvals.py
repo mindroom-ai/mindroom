@@ -652,7 +652,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=MagicMock(return_value=SemanticConsumer.CONFIG_CONFIRMATION),
             ),
             patch(
-                "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+                "mindroom.reaction_dispatch.config_confirmation.resolve_reaction_pending_change",
                 new=AsyncMock(return_value=None),
             ) as resolve_pending,
         ):
@@ -697,11 +697,11 @@ class TestAgentBot(AgentBotTestBase):
         gate = bot.orchestrator.response_admission_gate
         with (
             patch(
-                "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+                "mindroom.reaction_dispatch.config_confirmation.resolve_reaction_pending_change",
                 side_effect=delayed_resolution,
             ),
             patch(
-                "mindroom.bot.config_confirmation.handle_confirmation_reaction",
+                "mindroom.reaction_dispatch.config_confirmation.handle_confirmation_reaction",
                 new=handler,
             ),
         ):
@@ -2347,11 +2347,11 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+                "mindroom.reaction_dispatch.config_confirmation.resolve_reaction_pending_change",
                 new=AsyncMock(return_value=pending_change),
             ),
             patch(
-                "mindroom.bot.config_confirmation.resume_committed_confirmation",
+                "mindroom.reaction_dispatch.config_confirmation.resume_committed_confirmation",
                 new=AsyncMock(side_effect=failure),
             ),
         ):
@@ -2372,7 +2372,7 @@ class TestAgentBot(AgentBotTestBase):
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
         with patch(
-            "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+            "mindroom.reaction_dispatch.config_confirmation.resolve_reaction_pending_change",
             new=AsyncMock(return_value=None),
         ) as resolve_pending:
             await restarted._journal_dispatcher.drain_once()
@@ -2738,7 +2738,7 @@ class TestAgentBot(AgentBotTestBase):
         [("$thread-root", "$thread-root"), (RuntimeError("lookup failed"), None)],
         ids=["found", "lookup_failed"],
     )
-    async def test_reaction_hooks_get_the_reacted_to_events_thread_when_its_lookup_succeeds(
+    async def test_reaction_hooks_get_the_reacted_to_events_thread_or_none_when_its_lookup_fails(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,

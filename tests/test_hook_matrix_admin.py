@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import importlib.util
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +14,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import HookContext
+from mindroom.hooks.matrix_admin import build_hook_matrix_admin
 from mindroom.logging_config import get_logger
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
@@ -42,12 +42,6 @@ def _config(tmp_path: Path) -> Config:
         Config(models={"default": ModelConfig(provider="openai", id="test-model")}),
         runtime_paths,
     )
-
-
-def _matrix_admin_module() -> object:
-    spec = importlib.util.find_spec("mindroom.hooks.matrix_admin")
-    assert spec is not None, "mindroom.hooks.matrix_admin should exist"
-    return importlib.import_module("mindroom.hooks.matrix_admin")
 
 
 def _private_room_config(tmp_path: Path) -> Config:
@@ -127,14 +121,13 @@ async def test_hook_context_delegates_latest_agent_message_snapshot_reads(tmp_pa
 @pytest.mark.parametrize("available", [True, False])
 async def test_hook_matrix_admin_reads_bound_account_joined_rooms(tmp_path: Path, available: bool) -> None:
     """Plugins can distinguish current memberships from an unavailable snapshot."""
-    module = _matrix_admin_module()
     client = AsyncMock(spec=nio.AsyncClient)
     client.joined_rooms.return_value = (
         nio.JoinedRoomsResponse(rooms=["!existing:localhost"])
         if available
         else nio.JoinedRoomsError("unavailable", status_code="M_UNKNOWN")
     )
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+    admin = build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
 
     assert await admin.get_joined_rooms() == (["!existing:localhost"] if available else None)
 
@@ -142,7 +135,6 @@ async def test_hook_matrix_admin_reads_bound_account_joined_rooms(tmp_path: Path
 @pytest.mark.asyncio
 async def test_build_hook_matrix_admin_resolve_alias_returns_room_id(tmp_path: Path) -> None:
     """Alias resolution should return the resolved room ID on success."""
-    module = _matrix_admin_module()
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
     client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
@@ -151,7 +143,7 @@ async def test_build_hook_matrix_admin_resolve_alias_returns_room_id(tmp_path: P
         servers=["localhost"],
     )
 
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+    admin = build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
     room_id = await admin.resolve_alias("#personal-user:localhost")
 
     assert room_id == "!personal:localhost"
@@ -161,151 +153,101 @@ async def test_build_hook_matrix_admin_resolve_alias_returns_room_id(tmp_path: P
 @pytest.mark.asyncio
 async def test_build_hook_matrix_admin_resolve_alias_returns_none_on_error(tmp_path: Path) -> None:
     """Alias resolution should fail closed on Matrix error responses."""
-    module = _matrix_admin_module()
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
     client.room_resolve_alias.return_value = nio.RoomResolveAliasError("not found", status_code="M_NOT_FOUND")
 
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+    admin = build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
     room_id = await admin.resolve_alias("#personal-user:localhost")
 
     assert room_id is None
 
 
 @pytest.mark.asyncio
-async def test_hook_matrix_admin_get_profile_avatar_returns_content_uri(tmp_path: Path) -> None:
-    """Profile avatar reads should expose the Matrix content URI."""
-    module = _matrix_admin_module()
+@pytest.mark.parametrize(
+    ("response", "avatar"),
+    [
+        pytest.param(
+            nio.ProfileGetResponse(displayname="Ada", avatar_url="mxc://localhost/ada"),
+            "mxc://localhost/ada",
+            id="content-uri",
+        ),
+        pytest.param(nio.ProfileGetResponse(displayname="Ada"), None, id="no-avatar"),
+        pytest.param(nio.ProfileGetResponse(displayname="Ada", avatar_url=""), None, id="empty-avatar"),
+        pytest.param(nio.ProfileGetError("not found", status_code="M_NOT_FOUND"), None, id="lookup-error"),
+    ],
+)
+async def test_hook_matrix_admin_get_profile_avatar(
+    tmp_path: Path,
+    response: nio.ProfileGetResponse | nio.ProfileGetError,
+    avatar: str | None,
+) -> None:
+    """Profile avatar reads expose the Matrix content URI; no avatar, an empty one, or a failed lookup stays unset."""
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
-    client.get_profile.return_value = nio.ProfileGetResponse(
-        displayname="Ada",
-        avatar_url="mxc://localhost/ada",
-    )
+    client.get_profile.return_value = response
 
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+    admin = build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
 
-    assert await admin.get_profile_avatar("@ada:localhost") == "mxc://localhost/ada"
+    assert await admin.get_profile_avatar("@ada:localhost") == avatar
     client.get_profile.assert_awaited_once_with("@ada:localhost")
 
 
 @pytest.mark.asyncio
-async def test_hook_matrix_admin_get_profile_avatar_returns_none_without_avatar(tmp_path: Path) -> None:
-    """Profiles without avatars should remain unset."""
-    module = _matrix_admin_module()
+@pytest.mark.parametrize(
+    ("response", "result"),
+    [
+        pytest.param(
+            nio.RoomGetStateEventResponse(
+                content={"url": "mxc://localhost/ada"},
+                event_type="m.room.avatar",
+                state_key="",
+                room_id="!personal:localhost",
+            ),
+            (True, {"url": "mxc://localhost/ada"}),
+            id="content",
+        ),
+        pytest.param(
+            nio.RoomGetStateEventError("missing", status_code="M_NOT_FOUND", room_id="!personal:localhost"),
+            (True, None),
+            id="missing",
+        ),
+        pytest.param(
+            nio.RoomGetStateEventError("forbidden", status_code="M_FORBIDDEN", room_id="!personal:localhost"),
+            (False, None),
+            id="failed",
+        ),
+        pytest.param(
+            nio.RoomGetStateEventResponse(
+                content=["not", "an", "object"],
+                event_type="m.room.avatar",
+                state_key="",
+                room_id="!personal:localhost",
+            ),
+            (False, None),
+            id="malformed-content",
+        ),
+    ],
+)
+async def test_hook_matrix_admin_get_room_state_event(
+    tmp_path: Path,
+    response: nio.RoomGetStateEventResponse | nio.RoomGetStateEventError,
+    result: tuple[bool, dict[str, object] | None],
+) -> None:
+    """Single-event reads expose content, confirm a missing event, and fail closed on a failed read or non-object content."""
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
-    client.get_profile.return_value = nio.ProfileGetResponse(displayname="Ada")
+    client.room_get_state_event.return_value = response
 
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+    admin = build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
 
-    assert await admin.get_profile_avatar("@ada:localhost") is None
-
-
-@pytest.mark.asyncio
-async def test_hook_matrix_admin_get_profile_avatar_normalizes_empty_avatar(tmp_path: Path) -> None:
-    """An empty avatar URL should remain unavailable to hook callers."""
-    module = _matrix_admin_module()
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.homeserver = "http://localhost:8008"
-    client.get_profile.return_value = nio.ProfileGetResponse(displayname="Ada", avatar_url="")
-
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
-
-    assert await admin.get_profile_avatar("@ada:localhost") is None
-
-
-@pytest.mark.asyncio
-async def test_hook_matrix_admin_get_profile_avatar_returns_none_on_error(tmp_path: Path) -> None:
-    """Profile lookup errors should fail closed."""
-    module = _matrix_admin_module()
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.homeserver = "http://localhost:8008"
-    client.get_profile.return_value = nio.ProfileGetError("not found", status_code="M_NOT_FOUND")
-
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
-
-    assert await admin.get_profile_avatar("@missing:localhost") is None
-
-
-@pytest.mark.asyncio
-async def test_hook_matrix_admin_get_room_state_event_returns_content(tmp_path: Path) -> None:
-    """Single-event reads should expose successful content."""
-    module = _matrix_admin_module()
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.homeserver = "http://localhost:8008"
-    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        content={"url": "mxc://localhost/ada"},
-        event_type="m.room.avatar",
-        state_key="",
-        room_id="!personal:localhost",
-    )
-
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
-
-    assert await admin.get_room_state_event("!personal:localhost", "m.room.avatar", "") == (
-        True,
-        {"url": "mxc://localhost/ada"},
-    )
+    assert await admin.get_room_state_event("!personal:localhost", "m.room.avatar", "") == result
     client.room_get_state_event.assert_awaited_once_with("!personal:localhost", "m.room.avatar", "")
-
-
-@pytest.mark.asyncio
-async def test_hook_matrix_admin_get_room_state_event_distinguishes_missing(tmp_path: Path) -> None:
-    """A missing state event should be distinguishable from a failed read."""
-    module = _matrix_admin_module()
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.homeserver = "http://localhost:8008"
-    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
-        "missing",
-        status_code="M_NOT_FOUND",
-        room_id="!personal:localhost",
-    )
-
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
-
-    assert await admin.get_room_state_event("!personal:localhost", "m.room.avatar", "") == (True, None)
-
-
-@pytest.mark.asyncio
-async def test_hook_matrix_admin_get_room_state_event_fails_closed(tmp_path: Path) -> None:
-    """A failed state read should not look like a confirmed missing event."""
-    module = _matrix_admin_module()
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.homeserver = "http://localhost:8008"
-    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
-        "forbidden",
-        status_code="M_FORBIDDEN",
-        room_id="!personal:localhost",
-    )
-
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
-
-    assert await admin.get_room_state_event("!personal:localhost", "m.room.avatar", "") == (False, None)
-
-
-@pytest.mark.asyncio
-async def test_hook_matrix_admin_get_room_state_event_rejects_malformed_content(tmp_path: Path) -> None:
-    """Successful responses with non-object content should fail closed."""
-    module = _matrix_admin_module()
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.homeserver = "http://localhost:8008"
-    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        content=["not", "an", "object"],
-        event_type="m.room.avatar",
-        state_key="",
-        room_id="!personal:localhost",
-    )
-
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
-
-    assert await admin.get_room_state_event("!personal:localhost", "m.room.avatar", "") == (False, None)
 
 
 @pytest.mark.asyncio
 async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path: Path) -> None:
     """The hook builder should reuse the existing Matrix helper functions."""
-    module = _matrix_admin_module()
     runtime_paths = runtime_paths_for(_config(tmp_path))
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
@@ -322,7 +264,7 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
         ) as mock_members,
         patch("mindroom.hooks.matrix_admin.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
     ):
-        admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths)
+        admin = build_hook_matrix_admin(client, runtime_paths=runtime_paths)
 
         room_id = await admin.create_room(name="Personal Room", alias_localpart="personal-user", topic="Hello")
         invited = await admin.invite_user("!created:localhost", "@user:localhost")
@@ -377,12 +319,11 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
 @pytest.mark.asyncio
 async def test_hook_matrix_admin_kick_user_returns_false_on_error(tmp_path: Path) -> None:
     """User kicks should fail closed on Matrix error responses."""
-    module = _matrix_admin_module()
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
     client.room_kick.return_value = nio.RoomKickError("forbidden", status_code="M_FORBIDDEN")
 
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+    admin = build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
 
     assert await admin.kick_user("!room:localhost", "@user:localhost") is False
     client.room_kick.assert_awaited_once_with("!room:localhost", "@user:localhost", reason=None)
@@ -391,16 +332,15 @@ async def test_hook_matrix_admin_kick_user_returns_false_on_error(tmp_path: Path
 @pytest.mark.asyncio
 async def test_hook_matrix_admin_force_join_user_calls_synapse_admin_api(tmp_path: Path) -> None:
     """Force-join should invite first so Tuwunel can join a private room."""
-    module = _matrix_admin_module()
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
     client.access_token = TEST_PASSWORD
     response = MagicMock(status=200)
     client.send.return_value = response
 
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+    admin = build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
 
-    with patch.object(module, "invite_to_room", new=AsyncMock(return_value=True)) as mock_invite:
+    with patch("mindroom.hooks.matrix_admin.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite:
         assert await admin.force_join_user("!personal:localhost", "@user:localhost") is True
 
     mock_invite.assert_awaited_once_with(client, "!personal:localhost", "@user:localhost")
@@ -419,12 +359,11 @@ async def test_hook_matrix_admin_force_join_user_calls_synapse_admin_api(tmp_pat
 @pytest.mark.asyncio
 async def test_hook_matrix_admin_force_join_user_fails_without_access_token(tmp_path: Path) -> None:
     """Force-join should fail closed when no authenticated admin token exists."""
-    module = _matrix_admin_module()
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
     client.access_token = None
 
-    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+    admin = build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
 
     assert await admin.force_join_user("!personal:localhost", "@user:localhost") is False
     client.send.assert_not_awaited()
@@ -433,14 +372,13 @@ async def test_hook_matrix_admin_force_join_user_fails_without_access_token(tmp_
 @pytest.mark.asyncio
 async def test_hook_matrix_admin_invite_user_with_config_delegates_to_raw_invite(tmp_path: Path) -> None:
     """Single-user invite should not run managed private-room reconciliation."""
-    module = _matrix_admin_module()
     config = _private_room_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
     client.homeserver = "http://localhost:8008"
 
     with patch("mindroom.hooks.matrix_admin.invite_to_room", new=AsyncMock(return_value=False)) as mock_invite:
-        admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+        admin = build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
         invited = await admin.invite_user("!created:localhost", "@user:localhost")
 
     assert invited is False
@@ -453,7 +391,6 @@ async def test_hook_matrix_admin_invite_user_with_config_delegates_to_raw_invite
 @pytest.mark.asyncio
 async def test_hook_matrix_admin_create_room_persists_room_for_managed_creator(tmp_path: Path) -> None:
     """A managed bot's created room is recorded so lifecycle cleanup preserves it for the creator."""
-    module = _matrix_admin_module()
     config = _private_room_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
@@ -462,7 +399,7 @@ async def test_hook_matrix_admin_create_room_persists_room_for_managed_creator(t
     client.user_id = ids[ROUTER_AGENT_NAME].full_id
 
     with patch("mindroom.hooks.matrix_admin.create_room", new=AsyncMock(return_value="!private:localhost")):
-        admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+        admin = build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
         room_id = await admin.create_room(name="Private Room", alias_localpart="private-user")
 
     assert room_id == "!private:localhost"
@@ -476,7 +413,6 @@ async def test_hook_matrix_admin_create_room_persists_room_for_managed_creator(t
 @pytest.mark.asyncio
 async def test_hook_matrix_admin_create_room_does_not_persist_for_unmanaged_creator(tmp_path: Path) -> None:
     """A non-managed creator records nothing, even when config is present."""
-    module = _matrix_admin_module()
     config = _private_room_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
@@ -484,7 +420,7 @@ async def test_hook_matrix_admin_create_room_does_not_persist_for_unmanaged_crea
     client.user_id = "@stranger:localhost"
 
     with patch("mindroom.hooks.matrix_admin.create_room", new=AsyncMock(return_value="!private:localhost")):
-        admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+        admin = build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
         room_id = await admin.create_room(name="Private Room", alias_localpart="private-user")
 
     assert room_id == "!private:localhost"
@@ -500,7 +436,6 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
     new_room: bool,
 ) -> None:
     """New and reconciled plugin rooms must survive the bot's own cleanup."""
-    module = _matrix_admin_module()
     config = _private_room_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
@@ -520,7 +455,7 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
     client.room_kick.assert_not_awaited()
 
     with patch("mindroom.hooks.matrix_admin.create_room", new=AsyncMock(return_value="!private:localhost")):
-        admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+        admin = build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
         if new_room:
             await admin.create_room(name="Private Room", alias_localpart="private-user")
         else:
@@ -561,7 +496,6 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
 
 def test_a_room_a_plugin_retains_for_the_running_router_owns_its_approvals_at_once(tmp_path: Path) -> None:
     """Approval transport sees a retained room as soon as it is retained, not at the next room setup."""
-    module = _matrix_admin_module()
     config = _private_room_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     router_id = entity_ids(config, runtime_paths)[ROUTER_AGENT_NAME].full_id
@@ -574,7 +508,7 @@ def test_a_room_a_plugin_retains_for_the_running_router_owns_its_approvals_at_on
     assert "!private:localhost" not in bot.approval_room_ids
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = router_id
-    admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+    admin = build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
 
     admin.retain_room("!private:localhost")
 
@@ -583,12 +517,11 @@ def test_a_room_a_plugin_retains_for_the_running_router_owns_its_approvals_at_on
 
 def test_hook_matrix_admin_retention_preserves_other_rooms(tmp_path: Path) -> None:
     """Reconciliation adds to durable retention without dropping earlier rooms."""
-    module = _matrix_admin_module()
     config = _private_room_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = entity_ids(config, runtime_paths)[ROUTER_AGENT_NAME].full_id
-    admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+    admin = build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
 
     for room_id in ("!first:localhost", "!second:localhost", "!first:localhost"):
         admin.retain_room(room_id)
@@ -602,12 +535,11 @@ def test_hook_matrix_admin_retention_preserves_other_rooms(tmp_path: Path) -> No
 
 def test_hook_matrix_admin_retention_surfaces_storage_failure(tmp_path: Path) -> None:
     """A failed retention write must not let a plugin report reconciliation success."""
-    module = _matrix_admin_module()
     config = _private_room_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = entity_ids(config, runtime_paths)[ROUTER_AGENT_NAME].full_id
-    admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+    admin = build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
 
     with (
         patch("mindroom.matrix.invited_rooms_store._save_invited_rooms", return_value=False),
@@ -625,13 +557,12 @@ def test_hook_matrix_admin_retention_respects_entity_policy(
     accept_invites: bool,
 ) -> None:
     """Retention cannot enroll unmanaged accounts or override disabled invites."""
-    module = _matrix_admin_module()
     config = _private_room_config(tmp_path)
     config.router.accept_invites = accept_invites
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = entity_ids(config, runtime_paths)[ROUTER_AGENT_NAME].full_id if managed else "@outsider:localhost"
-    admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+    admin = build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
 
     admin.retain_room("!private:localhost")
 

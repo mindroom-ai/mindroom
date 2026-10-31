@@ -503,7 +503,7 @@ def _conversation_reader(thread_history: ThreadHistoryResult | None = None) -> C
     )
 
 
-_VOICE_READINESS_CHANGES = {"normalizer": "normalizer", "turn_store": "turn_store", "logger": "logger"}
+_VOICE_READINESS_FIELDS = frozenset({"normalizer", "turn_store", "logger"})
 
 
 def _observe_admission_wait(harness: _Harness, monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
@@ -525,14 +525,14 @@ def _replace_harness_deps(harness: _Harness, **changes: object) -> None:
     In place, because the gate keeps the owners it was built with.
     """
     owners = (harness.ingress, harness.dispatcher, harness.selections, harness.voice)
-    known = set(_VOICE_READINESS_CHANGES).union(*(owner.deps.__dataclass_fields__ for owner in owners))
+    known = _VOICE_READINESS_FIELDS.union(*(owner.deps.__dataclass_fields__ for owner in owners))
     unknown = set(changes) - known
     assert not unknown, f"not a turn owner collaborator: {sorted(unknown)}"
     for owner in owners:
         owner_changes = {name: value for name, value in changes.items() if name in owner.deps.__dataclass_fields__}
         if owner_changes:
             owner.deps = replace(owner.deps, **owner_changes)
-    readiness_changes = {field: changes[name] for name, field in _VOICE_READINESS_CHANGES.items() if name in changes}
+    readiness_changes = {name: value for name, value in changes.items() if name in _VOICE_READINESS_FIELDS}
     if readiness_changes:
         harness.voice.deps = replace(
             harness.voice.deps,
@@ -2472,8 +2472,8 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
 
     # Payload data crosses the seam as values, not closures: the request has no
     # prepare-after-lock callback and nothing callable rides inside the
-    # preparation value. The only callback on the request is the inbox handoff
-    # signal, fired by the runner when it takes the lifecycle lock.
+    # preparation value. The request does carry the inbox handoff signal, which
+    # the runner fires when it takes the lifecycle lock.
     request_field_names = {request_field.name for request_field in fields(ResponseRequest)}
     assert "prepare_after_lock" not in request_field_names
     assert request.on_lifecycle_lock_acquired is not None

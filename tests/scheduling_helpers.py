@@ -241,7 +241,6 @@ async def run_once_task(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_reader: ConversationReader | None = None,
-    matrix_admin: HookMatrixAdmin | None = None,
     *,
     config_provider: Callable[[], Config] | None = None,
 ) -> None:
@@ -254,7 +253,6 @@ async def run_once_task(
         config,
         runtime_paths,
         conversation_reader,
-        matrix_admin,
         config_provider=config_provider,
     )
     await runner.run_once(workflow)

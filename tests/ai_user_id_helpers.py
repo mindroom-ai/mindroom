@@ -103,17 +103,9 @@ def _config() -> Config:
 
 
 def _config_with_matrix_message() -> Config:
-    return with_current_room_member_access(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    tools=["matrix_message"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-        ),
-    )
+    config = _config()
+    config.agents["general"].tools = ["matrix_message"]
+    return config
 
 
 def _config_with_team() -> Config:
@@ -134,25 +126,9 @@ def _config_with_team() -> Config:
 
 
 def _config_with_team_matrix_message() -> Config:
-    return with_current_room_member_access(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    tools=["matrix_message"],
-                ),
-            },
-            teams={
-                "ultimate": TeamConfig(
-                    display_name="Ultimate",
-                    role="Coordinate the team",
-                    agents=["general"],
-                    mode="coordinate",
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-        ),
-    )
+    config = _config_with_team()
+    config.agents["general"].tools = ["matrix_message"]
+    return config
 
 
 def _metadata_config(provider: str, model_id: str) -> Config:
@@ -221,7 +197,6 @@ def team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleName
         router_hook_context=lambda: SimpleNamespace(
             runtime=SimpleNamespace(client=None),
             matrix_admin=lambda: matrix_admin,
-            send_message=AsyncMock(return_value=None),
         ),
         budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
         running_entity_names=lambda: frozenset({*config.agents, *config.teams}),

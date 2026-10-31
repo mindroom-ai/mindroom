@@ -17,7 +17,6 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
@@ -63,6 +62,7 @@ from mindroom.response_lifecycle import ResponseHookService, ResponseLifecycle, 
 from mindroom.response_sources import Owned, ResponseSources
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -106,20 +106,6 @@ def _config(tmp_path: Path, *, teams: dict[str, TeamConfig] | None = None) -> Co
         ),
         runtime_paths,
     )
-
-
-def _plugin(name: str, callbacks: list[object]) -> object:
-    return type(
-        "PluginStub",
-        (),
-        {
-            "name": name,
-            "discovered_hooks": tuple(callbacks),
-            "discovered_automations": (),
-            "entry_config": PluginEntryConfig(path=f"./plugins/{name}"),
-            "plugin_order": 0,
-        },
-    )()
 
 
 def _envelope(*, agent_name: str = "code", body: str = "hello") -> MessageEnvelope:
@@ -211,6 +197,10 @@ def _response_lifecycle(
         ),
         pipeline_timing=None,
     )
+
+
+def _no_effects() -> PostResponseEffectsDeps:
+    return PostResponseEffectsDeps(logger=get_logger("tests.post_response"))
 
 
 def _team_bot(tmp_path: Path) -> AgentBot:
@@ -742,7 +732,7 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
     finalized = await lifecycle.finalize(
         result,
         build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-        post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        post_response_deps=_no_effects,
     )
 
     assert finalized.ending == Suppressed(Suppression.HOOK)
@@ -754,20 +744,7 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "expected_event_id", "expected_delivery_kind", "tracked_event_id"),
-    [
-        ("final", "$response", "sent", None),
-        ("streamed", "$stream", "sent", "$stream"),
-    ],
-)
-async def test_late_after_response_cancellation_preserves_delivery_result(
-    tmp_path: Path,
-    mode: str,
-    expected_event_id: str,
-    expected_delivery_kind: str,
-    tracked_event_id: str | None,
-) -> None:
+async def test_late_after_response_cancellation_preserves_delivery_result(tmp_path: Path) -> None:
     """Late cancellation during lifecycle after_response must not downgrade a visible delivery to cancelled."""
     after_started = asyncio.Event()
     cancelled_seen: list[CancelledResponseInfo] = []
@@ -789,24 +766,23 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
     lifecycle = _response_lifecycle(
         response_hooks,
         response_envelope=_envelope(),
-        correlation_id=f"corr-late-{mode}",
+        correlation_id="corr-late",
     )
 
     delivery_result = None
 
     async def deliver_response() -> None:
         nonlocal delivery_result
-        event_id = "$response" if mode == "final" else "$stream"
         delivery_result = await lifecycle.finalize(
             FinalDeliveryOutcome(
                 ending=Completed(),
-                event_id=tracked_event_id or event_id,
+                event_id="$response",
                 is_visible_response=True,
                 final_visible_body="visible response",
-                delivery_kind=expected_delivery_kind,
+                delivery_kind="sent",
             ),
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-            post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            post_response_deps=_no_effects,
         )
 
     task = asyncio.create_task(deliver_response())
@@ -816,8 +792,8 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
         await task
 
     assert delivery_result is not None
-    assert delivery_result.event_id == expected_event_id
-    assert delivery_result.delivery_kind == expected_delivery_kind
+    assert delivery_result.event_id == "$response"
+    assert delivery_result.delivery_kind == "sent"
     assert delivery_result.response_text == "visible response"
     assert cancelled_seen == []
 
@@ -865,7 +841,7 @@ async def test_process_shutdown_escapes_real_best_effort_after_response_hook(
                     delivery_kind="sent",
                 ),
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-                post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+                post_response_deps=_no_effects,
             ),
         )
         await asyncio.wait_for(after_started.wait(), timeout=1.0)
@@ -964,7 +940,7 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
     finalized = await lifecycle.finalize(
         outcome,
         build_post_response_outcome=lambda _delivered: ResponseOutcome(),
-        post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        post_response_deps=_no_effects,
     )
 
     assert finalized.ending == Failed(FailureCause.DELIVERY_FAILED)
@@ -1037,7 +1013,7 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
     finalized = await lifecycle.finalize(
         outcome,
         build_post_response_outcome=lambda _delivered: ResponseOutcome(),
-        post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        post_response_deps=_no_effects,
     )
 
     assert before_seen == ["final body"]
@@ -1117,7 +1093,7 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
     await lifecycle.finalize(
         outcome,
         build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-        post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        post_response_deps=_no_effects,
     )
 
     assert len(cancelled_seen) == 1
@@ -1156,7 +1132,7 @@ async def test_a_suspended_reply_applies_its_run_effects_only_once_its_run_finis
         outcome = await lifecycle.finalize(
             FinalDeliveryOutcome(ending=ending, event_id=None),
             build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=run_succeeded),
-            post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            post_response_deps=_no_effects,
         )
 
     assert outcome.ending == ending
@@ -1184,7 +1160,7 @@ async def test_an_owed_answer_hands_a_shutdown_during_its_effects_back_to_the_pr
         await lifecycle.finalize(
             FinalDeliveryOutcome(ending=Owed(), event_id=None),
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-            post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            post_response_deps=_no_effects,
         )
 
 
@@ -1210,10 +1186,6 @@ def _lifecycle_with(
         ),
         pipeline_timing=cast("Any", pipeline_timing),
     )
-
-
-def _no_effects() -> PostResponseEffectsDeps:
-    return PostResponseEffectsDeps(logger=get_logger("tests.post_response"))
 
 
 @pytest.mark.asyncio

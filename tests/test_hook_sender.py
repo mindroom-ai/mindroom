@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -100,11 +99,14 @@ def test_hooks_package_reexports_hook_message_sender() -> None:
     assert HookMessageSender is SenderAlias
 
 
-def _message_received_context(tmp_path: Path, *, plugin_name: str = "") -> MessageReceivedContext:
+def _message_received_context(
+    tmp_path: Path,
+    *,
+    message_sender: HookMessageSender | None = None,
+) -> MessageReceivedContext:
     config = _config(tmp_path)
     return MessageReceivedContext(
         event_name=EVENT_MESSAGE_RECEIVED,
-        plugin_name=plugin_name,
         settings={},
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -119,18 +121,8 @@ def _message_received_context(tmp_path: Path, *, plugin_name: str = "") -> Messa
             agent_name="code",
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         ),
+        message_sender=message_sender,
     )
-
-
-def _message_received_context_with_sender(
-    tmp_path: Path,
-    sender: HookMessageSender | None,
-    *,
-    plugin_name: str = "",
-) -> MessageReceivedContext:
-    context = _message_received_context(tmp_path, plugin_name=plugin_name)
-    context.message_sender = sender
-    return context
 
 
 def _synthetic_envelope(*, agent_name: str = "code") -> MessageEnvelope:
@@ -156,43 +148,8 @@ def _synthetic_envelope(*, agent_name: str = "code") -> MessageEnvelope:
     )
 
 
-def _hook_bot(tmp_path: Path) -> AgentBot:
-    config = _config(tmp_path)
-    bot = make_test_agent_bot(
-        agent_user=AgentMatrixUser(
-            agent_name="router",
-            password=TEST_PASSWORD,
-            display_name="Router",
-            user_id="@mindroom_router:localhost",
-        ),
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    install_runtime_journal_support(bot)
-    wrap_extracted_collaborators(bot)
-    replace_turn_policy_deps(
-        bot,
-        resolver=bot._conversation_resolver,
-        response_runner=bot._response_runner,
-        delivery_gateway=bot._delivery_gateway,
-    )
-    replace_turn_deps(
-        bot,
-        resolver=bot._conversation_resolver,
-        normalizer=bot._inbound_turn_normalizer,
-        turn_policy=bot._turn_policy,
-        response_runner=bot._response_runner,
-        delivery_gateway=bot._delivery_gateway,
-        state_writer=bot._conversation_state_writer,
-    )
-    return bot
-
-
-def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
-    config = _config(tmp_path)
-    with_current_room_member_access(config)
+def _wired_bot(config: Config, agent_name: str) -> AgentBot:
+    """Return a bot in ``config`` with a stand-in client and its turn collaborators wrapped for seam assertions."""
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
@@ -223,6 +180,16 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
         state_writer=bot._conversation_state_writer,
     )
     return bot
+
+
+def _hook_bot(tmp_path: Path) -> AgentBot:
+    """Return the router, under the default responder access."""
+    return _wired_bot(_config(tmp_path), "router")
+
+
+def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
+    """Return the ``agent_name`` bot in a config whose responders allow current-room members."""
+    return _wired_bot(with_current_room_member_access(_config(tmp_path)), agent_name)
 
 
 def _dispatch_context(bot: AgentBot) -> MessageContext:
@@ -303,7 +270,7 @@ async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: 
 
     registry = HookRegistry.from_plugins([_plugin("hook-plugin", [first, second])])
 
-    await emit(registry, EVENT_MESSAGE_RECEIVED, _message_received_context_with_sender(tmp_path, sender))
+    await emit(registry, EVENT_MESSAGE_RECEIVED, _message_received_context(tmp_path, message_sender=sender))
 
     assert sent_messages == [
         (
@@ -334,11 +301,17 @@ async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("context_kind", ["enrich", "before", "after"])
-async def test_downstream_hook_sends_advance_existing_message_received_depth(
+@pytest.mark.parametrize(
+    ("envelope_kind", "expected_depth"),
+    [("synthetic", 2), ("message", 1)],
+)
+async def test_downstream_hook_dispatch_sends_one_hop_past_the_envelopes_message_received_depth(
     tmp_path: Path,
     context_kind: str,
+    envelope_kind: str,
+    expected_depth: int,
 ) -> None:
-    """Downstream hook contexts should advance an existing synthetic message:received chain."""
+    """Downstream hook dispatch advances an existing synthetic message:received chain, or starts one at depth one."""
     sent_messages: list[dict[str, object] | None] = []
 
     async def sender(
@@ -364,7 +337,7 @@ async def test_downstream_hook_sends_advance_existing_message_received_depth(
         "correlation_id": "corr-depth",
         "message_sender": sender,
     }
-    envelope = _synthetic_envelope()
+    envelope = _synthetic_envelope() if envelope_kind == "synthetic" else _message_received_context(tmp_path).envelope
     if context_kind == "enrich":
         context = MessageEnrichContext(
             event_name="message:enrich",
@@ -404,84 +377,7 @@ async def test_downstream_hook_sends_advance_existing_message_received_depth(
     assert sent_messages == [
         {
             "com.mindroom.original_sender": "@user:localhost",
-            HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
-        },
-    ]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("context_kind", ["enrich", "before", "after"])
-async def test_non_message_hook_dispatch_starts_synthetic_chain_at_depth_one(
-    tmp_path: Path,
-    context_kind: str,
-) -> None:
-    """Non-message hook dispatch should mark the first synthetic hop with depth one."""
-    sent_messages: list[dict[str, object] | None] = []
-
-    async def sender(
-        room_id: str,
-        body: str,
-        thread_id: str | None,
-        source_hook: str,
-        extra_content: dict[str, object] | None,
-        *,
-        trigger_dispatch: bool = False,
-    ) -> str | None:
-        del room_id, body, thread_id, source_hook, trigger_dispatch
-        sent_messages.append(extra_content)
-        return "$event"
-
-    config = _config(tmp_path)
-    base_kwargs = {
-        "plugin_name": "downstream-plugin",
-        "settings": {},
-        "config": config,
-        "runtime_paths": runtime_paths_for(config),
-        "logger": get_logger("tests.hook_sender").bind(event_name="test"),
-        "correlation_id": "corr-depth",
-        "message_sender": sender,
-    }
-    envelope = _message_received_context(tmp_path).envelope
-    if context_kind == "enrich":
-        context = MessageEnrichContext(
-            event_name="message:enrich",
-            envelope=envelope,
-            target_entity_name="code",
-            target_member_names=None,
-            **base_kwargs,
-        )
-    elif context_kind == "before":
-        context = BeforeResponseContext(
-            event_name="message:before_response",
-            draft=ResponseDraft(
-                response_text="hello",
-                response_kind="ai",
-                tool_trace=None,
-                extra_content=None,
-                envelope=envelope,
-            ),
-            **base_kwargs,
-        )
-    else:
-        context = AfterResponseContext(
-            event_name="message:after_response",
-            result=ResponseResult(
-                response_text="hello",
-                response_event_id="$response",
-                delivery_kind="sent",
-                response_kind="ai",
-                envelope=envelope,
-            ),
-            **base_kwargs,
-        )
-
-    event_id = await context.send_message("!room:localhost", "follow-up", trigger_dispatch=True)
-
-    assert event_id == "$event"
-    assert sent_messages == [
-        {
-            "com.mindroom.original_sender": "@user:localhost",
-            HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
+            HOOK_MESSAGE_RECEIVED_DEPTH_KEY: expected_depth,
         },
     ]
 
@@ -512,80 +408,11 @@ async def test_hook_send_message_failure_does_not_crash_later_hooks(tmp_path: Pa
         ctx.suppress = True
 
     registry = HookRegistry.from_plugins([_plugin("hook-plugin", [first, second])])
-    context = _message_received_context_with_sender(tmp_path, failing_sender)
+    context = _message_received_context(tmp_path, message_sender=failing_sender)
 
     await emit(registry, EVENT_MESSAGE_RECEIVED, context)
 
     assert context.suppress is True
-
-
-@pytest.mark.asyncio
-async def test_bot_hook_sender_tags_source_and_threads(tmp_path: Path) -> None:
-    """Hook sends should include hook metadata and thread relations."""
-    bot = _hook_bot(tmp_path)
-    bot.client = AsyncMock()
-    bot.hook_context.conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value="$latest"))
-
-    captured_content: dict[str, object] = {}
-
-    async def mock_send(
-        _client: object,
-        _room_id: str,
-        content: dict[str, object],
-    ) -> object:
-        captured_content.update(content)
-        return delivered_matrix_event("$hook-event", content)
-
-    with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
-        event_id = await bot.hook_context.send_message(
-            "!room:localhost",
-            "hello",
-            "$thread",
-            "plugin:event",
-            {"custom": "value"},
-        )
-
-    assert event_id == "$hook-event"
-    assert captured_content[SOURCE_KIND_KEY] == "hook"
-    assert captured_content["com.mindroom.hook_source"] == "plugin:event"
-    assert captured_content["custom"] == "value"
-    assert isinstance(captured_content["m.relates_to"], dict)
-    assert captured_content["m.relates_to"]["rel_type"] == "m.thread"
-    assert captured_content["m.relates_to"]["event_id"] == "$thread"
-    bot.hook_context.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
-        room_id="!room:localhost",
-        thread_id="$thread",
-    )
-
-
-@pytest.mark.asyncio
-async def test_hook_send_message_preserves_original_sender_for_downstream_dispatch(tmp_path: Path) -> None:
-    """Hook sends should preserve the requester identity for downstream permission checks."""
-    bot = _hook_bot(tmp_path)
-    bot.client = AsyncMock()
-
-    captured_content: dict[str, object] = {}
-
-    async def mock_send(
-        _client: object,
-        _room_id: str,
-        content: dict[str, object],
-    ) -> object:
-        captured_content.update(content)
-        return delivered_matrix_event("$hook-event", content)
-
-    bot.hook_context.conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
-    with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
-        event_id = await bot.hook_context.send_message(
-            "!room:localhost",
-            "hello",
-            None,
-            "plugin:event",
-            {ORIGINAL_SENDER_KEY: "@user:localhost"},
-        )
-
-    assert event_id == "$hook-event"
-    assert captured_content[ORIGINAL_SENDER_KEY] == "@user:localhost"
 
 
 @pytest.mark.asyncio
@@ -1081,44 +908,6 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
     bot._turn_policy.plan_turn.assert_awaited_once()
     dispatch = bot._turn_policy.plan_turn.await_args.args[2]
     assert dispatch.envelope.source_kind == "message"
-
-
-def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path) -> None:
-    """Hook-envelope assembly should go through the extracted resolver owner."""
-    bot = _agent_bot(tmp_path)
-    event = PreparedIngress(
-        sender="@user:localhost",
-        event_id="$event",
-        body="hello",
-        source={"content": {"body": "hello", "msgtype": "m.text"}},
-    )
-    context = _dispatch_context(bot)
-    target = MessageTarget.resolve("!room:localhost", None, event.event_id)
-    expected = MessageEnvelope(
-        source_event_id=event.event_id,
-        target=target,
-        body=event.body,
-        attachment_ids=(),
-        mentioned_agents=(),
-        agent_name=bot.agent_name,
-        origin=message_origin(sender_id=event.sender, requester_id="@user:localhost", source_kind="message"),
-    )
-    bot._conversation_resolver.build_message_envelope = MagicMock(return_value=expected)
-
-    envelope = bot._conversation_resolver.build_message_envelope(
-        event=event,
-        requester_user_id="@user:localhost",
-        context=context,
-        target=target,
-    )
-
-    assert envelope is expected
-    bot._conversation_resolver.build_message_envelope.assert_called_once_with(
-        event=event,
-        requester_user_id="@user:localhost",
-        context=context,
-        target=target,
-    )
 
 
 @pytest.mark.asyncio

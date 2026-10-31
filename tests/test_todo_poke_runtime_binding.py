@@ -30,7 +30,7 @@ from mindroom.custom_tools.todo_poke import (
 )
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
 from mindroom.entity_resolution import MissingManagedEntityAccountError, mindroom_user_id
-from mindroom.hooks.sender import send_hook_message
+from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -335,30 +335,13 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         sent_contents.append(content)
         return DeliveredMatrixEvent(event_id=f"$poke-{len(sent_contents)}", content_sent=content)
 
-    async def send_message(
-        room_id: str,
-        body: str,
-        thread_id: str | None,
-        source_hook: str,
-        extra_content: dict[str, Any] | None,
-        *,
-        trigger_dispatch: bool = False,
-    ) -> str | None:
-        return await send_hook_message(
-            MagicMock(),
-            config,
-            runtime_paths,
-            room_id,
-            body,
-            thread_id,
-            source_hook,
-            extra_content,
-            trigger_dispatch=trigger_dispatch,
-            conversation_reader=make_conversation_reader_mock(),
-        )
-
     agent_bot = _bot()
-    agent_bot.hook_context.send_message = send_message
+    agent_bot.hook_context.send_message = build_hook_message_sender(
+        MagicMock(),
+        config,
+        runtime_paths,
+        conversation_reader=make_conversation_reader_mock(),
+    )
     coordinator = _coordinator(runtime_paths, config, {"secret": agent_bot})
     with patch("mindroom.matrix.client_delivery.send_message_result", new=send_message_result):
         for requester_id in ("@alice:localhost", "@mallory:localhost", None):
