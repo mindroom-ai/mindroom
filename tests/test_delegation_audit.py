@@ -21,6 +21,7 @@ from mindroom.delegation.audit import finish_child_record, record_child_response
 from mindroom.delegation.lifecycle import (
     child_run_context,
     observe_child_event,
+    running_child_id,
     settle_child_response,
     start_child_turn,
 )
@@ -32,7 +33,7 @@ from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
-from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -939,6 +940,132 @@ async def test_a_child_whose_last_buffered_output_fails_to_record_still_settles(
     events = _events(await _record_dir(child, config, runtime_paths))
     assert events[-1]["kind"] == "delegation_finished"
     assert "text after the end" not in json.dumps(events)
+
+
+@pytest.mark.asyncio
+async def test_a_child_context_ends_even_when_its_settlement_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A settlement that raises still ends the child's context, so later events are not attributed to it."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+
+    async def refuse_finish(*_args: object, **_kwargs: object) -> None:
+        msg = "record is gone"
+        raise OSError(msg)
+
+    monkeypatch.setattr(DelegationRecordOwner, "finish", refuse_finish)
+    finished = RunRecord(run_id=child.run_id, session_id=child.session_id, status=RunStatus.completed, content="done")
+
+    async def run_child() -> None:
+        async with child_run_context(child, config=config, runtime_paths=runtime_paths):
+            await observe_child_event(RunFinished(finished))
+
+    with pytest.raises(OSError, match="record is gone"):
+        await run_child()
+
+    assert running_child_id() is None
+    assert child.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_an_inner_child_context_hands_later_events_back_to_its_outer_child(tmp_path: Path) -> None:
+    """A nested child's events go to its own record, and the outer child's events after it to the outer's."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    outer = _child()
+    inner = replace(
+        _child(),
+        delegation_id="inner-delegation",
+        parent_tool_call_id="inner-call",
+        session_id="inner-session",
+        run_id="inner-run",
+        execution_identity=serialize_tool_execution_identity(_identity("child", "inner-session")),
+        subagent_id="d" * 32,
+    )
+    for child in (outer, inner):
+        await start_child_turn(
+            child,
+            parent_run_id="parent-run",
+            config=config,
+            runtime_paths=runtime_paths,
+            caller_execution_identity=_identity("leader", "parent-session"),
+        )
+    outer_tool = ToolExecution(tool_call_id="outer-tool", tool_name="lookup", tool_args={}, result="outer result")
+    inner_tool = ToolExecution(tool_call_id="inner-tool", tool_name="lookup", tool_args={})
+
+    async with child_run_context(outer, config=config, runtime_paths=runtime_paths):
+        await observe_child_event(ToolStarted(outer_tool.call))
+        async with child_run_context(inner, config=config, runtime_paths=runtime_paths):
+            assert running_child_id() == "inner-delegation"
+            await observe_child_event(TextDelta("inner text"))
+            await observe_child_event(ToolStarted(inner_tool.call))
+        assert running_child_id() == "child-delegation"
+        await observe_child_event(TextDelta("outer text"))
+        await observe_child_event(ToolCompleted(outer_tool.call))
+    assert running_child_id() is None
+
+    outer_events = _events(await _record_dir(outer, config, runtime_paths))
+    inner_events = _events(await _record_dir(inner, config, runtime_paths))
+    assert [(event["kind"], event["event_id"]) for event in outer_events[1:]] == [
+        ("tool_call", "run:child-run:tool:outer-tool:call"),
+        ("output", "run:child-run:stream:2"),
+        ("tool_result", "run:child-run:tool:outer-tool:result"),
+    ]
+    assert outer_events[2]["data"]["content"] == "outer text"
+    assert [(event["kind"], event["event_id"]) for event in inner_events[1:]] == [
+        ("output", "run:inner-run:stream:1"),
+        ("tool_call", "run:inner-run:tool:inner-tool:call"),
+    ]
+    assert inner_events[1]["data"]["content"] == "inner text"
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_record_of_another_run_is_neither_the_childs_evidence_nor_in_its_record(
+    tmp_path: Path,
+) -> None:
+    """Only a record of the child's current run and session settles it or reaches its audit, and only it is numbered."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    foreign_records = (
+        RunRecord(run_id="other-run", session_id=child.session_id, status=RunStatus.completed, content="other run"),
+        RunRecord(run_id=child.run_id, session_id="other-session", status=RunStatus.completed, content="other session"),
+        TeamRunRecord(
+            run_id=child.run_id,
+            session_id=child.session_id,
+            status=RunStatus.completed,
+            content="team run",
+            team_id="team",
+        ),
+    )
+
+    async with child_run_context(child, config=config, runtime_paths=runtime_paths) as observation:
+        for record in foreign_records:
+            await observe_child_event(RunFinished(record))
+        await observe_child_event(TextDelta("own text"))
+        assert observation.response is None
+
+    assert child.status == "running"
+    events = _events(await _record_dir(child, config, runtime_paths))
+    assert [(event["kind"], event["event_id"]) for event in events[1:]] == [("output", "run:child-run:stream:1")]
+    assert events[1]["data"]["content"] == "own text"
 
 
 @pytest.mark.asyncio
