@@ -19,6 +19,7 @@ from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.custom_tools.todo_state import (
     PRIORITY_ORDER,
     TERMINAL_STATUSES,
+    VALID_STATUSES,
     NoWriteResult,
     is_actionable,
     is_blocked,
@@ -891,7 +892,7 @@ class TodoTools(Toolkit):
 
         if priority and priority.lower() not in _VALID_PRIORITIES:
             return f"Invalid priority '{priority}'. Must be: low, medium, high, critical."
-        if status and status.lower() not in {"open", "done", "cancelled"}:
+        if status and status.lower() not in VALID_STATUSES:
             return f"Invalid status '{status}'. Must be: open, done, cancelled."
         if assigned_agent and assigned_agent.strip():
             unknown_agent = _unknown_assigned_agent_message(assigned_agent.strip(), _configured_agent_names())

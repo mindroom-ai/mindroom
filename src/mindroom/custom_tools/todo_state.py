@@ -22,7 +22,7 @@ _T = TypeVar("_T")
 
 TERMINAL_STATUSES = frozenset({"done", "cancelled"})
 PRIORITY_ORDER: dict[str, int] = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-_VALID_STATUSES = {"open", *TERMINAL_STATUSES}
+VALID_STATUSES = frozenset({"open", *TERMINAL_STATUSES})
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +105,7 @@ def parse_todo_item(raw_item: object) -> TodoItemSnapshot:
     item_data = cast("dict[str, Any]", raw_item)
 
     status = require_string(item_data, "status")
-    if status not in _VALID_STATUSES:
+    if status not in VALID_STATUSES:
         msg = f"invalid todo status: {status}"
         raise ValueError(msg)
 

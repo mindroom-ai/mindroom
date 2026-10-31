@@ -377,6 +377,22 @@ def test_update_todo_validates_before_mutating_and_can_clear_dependencies(tmp_pa
     assert cleared["items"][1]["depends_on"] == []  # type: ignore[index]
 
 
+def test_update_todo_accepts_only_stored_statuses(tmp_path: Path) -> None:
+    """A status outside open, done, and cancelled is refused, and a stored status is written in lowercase."""
+    config = _config(tmp_path)
+    tool = _todo(config)
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.plan(tasks="Only")
+        item_id = _read_todos(config)["items"][0]["id"]  # type: ignore[index]
+        invalid_result = tool.update_todo(todo_id=item_id, status="paused")
+        cancelled_result = tool.update_todo(todo_id=item_id, status="Cancelled")
+
+    assert invalid_result == "Invalid status 'paused'. Must be: open, done, cancelled."
+    assert cancelled_result == f"Updated `{item_id}`: status=cancelled"
+    assert _read_todos(config)["items"][0]["status"] == "cancelled"  # type: ignore[index]
+
+
 def test_update_todo_rejects_runtime_dependency_cycle(tmp_path: Path) -> None:
     """Runtime dependency edits should reject cycles and leave existing state unchanged."""
     config = _config(tmp_path)
