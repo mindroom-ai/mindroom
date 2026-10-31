@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -99,15 +99,6 @@ class _GoogleRefreshGrantMissingError(RuntimeError):
     """Signal that a forced provider retry has no refresh grant to use."""
 
 
-class _OAuthAuthSource(Enum):
-    """Credential source selected for one tool auth attempt."""
-
-    PROVIDED_CREDENTIALS = auto()
-    ORIGINAL_AUTH = auto()
-    VALID_CREDENTIALS = auto()
-    STORED_OAUTH = auto()
-
-
 class _GoogleRefreshFailure(Enum):
     """Known refresh failures replayed to concurrent callers of one client."""
 
@@ -149,7 +140,6 @@ class ScopedOAuthClientMixin:
     _creds_manager: CredentialsManager
     _worker_target: ResolvedWorkerTarget | None
     _config: Config | None
-    _provided_creds: bool
     _provided_credentials: GoogleOAuthCredentials | None
     _provided_credentials_lock: threading.RLock
     _oauth_quota_project_id: str | None
@@ -190,7 +180,6 @@ class ScopedOAuthClientMixin:
         """Prepare OAuth state and initial credentials for the tool."""
         self._worker_target = worker_target
         self._config = config
-        self._provided_creds = provided_creds is not None
         self._provided_credentials_lock = threading.RLock()
         self._oauth_quota_project_id = quota_project_id
         self._provided_credentials = (
@@ -216,31 +205,11 @@ class ScopedOAuthClientMixin:
 
         @wraps(entrypoint)
         def oauth_entrypoint(*args: object, **kwargs: object) -> object:
-            return self._run_oauth_entrypoint(entrypoint, args, kwargs)
+            lock = self._provided_credentials_lock if self._provided_credentials is not None else nullcontext()
+            with lock, self._oauth_entrypoint_scope() as outermost:
+                return self._run_scoped_oauth_entrypoint(entrypoint, args, kwargs, outermost=outermost)
 
         return oauth_entrypoint
-
-    def _run_oauth_entrypoint(
-        self,
-        entrypoint: Callable[..., object],
-        args: tuple[object, ...],
-        kwargs: dict[str, object],
-    ) -> object:
-        """Run one wrapped call while retaining its thread-local auth outcome."""
-        if self._provided_creds:
-            with self._provided_credentials_lock:
-                return self._run_oauth_entrypoint_with_scope(entrypoint, args, kwargs)
-        return self._run_oauth_entrypoint_with_scope(entrypoint, args, kwargs)
-
-    def _run_oauth_entrypoint_with_scope(
-        self,
-        entrypoint: Callable[..., object],
-        args: tuple[object, ...],
-        kwargs: dict[str, object],
-    ) -> object:
-        """Apply owner-managed auth state to one serialized toolkit call."""
-        with self._oauth_entrypoint_scope() as outermost:
-            return self._run_scoped_oauth_entrypoint(entrypoint, args, kwargs, outermost=outermost)
 
     @contextmanager
     def _oauth_entrypoint_scope(self) -> Iterator[bool]:
@@ -273,33 +242,17 @@ class ScopedOAuthClientMixin:
                 return result
             result = entrypoint(*args, **kwargs)
         except RefreshError:
-            if not outermost:
-                raise
-            if translated := self._outer_refresh_error_result():
+            if outermost and (translated := self._outer_oauth_entrypoint_result()):
                 return translated
             raise
         except Exception:
-            if not outermost:
-                raise
-            if translated := self._google_access_rejection_result():
+            if outermost and (translated := self._google_access_rejection_result()):
                 return translated
             raise
-        else:
-            if not outermost:
-                return result
-            return self._outer_oauth_entrypoint_result(result)
+        return self._outer_oauth_entrypoint_result(result) if outermost else result
 
-    def _outer_refresh_error_result(self) -> str | None:
-        """Translate shared auth state after an outer RefreshError."""
-        if rejected := self._google_access_rejection_result():
-            return rejected
-        required, reason = self._consume_oauth_connection_required()
-        if not required:
-            return None
-        return self._structured_auth_failure(self._connection_required(reason=reason))
-
-    def _outer_oauth_entrypoint_result(self, result: object) -> object:
-        """Replace an outer tool result when nested auth state requires it."""
+    def _outer_oauth_entrypoint_result(self, result: object | None = None) -> object:
+        """Replace an outer tool result, or answer an outer RefreshError, when nested auth state requires it."""
         if rejected := self._google_access_rejection_result(result):
             return rejected
         required, reason = self._consume_oauth_connection_required()
@@ -310,7 +263,7 @@ class ScopedOAuthClientMixin:
     def _google_access_rejection_result(self, result: object | None = None) -> str | None:
         """Translate a final managed resource 401 after provider refresh retries."""
         rejected = self._consume_google_authorization_rejected()
-        if not rejected or self._provided_creds or self._defer_to_original_auth:
+        if not rejected or self._provided_credentials is not None or self._defer_to_original_auth:
             return None
         self.creds = None
         self.service = None
@@ -620,7 +573,7 @@ class ScopedOAuthClientMixin:
         if required:
             self.creds = None
             self.service = None
-        return required, reason if isinstance(reason, str) else None
+        return required, reason
 
     def _mark_oauth_connection_required(self, *, reason: str | None = None) -> None:
         self._oauth_call_state.connection_required = True
@@ -678,25 +631,6 @@ class ScopedOAuthClientMixin:
     def _should_fallback_to_original_auth(self) -> bool:
         """Return whether the tool should defer to its original auth flow."""
         return self._defer_to_original_auth
-
-    def _should_skip_auth(self) -> bool:
-        """Return whether tool auth can return early with already-valid provided credentials."""
-        if self._provided_credentials is None:
-            return False
-        self.creds = self._provided_credentials
-        self._google_credential_key = None
-        return True
-
-    def _select_auth_source(self) -> _OAuthAuthSource:
-        """Select the credential source according to the tool auth priority contract."""
-        if self._should_skip_auth():
-            return _OAuthAuthSource.PROVIDED_CREDENTIALS
-        if self._should_fallback_to_original_auth():
-            return _OAuthAuthSource.ORIGINAL_AUTH
-        self._drop_stale_managed_oauth_credentials()
-        if self.creds and self.creds.valid:
-            return _OAuthAuthSource.VALID_CREDENTIALS
-        return _OAuthAuthSource.STORED_OAUTH
 
     def _drop_stale_managed_oauth_credentials(self) -> None:
         """Discard this worker's credentials and service when their full key changes."""
@@ -776,16 +710,20 @@ class ScopedOAuthClientMixin:
             raise self._connection_required() from exc
 
     def _authenticate(self) -> None:
-        """Authenticate using the selected MindRoom or wrapped-tool credential source.
+        """Authenticate with supplied credentials, the wrapped tool's auth, valid cached credentials, or stored OAuth.
 
         Not named ``_auth``: Agno's Google toolkits store their ``AuthConfig`` on
         ``self._auth``, and an instance attribute would shadow a mixin method.
         """
-        auth_source = self._select_auth_source()
-        if auth_source in {_OAuthAuthSource.PROVIDED_CREDENTIALS, _OAuthAuthSource.VALID_CREDENTIALS}:
+        if self._provided_credentials is not None:
+            self.creds = self._provided_credentials
+            self._google_credential_key = None
             return
-        if auth_source is _OAuthAuthSource.ORIGINAL_AUTH:
+        if self._should_fallback_to_original_auth():
             self._auth_with_original_fallback()
+            return
+        self._drop_stale_managed_oauth_credentials()
+        if self.creds and self.creds.valid:
             return
         self._auth_with_stored_oauth()
 
