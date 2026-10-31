@@ -1335,10 +1335,11 @@ class TestRoomHydration:
 
         This shape used to be read as failure and left rooms unready.
         """
-        client = FakeClient(history=[raw("$a", "first")], history_end_token=None)
+        client = FakeClient(pages=[([raw("$a", "first")], "t1"), ([], None)])
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
+        assert client.history_pages == 2
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
         assert await bodies(alice) == ["first"]
 
