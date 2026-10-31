@@ -15,7 +15,6 @@ from mindroom.external_triggers.store import (
     ExternalTriggerStore,
     ExternalTriggerStoreError,
     ExternalTriggerTarget,
-    public_key_fingerprint,
 )
 from mindroom.tool_system.authoring import Toolkit
 
@@ -45,13 +44,9 @@ class ExternalTriggerManagerTools(Toolkit):
         return custom_tool_payload("external_trigger_manager", status, **fields)
 
     @classmethod
-    def _context(cls) -> ToolRuntimeContext:
-        return require_external_trigger_owner_context("External trigger manager")
-
-    @classmethod
     def _with_store(cls, action: Callable[[ToolRuntimeContext, ExternalTriggerStore], str]) -> str:
         try:
-            context = cls._context()
+            context = require_external_trigger_owner_context("External trigger manager")
             return action(context, ExternalTriggerStore(context.runtime_paths))
         except (ExternalTriggerContextError, ExternalTriggerStoreError, ValueError) as exc:
             return cls._payload("error", message=str(exc))
@@ -59,7 +54,7 @@ class ExternalTriggerManagerTools(Toolkit):
     @staticmethod
     def _is_admin(context: ToolRuntimeContext) -> bool:
         return is_external_trigger_administrator(
-            context.current_config,
+            context.config,
             context.runtime_paths,
             context.requester_id,
         )
@@ -245,7 +240,7 @@ class ExternalTriggerManagerTools(Toolkit):
                 "ok",
                 action="rotate_key",
                 trigger=self._record_payload(record),
-                public_key_fingerprint=public_key_fingerprint(public_key),
+                public_key_fingerprint=record.public_key_fingerprint,
             )
 
         return self._with_store(rotate)

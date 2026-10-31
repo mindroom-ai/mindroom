@@ -551,13 +551,12 @@ def _replay_scope(record: ExternalTriggerRecord) -> str:
     return f"{record.uid}:{record.auth_epoch}"
 
 
-def _validate_trigger_id(trigger_id: str) -> str:
+def _validate_trigger_id(trigger_id: str) -> None:
     """Validate one route-safe trigger id."""
     normalized = non_empty_stripped(trigger_id, field_name="trigger_id")
     if re.fullmatch(_TRIGGER_ID_PATTERN, normalized) is None:
         msg = "trigger_id must contain only ASCII letters, digits, underscore, or hyphen"
         raise ExternalTriggerStoreError(msg)
-    return normalized
 
 
 def _normalize_public_key(public_key: str) -> tuple[str, bytes]:
