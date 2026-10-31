@@ -27,6 +27,11 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 if not stripe.api_key:
     print("❌ Error: STRIPE_SECRET_KEY not found in environment variables")
     sys.exit(1)
+# This script writes only the test-mode price fields, so live prices are created by hand.
+if stripe.api_key.startswith(("sk_live_", "rk_live_")):
+    print("❌ Error: STRIPE_SECRET_KEY is a live-mode key; this script syncs test-mode prices only.")
+    print("Create live prices by hand: docs/deployment/saas-platform.md#changing-a-plan-price")
+    sys.exit(1)
 
 config_path = repo_root / "saas-platform" / "pricing-config.yaml"
 with open(config_path) as f:

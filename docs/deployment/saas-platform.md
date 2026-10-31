@@ -259,6 +259,14 @@ Operator reprovisioning (`/system/provision`, admin provision) redeploys a held 
 If an instance's OpenRouter key was deleted in OpenRouter or is missing from its instance Secret, re-provisioning replaces it.
 Each subscription has at most one instance, so a concurrent second provision request for it gets `409`.
 
+### Changing a Plan Price
+
+Plan prices are the `price_monthly` and `price_yearly` amounts, in cents, in `saas-platform/pricing-config.yaml`.
+To change one, edit the amount and run `cluster/scripts/sync-stripe-prices.py` with a test-mode `STRIPE_SECRET_KEY` in the environment or `saas-platform/.env`; it creates a test-mode price for each changed amount and writes its ID to `stripe_price_id_monthly` or `stripe_price_id_yearly`.
+The script refuses a live key, so create the live price by hand on the MindRoom product with the new amount, the test-mode price's billing interval, and `tier` and `billing_cycle` metadata (for example `byok` and `monthly`), then set its ID in `stripe_price_id_monthly_live` or `stripe_price_id_yearly_live`.
+Existing subscribers keep the price they bought, which maps to their plan only through its `tier` and `billing_cycle` metadata once its ID leaves the YAML, so add that metadata to the old live price first if it lacks it.
+Checkout and the pricing page use the new prices once a release with the YAML change is deployed (see [Release Deployment](#release-deployment)).
+
 ### Account Deletion
 
 See [Account Deletion](../support.md#account-deletion).
