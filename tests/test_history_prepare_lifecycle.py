@@ -47,6 +47,7 @@ from mindroom.history.types import (
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
+    ResolvedReplayPlan,
     ScopeSummary,
 )
 from mindroom.llm.errors import ModelSafeguardRefusal
@@ -1911,7 +1912,12 @@ def _reported_run(
     run.model = model
     run.model_provider = "fake"
     run.metadata = build_prepared_history_metadata_content(
-        PreparedHistoryState(prepared_context_tokens=1_000, non_prompt_tokens=non_prompt_tokens, native_history=None),
+        PreparedHistoryState(
+            replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=600, add_history_to_context=True),
+            prepared_context_tokens=1_000,
+            non_prompt_tokens=non_prompt_tokens,
+            native_history=None,
+        ),
     )
     return run
 

@@ -733,12 +733,8 @@ def finalize_history_preparation(
         compaction_decision=prepared_scope_history.compaction_decision,
         compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
         prepared_context_tokens=prepared_context_tokens,
-        # A request that replays part of the history reports the size of that part alone.
-        non_prompt_tokens=(
-            prepared_scope_history.non_prompt_tokens
-            if replay_plan.mode == "configured" and history_settings.replays_whole_history
-            else None
-        ),
+        # Authored replay limits keep older history out of every request.
+        non_prompt_tokens=prepared_scope_history.non_prompt_tokens if history_settings.replays_whole_history else None,
         native_history=native_history,
     )
 

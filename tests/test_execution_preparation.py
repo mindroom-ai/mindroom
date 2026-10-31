@@ -14,6 +14,7 @@ from mindroom import execution_preparation
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
+from mindroom.ai_run_metadata import build_prepared_history_metadata_content, recorded_non_prompt_tokens
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
@@ -551,6 +552,24 @@ def test_scheduled_limit_caps_larger_plans_only() -> None:
 
     no_plan = PreparedHistoryState(native_history=None)
     assert _prepared_history_with_scheduled_limit(no_plan, 2) is no_plan
+
+
+@pytest.mark.parametrize("limit", [0, 2])
+def test_a_scheduled_limit_leaves_no_anchor_for_the_next_reply(limit: int) -> None:
+    """A scheduled run replays at most its limit, so the size its provider reports cannot size the whole history."""
+    prepared = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=500, add_history_to_context=True),
+        replays_persisted_history=True,
+        prepared_context_tokens=1_500,
+        non_prompt_tokens=1_000,
+        native_history=None,
+    )
+    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(prepared)) == 1_000
+
+    capped = _prepared_history_with_scheduled_limit(prepared, limit)
+
+    # The run records no system prompt and tools, so the next reply sizes its history by estimate.
+    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(capped)) is None
 
 
 def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:

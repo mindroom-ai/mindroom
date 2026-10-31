@@ -114,7 +114,13 @@ def _prepared_history_payload(prepared_history: PreparedHistoryState) -> dict[st
     payload: dict[str, Any] = {}
     if prepared_history.prepared_context_tokens is not None:
         payload["prepared_context"] = {"tokens": prepared_history.prepared_context_tokens}
-        if prepared_history.non_prompt_tokens is not None:
+        replay_plan = prepared_history.replay_plan
+        # A request that replays part of the history, however the plan was cut, reports the size of that part alone.
+        if (
+            prepared_history.non_prompt_tokens is not None
+            and replay_plan is not None
+            and replay_plan.mode == "configured"
+        ):
             payload["prepared_context"]["non_prompt_tokens"] = prepared_history.non_prompt_tokens
     decision = prepared_history.compaction_decision
     compaction: dict[str, Any] = {
