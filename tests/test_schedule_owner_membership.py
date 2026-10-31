@@ -109,7 +109,6 @@ def _owner_schedule(
         return nio.RoomPutStateResponse("$state", room_id)
 
     client = make_matrix_client_mock(user_id="@router:server")
-    client.homeserver = "https://matrix.example"
     client.user_id = "@router:server"
     client.device_id = "TEST"
     client.rooms = {}
@@ -377,7 +376,6 @@ async def test_a_one_time_task_finishing_during_an_edit_write_stays_completed(tm
         return await write_state(room_id, event_type, state_key, content)
 
     api_client = make_matrix_client_mock(user_id="@router:server")
-    api_client.homeserver = client.homeserver
     api_client.room_get_state_event.side_effect = client.room_get_state_event.side_effect
     api_client.room_put_state.side_effect = slow_edit_write
     serve_task_state_events(api_client, sender=_SCHEDULE_WRITER)
@@ -435,7 +433,6 @@ async def test_edit_cannot_resurrect_schedule_while_cancellation_is_persisting(
 
     client.room_put_state.side_effect = blocked_write
     api_client = make_matrix_client_mock(user_id="@router:server")
-    api_client.homeserver = client.homeserver
     api_client.room_get_state_event.side_effect = client.room_get_state_event.side_effect
     api_client.room_put_state.side_effect = write_state
     serve_task_state_events(api_client, sender=_SCHEDULE_WRITER)

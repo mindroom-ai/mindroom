@@ -107,18 +107,13 @@ def serve_room_schedule_state(
     *,
     sender: str = SCHEDULE_WRITER_ID,
 ) -> None:
-    """Answer the room-state snapshot and each task's own state read from the same events, as a homeserver would.
-
-    Reads of other state events still reach the client's previous ``room_get_state_event`` mock.
-    """
-    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events, room_id=room_id))
+    """Answer the room-state snapshot and each task's own state read from the same events, as a homeserver would."""
+    serve_full_room_state(client, room_id, events)
     tasks = {event["state_key"]: event["content"] for event in events if event["type"] == SCHEDULED_TASK_EVENT_TYPE}
-    fallback = client.room_get_state_event
 
     async def get_state_event(room_id: str, event_type: str, state_key: str = "") -> object:
-        if event_type == SCHEDULED_TASK_EVENT_TYPE and state_key in tasks:
-            return nio.RoomGetStateEventResponse(dict(tasks[state_key]), event_type, state_key, room_id)
-        return await fallback(room_id=room_id, event_type=event_type, state_key=state_key)
+        assert event_type == SCHEDULED_TASK_EVENT_TYPE
+        return nio.RoomGetStateEventResponse(dict(tasks[state_key]), event_type, state_key, room_id)
 
     client.room_get_state_event = AsyncMock(side_effect=get_state_event)
     serve_task_state_events(client, sender=sender)

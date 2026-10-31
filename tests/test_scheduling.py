@@ -1715,24 +1715,8 @@ async def test_cancel_all_scheduled_tasks_persists_through_the_router_when_activ
         room_id="!test:server",
         thread_id="$thread",
     )
-    serve_room_schedule_state(
-        client,
-        "!test:server",
-        [
-            {
-                "type": SCHEDULED_TASK_EVENT_TYPE,
-                "state_key": "task1",
-                "content": {
-                    "task_id": "task1",
-                    "workflow": workflow.model_dump_json(),
-                    "status": "pending",
-                },
-                "event_id": "$state_task1",
-                "sender": SCHEDULE_WRITER_ID,
-                "origin_server_ts": 1234567890,
-            },
-        ],
-    )
+    content = {"task_id": "task1", "workflow": workflow.model_dump_json(), "status": "pending"}
+    serve_room_schedule_state(client, "!test:server", [scheduled_task_state_event("task1", content)])
 
     with patch.object(state_writers, "cancel_runner") as cancel_runner:
         result = await cancel_all_scheduled_tasks(
@@ -1770,11 +1754,7 @@ async def test_cancel_all_scheduled_tasks_rereads_each_task_before_cancelling(
         thread_id="$thread",
     )
     content = {"task_id": "task1", "workflow": workflow.model_dump_json(), "status": "pending"}
-    serve_full_room_state(
-        client,
-        "!test:server",
-        [scheduled_task_state_event("task1", content, sender=SCHEDULE_WRITER_ID)],
-    )
+    serve_full_room_state(client, "!test:server", [scheduled_task_state_event("task1", content)])
     client.room_get_state_event = AsyncMock(
         return_value=nio.RoomGetStateEventResponse(
             {**content, "status": status},
@@ -1809,24 +1789,8 @@ async def test_cancel_all_scheduled_tasks_returns_error_when_state_write_fails(t
         room_id="!test:server",
         thread_id="$thread",
     )
-    serve_room_schedule_state(
-        client,
-        "!test:server",
-        [
-            {
-                "type": SCHEDULED_TASK_EVENT_TYPE,
-                "state_key": "task1",
-                "content": {
-                    "task_id": "task1",
-                    "workflow": workflow.model_dump_json(),
-                    "status": "pending",
-                },
-                "event_id": "$state_task1",
-                "sender": SCHEDULE_WRITER_ID,
-                "origin_server_ts": 1234567890,
-            },
-        ],
-    )
+    content = {"task_id": "task1", "workflow": workflow.model_dump_json(), "status": "pending"}
+    serve_room_schedule_state(client, "!test:server", [scheduled_task_state_event("task1", content)])
 
     result = await cancel_all_scheduled_tasks(
         client=client,

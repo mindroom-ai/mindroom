@@ -1685,6 +1685,31 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
     return "\n".join(lines)
 
 
+async def _cancel_stored_task(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+    content: dict[str, object],
+    task_runtime: ScheduledTaskRuntime | None,
+) -> None:
+    """Publish one stored task's cancellation and end its runner; the caller holds the task's edit lock.
+
+    A scheduled call's approval is withdrawn before the cancellation is published, so an interruption between the
+    two leaves a runnable task that asks again rather than a cancelled task whose approval still works.
+    """
+    if _stored_task_has_scheduled_call(room_id, task_id, content):
+        await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
+    await _put_scheduled_task_state_content(
+        client=client,
+        room_id=room_id,
+        task_id=task_id,
+        content=_cancelled_task_content(task_id, content),
+        writers=task_runtime,
+    )
+    if task_runtime is not None:
+        task_runtime.cancel_runner(task_id)
+
+
 async def cancel_scheduled_task(
     client: nio.AsyncClient,
     room_id: str,
@@ -1697,25 +1722,10 @@ async def cancel_scheduled_task(
         existing_content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
         if existing_content is None:
             return f"❌ Task `{task_id}` not found."
-
-        # Withdraw a scheduled call's approval before publishing the cancellation, so an
-        # interruption between the two leaves a runnable task that asks again rather than
-        # a cancelled task whose approval still works.
         try:
-            if _stored_task_has_scheduled_call(room_id, task_id, existing_content):
-                await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
-            await _put_scheduled_task_state_content(
-                client=client,
-                room_id=room_id,
-                task_id=task_id,
-                content=_cancelled_task_content(task_id, existing_content),
-                writers=task_runtime,
-            )
+            await _cancel_stored_task(client, room_id, task_id, existing_content, task_runtime)
         except ValueError as e:
             return f"❌ Failed to cancel task `{task_id}`: {e!s}"
-
-        if task_runtime is not None:
-            task_runtime.cancel_runner(task_id)
 
     record = _parse_scheduled_task_record(room_id, task_id, existing_content)
     if record is not None and record.workflow.pre_approved_call:
@@ -1723,7 +1733,7 @@ async def cancel_scheduled_task(
     return f"✅ Cancelled task `{task_id}`"
 
 
-async def cancel_all_scheduled_tasks(  # noqa: C901
+async def cancel_all_scheduled_tasks(
     client: nio.AsyncClient,
     room_id: str,
     runtime_paths: RuntimePaths,
@@ -1754,17 +1764,7 @@ async def cancel_all_scheduled_tasks(  # noqa: C901
                         current_content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
                         if current_content is None or current_content.get("status") != "pending":
                             continue
-                        if _stored_task_has_scheduled_call(room_id, task_id, current_content):
-                            await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
-                        await _put_scheduled_task_state_content(
-                            client=client,
-                            room_id=room_id,
-                            task_id=task_id,
-                            content=_cancelled_task_content(task_id, current_content),
-                            writers=task_runtime,
-                        )
-                        if task_runtime is not None:
-                            task_runtime.cancel_runner(task_id)
+                        await _cancel_stored_task(client, room_id, task_id, current_content, task_runtime)
                     cancelled_count += 1
                     logger.info("scheduled_task_cancelled", task_id=task_id)
                 except Exception:

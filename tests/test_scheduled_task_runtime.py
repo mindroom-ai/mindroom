@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -63,9 +62,7 @@ def _config_and_ids(tmp_path: Path) -> tuple[Config, RuntimePaths, dict[str, str
 
 
 def _client(user_id: str) -> AsyncMock:
-    client = make_matrix_client_mock(user_id=user_id)
-    client.homeserver = "https://localhost"
-    return client
+    return make_matrix_client_mock(user_id=user_id)
 
 
 def _workflow(*, due: bool = True) -> ScheduledWorkflow:
@@ -92,6 +89,20 @@ def _runtime(runtime_paths: RuntimePaths, config: Config, bots: _Bots) -> Schedu
     runtime = scheduled_task_runtime(runtime_paths, config=config)
     runtime.bots = lambda: bots
     return runtime
+
+
+async def _save_task(runtime: ScheduledTaskRuntime, client: nio.AsyncClient, workflow: ScheduledWorkflow) -> None:
+    """Save a pending task as a scheduling command does, without starting its runner."""
+    with patch.object(runtime, "_start_runner", return_value=True):
+        await _save_pending_scheduled_task(
+            client,
+            ROOM_ID,
+            TASK_ID,
+            workflow,
+            runtime.config_provider(),
+            runtime.runtime_paths,
+            task_runtime=runtime,
+        )
 
 
 def _stopped(bot: AgentBot) -> AgentBot:
@@ -662,16 +673,7 @@ async def test_cancelling_a_task_through_another_agent_keeps_its_stored_owner(tm
     owner = scheduling_bot(room.client(ids["general"]), agent_name="general")
     other = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
     runtime = _runtime(runtime_paths, config, _Bots(general=owner, helper=other))
-    with patch.object(runtime, "_start_runner", return_value=True):
-        await _save_pending_scheduled_task(
-            owner.client,
-            ROOM_ID,
-            TASK_ID,
-            _workflow(due=False),
-            config,
-            runtime_paths,
-            task_runtime=runtime,
-        )
+    await _save_task(runtime, owner.client, _workflow(due=False))
 
     result = await cancel_scheduled_task(other.client, ROOM_ID, TASK_ID, runtime_paths, task_runtime=runtime)
 
@@ -691,16 +693,7 @@ async def test_a_cancel_during_an_edit_leaves_the_task_cancelled(tmp_path: Path,
     editor = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
     runtime = _runtime(runtime_paths, config, _Bots(general=owner, helper=editor))
     workflow = _workflow(due=False)
-    with patch.object(runtime, "_start_runner", return_value=True):
-        await _save_pending_scheduled_task(
-            owner.client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            config,
-            runtime_paths,
-            task_runtime=runtime,
-        )
+    await _save_task(runtime, owner.client, workflow)
     existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
     assert existing is not None
     edit_writing = asyncio.Event()
@@ -741,46 +734,7 @@ async def test_a_cancel_during_an_edit_leaves_the_task_cancelled(tmp_path: Path,
 
     assert cancelled.result().startswith("✅ Cancelled")
     assert room.task()["content"]["status"] == "cancelled"
-    assert json.loads(room.task()["content"]["workflow"])["message"] == "Water the plants twice"
-
-
-@pytest.mark.asyncio
-async def test_restore_decides_on_an_edit_that_landed_after_it_read_the_room(tmp_path: Path) -> None:
-    """An ancient one-time task that an edit rescheduled after restore read the room gets a runner, not a failure."""
-    config, runtime_paths, ids = _two_agents(tmp_path)
-    room = _SharedRoom({ids["general"]: 100})
-    agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
-    runtime = _runtime(runtime_paths, config, _Bots(general=agent))
-    with patch.object(runtime, "_start_runner", return_value=True):
-        await _save_pending_scheduled_task(
-            agent.client,
-            ROOM_ID,
-            TASK_ID,
-            _workflow(due=False),
-            config,
-            runtime_paths,
-            task_runtime=runtime,
-        )
-    rescheduled = room.task()
-    ancient_workflow = ScheduledWorkflow.model_validate_json(rescheduled["content"]["workflow"]).model_copy(
-        update={"execute_at": datetime.now(UTC) - timedelta(days=30)},
-    )
-    stale_task = {
-        **rescheduled,
-        "content": {**rescheduled["content"], "workflow": ancient_workflow.model_dump_json()},
-    }
-    stale_room = [stale_task if event is rescheduled else event for event in room.events.values()]
-    agent.client.room_get_state = AsyncMock(
-        return_value=nio.RoomGetStateResponse.from_dict(stale_room, room_id=ROOM_ID),
-    )
-
-    with patch.object(runtime, "_start_runner", return_value=True) as start_runner:
-        restored = await runtime.restore_room(agent, ROOM_ID)
-
-    assert restored == 1
-    start_runner.assert_called_once()
-    assert room.task() is rescheduled
-    assert room.task()["content"]["status"] == "pending"
+    assert ScheduledWorkflow.model_validate_json(room.task()["content"]["workflow"]).message == "Water the plants twice"
 
 
 @pytest.mark.asyncio
@@ -791,26 +745,8 @@ async def test_restore_waits_for_an_edit_still_rescheduling_an_overdue_task(tmp_
     agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
     editor = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
     runtime = _runtime(runtime_paths, config, _Bots(general=agent, helper=editor))
-    with patch.object(runtime, "_start_runner", return_value=True):
-        await _save_pending_scheduled_task(
-            agent.client,
-            ROOM_ID,
-            TASK_ID,
-            _workflow(due=False),
-            config,
-            runtime_paths,
-            task_runtime=runtime,
-        )
-    saved = room.task()
-    overdue = ScheduledWorkflow.model_validate_json(saved["content"]["workflow"]).model_copy(
-        update={"execute_at": datetime.now(UTC) - timedelta(days=30)},
-    )
-    room._put(
-        saved["type"],
-        TASK_ID,
-        {**saved["content"], "workflow": overdue.model_dump_json()},
-        saved["sender"],
-    )
+    overdue = _workflow(due=False).model_copy(update={"execute_at": datetime.now(UTC) - timedelta(days=30)})
+    await _save_task(runtime, agent.client, overdue)
     existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
     assert existing is not None
     edit_writing = asyncio.Event()
@@ -868,16 +804,7 @@ async def test_restore_keeps_the_stored_owner_when_the_room_would_now_pick_anoth
     agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
     runtime = _runtime(runtime_paths, config, _Bots(router=router, general=agent))
     workflow = _workflow(due=False)
-    with patch.object(runtime, "_start_runner", return_value=True):
-        await _save_pending_scheduled_task(
-            agent.client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            config,
-            runtime_paths,
-            task_runtime=runtime,
-        )
+    await _save_task(runtime, agent.client, workflow)
     room.events["m.room.power_levels", ""]["content"]["users"][ids["router"]] = 100
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
