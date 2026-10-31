@@ -1224,6 +1224,27 @@ def switch_thread_model(model_name: str) -> str:
     return f"switched to {model_name}"
 
 
+@pytest.mark.asyncio
+async def test_a_run_that_stopped_after_a_call_stores_no_turn_context() -> None:
+    """The attempt that continues the turn after a model switch replays this run and sends the turn context again."""
+    model = ScriptedModel([calls(tool_call("switch_thread_model", "c-switch", model_name="opus"))])
+    switch = toolkit(switch_thread_model, name="thread_model", stop_after_call=True)
+
+    _, record = await collect(
+        run_agent(
+            spec(model, switch),
+            [*_prompt(), Message(role="user", content="context", add_to_agent_memory=False)],
+            ctx=context(),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
+
+    assert record.status is RunStatus.completed
+    assert [message.role for message in record.messages] == ["system", "user", "assistant", "tool"]
+    assert all(message.add_to_agent_memory for message in record.messages)
+
+
 @pytest.mark.parametrize("stopping", ["approved", "before-pause"])
 @pytest.mark.asyncio
 async def test_a_resumed_batch_whose_result_stops_the_run_ends_it_without_another_request(stopping: str) -> None:

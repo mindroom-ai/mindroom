@@ -122,9 +122,10 @@ logger = get_logger(__name__)
 _STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
 # Replayed thinking whose earlier context changed is dropped instead of failing the request. The system prompt carries
 # the date and the turn's memory and enrichment, and compaction and replay limits rewrite earlier turns, so a request
-# regularly replays thinking produced after a different prefix; the API rejects such a request by default on accounts created from 2026-08-31. The default binding goes
-# only on the routes shown to accept the beta, because a platform rejects a beta it does not take, so not on Bedrock;
-# a request without a binding leaves out earlier turns' thinking instead (``_replays_earlier_thinking``).
+# regularly replays thinking produced after a different prefix; the API rejects such a request by default on accounts
+# created from 2026-08-31. The default binding goes only on the routes shown to accept the beta, because a platform
+# rejects a beta it does not take, so not on Bedrock; a request without a binding leaves out earlier turns' thinking
+# instead (``_replays_earlier_thinking``).
 _THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 _THINKING_BINDING_ROUTES: frozenset[ClaudeRouteKind] = frozenset({"anthropic", "vertexai_claude"})
 _VERTEX_ENDPOINTS = {

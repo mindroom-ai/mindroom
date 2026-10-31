@@ -43,7 +43,7 @@ plugins:
       dawarich_url: http://dawarich.local
 ```
 
-Whenever an agent is about to answer a message, this hook adds the user's location to that turn's context, and `persist=False` keeps it out of the stored message text.
+Whenever an agent is about to answer a message, this hook adds the user's location to that turn's context, and `persist=False` puts it in a separate context message instead of the user's message text.
 
 MindRoom finds `@hook` functions in the manifest's `hooks_module`, or in `tools_module` when `hooks_module` is omitted; see [Manifest format](plugins.md#manifest-format).
 
