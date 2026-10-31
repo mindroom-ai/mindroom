@@ -564,11 +564,10 @@ class LiveTurnTools(TurnToolBridge):
                 PausedAttempt(
                     session_id=self.catalog.run.session_id,
                     run_id=self.catalog.run.run_id,
-                    tools=(waiting.tool_execution,),
+                    requirements=(waiting,),
                     toolkit_owners={
                         (self.catalog.runtime_context.agent_name, binding.key.function): binding.approval_toolkit,
                     },
-                    requirements=(waiting,),
                     runtime_model_name=self.catalog.run.model_name,
                     response_text=presentation.final_text(),
                     tool_trace=tuple(presentation.tool_trace),

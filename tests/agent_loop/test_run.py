@@ -12,6 +12,7 @@ import asyncio
 import json
 import time
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -23,18 +24,21 @@ from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.event_journal.approval_calls import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request
+from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import RateLimited
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity, TextDelta, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.run_record_helpers import PRODUCT, approved_call, denied_call, result, resumed, settled, waiting_call
 from tests.session_storage.goldens import loaded_sessions
+from tests.session_storage.layout_4 import store_rows, upgrade_from_layout
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -238,10 +242,9 @@ async def test_a_paused_run_whose_model_said_nothing_is_stored_paused_without_co
     )
 
     assert record.status is RunStatus.paused
-    # The pause is the record's requirements; no notice stands in for text the model did not write.
+    # The pause is the record's paused call; no notice stands in for text the model did not write.
     assert record.content is None
     assert "content" not in store.saved[0]
-    assert record.requirements is not None
     assert record.requirements[0].needs_confirmation
     assert store.saved[0]["status"] == "PAUSED"
     assert [message["role"] for message in store.saved[0]["messages"]] == ["system", "user", "assistant"]
@@ -511,8 +514,8 @@ async def test_a_stop_while_the_paused_record_is_being_saved_leaves_a_cancelled_
 
     assert [record["status"] for record in saved] == ["PAUSED", "CANCELLED"]
     cancelled = saved[-1]
-    # Cancellation wins over the pause: the requirement leaves and the tool entry stops waiting.
-    assert cancelled["requirements"] == []
+    # Cancellation wins over the pause: the tool entry stops waiting.
+    assert "requirements" not in cancelled
     tool = ToolExecution.from_dict(cancelled["tools"][0])
     assert (tool.requires_confirmation, tool.confirmed) == (False, None)
     assert "content" not in cancelled
@@ -674,7 +677,6 @@ async def test_an_approved_call_resumes_into_a_completed_run_with_its_result() -
             decided=approved_call(waiting, PRODUCT),
             added=[result(call, PRODUCT)],
             answered=answered,
-            confirmation=True,
         ),
     )
     assert record.messages[: len(paused.messages)] == paused.messages
@@ -705,8 +707,6 @@ async def test_a_denied_call_resumes_into_a_completed_run_that_answers_it_with_t
             decided=denied_call(waiting, reason),
             added=[result(call, reason, is_error=True)],
             answered=answered,
-            confirmation=False,
-            confirmation_note=reason,
         ),
     )
     assert not any(isinstance(event, ToolStarted | ToolCompleted) for event in events)
@@ -746,7 +746,6 @@ async def test_a_team_member_s_approved_call_resumes_into_the_member_s_completed
             decided=approved_call(waiting, PRODUCT),
             added=[result(call, PRODUCT)],
             answered=answered,
-            confirmation=True,
         ),
     )
     assert record.parent_run_id == "team-paused"
@@ -774,10 +773,43 @@ async def test_an_external_result_resumes_into_a_completed_run_that_answers_the_
             decided=executed,
             added=[result(call, helper_result, is_error=None)],
             answered=answered,
-            external_execution_result=helper_result,
         ),
     )
     assert not any(isinstance(event, ToolStarted | ToolCompleted) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_a_run_an_earlier_release_paused_with_its_call_stored_twice_resumes_after_the_upgrade(
+    tmp_path: Path,
+) -> None:
+    """v2026.10.744 and earlier stored the paused call in the run's tools and again in its requirements.
+
+    Layout version 8 keeps the call once, so the run waits on it alone and its approval resumes the run.
+    """
+    row = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "legacy_run_content" / "v2026.10.627_rows.json").read_text(),
+    )
+    stored = {key: value for key, value in row["agent_paused"].items() if key != "content"}
+    store = create_agent_state_storage("code", tmp_path)
+    store_rows(store, "session-1", [stored])
+    upgrade_from_layout(store, HistoryScope(kind="agent", scope_id="code"), 7)
+    paused = store.get_run("run-1")
+    assert isinstance(paused, RunRecord)
+    [waiting] = paused.requirements
+    model = _model("scripted-model", answer("Their sum is 13.", usage(1, 1)))
+
+    events, record, _ = await _resume(
+        spec(model, gated(add)),
+        paused,
+        approved=[_approval("c1", "add", {"a": 6, "b": 7})],
+    )
+
+    assert record.status is RunStatus.completed
+    assert record.content == "Their sum is 13."
+    [call] = record.tools or ()
+    assert (call.tool_call_id, call.result, call.confirmed, call.is_paused) == ("c1", '{"sum": 13}', True, False)
+    assert call.pause_id == waiting.tool_execution.pause_id == stored["requirements"][0]["id"]
+    assert [type(event).__name__ for event in events[:2]] == ["ToolStarted", "ToolCompleted"]
 
 
 @pytest.mark.asyncio
@@ -863,10 +895,8 @@ async def test_a_second_resume_answers_only_the_calls_it_decided(second_decision
     )
     _, second, _ = await _resume(agent, first, approved=[_approval("c1", "add", {"a": 1, "b": 2})])
     assert second.status is RunStatus.paused
-    assert [(r.tool_execution.tool_call_id, r.confirmation) for r in second.requirements or ()] == [
-        ("c1", True),
-        ("c2", None),
-    ]
+    assert [(tool.tool_call_id, tool.confirmed) for tool in second.tools or ()] == [("c1", True), ("c2", None)]
+    assert [r.tool_execution.tool_call_id for r in second.requirements] == ["c2"]
 
     if second_decision == "approve":
         events, third, _ = await _resume(agent, second, approved=[_approval("c2", "add", {"a": 3, "b": 4})])
@@ -883,19 +913,17 @@ async def test_a_second_resume_answers_only_the_calls_it_decided(second_decision
     assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted | ToolCompleted)] == (
         ["c2", "c2"] if second_decision == "approve" else []
     )
-    assert [(r.tool_execution.tool_call_id, r.confirmation) for r in third.requirements or ()] == [
+    assert [(tool.tool_call_id, tool.confirmed) for tool in third.tools or ()] == [
         ("c1", True),
         ("c2", second_decision == "approve"),
     ]
-    assert all(not tool.is_paused for tool in third.tools or ())
+    assert third.requirements == []
 
 
 # --- resume guards ---------------------------------------------------------------------------------------------------
 
 
 def _paused_record(*tools: ToolExecution, status: RunStatus = RunStatus.paused) -> RunRecord:
-    from mindroom.llm.runs import RunRequirement  # noqa: PLC0415 - only these guards build records by hand.
-
     return RunRecord(
         run_id="run-p",
         session_id="session-1",
@@ -906,7 +934,6 @@ def _paused_record(*tools: ToolExecution, status: RunStatus = RunStatus.paused) 
             Message(role="assistant", tool_calls=[tool_call("add", "c1", a=1, b=2)]),
         ],
         tools=list(tools),
-        requirements=[RunRequirement(tool) for tool in tools if tool.is_paused],
     )
 
 
@@ -958,7 +985,6 @@ async def test_a_resume_refuses_a_planted_confirmed_call_that_no_approval_covers
         confirmed=True,
     )
     paused = _paused_record(_gated_add(), planted)
-    paused.requirements = paused.requirements[:1]  # type: ignore[index]
 
     with pytest.raises(ValueError, match="retry the request"):
         await _resume(

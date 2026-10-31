@@ -309,7 +309,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
             "call_id": "switch",
             "parent_bash_call_id": "interrupted-bash",
             "arguments": switch_arguments,
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
             "delegation_depth": 2,
         },
     )
@@ -431,7 +431,7 @@ async def test_a_recovered_call_s_follow_up_publishes_the_usage_its_turn_spent_b
             "call_id": "switch",
             "parent_bash_call_id": "interrupted-bash",
             "arguments": switch_arguments,
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
             "delegation_depth": 0,
         },
     )
@@ -566,7 +566,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
             "arguments": {"value": "exact\nargument"},
             "call_id": "hidden",
             "parent_bash_call_id": "bash-parent",
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
         },
     )
 
@@ -699,7 +699,7 @@ async def test_a_later_save_of_the_recovered_session_keeps_the_state_the_recover
             "arguments": {"value": "v"},
             "call_id": "hidden",
             "parent_bash_call_id": "bash-parent",
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
         },
     )
 
@@ -1098,7 +1098,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             "arguments": arguments,
             "call_id": "hidden",
             "parent_bash_call_id": "old-bash",
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
             "delegation_depth": 2,
         },
     )
@@ -1342,7 +1342,7 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
             "call_id": "search-id",
             "parent_bash_call_id": "interrupted-bash",
             "arguments": arguments,
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
         },
     )
     execution = _approval_execution(tmp_path, runtime, monkeypatch, _knowledge(searches) if available else None)
@@ -1456,7 +1456,11 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
         thread_id=runtime.resolved_thread_id,
         requester_id=runtime.requester_id,
         state="claimed",
-        calls=approval_calls_for_cli_pause(paused, "helper", (replace(waiting, confirmation=True),)),
+        calls=approval_calls_for_cli_pause(
+            paused,
+            "helper",
+            (RunRequirement(replace(waiting.tool_execution, confirmed=True)),),
+        ),
         cli_call=paused.cli_call,
     )
     execution = _approval_execution(tmp_path, runtime, monkeypatch, None)

@@ -45,7 +45,7 @@ def approval_calls_for_cli_pause(
                 arguments_digest=approval_arguments_digest(tool.tool_args),
                 expires_at_ns=0,
                 decision=ApprovalDecision.APPROVED if requirement.confirmation else ApprovalDecision.DENIED,
-                reason=requirement.confirmation_note,
+                reason=tool.confirmation_note,
             ),
         )
     return tuple(calls)
@@ -132,7 +132,7 @@ async def advance_cli_delegation(
             call_id=tool.tool_call_id,
             parent_bash_call_id=parent_bash_call_id,
             requirements=paused.requirements,
-            external_requirement=requirement,
+            delegation_pause_id=tool.pause_id,
             delegation_depth=delegation_depth,
         ).to_dict(),
     )

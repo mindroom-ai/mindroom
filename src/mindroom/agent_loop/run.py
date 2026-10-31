@@ -260,13 +260,7 @@ def resumed_record[R: AnyRunRecord](paused: R) -> R:
     the model writes after the resume to it: a team leader or delegating parent reads both, while the reply the resume
     continues, which already shows the text written before the pause, adds only the rest (``new_handover_content``).
     The copy is deep, so no field it carries is shared with ``paused`` and a refused resume changes nothing; a team
-    record keeps its own copy of the member runs that ended before the pause. A tool entry that one of the copy's own
-    requirements waits on is that requirement's execution of the same call, so a decision recorded on a requirement
-    shows on the run's tools too. A team run also holds its members' requirements, whose call ids come from other
-    provider requests and may equal a leader call's id; those belong to the member's run and never replace the
-    leader's entries. A member record resumed on its own owns its requirements too: the team runtime names them with
-    that record's run id (``_plan_member_resumes``), so the ``member_run_id`` half of the check keeps the aliasing on
-    the member's tools.
+    record keeps its own copy of the member runs that ended before the pause and of its paused member runs.
     """
     if paused.status is not RunStatus.paused:
         msg = f"Only a paused run can be resumed; run {paused.run_id!r} is {paused.status.value}"
@@ -274,15 +268,8 @@ def resumed_record[R: AnyRunRecord](paused: R) -> R:
     record = deepcopy(replace(paused, messages=[]))
     record.carried_content = record.content
     record.status = RunStatus.running
-    record.requirements = record.requirements or []
     if record.metrics is None:
         record.metrics = RunMetrics()
-    by_call = {
-        requirement.tool_execution.tool_call_id: requirement.tool_execution
-        for requirement in record.requirements
-        if requirement.member_agent_id is None or requirement.member_run_id == paused.run_id
-    }
-    record.tools = [by_call.get(tool.tool_call_id) or tool for tool in record.tools or []]
     return record
 
 
@@ -293,14 +280,13 @@ def decide_requirements(
     denied: Mapping[str, str | None],
     external_results: Mapping[str, str],
 ) -> list[RunRequirement]:
-    """Apply the decisions to the calls the record waits for and return their requirements, in record order.
+    """Record the decisions on the calls the record waits for and return their requirements, in record order.
 
     Anything but exact coverage of the waiting calls is refused before any decision is recorded.
     """
-    requirements = {requirement.tool_execution.tool_call_id: requirement for requirement in record.requirements or ()}
-    waiting = [*(record.tools or ()), *(requirement.tool_execution for requirement in record.requirements or ())]
-    confirmations = {tool.tool_call_id for tool in waiting if tool.requires_confirmation}
-    externals = {tool.tool_call_id for tool in waiting if tool.external_execution_required}
+    requirements = {requirement.tool_execution.tool_call_id: requirement for requirement in record.requirements}
+    confirmations = {call_id for call_id, item in requirements.items() if item.tool_execution.requires_confirmation}
+    externals = {call_id for call_id, item in requirements.items() if item.tool_execution.external_execution_required}
     approved_ids = [call.tool_call_id for call in approved]
     decided = {*approved_ids, *denied}
     if (
@@ -308,13 +294,11 @@ def decide_requirements(
         or set(approved_ids) & set(denied)
         or decided != confirmations
         or set(external_results) != externals
-        or not (confirmations | externals) <= set(requirements)
     ):
         msg = f"Decisions do not cover exactly the calls run {record.run_id!r} waits for; retry the request"
         raise ValueError(msg)
     for call in approved:
-        requirement = requirements[call.tool_call_id]
-        tool = requirement.tool_execution
+        tool = requirements[call.tool_call_id].tool_execution
         if tool.tool_name != call.tool_name or not call.binds_arguments(tool.tool_args):
             msg = f"Approved call {call.tool_call_id!r} no longer matches the paused call; retry the request"
             raise ValueError(msg)
@@ -324,8 +308,7 @@ def decide_requirements(
         requirements[call_id].reject(note)
     for call_id, result in external_results.items():
         requirements[call_id].set_external_execution_result(result)
-    waited_for = confirmations | externals
-    return [requirement for call_id, requirement in requirements.items() if call_id in waited_for]
+    return list(requirements.values())
 
 
 async def drive_run[R: AnyRunRecord](
@@ -409,15 +392,13 @@ async def _store_interrupted[R: AnyRunRecord](
 ) -> None:
     """End a cancelled (``error`` None) or failed run and store it before its ending propagates.
 
-    Cancellation wins over a pause: unresolved requirements leave and paused tool entries stop waiting. A failed
+    Cancellation wins over a pause: paused tool entries stop waiting. A failed
     run records its ``failure_text`` in ``error``, redacted, which is what its caller reports, and keeps in its content
     what its model wrote. The store finishes even if the waiter is cancelled again, so a record the caller writes for
     the same run afterwards is never overwritten by this one.
     """
     if error is None:
         _end(record, messages, started, RunStatus.cancelled)
-        if record.requirements:
-            record.requirements = [requirement for requirement in record.requirements if requirement.is_resolved()]
         for tool in record.tools or ():
             if tool.is_paused:
                 tool.requires_confirmation = False

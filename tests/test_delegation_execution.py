@@ -35,12 +35,12 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import ModelOutputLimitError, ProviderError
 from mindroom.llm.events import ToolCompleted
 from mindroom.llm.provider import TurnCompleted
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
-from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.schema import quote_identifier
+from mindroom.session_storage.schema import TableNames, quote_identifier
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -313,7 +313,6 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
                 completed.status = RunStatus.completed
                 completed.content = "Saved result"
                 completed.tools = []
-                completed.requirements = []
                 storage.save_run(session, completed, record_usage=False)
             if outcome == "cancel_removed":
                 config.agents.clear()
@@ -423,8 +422,10 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
             assert "Cannot delegate" in result_message
         else:
             assert "child result" in result_message
-        # Every delegation's requirement holds its child's answer as the external result the parent continued with.
-        assert all(requirement.external_execution_result for requirement in resumed.requirements or ())
+        # Every delegation call holds its child's answer as the external result the parent continued with.
+        delegations = [tool for tool in resumed.tools or () if tool.tool_name == "run_subagent"]
+        assert delegations
+        assert all(tool.result for tool in delegations)
         assert all(not tool.is_paused for tool in resumed.tools or ())
 
 
@@ -1018,7 +1019,8 @@ async def test_a_child_that_fails_continuing_after_its_own_child_hands_its_paren
     assert stored.status is RunStatus.error
     assert stored.error is not None
     assert stored.error.startswith("provider connection lost: api_key=")
-    assert [requirement.tool_execution.tool_call_id for requirement in stored.requirements or ()] == ["nested-0"]
+    # The grandchild's answer stands on the child's own call.
+    assert [(tool.tool_call_id, tool.is_paused) for tool in stored.tools or ()] == [("nested-0", False)]
     [record_dir] = (
         path.parent
         for path in tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json")
@@ -1194,7 +1196,6 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
         session_id="parent",
         status=RunStatus.paused,
         tools=[requirement.tool_execution],
-        requirements=[requirement],
     )
     persisted: list[DelegationState] = []
 
@@ -1234,7 +1235,6 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
         assert asked is None
         assert state.pending_agent_name == "code"
         assert state.pending_tools[0]["tool_call_id"] == "code:call"
-        assert RunRequirement.from_dict(state.pending_requirements[0]).tool_execution.tool_call_id == "code:call"
         assert persisted[-1].pending_tools == state.pending_tools
 
         # The answer to that card is kept as the gate of the same key, which settles the call without a child.
@@ -1293,10 +1293,8 @@ async def test_copied_delegation_call_never_starts_twice_from_one_approval(
     session = storage.load_session("parent")
     assert session is not None
     planted = deepcopy(stored)
-    assert planted.requirements is not None
-    copy = RunRequirement.from_dict(planted.requirements[0].to_dict())
-    copy.id = "copied-requirement"
-    planted.requirements.append(copy)
+    [waiting] = planted.requirements
+    planted.tools = [*(planted.tools or ()), replace(waiting.tool_execution, pause_id="copied-call")]
     storage.save_run(session, planted, record_usage=False)
 
     with pytest.raises(RuntimeError, match="same delegation call more than once"):
@@ -1446,6 +1444,44 @@ async def test_the_driver_rewrites_the_parent_without_touching_its_recorded_usag
     stored = store.get_run("parent-run")
     assert stored is not None
     assert DELEGATION_STATE_KEY in (stored.metadata or {})
+
+
+@pytest.mark.asyncio
+async def test_the_driver_saves_a_paused_team_s_member_whose_delegation_it_answered(tmp_path: Path) -> None:
+    """A member's delegation call is stored once, on the member's row, so the answer the driver records reaches it."""
+    scope = HistoryScope(kind="team", scope_id="squad")
+    store = create_state_storage(TableNames.of_team(scope).storage_name, tmp_path, scope)
+    session = new_scope_session(session_id="team-session", scope=scope)
+    delegation = ToolExecution(tool_call_id="sub", tool_name="run_subagent", external_execution_required=True)
+    member = RunRecord(
+        run_id="member-run",
+        agent_id="checker",
+        session_id="team-session",
+        parent_run_id="team-run",
+        status=RunStatus.paused,
+        tools=[delegation],
+    )
+    team = TeamRunRecord(
+        run_id="team-run",
+        team_id="squad",
+        session_id="team-session",
+        status=RunStatus.paused,
+        member_responses=[member],
+    )
+    await persist_to(store, session)(member)
+    await persist_to(store, session)(team)
+    [requirement] = team.requirements
+    requirement.set_external_execution_result("Helper says 42")
+    delegation.pause_id = "pause-1"
+
+    await execution.persist_delegation_state(store, session, team, DelegationState())
+
+    stored_member = store.get_run("member-run")
+    assert stored_member is not None
+    assert stored_member.tools == [delegation]
+    loaded = store.get_run("team-run")
+    assert isinstance(loaded, TeamRunRecord)
+    assert execution.answered_delegation_calls(loaded) == {("checker", "sub"): "Helper says 42"}
 
 
 @pytest.mark.asyncio

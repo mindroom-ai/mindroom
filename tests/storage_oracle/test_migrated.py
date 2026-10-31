@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
+from mindroom.delegation.state import DELEGATION_STATE_KEY
 from mindroom.history.summary_message import is_scope_summary
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -83,6 +84,9 @@ MASKS: dict[str, str] = {
     "readers_follow_the_log": "background readers list a conversation's turns in log order, not in creation order",
     "history_state_is_the_owners_one_value": "layout version 7: the owner's force flag and preserved seen ids, kept per "
     "scope, become one metadata value, and other scopes' entries go (``mindroom.session_storage.legacy_scope_metadata``)",
+    "paused_calls_stored_once": "#3106 item 2: a paused run's requirements fold into the calls they copy, which keep "
+    "their requirement's id as their pause id, and delegation state lists its pending calls once "
+    "(``mindroom.session_storage.legacy_run_requirements``)",
 }
 # The masks each golden and legacy input uses; every other input compares unmasked.
 _PINS: dict[str, set[str]] = {
@@ -171,6 +175,51 @@ _END_STATE_PINS: dict[str, frozenset[str]] = {
     "generated/9": frozenset({"history_state_is_the_owners_one_value"}),
     "named/interrupted_voice_playout": frozenset({"readers_follow_the_log"}),
 }
+# The inputs and the recorded end states whose stored runs hold requirements, which the ``paused_calls_stored_once``
+# mask shows folded; it adds to the pins above.
+_STORED_REQUIREMENTS = (
+    "goldens/agent_code",
+    "goldens/agent_code__before_run-approved",
+    "goldens/agent_code__before_run-delegation-approved",
+    "goldens/agent_code__before_run-rejected",
+    "goldens/agent_helper",
+    "goldens/agent_helper__before_run-delegation-approved",
+    "goldens/team_squad",
+    "goldens/team_squad__before_team-approved",
+    "legacy/synthetic__embedded_paused_member_advanced",
+)
+_END_STATES_STORED_REQUIREMENTS = (
+    "generated/0",
+    "generated/11",
+    "generated/12",
+    "generated/13",
+    "generated/14",
+    "generated/16",
+    "generated/17",
+    "generated/2",
+    "generated/20",
+    "generated/22",
+    "generated/24",
+    "generated/26",
+    "generated/27",
+    "generated/29",
+    "generated/3",
+    "generated/30",
+    "generated/32",
+    "generated/34",
+    "generated/35",
+    "generated/37",
+    "generated/38",
+    "generated/39",
+    "generated/4",
+    "generated/5",
+    "generated/6",
+    "generated/7",
+    "named/cli_delegate_then_complete",
+    "named/delegation_state_after_continuation",
+    "named/stale_paused_copy",
+    "named/team_pause_advanced",
+)
 # Where an older release also queued a manual compaction request: the scope keys listed in the session state.
 _PENDING_KEY = "mindroom_pending_compaction_scope_keys"
 
@@ -431,6 +480,47 @@ def _members_join_team(recorded: dict[str, Any], used: set[str]) -> None:
             used.add("members_of_members_join_their_team")
 
 
+def _paused_call_ids(runs: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
+    """Return the id each paused run's requirements give its calls, by ``(run id, call id)``.
+
+    A paused run's own requirements name its calls, and a paused team run's copies name its paused members' calls,
+    which fold after the members' own.
+    """
+    paused = {run["run_id"] for run in runs if run.get("status") == RunStatus.paused.value}
+    entries = [
+        (run["run_id"], entry) for run in runs if run["run_id"] in paused for entry in run.get("requirements") or []
+    ]
+    ids: dict[tuple[str, str], str] = {}
+    for copies in (False, True):
+        for run_id, entry in entries:
+            owner = entry.get("member_run_id") or run_id
+            if (owner != run_id) is copies and owner in paused:
+                ids[(owner, entry["tool_execution"]["tool_call_id"])] = entry["id"]
+    return ids
+
+
+def _paused_calls_stored_once(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
+    """Show each recorded run's paused calls stored once: a paused call takes its requirement's id, and no copy stays."""
+    for run in _runs(observed):
+        assert "requirements" not in run, run["run_id"]
+        assert "pending_requirements" not in ((run.get("metadata") or {}).get(DELEGATION_STATE_KEY) or {})
+    runs = _runs(recorded)
+    ids = _paused_call_ids(runs)
+    for run in runs:
+        if run.pop("requirements", None) is not None:
+            used.add("paused_calls_stored_once")
+        state = (run.get("metadata") or {}).get(DELEGATION_STATE_KEY)
+        if isinstance(state, dict) and state.pop("pending_requirements", None) is not None:
+            used.add("paused_calls_stored_once")
+        taken: set[str] = set()
+        for tool in reversed(run.get("tools") or []):
+            key = (run["run_id"], tool["tool_call_id"])
+            waiting = tool.get("requires_confirmation") or tool.get("external_execution_required")
+            if key in ids and waiting and tool["tool_call_id"] not in taken:
+                tool["pause_id"] = ids[key]
+                taken.add(tool["tool_call_id"])
+
+
 def _states(observed: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the session states ``observed`` shows, the loaded session's and the row's, where each is an object."""
     session, row = observed["session"], observed["row"]
@@ -508,6 +598,7 @@ def _mask_session(
     _restore_repeated_ids(observed, facts, used)
     _embedded_members(recorded, used)
     _members_join_team(recorded, used)
+    _paused_calls_stored_once(recorded, observed, used)
     return created
 
 
@@ -554,7 +645,7 @@ def test_a_converted_input_shows_its_recording_but_for_named_masks(name: str, tm
     observed = with_defaults(observe_database(text, tmp_path / "converted", facts.extra_run_ids()))
     used = _masked(text, recorded, observed, facts, tmp_path / "expected")
     assert first_difference(recorded, observed) is None, first_difference(recorded, observed)
-    assert used == _PINS.get(name, set())
+    assert used == _PINS.get(name, set()) | ({"paused_calls_stored_once"} if name in _STORED_REQUIREMENTS else set())
 
 
 @pytest.mark.parametrize("path", SEQUENCES, ids=sequence_id)
@@ -574,7 +665,10 @@ def test_a_converted_end_state_shows_its_last_recorded_observables_but_for_named
     _unminted(final)
     _unminted(observed)
     assert first_difference(final, observed) is None, first_difference(final, observed)
-    assert used == _END_STATE_PINS.get(sequence_id(path), frozenset())
+    stored_requirements = (
+        {"paused_calls_stored_once"} if sequence_id(path) in _END_STATES_STORED_REQUIREMENTS else set()
+    )
+    assert used == _END_STATE_PINS.get(sequence_id(path), frozenset()) | stored_requirements
 
 
 def test_a_fold_run_a_retirement_removed_converts_without_a_row(tmp_path: Path) -> None:
@@ -615,4 +709,7 @@ def test_every_mask_is_used_and_every_pin_names_an_input() -> None:
     """Each named mask explains a difference some input shows, and no pin is stale."""
     assert set(_PINS) <= set(_INPUTS)
     assert set(_END_STATE_PINS) <= {sequence_id(path) for path in SEQUENCES}
-    assert set().union(*_PINS.values(), *_END_STATE_PINS.values()) == set(MASKS)
+    assert set(_STORED_REQUIREMENTS) <= set(_INPUTS)
+    assert set(_END_STATES_STORED_REQUIREMENTS) <= {sequence_id(path) for path in SEQUENCES}
+    stored_requirements = {"paused_calls_stored_once"} if _STORED_REQUIREMENTS else set()
+    assert set().union(*_PINS.values(), *_END_STATE_PINS.values(), stored_requirements) == set(MASKS)

@@ -12,8 +12,9 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.llm.runs import RunRecord, TeamRunRecord
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.codec import decode_json
+from mindroom.session_storage.legacy_run_requirements import fold_requirements
 from mindroom.session_storage.legacy_tool_results import split_combined_tool_results
 from mindroom.session_storage.schema import TableNames, index_sql, quote_identifier, usage_table_sql
 
@@ -141,6 +142,16 @@ def run_from_row(run_type: str, run_data: str) -> AnyRunRecord | None:
         return None
     data = cast("dict[str, Any]", decode_json(run_data))
     _drop_tool_schemas(data)
+    if data.get("status") == RunStatus.paused.value:
+        # A paused team row embeds its paused member runs, whose calls its own requirements copy.
+        members = {
+            member["run_id"]: member
+            for member in data.get("member_responses") or ()
+            if isinstance(member, dict) and isinstance(member.get("run_id"), str)
+        }
+        for member in members.values():
+            fold_requirements(member, {})
+        fold_requirements(data, members)
     run = TeamRunRecord.from_dict(data) if run_type == "team" else RunRecord.from_dict(data)
     split_combined_tool_results(run)
     return run

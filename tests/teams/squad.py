@@ -273,7 +273,7 @@ def resume_team(
 
     The members whose paused runs the resume continues are built first, as a saved approval's resume builds them.
     """
-    paused_members = {requirement.member_agent_id for requirement in paused.requirements or ()}
+    paused_members = {member.agent_id for member in paused.member_responses}
     for member in team.members:
         if member.id in paused_members and member.built is None:
             member.built = member.build()

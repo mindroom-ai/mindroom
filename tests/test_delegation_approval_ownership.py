@@ -15,7 +15,7 @@ from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, child_execution_identity
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
-from mindroom.llm.runs import RunRecord, RunRequirement, ToolExecution
+from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.delegation_helpers import (
@@ -141,17 +141,19 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
     if decision == "rewrite_gate":
         # Only the separate external requirement changes; the approved gate card keeps its arguments.
         rewritten = deepcopy(stored)
-        external = next(item for item in rewritten.requirements or () if item.needs_external_execution)
+        external = next(item for item in rewritten.requirements if item.needs_external_execution)
         external.tool_execution.tool_args = {**(external.tool_execution.tool_args or {}), "task": "Add 40 and 2"}
         _save_parent(config, paths, rewritten)
     elif decision.endswith("planted_gate"):
         # A second delegation and an approved gate for it appear only in the stored run.
         planted_run = deepcopy(stored)
-        external = next(item for item in planted_run.requirements or () if item.needs_external_execution)
+        external = next(item for item in planted_run.requirements if item.needs_external_execution)
         planted_tool = deepcopy(external.tool_execution)
         planted_tool.tool_call_id = "planted"
+        # A delegation call of its own: no child or hooks are kept under an id for it yet.
+        planted_tool.pause_id = None
         planted_tool.tool_args = {**(planted_tool.tool_args or {}), "task": "Add 40 and 2"}
-        planted_run.requirements = [*(planted_run.requirements or ()), RunRequirement(planted_tool)]
+        planted_run.tools = [*(planted_run.tools or ()), planted_tool]
         planted_state = DelegationState.from_metadata(planted_run.metadata)
         planted_state.gates[planted_key] = True
         planted_run.metadata = {**(planted_run.metadata or {}), DELEGATION_STATE_KEY: planted_state.to_dict()}
