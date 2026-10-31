@@ -1665,24 +1665,25 @@ async def cancel_all_scheduled_tasks(
     runtime_account_ids = persisted_bot_user_ids(runtime_paths)
 
     for event in response.events:
-        if event["type"] == SCHEDULED_TASK_EVENT_TYPE:
-            content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
-            if content is not None and content.get("status") == "pending":
-                task_id = event["state_key"]
-
-                # The room snapshot only picks candidates; each task is re-read under its lock,
-                # so an edit that is still writing cannot land after the cancellation.
-                try:
-                    async with scheduled_task_state_lock(client, room_id, task_id):
-                        current_content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
-                        if current_content is None or current_content.get("status") != "pending":
-                            continue
-                        await _cancel_stored_task(client, room_id, task_id, current_content, task_runtime)
-                    cancelled_count += 1
-                    logger.info("scheduled_task_cancelled", task_id=task_id)
-                except Exception:
-                    logger.exception("scheduled_task_cancel_failed", task_id=task_id)
-                    failed_count += 1
+        if event["type"] != SCHEDULED_TASK_EVENT_TYPE:
+            continue
+        content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
+        if content is None or content.get("status") != "pending":
+            continue
+        task_id = event["state_key"]
+        # The room snapshot only picks candidates; each task is re-read under its lock,
+        # so an edit that is still writing cannot land after the cancellation.
+        try:
+            async with scheduled_task_state_lock(client, room_id, task_id):
+                current_content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
+                if current_content is None or current_content.get("status") != "pending":
+                    continue
+                await _cancel_stored_task(client, room_id, task_id, current_content, task_runtime)
+            cancelled_count += 1
+            logger.info("scheduled_task_cancelled", task_id=task_id)
+        except Exception:
+            logger.exception("scheduled_task_cancel_failed", task_id=task_id)
+            failed_count += 1
     if cancelled_count == 0:
         if failed_count > 0:
             msg = f"Failed to cancel {failed_count} scheduled task(s)"
