@@ -40,7 +40,6 @@ from mindroom.scheduling.tasks import (
     persist_scheduled_task_state,
     schedule_edit_lock,
     scheduled_call_workflow_digest,
-    scheduled_task_timezone,
     task_records_with_writers,
     withdraw_scheduled_call,
 )
@@ -149,8 +148,7 @@ class ScheduledTaskRuntime:
         tasks = task_records_with_writers(room_id, response, self.runtime_paths)
         if not tasks:
             return 0
-        config = self.config_provider()
-        registry = entity_identity_registry(config, self.runtime_paths)
+        registry = entity_identity_registry(self.config_provider(), self.runtime_paths)
         router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
         room = room_from_state(room_id, client.user_id, response.events)
         restored = 0
@@ -177,7 +175,7 @@ class ScheduledTaskRuntime:
                     continue
                 await self._fail_owner_removed_task(bot, room_id, task.task_id, owner_id)
                 continue
-            if owner == bot.agent_name and await self._restore_task(bot, client, task, config):
+            if owner == bot.agent_name and await self._restore_task(bot, client, task):
                 restored += 1
         return restored
 
@@ -186,7 +184,6 @@ class ScheduledTaskRuntime:
         bot: AgentBot,
         client: nio.AsyncClient,
         task: ScheduledTaskRecord,
-        config: Config,
     ) -> bool:
         workflow = task.workflow
         if workflow.schedule_type == "cron" and not workflow.cron_schedule:
@@ -200,13 +197,7 @@ class ScheduledTaskRuntime:
             if missed_by > _MISSED_TASK_MAX_AGE_SECONDS:
                 logger.warning("Skipping ancient missed task", task_id=task.task_id, missed_by_seconds=missed_by)
                 try:
-                    await _save_task_status(
-                        client,
-                        task,
-                        "failed",
-                        timezone=scheduled_task_timezone(workflow, config),
-                        writers=self,
-                    )
+                    await _save_task_status(client, task, "failed", writers=self)
                 except Exception:
                     logger.exception("Failed to mark ancient task as failed", task_id=task.task_id)
                 return False
@@ -263,13 +254,7 @@ class ScheduledTaskRuntime:
                     return
                 if task.workflow.pre_approved_call:
                     await withdraw_scheduled_call(task_id, reason=_OWNER_REMOVED_REASON)
-                await _save_task_status(
-                    client,
-                    task,
-                    "failed",
-                    timezone=scheduled_task_timezone(task.workflow, self.config_provider()),
-                    writers=self,
-                )
+                await _save_task_status(client, task, "failed", writers=self)
             logger.warning("scheduled_task_failed_owner_removed", room_id=room_id, task_id=task_id, owner=owner)
             await scheduling_executor.send_scheduled_failure_notice(
                 client,
@@ -428,13 +413,7 @@ class _TaskRunner:
                                 self.task_id,
                                 reason=SCHEDULE_CANCELLED_REASON,
                             )
-                        await _save_task_status(
-                            client,
-                            current_task,
-                            "cancelled",
-                            timezone=scheduled_task_timezone(current_task.workflow, runtime.config_provider()),
-                            writers=runtime,
-                        )
+                        await _save_task_status(client, current_task, "cancelled", writers=runtime)
             except ScheduledTaskStateReadError as exc:
                 logger.warning(
                     "scheduled_task_state_read_failed_retrying",
@@ -515,13 +494,7 @@ class _TaskRunner:
         while True:
             async with self.runtime.operation(self.owner) as (bot, client):
                 try:
-                    await _save_task_status(
-                        client,
-                        task,
-                        status,
-                        timezone=scheduled_task_timezone(task.workflow, self.runtime.config_provider()),
-                        writers=self.runtime,
-                    )
+                    await _save_task_status(client, task, status, writers=self.runtime)
                 except Exception:
                     if bot not in self.runtime._fenced:
                         logger.exception(
@@ -709,7 +682,6 @@ async def _save_task_status(
     task: ScheduledTaskRecord,
     status: str,
     *,
-    timezone: str,
     writers: ScheduledTaskRuntime,
 ) -> None:
     """Persist a task's new status, keeping its stored owner, without touching its runner."""
@@ -718,7 +690,7 @@ async def _save_task_status(
         room_id=task.room_id,
         task_id=task.task_id,
         workflow=task.workflow,
-        timezone=timezone,
+        config=writers.config_provider(),
         owner_id=task.owner_id,
         status=status,
         created_at=task.created_at,

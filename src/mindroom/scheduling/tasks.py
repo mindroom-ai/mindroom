@@ -782,7 +782,7 @@ async def persist_scheduled_task_state(
     task_id: str,
     workflow: ScheduledWorkflow,
     *,
-    timezone: str,
+    config: Config,
     owner_id: str | None,
     status: str = "pending",
     created_at: datetime | str | None = None,
@@ -790,7 +790,8 @@ async def persist_scheduled_task_state(
 ) -> str:
     """Persist scheduled task state to Matrix and return its unique revision.
 
-    `timezone` is the wall time the stored `cron_description` is written in for clients.
+    The stored `cron_description` is written for clients in the task's own timezone, which `config` supplies for a
+    task that has none.
     `owner_id` is the task's stored owner, which every rewrite keeps; a task saved before owners were stored keeps
     none.
     """
@@ -800,7 +801,7 @@ async def persist_scheduled_task_state(
         "revision": revision,
         "workflow": workflow.model_dump_json(),
         "cron_description": (
-            workflow.cron_schedule.to_natural_language(timezone)
+            workflow.cron_schedule.to_natural_language(scheduled_task_timezone(workflow, config))
             if workflow.schedule_type == "cron" and workflow.cron_schedule is not None
             else None
         ),
@@ -837,7 +838,7 @@ async def _save_pending_scheduled_task(
         room_id=room_id,
         task_id=task_id,
         workflow=workflow,
-        timezone=scheduled_task_timezone(workflow, config),
+        config=config,
         owner_id=owner_id,
         status="pending",
         created_at=created_at,
@@ -855,7 +856,7 @@ async def save_edited_scheduled_task(
     existing_task: ScheduledTaskRecord,
     runtime_paths: RuntimePaths,
     *,
-    timezone: str,
+    config: Config,
     writers: ScheduledTaskRuntime | None = None,
 ) -> ScheduledTaskRecord:
     """Persist edits to an existing task without touching runtime task runners."""
@@ -882,7 +883,7 @@ async def save_edited_scheduled_task(
             room_id=room_id,
             task_id=task_id,
             workflow=workflow,
-            timezone=timezone,
+            config=config,
             # An edit never changes which bot runs the task, whichever bot writes it.
             owner_id=current_task.owner_id,
             status="pending",
@@ -1098,7 +1099,6 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     full_text: str,
     new_thread: bool = False,
     mentioned_agents: list[MatrixID] | None = None,
-    task_id: str | None = None,
     existing_task: ScheduledTaskRecord | None = None,
     history_limit: int | None = None,
     silent: bool | None = None,
@@ -1225,8 +1225,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if silent is not None:
         workflow_result.silent = silent
 
-    # Create task ID for new tasks (or reuse existing ID when editing)
-    task_id = task_id or (existing_task.task_id if existing_task else str(uuid.uuid4())[:8])
+    task_id = existing_task.task_id if existing_task else str(uuid.uuid4())[:8]
     response_text = _scheduled_task_response_text(
         workflow_result,
         task_id=task_id,
@@ -1250,7 +1249,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 room_id=room_id,
                 task_id=task_id,
                 workflow=workflow_result,
-                timezone=task_timezone,
+                config=config,
                 existing_task=existing_task,
                 runtime_paths=runtime_paths,
                 writers=runtime.task_runtime,
@@ -1470,7 +1469,7 @@ async def schedule_approved_tool_call(
             room_id=room_id,
             task_id=task_id,
             workflow=workflow,
-            timezone=timezone,
+            config=config,
             owner_id=owner_id,
             created_at=datetime.now(UTC).isoformat(),
             writers=runtime.task_runtime,
@@ -1498,13 +1497,11 @@ async def edit_scheduled_task(
     task_id: str,
     full_text: str,
     scheduled_by: str,
-    thread_id: str | None = None,
     history_limit: int | None = None,
     silent: bool | None = None,
     model: str | None = None,
 ) -> str:
     """Edit an existing scheduled task while preserving its saved delivery scope."""
-    del thread_id
     client = runtime.client
     existing_task = await get_scheduled_task(
         client=client,
@@ -1529,7 +1526,6 @@ async def edit_scheduled_task(
         scheduled_by=scheduled_by,
         full_text=full_text,
         new_thread=target_new_thread,
-        task_id=task_id,
         existing_task=existing_task,
         history_limit=history_limit,
         silent=silent,

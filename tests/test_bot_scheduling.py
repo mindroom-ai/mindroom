@@ -384,7 +384,6 @@ class TestBotScheduleCommands:
             assert edit_kwargs["task_id"] == "task123"
             assert edit_kwargs["full_text"] == "in 30 minutes Check deployment"
             assert edit_kwargs["scheduled_by"] == "@user:server"
-            assert edit_kwargs["thread_id"] == "$thread123"
 
         send_response_mock.assert_called_once()
         call_args = send_response_mock.call_args

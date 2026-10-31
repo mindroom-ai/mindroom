@@ -1963,7 +1963,6 @@ async def test_edit_scheduled_task_reuses_existing_thread(tmp_path: Path) -> Non
             task_id="task123",
             full_text="tomorrow at 9am updated task",
             scheduled_by="@user:server",
-            thread_id="$fallback_thread",
         )
 
     assert "✅ Updated task `task123`." in result
@@ -1977,7 +1976,6 @@ async def test_edit_scheduled_task_reuses_existing_thread(tmp_path: Path) -> Non
     assert call_kwargs["runtime"].config is config
     assert call_kwargs["runtime"].room is room
     assert call_kwargs["new_thread"] is False
-    assert call_kwargs["task_id"] == "task123"
     assert call_kwargs["existing_task"].task_id == "task123"
     assert call_kwargs["existing_task"].workflow.thread_id == "$original_thread"
     assert call_kwargs["history_limit"] is None
@@ -2033,7 +2031,7 @@ async def test_threaded_schedule_edit_preserves_persisted_placement(
         task_id="task123",
         workflow=workflow,
         writers=state_writers,
-        timezone="UTC",
+        config=Config(),
     )
     parsed = workflow.model_copy(update={"description": "Updated description"})
     with (
@@ -2055,7 +2053,6 @@ async def test_threaded_schedule_edit_preserves_persisted_placement(
             task_id="task123",
             full_text="change the description to Updated description",
             scheduled_by="@alice:server",
-            thread_id="$editing_thread",
         )
 
     assert "Updated task" in result
@@ -2107,7 +2104,7 @@ async def test_parsed_schedule_never_carries_a_call_approval(tmp_path: Path) -> 
         task_id="task123",
         workflow=workflow,
         writers=state_writers,
-        timezone="UTC",
+        config=Config(),
     )
     withdraw = AsyncMock()
     parsed = workflow.model_copy(update={"description": "Edited", "pre_approved_call": True})
@@ -2131,7 +2128,6 @@ async def test_parsed_schedule_never_carries_a_call_approval(tmp_path: Path) -> 
             task_id="task123",
             full_text="rename it Edited",
             scheduled_by="@alice:server",
-            thread_id="$thread",
         )
 
     assert "Updated task" in result
@@ -2221,7 +2217,6 @@ async def test_edit_scheduled_task_preserves_new_thread_mode(tmp_path: Path) -> 
             task_id="task123",
             full_text="tomorrow at 9am updated task",
             scheduled_by="@user:server",
-            thread_id="$fallback_thread",
         )
 
     assert "✅ Updated task `task123`." in result
@@ -2300,7 +2295,6 @@ async def test_edit_scheduled_task_persists_through_the_router_and_preserves_omi
             task_id="taskedit",
             full_text="in 10 minutes update logs",
             scheduled_by="@alice:server",
-            thread_id="$thread",
         )
 
     assert "✅ Updated task `taskedit`." in result
@@ -2339,7 +2333,6 @@ async def test_edit_scheduled_task_rejects_non_pending(tmp_path: Path) -> None:
         task_id="task123",
         full_text="tomorrow at 9am updated task",
         scheduled_by="@user:server",
-        thread_id="$thread123",
     )
 
     assert "cannot be edited" in result
@@ -2398,7 +2391,7 @@ async def test_save_edited_scheduled_task_preserves_created_at(tmp_path: Path) -
         workflow=updated_workflow,
         existing_task=existing_task,
         runtime_paths=_test_runtime_paths(tmp_path),
-        timezone="UTC",
+        config=Config(),
     )
 
     assert updated_task.created_at == created_at
@@ -2459,7 +2452,7 @@ async def test_save_edited_scheduled_task_is_state_only(tmp_path: Path) -> None:
         workflow=updated_workflow,
         existing_task=existing_task,
         runtime_paths=_test_runtime_paths(tmp_path),
-        timezone="UTC",
+        config=Config(),
     )
 
     assert updated_task.created_at == created_at
@@ -2503,7 +2496,7 @@ async def test_save_edited_scheduled_task_rejects_schedule_type_change(tmp_path:
             workflow=updated_workflow,
             existing_task=existing_task,
             runtime_paths=_test_runtime_paths(tmp_path),
-            timezone="UTC",
+            config=Config(),
         )
 
     client.room_put_state.assert_not_called()
@@ -2589,7 +2582,7 @@ async def test_persist_scheduled_task_state_raises_on_matrix_error() -> None:
             room_id="!test:server",
             task_id="task1234",
             workflow=workflow,
-            timezone="UTC",
+            config=Config(),
         )
 
 
@@ -2693,7 +2686,6 @@ async def test_restored_task_state_refused_to_the_router_lands_through_a_bot_the
             client=router_client,
             task=record,
             status="completed",
-            timezone="UTC",
             writers=writers,
         )
 
@@ -2708,8 +2700,12 @@ async def test_restored_task_state_refused_to_the_router_lands_through_a_bot_the
 
 
 @pytest.mark.asyncio
-async def test_persist_scheduled_task_state_includes_cron_description() -> None:
-    """Matrix state should expose the backend-owned recurring schedule description."""
+@pytest.mark.parametrize(
+    ("task_timezone", "expected"),
+    [(None, "At 09:00, only in January (Asia/Tokyo)"), ("Europe/London", "At 00:00, only in January (Europe/London)")],
+)
+async def test_persist_scheduled_task_state_includes_cron_description(task_timezone: str | None, expected: str) -> None:
+    """Matrix state describes a recurring schedule in the task's own timezone, else the global one."""
     client = AsyncMock()
     client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
         {"event_id": "$state"},
@@ -2717,10 +2713,11 @@ async def test_persist_scheduled_task_state_includes_cron_description() -> None:
     )
     workflow = ScheduledWorkflow(
         schedule_type="cron",
-        cron_schedule=CronSchedule(minute="0", hour="0"),
+        cron_schedule=CronSchedule(minute="0", hour="0", month="1"),
         message="check logs",
         description="check logs",
         room_id="!test:server",
+        timezone=task_timezone,
     )
 
     await persist_scheduled_task_state(
@@ -2729,11 +2726,11 @@ async def test_persist_scheduled_task_state_includes_cron_description() -> None:
         room_id="!test:server",
         task_id="task1234",
         workflow=workflow,
-        timezone="Asia/Tokyo",
+        config=Config(timezone="Asia/Tokyo"),
     )
 
     content = client.room_put_state.await_args.kwargs["content"]
-    assert content["cron_description"] == "At 09:00 (Asia/Tokyo)"
+    assert content["cron_description"] == expected
 
 
 @pytest.mark.asyncio
@@ -2759,7 +2756,7 @@ async def test_persist_scheduled_task_state_omits_cron_description_for_one_time_
         room_id="!test:server",
         task_id="task1234",
         workflow=workflow,
-        timezone="UTC",
+        config=Config(),
     )
 
     content = client.room_put_state.await_args.kwargs["content"]

@@ -194,7 +194,7 @@ async def update_schedule(
                 workflow=updated_workflow,
                 existing_task=existing_task,
                 runtime_paths=runtime_paths,
-                timezone=scheduled_task_timezone(updated_workflow, runtime_config),
+                config=runtime_config,
                 writers=config_lifecycle.app_state(api_request.app).runtime.scheduled_tasks,
             )
         except ValueError as e:

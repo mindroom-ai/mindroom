@@ -1107,7 +1107,6 @@ class TestIntegrationWithScheduling:
             thread_id="$thread123",
             scheduled_by="@user:server",
             full_text="Change to 6 hours from now instead, keep the same message, and restore full history",
-            task_id="task123",
             existing_task=existing_task,
         )
 
@@ -1215,7 +1214,6 @@ class TestIntegrationWithScheduling:
             thread_id="$thread123",
             scheduled_by="@user:server",
             full_text="Change to 6 hours from now instead and keep the same message",
-            task_id="task123",
             existing_task=existing_task,
         )
 

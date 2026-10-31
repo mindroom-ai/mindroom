@@ -628,7 +628,7 @@ async def test_an_edit_by_another_agent_keeps_the_owner_its_runner_and_who_fails
             workflow.model_copy(update={"message": "Water the plants twice"}),
             existing,
             runtime_paths,
-            timezone="UTC",
+            config=Config(),
             writers=runtime,
         )
         assert await runtime.restore_room(editor, ROOM_ID) == 0
@@ -740,7 +740,7 @@ async def test_task_saved_without_an_owner_restores_under_the_rule_over_its_writ
             workflow,
             existing,
             runtime_paths,
-            timezone="UTC",
+            config=Config(),
         )
 
     assert restored == {"router": int(owner == "router"), "general": int(owner == "general")}

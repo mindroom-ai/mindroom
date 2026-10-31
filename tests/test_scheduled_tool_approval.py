@@ -1740,7 +1740,7 @@ async def test_pre_approved_task_cannot_be_edited() -> None:
             workflow=workflow.model_copy(update={"execute_at": datetime.now(UTC) + timedelta(hours=2)}),
             existing_task=existing,
             runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-            timezone="UTC",
+            config=Config(),
         )
 
     withdraw.assert_not_awaited()

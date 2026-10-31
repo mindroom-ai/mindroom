@@ -541,7 +541,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             task_id=task_id,
             full_text=full_text,
             scheduled_by=requester_user_id,
-            thread_id=effective_thread_id,
         )
 
     elif command.type == CommandType.CONFIG:

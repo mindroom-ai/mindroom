@@ -213,7 +213,6 @@ class SchedulerTools(Toolkit):
             task_id=task_id,
             full_text=request,
             scheduled_by=context.requester_id,
-            thread_id=context.resolved_thread_id,
             history_limit=history_limit,
             silent=silent,
             model=model,

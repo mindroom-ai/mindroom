@@ -215,7 +215,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     assert save_mock.await_args.kwargs["room_id"] == "test_room"
     assert save_mock.await_args.kwargs["workflow"].new_thread is True
     assert save_mock.await_args.kwargs["workflow"].silent is True
-    assert save_mock.await_args.kwargs["timezone"] == "UTC"
+    assert save_mock.await_args.kwargs["config"].timezone == "UTC"
 
 
 def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> None:
