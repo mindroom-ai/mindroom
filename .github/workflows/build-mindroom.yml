@@ -12,6 +12,7 @@ on:
       - 'src/**'
       - 'frontend/**'
       - 'local/instances/deploy/Dockerfile.*'
+      - 'local/instances/deploy/build-sqlite.sh'
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/build-mindroom.yml'
