@@ -65,3 +65,5 @@ The synchronizer writes only the test-mode price fields; live-mode price IDs are
 
 A sync during a redeploy of an existing deployment that is still ready can record `running` over the provision's `provisioning` claim before Helm replaces the pods.
 The status alone cannot show that a provision is in flight; both copies behaved this way before.
+For the same reason a sync during a redeploy of a scaled-down instance, such as a lifecycle resume after a tier change, can record `stopped` over the claim before Helm scales it up; the provision's guarded readiness write then leaves it, and the row reads `stopped` until the next sync.
+That is the price of letting an admin's stop during the readiness wait stand, and a release run in that window would redeploy the instance stopped.
