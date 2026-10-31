@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import errno
+import gc
 import ipaddress
 import json
 import os
@@ -67,7 +68,7 @@ from tests.browser_egress_helpers import (
     SquidLikeUpstream,
     socks5_connect,
 )
-from tests.browser_lifecycle_helpers import UNCOMPARED_LAUNCH_SETTINGS, LifecycleBrowser
+from tests.browser_lifecycle_helpers import UNCOMPARED_LAUNCH_SETTINGS, LifecycleBrowser, LifecyclePage
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     make_conversation_reader_mock,
@@ -665,13 +666,19 @@ async def test_host_call_that_never_settles_stops_at_its_time_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A page script that never settles fails its call at the time limit, and the shared browser keeps working."""
+    """A page script that never settles fails its call at the time limit, and the shared browser keeps working.
+
+    Closing the stopped call's tab afterwards logs no error, since the stop also dropped the call's pending request.
+    """
     paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
         process_env={"BROWSER_EXECUTABLE_PATH": _chromium_executable()},
     )
     tool, other_reply = BrowserTools(paths), BrowserTools(paths)
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
 
     async def evaluate(toolkit: BrowserTools, fn: str) -> object:
         return json.loads(await toolkit.browser(action="act", request={"kind": "evaluate", "fn": fn}))["result"]
@@ -679,13 +686,18 @@ async def test_host_call_that_never_settles_stops_at_its_time_limit(
     try:
         await tool.browser(action="start")
         with monkeypatch.context() as patch:
-            patch.setattr("mindroom.custom_tools.browser._HOST_CALL_TIMEOUT_SECONDS", 0.5)
+            patch.setattr("mindroom.custom_tools.browser.HOST_CALL_TIMEOUT_SECONDS", 0.5)
             with pytest.raises(TimeoutError, match=r"^Browser action=act did not finish within 0\.5 seconds"):
                 async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                     await evaluate(tool, "() => new Promise(() => {})")
         assert await evaluate(tool, "() => 1 + 1") == 2
         assert await evaluate(other_reply, "() => 2 + 2") == 4
+        await tool.browser(action="close")
+        await tool.browser(action="tabs")
+        gc.collect()
+        assert [context["message"] for context in unhandled] == []
     finally:
+        loop.set_exception_handler(None)
         await tool.aclose()
 
 
@@ -699,7 +711,7 @@ async def test_a_jobs_host_call_stops_at_the_time_limit(monkeypatch: pytest.Monk
         return {"status": "ok"}
 
     monkeypatch.setattr(tool, "_act", slow_act)
-    monkeypatch.setattr("mindroom.custom_tools.browser._HOST_CALL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.custom_tools.browser.HOST_CALL_TIMEOUT_SECONDS", 0.01)
 
     with job_control_context(JobControl()), pytest.raises(TimeoutError, match=r"^Browser action=act did not finish"):
         await tool.browser(action="act", request={"kind": "wait", "timeMs": 200})
@@ -3239,6 +3251,90 @@ async def test_native_page_creation_during_tab_listing_preserves_snapshot(
     second = json.loads(await browser.browser("tabs"))
     assert len(first["tabs"]) == 1
     assert len(second["tabs"]) == 2
+    await browser.aclose()
+
+
+async def _never_answer() -> str:
+    """Stand in for a title read on a page whose script never yields."""
+    await asyncio.Event().wait()
+    raise AssertionError
+
+
+@pytest.mark.asyncio
+async def test_tab_listings_report_a_frozen_tab_instead_of_failing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tab whose page a script keeps busy shows as unresponsive, so the model can still pick a tab to close."""
+    monkeypatch.setattr("mindroom.custom_tools.browser._TAB_TITLE_TIMEOUT_SECONDS", 0.01)
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    browser = BrowserTools(paths)
+    frozen_id = json.loads(await browser.browser("start"))["activeTargetId"]
+    monkeypatch.setattr(adapters[0].pages[0], "title", _never_answer)
+    adapters[0].add_native_page("https://example.org/healthy")
+
+    for action in ("status", "tabs"):
+        listed = json.loads(await asyncio.wait_for(browser.browser(action), SETTLE_TIMEOUT_SECONDS))
+        assert [(tab["targetId"] == frozen_id, tab["title"], tab.get("unresponsive")) for tab in listed["tabs"]] == [
+            (True, None, True),
+            (False, "https://example.org/healthy", None),
+        ]
+    await browser.aclose()
+
+
+@pytest.mark.asyncio
+async def test_status_reading_a_frozen_tab_does_not_hold_up_other_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Other calls on the browser go on while status waits for a tab's title."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    browser = BrowserTools(paths)
+    await browser.browser("start")
+    reading, answer = asyncio.Event(), asyncio.Event()
+
+    async def slow_title() -> str:
+        reading.set()
+        await answer.wait()
+        return "Busy page"
+
+    monkeypatch.setattr(adapters[0].pages[0], "title", slow_title)
+    status = asyncio.create_task(browser.browser("status"))
+    await reading.wait()
+
+    profiles = json.loads(await asyncio.wait_for(browser.browser("profiles"), SETTLE_TIMEOUT_SECONDS))
+
+    assert profiles["running_profiles"] == ["mindroom"]
+    assert not status.done()
+    answer.set()
+    assert [tab["title"] for tab in json.loads(await status)["tabs"]] == ["Busy page"]
+    await browser.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_tab_whose_open_fails_is_the_current_tab(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tab that failed to load stays current, so close without targetId closes it and not the earlier tab."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    browser = BrowserTools(paths, allow_private_networks=True)
+    earlier_id = json.loads(await browser.browser("start"))["activeTargetId"]
+
+    async def refused(_page: LifecyclePage, url: str, **_kwargs: object) -> None:
+        msg = f"net::ERR_CONNECTION_REFUSED at {url}"
+        raise PlaywrightError(msg)
+
+    monkeypatch.setattr(LifecyclePage, "goto", refused)
+    with pytest.raises(PlaywrightError, match="ERR_CONNECTION_REFUSED"):
+        await browser.browser("open", targetUrl="http://127.0.0.1:9/")
+    failed_id = json.loads(await browser.browser("status"))["activeTargetId"]
+    closed = json.loads(await browser.browser("close"))
+
+    assert closed["targetId"] == failed_id != earlier_id
+    tabs = json.loads(await browser.browser("tabs"))
+    assert [tab["targetId"] for tab in tabs["tabs"]] == [earlier_id]
+    assert not adapters[0].pages[0].closed
     await browser.aclose()
 
 

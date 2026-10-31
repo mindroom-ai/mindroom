@@ -49,6 +49,7 @@ from mindroom.api.worker_responses import (
 )
 from mindroom.attachments.ids import normalize_attachment_id
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.browser.call_limit import browser_request_budget_seconds
 from mindroom.config.main import Config, load_config
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
@@ -1671,6 +1672,11 @@ async def _execute_worker_browser(
     prepared_context = _prepare_execute_request(call)
     prepared = prepared_context.request
     browser_paths = replace(prepared_context.runtime_paths, storage_root=prepared_worker.paths.root)
+    # A browser tool call stops itself at its own limit with an error that says so, which this limit must outlast.
+    timeout_seconds = max(
+        sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths),
+        browser_request_budget_seconds(payload.tool_name, payload.function_name),
+    )
     with bind_detached_execution_identity(route.identity):
         toolkit, current_entrypoint = _resolve_entrypoint(
             runtime_paths=browser_paths,
@@ -1699,7 +1705,7 @@ async def _execute_worker_browser(
                 )
 
                 async def execute_current() -> object:
-                    async with asyncio.timeout(sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)):
+                    async with asyncio.timeout(timeout_seconds):
                         return await _run_toolkit_entrypoint(
                             headless_toolkit,
                             current_entrypoint,
@@ -1720,7 +1726,7 @@ async def _execute_worker_browser(
                 args: list[object],
                 kwargs: dict[str, object],
             ) -> object:
-                async with asyncio.timeout(sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)):
+                async with asyncio.timeout(timeout_seconds):
                     return await _run_toolkit_entrypoint(retained_toolkit, entrypoint, args, kwargs)
 
             browser_config_key, session = provider.bind(

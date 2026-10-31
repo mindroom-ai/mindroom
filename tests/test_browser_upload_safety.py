@@ -230,12 +230,12 @@ async def test_upload_rejects_workspace_root_replaced_before_construction(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
-async def test_upload_removes_staging_after_browser_failure(
+async def test_failed_upload_keeps_the_files_the_page_may_have_selected_until_its_tab_closes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: type[BaseException],
 ) -> None:
-    """Failure and cancellation remove every private staged upload."""
+    """A selection that fails or is stopped may already hold the staged files, which a later submit reads."""
     tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
     source = root / "upload.txt"
     source.write_bytes(b"authorized bytes")
@@ -244,13 +244,15 @@ async def test_upload_removes_staging_after_browser_failure(
     async def fail(paths: list[str], *, timeout: int) -> None:  # noqa: ASYNC109
         assert timeout == 1234
         staging.extend(Path(path) for path in paths)
-        assert staging[0].read_bytes() == b"authorized bytes"
         raise failure
 
     consumer.side_effect = fail
     with pytest.raises(failure):
         await _upload(tool, [source])
-    assert staging
+    assert staging[0].read_bytes() == b"authorized bytes"
+
+    await tool._close_tab("mindroom", "tab-1")
+
     assert not staging[0].exists()
     assert source.read_bytes() == b"authorized bytes"
 

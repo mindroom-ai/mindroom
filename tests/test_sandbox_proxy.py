@@ -6335,6 +6335,28 @@ async def test_a_worker_shell_call_waits_as_long_as_its_runner(
 
 
 @pytest.mark.asyncio
+async def test_a_worker_browser_call_waits_past_the_browsers_own_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The primary outwaits a worker browser call's own limit, so the error saying the call ran out of time arrives."""
+    captured: dict[str, Any] = {}
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"browser"},
+    )
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _recording_client_class(captured=captured))
+    entrypoint = _offered_entrypoint(
+        get_tool_by_name("browser", runtime_paths, worker_target=None, tools=builtin_tool_registry()),
+        "browser_control",
+    )
+
+    await entrypoint(action="status")
+
+    assert captured["timeout"] == 150.0
+
+
+@pytest.mark.asyncio
 async def test_cancelled_worker_call_asks_the_runner_to_stop_that_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cancelling a dispatched call returns at once and posts the call's request ID to the runner's cancel route."""
     dispatched = threading.Event()
