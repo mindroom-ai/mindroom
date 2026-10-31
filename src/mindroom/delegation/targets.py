@@ -20,7 +20,9 @@ from mindroom.delegation.personas import (
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -30,6 +32,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, SubagentPersona
+    from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -46,22 +49,22 @@ class DelegationTarget:
 
 
 async def resolve_delegation_target(
-    tool_name: str,
-    args: Mapping[str, object],
+    tool: ToolExecution,
     retained: DelegationChild | None,
     *,
     caller_identity: ToolExecutionIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
     depth: int,
-    workspace_root: Callable[[], Path],
-    cap: SubagentPersona | None,
 ) -> DelegationTarget | str:
-    """Resolve one delegation call's arguments, returning a user-facing refusal if they are invalid.
+    """Resolve a delegation call the native driver runs, as ``caller_identity`` makes it, or return a refusal.
 
-    ``retained`` is the child a resumed call already started, which keeps what it was started with.
+    ``retained`` is the child a resumed call already started, which keeps what it was started with. A fresh child's
+    profile and skills come from the caller's workspace, and the persona of the authored child making the call, which
+    its tool context carries, caps the copies it authors.
     """
-    if tool_name == CONTINUE_SUBAGENT:
+    args = tool.tool_args or {}
+    if tool.tool_name == CONTINUE_SUBAGENT:
         return await resolve_follow_up_target(
             args,
             retained,
@@ -70,6 +73,16 @@ async def resolve_delegation_target(
             runtime_paths=runtime_paths,
             depth=depth,
         )
+
+    def caller_workspace_root() -> Path:
+        return resolve_agent_runtime(
+            caller_identity.agent_name,
+            config,
+            runtime_paths,
+            execution_identity=caller_identity,
+        ).workspace.root
+
+    context = get_tool_runtime_context()
     return resolve_fresh_target(
         args,
         retained,
@@ -77,8 +90,8 @@ async def resolve_delegation_target(
         config=config,
         runtime_paths=runtime_paths,
         depth=depth,
-        workspace_root=workspace_root,
-        cap=cap,
+        workspace_root=caller_workspace_root,
+        cap=context.persona if context is not None else None,
     )
 
 
@@ -95,8 +108,14 @@ async def resolve_follow_up_target(
     subagent_id, task = args.get("subagent_id"), args.get("message")
     if not isinstance(subagent_id, str) or not isinstance(task, str):
         return "Cannot continue: subagent_id and message must be strings."
+    if retained is not None:
+        # A resumed call continues the child it started, whatever the caller's tools are now.
+        if retained.subagent_id != subagent_id:
+            msg = "Subagent ID no longer matches its retained requirement"
+            raise RuntimeError(msg)
+        return DelegationTarget(retained.child_agent_name, task, previous_child=retained)
     try:
-        previous_child = retained or await resolve_subagent(
+        previous_child = await resolve_subagent(
             subagent_id,
             owner=owner,
             config=config,
@@ -105,20 +124,17 @@ async def resolve_follow_up_target(
         )
     except SubagentSessionError as error:
         return str(error)
-    if previous_child.subagent_id != subagent_id:
-        msg = "Subagent ID no longer matches its retained requirement"
-        raise RuntimeError(msg)
     live_config = live_delegation_config(config)
-    refusal = retained is None and follow_up_refusal(
+    refusal = follow_up_refusal(
         previous_child.persona,
         owner.agent_name,
         live_config,
         config_plugins(live_config, runtime_paths).tools,
         delegation_depth=depth,
     )
-    if refusal:
+    if refusal is not None:
         return refusal
-    return DelegationTarget(previous_child.child_agent_name, task, previous_child)
+    return DelegationTarget(previous_child.child_agent_name, task, previous_child=previous_child)
 
 
 def resolve_fresh_target(
@@ -177,4 +193,10 @@ def resolve_fresh_target(
     )
     if isinstance(request, str):
         return request
-    return DelegationTarget(child_name, task, None, request.agent_mode, request.persona, request.model)
+    return DelegationTarget(
+        child_name,
+        task,
+        agent_mode=request.agent_mode,
+        persona=request.persona,
+        model=request.model,
+    )

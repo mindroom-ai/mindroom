@@ -88,13 +88,11 @@ async def open_child_audit(
     runtime_paths: RuntimePaths,
 ) -> ChildAudit:
     """Reopen the child's record to audit one live stream, numbering past the events it holds for the run."""
-    owner = DelegationRecordOwner(config, runtime_paths)
-    locator = _record_locator(child)
-    handle = await owner.reopen(locator)
+    owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
     return ChildAudit(
         child=child,
         owner=owner,
-        locator=locator,
+        locator=handle.locator,
         observed=await owner.highest_event_index(handle, _stream_prefix(child.run_id)),
     )
 

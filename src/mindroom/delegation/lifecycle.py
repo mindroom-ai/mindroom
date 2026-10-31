@@ -327,12 +327,10 @@ def _target_refusal(
     grant: _DelegationGrant,
 ) -> str | None:
     """Return why this caller cannot start this target at all, before any requester check."""
-    if not task or not task.strip():
+    if not task.strip():
         return "Cannot delegate an empty task. Please provide a task description."
     if grant == "dynamic_workflow":
-        if agent_name == caller_name:
-            return None
-        return self_only_refusal(agent_name)
+        return None if agent_name == caller_name else self_only_refusal(agent_name)
     caller = config.agents.get(caller_name)
     allowed_targets = caller.delegate_to if caller is not None else []
     if agent_name in allowed_targets:
@@ -395,26 +393,19 @@ def authorize_delegation(  # noqa: PLR0911
         return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."
     if active_config is None or agent_name not in active_config.agents:
         return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
-    caller_allows_target = caller_grants_child(caller_name, agent_name, active_config, grant)
+    if not caller_grants_child(caller_name, agent_name, active_config, grant):
+        return f"Cannot delegate to '{agent_name}': it is no longer an allowed target."
     # A workflow participant is the caller's own copy inside the caller's tool call, so the requester
     # the caller already serves, possibly only through a team's access, keeps that access.
-    if not caller_allows_target or (
-        grant == "delegate"
-        and not is_sender_allowed_for_responder(
-            requester_id,
-            agent_name,
-            authorization_room_id,
-            active_config,
-            runtime_paths,
-            membership_index,
-        )
+    if grant == "delegate" and not is_sender_allowed_for_responder(
+        requester_id,
+        agent_name,
+        authorization_room_id,
+        active_config,
+        runtime_paths,
+        membership_index,
     ):
-        reason = (
-            "it is no longer an allowed target"
-            if not caller_allows_target
-            else "that agent is not allowed to reply to you"
-        )
-        return f"Cannot delegate to '{agent_name}': {reason}."
+        return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
     if active_config.agents[agent_name].private is not None and not is_access_checked_requester_id(
         requester_id,
         active_config,

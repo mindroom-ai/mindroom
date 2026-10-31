@@ -22,8 +22,7 @@ from mindroom.delegation.state import DelegationState, SubagentPersona
 from mindroom.delegation.targets import DelegationTarget, resolve_delegation_target
 from mindroom.llm.runs import RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
-from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.agent_tool_helpers import toolkit_offers
 from tests.delegation_helpers import (
     ScriptedAgents,
@@ -102,37 +101,6 @@ def _write_profile(tmp_path: Path, name: str, content: str) -> Path:
 def _last_tool_results(model: ScriptedModel) -> list[str]:
     """Return the tool results the model's last request carried."""
     return [str(message.content) for message in model.requests[-1].messages if message.role == "tool"]
-
-
-async def _resolve_native(
-    tool: ToolExecution,
-    retained: None,
-    *,
-    caller_identity: ToolExecutionIdentity,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    depth: int,
-) -> DelegationTarget | str:
-    """Resolve a native call as the driver does: in the caller's workspace, capped by the running context's persona."""
-    context = get_tool_runtime_context()
-    return await resolve_delegation_target(
-        tool.tool_name,
-        tool.tool_args or {},
-        retained,
-        caller_identity=caller_identity,
-        config=config,
-        runtime_paths=runtime_paths,
-        depth=depth,
-        workspace_root=lambda: (
-            resolve_agent_runtime(
-                caller_identity.agent_name,
-                config,
-                runtime_paths,
-                execution_identity=caller_identity,
-            ).workspace.root
-        ),
-        cap=context.persona if context is not None else None,
-    )
 
 
 class _Harness:
@@ -363,7 +331,7 @@ async def test_native_team_member_authors_persona_for_itself(tmp_path: Path) -> 
         tool_args={"task": "Check", "system_prompt": "Member prompt"},
     )
 
-    target = await _resolve_native(
+    target = await resolve_delegation_target(
         tool,
         None,
         caller_identity=member_identity,
@@ -371,7 +339,7 @@ async def test_native_team_member_authors_persona_for_itself(tmp_path: Path) -> 
         runtime_paths=paths,
         depth=0,
     )
-    refused = await _resolve_native(
+    refused = await resolve_delegation_target(
         ToolExecution(
             tool_call_id="call-run_subagent",
             tool_name="run_subagent",
@@ -542,7 +510,7 @@ async def test_native_copy_at_max_depth_inherits_tools_without_delegate(tmp_path
     )
 
     with tool_runtime_context(context):
-        target = await _resolve_native(
+        target = await resolve_delegation_target(
             ToolExecution(
                 tool_call_id="call-run_subagent",
                 tool_name="run_subagent",
@@ -581,7 +549,7 @@ async def test_native_authoring_after_the_caller_is_removed_is_refused(
     without_caller = config.model_copy(update={"agents": {"child": config.agents["child"]}})
 
     with tool_runtime_context(_delegate_runtime_context(without_caller, paths, execution_identity=identity)):
-        result = await _resolve_native(
+        result = await resolve_delegation_target(
             ToolExecution(
                 tool_call_id="call-run_subagent",
                 tool_name="run_subagent",
@@ -628,7 +596,7 @@ async def test_native_follow_up_checks_the_current_config(tmp_path: Path) -> Non
     )
 
     with tool_runtime_context(_delegate_runtime_context(without_file, paths, execution_identity=identity)):
-        result = await _resolve_native(
+        result = await resolve_delegation_target(
             follow_up,
             None,
             caller_identity=identity,
@@ -763,7 +731,7 @@ def _native_resolver(
 
     async def resolve(context: ToolRuntimeContext, **arguments: object) -> DelegationTarget | str:
         with tool_runtime_context(context):
-            return await _resolve_native(
+            return await resolve_delegation_target(
                 ToolExecution(
                     tool_call_id="call-run_subagent",
                     tool_name="run_subagent",

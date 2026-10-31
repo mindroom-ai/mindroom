@@ -8239,7 +8239,9 @@ depends_on = [
     "mindroom.delegation.recovery",
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
+    "mindroom.runtime_resolution",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.runtime_context",
 ]
 visibility = ["mindroom.custom_tools.delegate", "mindroom.delegation.execution"]
 

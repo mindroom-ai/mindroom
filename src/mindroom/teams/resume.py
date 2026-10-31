@@ -410,7 +410,7 @@ async def continue_paused_team_run(
         )
         resumed, driver_calls = resume_from_approval(persisted, approval_calls, resume)
         events = drive_team_delegations(
-            cast("AsyncIterator[TeamRunEvent]", resumed),
+            resumed,
             resume,
             team_name=entity_name,
             config=config,

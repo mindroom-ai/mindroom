@@ -70,7 +70,7 @@ from mindroom.response_turn import (
     pending_approval_requirements,
 )
 from mindroom.run_storage import RunStorage, TerminalRecord
-from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
+from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.background_after import BACKGROUND_AFTER, application_arguments, read_background_after
@@ -108,7 +108,6 @@ logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-    from pathlib import Path
 
     from mindroom.approval.resume import ContinueRun, ResumeEvents
     from mindroom.config.main import Config
@@ -944,21 +943,13 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     except ValueError as error:
         return resolve_result(str(error), failed=True)
     args = application_arguments(tool.tool_args)
-
-    def caller_workspace_root() -> Path:
-        return resolve_agent_runtime(caller, config, runtime_paths, execution_identity=caller_identity).workspace.root
-
-    context = get_tool_runtime_context()
     target = await resolve_delegation_target(
-        tool_name,
-        tool.tool_args or {},
+        tool,
         retained,
         caller_identity=caller_identity,
         config=config,
         runtime_paths=runtime_paths,
         depth=delegation_depth,
-        workspace_root=caller_workspace_root,
-        cap=context.persona if context is not None else None,
     )
     if isinstance(target, str):
         return resolve_result(target, failed=True)
