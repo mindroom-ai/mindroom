@@ -941,20 +941,30 @@ async def _run_subprocess_refresh_request(payload: bytes) -> _RefreshChildResult
             error_prefix="Knowledge refresh execution_identity",
         )
     )
-    with collected_oversized_files() as oversized_files:
-        result = await _refresh_knowledge_binding(
-            request.base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            force_reindex=request.force_reindex,
-        )
-    return replace(result, oversized_files=tuple(oversized_files.values()))
+    return await _refresh_knowledge_binding(
+        request.base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        force_reindex=request.force_reindex,
+    )
 
 
 def _failed_child_result(error: Exception) -> _RefreshChildResult:
     """Return what a refresh child reports for an error it did not handle, credential-redacted."""
     return _RefreshChildResult(error=redact_credentials_in_text(str(error)) or type(error).__name__)
+
+
+def _run_child_request(payload: bytes) -> _RefreshChildResult:
+    """Run one refresh request and report its result, or its error, with the oversized files it skipped."""
+    # `asyncio.run` copies this context, so the refresh adds to this same collection.
+    with collected_oversized_files() as oversized_files:
+        try:
+            result = asyncio.run(_run_subprocess_refresh_request(payload))
+        except Exception as exc:
+            logger.exception("Knowledge refresh subprocess failed")
+            result = _failed_child_result(exc)
+    return replace(result, oversized_files=tuple(oversized_files.values()))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -965,11 +975,7 @@ def main(argv: list[str] | None = None) -> int:
     # Native libraries and configured handlers can retain stdout's descriptor.
     with os.fdopen(os.dup(sys.stdout.fileno()), "wb") as output:
         os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
-        try:
-            result = asyncio.run(_run_subprocess_refresh_request(payload))
-        except Exception as exc:
-            logger.exception("Knowledge refresh subprocess failed")
-            result = _failed_child_result(exc)
+        result = _run_child_request(payload)
         logger.info(
             "Knowledge refresh subprocess completed",
             indexed_count=result.indexed_count,

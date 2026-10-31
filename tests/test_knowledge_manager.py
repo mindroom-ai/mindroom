@@ -9704,6 +9704,34 @@ async def test_an_oversized_file_warns_once_across_refresh_children(
     assert "above the read cap" not in capfd.readouterr().err
 
 
+def test_a_failed_refresh_child_still_reports_its_oversized_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh that fails after listing reports the files it skipped with its error, so the runtime still warns."""
+    docs = (tmp_path / "docs").resolve()
+    docs.mkdir()
+    with (docs / "huge.md").open("wb") as huge:
+        huge.truncate(65 << 20)
+    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"])
+
+    async def _list_then_fail(_payload: bytes) -> _RefreshChildResult:
+        await asyncio.to_thread(list_knowledge_files, config, "docs", docs)
+        msg = "No space left on device"
+        raise OSError(msg)
+
+    monkeypatch.setattr(knowledge_refresh_runner, "_run_subprocess_refresh_request", _list_then_fail)
+    with capture_logs() as logs:
+        result = knowledge_refresh_runner._run_child_request(b"{}")
+
+    assert result.error == "No space left on device"
+    assert result.oversized_files == (
+        knowledge_file_listing_module.OversizedKnowledgeFile("docs", str(docs / "huge.md"), 65 << 20),
+    )
+    skipped = [entry["log_level"] for entry in logs if entry["event"] == "Skipping a knowledge file above the read cap"]
+    assert skipped == ["debug"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("real_refresh_child")
 async def test_manual_refresh_returns_failed_candidate_result_and_tracks_parent_activity(
