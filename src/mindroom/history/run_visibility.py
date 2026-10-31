@@ -44,7 +44,7 @@ def is_queued_notice_message(message: Message) -> bool:
     # Legacy format: a stored notice whose marker is ``"persisted"`` instead of ``True``; once a reply was delivered,
     # MindRoom rewrote the notices its stored runs held into one marked so, and a reply that opened a scope rewrote a
     # notice a crashed reply had left with ``True``.
-    # Last legacy release: v2026.10.750, whose post-delivery rewrite wrote the marker; replacement: the next release,
+    # Last legacy release: v2026.10.760, whose post-delivery rewrite wrote the marker; replacement: the next release,
     # which stores each notice once, as its run held it, with ``True``.
     # Handling: such a notice reads as a notice, as one marked ``True`` does; both replay alike, so no row is rewritten.
     # Coverage: tests/test_agent_turn_runtime.py::test_a_notice_an_earlier_release_stored_replays_as_it_is_stored
