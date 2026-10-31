@@ -23,7 +23,7 @@ Provisioning already writes `running` only once pods are ready, and the dashboar
 The rule binds the syncs only: starting an instance still records `running` as the desired state before its pods are ready, and the next sync corrects it.
 A crash-looping instance therefore shows `provisioning`, also after an admin "Refresh All".
 The admin actions offer Stop and Restart for `provisioning` too, so a crash loop never leaves an admin only the destructive Uninstall; the customer page keeps them for `running`, because during a first boot they would interrupt the provision.
-An admin can still interrupt a provision in flight that way.
+An admin can also stop a provision in flight that way, and a stop that lands before the provision's Helm deploy is undone by it; guarding the deploy as well would add a third keep-stopped rule to provisioning for a rare admin action that can simply be repeated.
 
 ### A missing deployment keeps `provisioning` and `deprovisioned`
 
