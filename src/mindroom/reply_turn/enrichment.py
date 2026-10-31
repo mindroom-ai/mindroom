@@ -54,18 +54,18 @@ _UNKNOWN_ATTEMPT_INSTRUCTION = (
 )
 
 
-def _split_delivery_tool_trace(
-    tool_trace: Sequence[ToolTraceEntry],
+def _split_recorded_calls(
+    recorded: Sequence[ToolTraceEntry],
 ) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
-    """Split visible stream trace state into completed and still-interrupted tools."""
-    completed: list[ToolTraceEntry] = []
-    interrupted: list[ToolTraceEntry] = []
-    for trace_entry in tool_trace:
-        if trace_entry.type == "tool_call_completed":
-            completed.append(trace_entry)
+    """Split a stopped attempt's recorded calls into those that finished and those still running when it stopped."""
+    finished: list[ToolTraceEntry] = []
+    running: list[ToolTraceEntry] = []
+    for call in recorded:
+        if call.type == "tool_call_completed":
+            finished.append(call)
         else:
-            interrupted.append(trace_entry)
-    return completed, interrupted
+            running.append(call)
+    return finished, running
 
 
 def _cached_room_display_name(runtime: BotRuntimeView, room_id: str) -> str | None:
@@ -220,7 +220,7 @@ def interrupted_attempt_model_prompt(
     records hold, the only account of its calls, since a stopped attempt's running calls no longer show as running;
     an inline delegation leaves no record of its own. Returns None when there is nothing to tell.
     """
-    completed_tools, interrupted_tools = _split_delivery_tool_trace(recorded)
+    completed_tools, interrupted_tools = _split_recorded_calls(recorded)
     if unfinished is not None:
         attempt = render_stopped_attempt(
             partial_text=strip_team_display(unfinished.partial_text),
