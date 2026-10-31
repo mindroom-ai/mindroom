@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { ParsedNumberInput } from "@/components/shared/ParsedNumberInput";
 import { Textarea } from "@/components/ui/textarea";
 import {
   FolderOpen,
@@ -1395,24 +1396,20 @@ export function Knowledge() {
                       >
                         Chunk Size (characters)
                       </label>
-                      <Input
+                      <ParsedNumberInput
                         id="knowledge-chunk-size"
-                        type="number"
                         min={MIN_CHUNK_SIZE}
                         value={settings.chunk_size ?? DEFAULT_CHUNK_SIZE}
-                        onChange={(event) => {
-                          const parsedValue = Number.parseInt(
-                            event.target.value,
-                            10,
-                          );
-                          updateSettings({
-                            chunk_size:
-                              Number.isNaN(parsedValue) ||
-                              parsedValue < MIN_CHUNK_SIZE
-                                ? MIN_CHUNK_SIZE
-                                : parsedValue,
-                          });
+                        parse={(text) => {
+                          const parsedValue = Number.parseInt(text, 10);
+                          return Number.isNaN(parsedValue) ||
+                            parsedValue < MIN_CHUNK_SIZE
+                            ? MIN_CHUNK_SIZE
+                            : parsedValue;
                         }}
+                        onChange={(chunk_size) =>
+                          updateSettings({ chunk_size })
+                        }
                       />
                       <p className="text-xs text-muted-foreground">
                         Larger chunks reduce requests but increase per-request
@@ -1427,28 +1424,24 @@ export function Knowledge() {
                       >
                         Chunk Overlap (characters)
                       </label>
-                      <Input
+                      <ParsedNumberInput
                         id="knowledge-chunk-overlap"
-                        type="number"
                         min={0}
                         value={settings.chunk_overlap ?? DEFAULT_CHUNK_OVERLAP}
-                        onChange={(event) => {
-                          const parsedValue = Number.parseInt(
-                            event.target.value,
-                            10,
-                          );
+                        parse={(text) => {
+                          const parsedValue = Number.parseInt(text, 10);
                           const nextChunkSize =
                             settings.chunk_size ?? DEFAULT_CHUNK_SIZE;
-                          const normalizedValue = Number.isNaN(parsedValue)
+                          return Number.isNaN(parsedValue)
                             ? 0
                             : Math.max(
                                 0,
                                 Math.min(parsedValue, nextChunkSize - 1),
                               );
-                          updateSettings({
-                            chunk_overlap: normalizedValue,
-                          });
                         }}
+                        onChange={(chunk_overlap) =>
+                          updateSettings({ chunk_overlap })
+                        }
                       />
                       <p className="text-xs text-muted-foreground">
                         Must stay lower than chunk size.

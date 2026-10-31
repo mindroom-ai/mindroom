@@ -1440,6 +1440,29 @@ describe("Knowledge", () => {
     expect(store.getState().isDirty).toBe(true);
   });
 
+  it("keeps a chunk size typed key by key and shows the stored value on blur", async () => {
+    const store = await mockStatefulStore({
+      docs: { path: "./knowledge_docs/docs", watch: true },
+    });
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    const chunkSize = screen.getByLabelText("Chunk Size (characters)");
+    for (const value of ["", "2", "20", "204", "2048"]) {
+      fireEvent.change(chunkSize, { target: { value } });
+      expect(chunkSize).toHaveDisplayValue(value);
+    }
+    expect(store.getState().config?.knowledge_bases?.docs?.chunk_size).toBe(
+      2048,
+    );
+
+    fireEvent.change(chunkSize, { target: { value: "2" } });
+    fireEvent.blur(chunkSize);
+    expect(chunkSize).toHaveDisplayValue("128");
+  });
+
   it("saves updated git settings from base settings", async () => {
     await mockStatefulStore({
       docs: {

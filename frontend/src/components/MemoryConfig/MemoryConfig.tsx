@@ -8,6 +8,7 @@ import type {
 } from "@/types/config";
 import { EditorPanel } from "@/components/shared/EditorPanel";
 import { FieldGroup } from "@/components/shared/FieldGroup";
+import { ParsedNumberInput } from "@/components/shared/ParsedNumberInput";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -177,15 +178,15 @@ function NumberField({
 }) {
   return (
     <FieldGroup label={label} helperText={helperText} htmlFor={id}>
-      <Input
+      <ParsedNumberInput
         id={id}
-        type="number"
         min={min}
         value={value ?? fallback}
-        onChange={(e) => {
-          const parsed = Number.parseInt(e.target.value, 10);
-          onChange(Number.isNaN(parsed) ? fallback : parsed);
+        parse={(text) => {
+          const parsed = Number.parseInt(text, 10);
+          return Number.isNaN(parsed) ? fallback : parsed;
         }}
+        onChange={onChange}
         className="transition-colors hover:border-ring focus:border-ring"
       />
     </FieldGroup>

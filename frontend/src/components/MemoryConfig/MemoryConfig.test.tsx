@@ -455,6 +455,40 @@ describe("MemoryConfig", () => {
     );
   });
 
+  it("lets a numeric field be cleared and retyped", async () => {
+    const actual = await vi.importActual<typeof import("@/store/configStore")>(
+      "@/store/configStore",
+    );
+    actual.useConfigStore.setState({
+      config: {
+        ...mockConfig,
+        memory: {
+          ...mockConfig.memory!,
+          backend: "file",
+          file: { max_entrypoint_lines: 120 },
+        },
+      } as Config,
+    });
+    (useConfigStore as any).mockImplementation(() => actual.useConfigStore());
+    render(<MemoryConfig />);
+
+    const input = document.getElementById(
+      "entrypoint-max-lines",
+    ) as HTMLInputElement;
+    for (const value of ["", "5", "50"]) {
+      fireEvent.change(input, { target: { value } });
+      expect(input).toHaveDisplayValue(value);
+    }
+    expect(
+      actual.useConfigStore.getState().config?.memory.file
+        ?.max_entrypoint_lines,
+    ).toBe(50);
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.blur(input);
+    expect(input).toHaveDisplayValue("200");
+  });
+
   it("enables auto flush and entrypoint search from their selects", async () => {
     mockStore({
       memory: { backend: "file", embedder: mockConfig.memory!.embedder },
