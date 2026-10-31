@@ -172,13 +172,27 @@ class RuntimePaths:
             return self.env_file_values[name]
         return default
 
-    def first_env_value(self, names: Sequence[str]) -> str | None:
-        """Return the first non-blank value of ``names``, trying each in the process env before any in the `.env`.
+    def first_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
+        """Return the first usable value of ``names`` and the variable that supplied it.
 
-        A blank exported value does not hide a `.env` value, so settings with fallbacks treat it as unset.
+        Tries each name in the process env, then each in the `.env`, then the stripped contents of the file each
+        name's `<NAME>_FILE` names, so an earlier value never resolves a file path. A blank value or an unedited
+        starter-template placeholder counts as unset everywhere, so an exported one does not hide a `.env` value.
         """
-        candidates = (layer.get(name, "") for layer in (self.process_env, self.env_file_values) for name in names)
-        return next((candidate for candidate in candidates if candidate.strip()), None)
+        for layer in (self.process_env, self.env_file_values):
+            for name in names:
+                value = layer.get(name, "")
+                if not runtime_env_policy.is_unset_env_value(name, value):
+                    return value, name
+        for name in names:
+            path = runtime_env_path(self, f"{name}_FILE")
+            try:
+                value = "" if path is None else path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                value = ""
+            if not runtime_env_policy.is_unset_env_value(name, value):
+                return value, f"{name}_FILE"
+        return None
 
     def env_flag(self, name: str, *, default: bool = False) -> bool:
         """Resolve one boolean env value against this runtime context."""

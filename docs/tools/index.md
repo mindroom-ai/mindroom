@@ -76,7 +76,7 @@ MindRoom rejects these fields, unknown field names, and values of the wrong type
 From lowest to highest priority, a tool's settings come from:
 
 1. The tool's built-in defaults.
-2. The environment variables its page names, such as `TAVILY_API_KEY`, read from the process environment or, when unset there, from the `.env` next to `config.yaml`.
+2. The environment variables its page names, such as `TAVILY_API_KEY`, read from the process environment, then the `.env` next to `config.yaml`, then their [`_FILE` variants](../configuration/models.md#file-based-secrets).
 3. Saved tool settings from the dashboard or credential store.
 4. `defaults.tools` inline settings.
 5. `agents.<name>.tools` inline settings.
