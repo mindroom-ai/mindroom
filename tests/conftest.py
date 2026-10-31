@@ -2344,7 +2344,7 @@ def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
     return bot
 
 
-async def start_call_manager(bot: RuntimeBot, call_manager: object | None) -> AsyncMock:
+async def start_call_manager(bot: RuntimeBot, call_manager: object) -> AsyncMock:
     """Start ``bot``'s call wiring as startup does, with ``call_manager`` built for its config; return the builder."""
     build = AsyncMock(return_value=call_manager)
     with patch("mindroom.bot.maybe_build_call_manager", new=build):

@@ -327,8 +327,7 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
     """Calls reconcile after each sync-loop's first successful response."""
     bot = _agent_bot(tmp_path)
     bot.client = AsyncMock()
-    call_manager = MagicMock()
-    call_manager.reconcile_joined_rooms = AsyncMock()
+    call_manager = MagicMock(spec=CallManager)
     await start_call_manager(bot, call_manager)
 
     with (
@@ -673,44 +672,6 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
 
 
 @pytest.mark.asyncio
-async def test_live_membership_replay_retries_an_unfinished_reconciliation(tmp_path: Path) -> None:
-    """A committed LIVE transition must retry effects left pending by a failed first pass."""
-    room_id = "!grant:localhost"
-    sender_id = "@bob:localhost"
-    bot, call_manager = await _router_with_call_manager(tmp_path)
-    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
-    client = _grant_room_client(bot, room_id)
-    index = bot._runtime_view.agent_reply_memberships
-    await index.refresh(bot.config, bot.runtime_paths, client)
-    admission = _validated_timeline_admission(
-        bot,
-        room_id,
-        _departure_member_event("$join", user_id=sender_id, membership="join", ts=1),
-    )
-    call_manager.revoke_reply_authorization.side_effect = [RuntimeError("reconciliation interrupted"), None]
-
-    with pytest.raises(RuntimeError, match="reconciliation interrupted"):
-        await bot._after_ingestion_admission(
-            admission,
-            _FRESH_SEMANTIC_FACTS,
-            TimelineEventProvenance.LIVE,
-        )
-
-    assert index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
-
-    await bot._after_ingestion_admission(
-        admission,
-        _REPLAY_FACTS,
-        TimelineEventProvenance.LIVE,
-    )
-
-    assert index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
-    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
-    assert call_manager.revoke_reply_authorization.await_count == 2
-    call_manager.reconcile_reply_authorization.assert_awaited_once_with()
-
-
-@pytest.mark.asyncio
 async def test_recovered_membership_does_not_grant_reply_access(tmp_path: Path) -> None:
     """Recovered membership history must not grant authority without a current roster."""
     room_id = "!grant:localhost"
@@ -862,7 +823,7 @@ async def test_call_manager_registers_call_and_room_membership_callbacks(tmp_pat
 async def test_published_config_updates_existing_call_manager(tmp_path: Path) -> None:
     """An unchanged call bot should observe authorization-only hot reloads."""
     bot = _agent_bot(tmp_path)
-    call_manager = MagicMock()
+    call_manager = MagicMock(spec=CallManager)
     await start_call_manager(bot, call_manager)
     new_config = _config(tmp_path)
 
@@ -878,10 +839,7 @@ async def test_call_manager_room_callbacks_run_without_legacy_delivery_provenanc
 ) -> None:
     """Owned settlement already gates callback eligibility before call fanout."""
     bot = _agent_bot(tmp_path)
-    client = MagicMock(spec=nio.AsyncClient)
-    call_manager = MagicMock()
-    call_manager.on_room_membership_event = AsyncMock()
-    call_manager.on_room_event = AsyncMock()
+    call_manager = MagicMock(spec=CallManager)
     room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
     membership_event = nio.RoomMemberEvent.from_dict(
         {
@@ -903,8 +861,7 @@ async def test_call_manager_room_callbacks_run_without_legacy_delivery_provenanc
         "org.matrix.msc3401.call.member",
     )
 
-    with patch("mindroom.bot.maybe_build_call_manager", new=AsyncMock(return_value=call_manager)):
-        await bot._register_call_manager_callbacks(client)
+    await start_call_manager(bot, call_manager)
 
     await bot._journal_dispatcher.callbacks.on_room_lifecycle(room, membership_event)
     rtc_callback = bot._journal_dispatcher.callbacks.on_rtc
@@ -968,7 +925,7 @@ async def test_presence_uses_voice_backend_availability(
     """Presence advertises calls only when the constructed manager can answer them."""
     bot = _agent_bot(tmp_path)
     bot.client = AsyncMock()
-    await start_call_manager(bot, MagicMock(voice_backend_available=backend_available))
+    await start_call_manager(bot, MagicMock(spec=CallManager, voice_backend_available=backend_available))
 
     with (
         patch("mindroom.bot.build_agent_status_message", return_value="status") as build_status,

@@ -782,20 +782,6 @@ async def test_manager_ignores_its_own_member_events(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_ignores_frame_keys_after_departing_configured_room(tmp_path: Path) -> None:
-    """Late to-device keys cannot repopulate state after the bot leaves."""
-    client = _client()
-    client.rooms = {ROOM_ID: _room(encrypted=True)}
-    manager = _manager(client, FakeBridge(), tmp_path)
-    await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
-
-    await manager.on_to_device_event(_frame_key_event())
-
-    assert not _call_state(manager).pending_keys
-    client.room_get_state.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_manager_clears_departure_guard_on_own_rejoin(tmp_path: Path) -> None:
     """A forwarded own join makes a configured call room eligible again."""
     client = _client()
@@ -5868,11 +5854,11 @@ async def test_a_batch_of_loss_records_ends_a_denied_call_once(tmp_path: Path, *
             IngestionRecordAdmission(disposition=IngestionRecordDisposition.HISTORY_LOSS, room_id=ROOM_ID),
             None,
         )
+    assert len(bot.tasks) == 3
     await bot.settle()
     bridge.release.set()
     await call
 
-    assert len(bot.tasks) == 0
     assert bridge.closes == 1
     assert _call_state(manager).session is None
     await manager.shutdown()

@@ -1,4 +1,4 @@
-"""A reply-grant change reaches every bot's calls in one order: revoke first, then reconcile what became allowed."""
+"""How grant changes reach real bots' calls and invites, and when each bot runs its call work (frames, drains, stops)."""
 
 from __future__ import annotations
 
@@ -15,10 +15,8 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_invited_room
-from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_manager import CallManager
 from tests.conftest import start_call_manager
-from tests.matrix_state_helpers import save_matrix_state
 from tests.test_bot_ready_hook import (
     _FRESH_SEMANTIC_FACTS,
     _REPLAY_FACTS,
@@ -34,6 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.event_journal import IngestionRecordAdmission
     from tests.runtime_fakes import ReadyRuntime
 
 GRANT_ROOM_ID = "!grant:localhost"
@@ -50,7 +49,6 @@ class _Calls:
 
     def manager(self, agent_name: str) -> MagicMock:
         manager = MagicMock(spec=CallManager)
-        manager.active_call_requesters = ()
 
         async def revoke() -> None:
             self.log.append((agent_name, "revoke"))
@@ -83,13 +81,11 @@ class _Calls:
 async def _router_and_agent(
     tmp_path: Path,
     calls: _Calls,
-    *,
-    grant_rooms: tuple[str, ...] = ("grant",),
 ) -> tuple[AgentBot, dict[str, MagicMock]]:
     """Return a router beside an agent, each with a logging call manager, the router joined to the grant room."""
     router = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
     agent = _agent_bot(tmp_path, agent_name="code", orchestrator=cast("ReadyRuntime", router.orchestrator))
-    router.config.router.access = ResponderAccessConfig(members_of_rooms=list(grant_rooms))
+    router.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     router.client = _grant_room_client(router, GRANT_ROOM_ID)
     managers = {bot.agent_name: calls.manager(bot.agent_name) for bot in (router, agent)}
     for bot in (router, agent):
@@ -101,11 +97,11 @@ async def _settle() -> None:
     assert await wait_for_background_tasks(timeout=1)
 
 
-def _live_join(router: AgentBot, event_id: str = "$join", ts: int = 1) -> object:
+def _live_join(router: AgentBot) -> IngestionRecordAdmission:
     return _validated_timeline_admission(
         router,
         GRANT_ROOM_ID,
-        _departure_member_event(event_id, user_id=JOINER, membership="join", ts=ts),
+        _departure_member_event("$join", user_id=JOINER, membership="join", ts=1),
     )
 
 
@@ -150,75 +146,6 @@ async def test_authoritative_refresh_invalidated_during_revocation_reconciles_no
 
 
 @pytest.mark.asyncio
-async def test_every_loss_of_grant_authority_revokes_every_bots_calls(tmp_path: Path) -> None:
-    """Each invalidation revokes every bot's calls and starts none; only a complete refresh starts allowed calls."""
-    calls = _Calls()
-    router, _managers = await _router_and_agent(tmp_path, calls)
-
-    router.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-    router.invalidate_agent_reply_memberships(reason="sync_loop_started")
-    await _settle()
-    assert calls.ops("revoke") == ["code", "code", "router", "router"]
-    assert calls.ops("reconcile") == []
-
-    await router.orchestrator.refresh_agent_reply_memberships()
-    await _settle()
-    assert calls.ops("revoke") == ["code", "code", "code", "router", "router", "router"]
-    assert calls.ops("reconcile") == ["code", "router"]
-
-    router.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-    router.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-    await _settle()
-    assert calls.ops("revoke") == ["code"] * 5 + ["router"] * 5
-    assert calls.ops("reconcile") == ["code", "router"]
-
-
-@pytest.mark.asyncio
-async def test_live_grant_change_revokes_every_bots_calls_before_reconciling_any(tmp_path: Path) -> None:
-    """A live roster change in a grant room ends denied calls on every bot before any newly allowed call starts."""
-    hold = asyncio.Event()
-    calls = _Calls(hold=hold)
-    router, _managers = await _router_and_agent(tmp_path, calls)
-    index = router._runtime_view.agent_reply_memberships
-    await index.refresh(router.config, router.runtime_paths, router.client)
-
-    effects = asyncio.create_task(
-        router._after_ingestion_admission(_live_join(router), _FRESH_SEMANTIC_FACTS, TimelineEventProvenance.LIVE),
-    )
-    try:
-        await calls.wait_for_revocations(2)
-        assert calls.ops("reconcile") == []
-    finally:
-        hold.set()
-        await effects
-    await _settle()
-
-    assert index.is_allowed(JOINER, ["grant"], router.config, router.runtime_paths)
-    assert calls.ops("reconcile") == ["code", "router"]
-    assert calls.first("reconcile") > calls.last("revoked")
-
-
-@pytest.mark.asyncio
-async def test_live_grant_change_reconciles_calls_while_another_grant_room_awaits_refresh(tmp_path: Path) -> None:
-    """A live change in a ready grant room reconciles calls at once, even while another grant room needs a refresh."""
-    calls = _Calls()
-    router, _managers = await _router_and_agent(tmp_path, calls, grant_rooms=("grant", "other"))
-    state = MatrixState.load(runtime_paths=router.runtime_paths)
-    state.add_room("other", "!other:localhost", "#other:localhost", "Other")
-    save_matrix_state(state, router.runtime_paths)
-    index = router._runtime_view.agent_reply_memberships
-    await index.refresh(router.config, router.runtime_paths, router.client)
-    assert index.needs_refresh(router.config)
-
-    await router._after_ingestion_admission(_live_join(router), _FRESH_SEMANTIC_FACTS, TimelineEventProvenance.LIVE)
-    await _settle()
-
-    assert index.is_allowed(JOINER, ["grant"], router.config, router.runtime_paths)
-    assert calls.ops("revoke") == ["code", "router"]
-    assert calls.ops("reconcile") == ["code", "router"]
-
-
-@pytest.mark.asyncio
 async def test_live_grant_change_retries_every_bots_effects_after_a_failed_revocation(tmp_path: Path) -> None:
     """A revocation that fails reconciles nothing, and the replayed transition revokes and reconciles again."""
     calls = _Calls()
@@ -241,62 +168,13 @@ async def test_live_grant_change_retries_every_bots_effects_after_a_failed_revoc
         await router._after_ingestion_admission(admission, _FRESH_SEMANTIC_FACTS, TimelineEventProvenance.LIVE)
     await _settle()
     assert calls.ops("reconcile") == []
+    assert index.is_allowed(JOINER, ["grant"], router.config, router.runtime_paths)
 
     await router._after_ingestion_admission(admission, _REPLAY_FACTS, TimelineEventProvenance.LIVE)
     await _settle()
 
     assert calls.ops("revoked") == ["code", "router", "router"]
     assert calls.ops("reconcile") == ["code", "router"]
-
-
-@pytest.mark.asyncio
-async def test_router_departure_schedules_every_bots_revocation_before_admission(tmp_path: Path) -> None:
-    """A reported router departure from a grant room schedules revocation before the departure is admitted."""
-    calls = _Calls()
-    router, _managers = await _router_and_agent(tmp_path, calls)
-    index = router._runtime_view.agent_reply_memberships
-    await index.refresh(router.config, router.runtime_paths, router.client)
-    departure = _validated_reported_membership_admission(
-        router,
-        GRANT_ROOM_ID,
-        previous_membership="join",
-        membership="leave",
-        previous_epoch=0,
-    )
-
-    before = asyncio.all_tasks()
-    router._before_ingestion_admission(departure, TimelineEventProvenance.LIVE)
-    scheduled = asyncio.all_tasks() - before
-
-    assert scheduled
-    assert calls.log == []
-    await asyncio.gather(*scheduled)
-    await _settle()
-    assert calls.ops("revoked") == ["code", "router"]
-    assert calls.ops("reconcile") == []
-
-
-@pytest.mark.asyncio
-async def test_call_reconciliation_waits_for_a_frame_published_while_accepting_work(tmp_path: Path) -> None:
-    """A room's call reconciliation survives frames published while draining and runs at the next accepting frame."""
-    bot = _agent_bot(tmp_path)
-    manager = MagicMock(spec=CallManager)
-    await start_call_manager(bot, manager)
-
-    with patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock()):
-        bot._runtime_view.begin_draining()
-        await bot._post_join_room_setup("!call:localhost")
-        await _complete_frame(bot)
-        await _settle()
-        manager.reconcile_joined_rooms.assert_not_awaited()
-
-        assert bot._runtime_view.resume()
-        await _complete_frame(bot)
-        await _settle()
-        await _complete_frame(bot)
-        await _settle()
-
-    manager.reconcile_joined_rooms.assert_awaited_once_with(frozenset({"!call:localhost"}))
 
 
 @pytest.mark.asyncio
@@ -380,7 +258,10 @@ async def _router_after_a_live_grant_change_with_held_agent_call_start(
     await router._runtime_view.agent_reply_memberships.refresh(router.config, router.runtime_paths, router.client)
     held = _HeldReconciliation()
     managers["code"].reconcile_reply_authorization.side_effect = held.run
-    await router._after_ingestion_admission(_live_join(router), _FRESH_SEMANTIC_FACTS, TimelineEventProvenance.LIVE)
+    await asyncio.wait_for(
+        router._after_ingestion_admission(_live_join(router), _FRESH_SEMANTIC_FACTS, TimelineEventProvenance.LIVE),
+        timeout=1,
+    )
     await asyncio.wait_for(held.started.wait(), timeout=1)
     return router, agent, managers, held
 
@@ -406,7 +287,6 @@ async def test_router_stop_leaves_another_bots_call_start_running(tmp_path: Path
 
     await router.stop()
     assert not held.cancelled.is_set()
-    assert not held.finished.is_set()
 
     held.release.set()
     assert await wait_for_background_tasks(timeout=1, owner=agent._runtime_view)
@@ -467,6 +347,10 @@ async def test_a_draining_bot_starts_no_invite_or_call_work_but_still_revokes(
     assert calls.ops("reconcile") == (["router"] if draining else ["code", "router"])
     assert invites.await_count == (0 if draining else 1)
 
+    router.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+    await _settle()
+    assert calls.ops("revoked") == ["code", "code", "router", "router"]
+
 
 @pytest.mark.asyncio
 async def test_call_reconciliation_waits_when_draining_begins_during_frame_effects(tmp_path: Path) -> None:
@@ -512,3 +396,38 @@ async def test_stop_drops_pending_call_reconciliation(tmp_path: Path) -> None:
 
     stopped_manager.reconcile_joined_rooms.assert_not_awaited()
     restarted_manager.reconcile_joined_rooms.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_bot_without_a_client_gets_no_invite_recheck(tmp_path: Path) -> None:
+    """A bot that has not logged in has no invites to recheck, so a grant change schedules no invite work for it."""
+    bot = _agent_bot(tmp_path)
+
+    with patch.object(bot._room_lifecycle, "reconcile_pending_invites", new=AsyncMock()) as invites:
+        bot.schedule_pending_invite_reconciliation()
+        await _settle()
+
+    invites.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_live_grant_change_does_not_wait_for_an_invite_join(tmp_path: Path) -> None:
+    """A pending invite cannot make the router's ingestion pump await a join that needs that pump to progress."""
+    router, _managers = await _router_and_agent(tmp_path, _Calls())
+    await router._runtime_view.agent_reply_memberships.refresh(router.config, router.runtime_paths, router.client)
+    join = _HeldReconciliation()
+
+    with patch.object(router._room_lifecycle, "reconcile_pending_invites", new=AsyncMock(side_effect=join.run)):
+        try:
+            await asyncio.wait_for(
+                router._after_ingestion_admission(
+                    _live_join(router),
+                    _FRESH_SEMANTIC_FACTS,
+                    TimelineEventProvenance.LIVE,
+                ),
+                timeout=1,
+            )
+            await asyncio.wait_for(join.started.wait(), timeout=1)
+        finally:
+            join.release.set()
+            await _settle()

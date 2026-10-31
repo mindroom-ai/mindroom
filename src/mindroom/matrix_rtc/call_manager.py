@@ -472,10 +472,10 @@ class CallManager:
 
         The bot's own membership arrives only through ``on_sync_room_membership``, from durably admitted sync sections.
         """
-        # Display name and avatar edits keep the membership, so the call roster cannot change.
         if (
             self._shutting_down
             or event.state_key == self._client.user_id
+            # Display name and avatar edits keep the membership, so the call roster cannot change.
             or event.membership == event.prev_membership
             or not self._is_configured_call_room(room)
         ):

@@ -42,6 +42,7 @@ from mindroom.approval.manager import (
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
@@ -4887,7 +4888,6 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True
         router_bot = MagicMock()
         router_bot.refresh_presence = AsyncMock()
-        router_bot.schedule_pending_invite_reconciliation = MagicMock()
         install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
 
         with (
@@ -5518,7 +5518,11 @@ class TestMultiAgentOrchestrator:
                 bot.running = True
                 bot.ensure_user_account = AsyncMock()
 
-            await orchestrator.stop()
+            membership_sync = orchestrator.agent_reply_membership_sync
+            with patch.object(membership_sync, "invalidate", wraps=membership_sync.invalidate) as invalidate:
+                await orchestrator.stop()
+
+            invalidate.assert_called_with(orchestrator.config, reason="shutdown")
 
             assert not orchestrator.running
             for bot in orchestrator.agent_bots.values():
@@ -5648,3 +5652,45 @@ async def test_entity_changes_fence_room_grants_only_when_the_router_stops(
         await orchestrator._entities_changing(entities)
 
     assert invalidate.call_args_list == ([call(orchestrator.config, reason="router_replacement")] if fenced else [])
+
+
+@pytest.mark.asyncio
+async def test_grant_refresh_without_a_router_fails_grants_closed(tmp_path: Path) -> None:
+    """Without the router's client no refresh can vouch for room grants, so they stay revoked and calls are revoked."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+
+    with (
+        patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as invalidate,
+        patch.object(orchestrator.agent_reply_memberships, "refresh") as refresh,
+    ):
+        await orchestrator.refresh_agent_reply_memberships()
+
+    invalidate.assert_called_once_with(orchestrator.config, reason="router_unavailable")
+    refresh.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reload_that_changes_reply_access_fails_room_grants_closed(tmp_path: Path) -> None:
+    """A reload that changes who may be answered revokes room grants under the published config until a refresh."""
+    current_config = _runtime_bound_config(Config(), tmp_path)
+    new_config = _runtime_bound_config(
+        Config(
+            router=RouterConfig(access=ResponderAccessConfig(current_room_members=False)),
+        ),
+        tmp_path,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=current_config)
+    orchestrator.running = True
+    router_bot = MagicMock()
+    router_bot.refresh_presence = AsyncMock()
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
+
+    with (
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
+        patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as invalidate,
+    ):
+        await orchestrator.config_reload._update_config()
+
+    invalidate.assert_called_once_with(new_config, reason="config_reload")

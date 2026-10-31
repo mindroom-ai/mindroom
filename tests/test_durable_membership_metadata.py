@@ -6,7 +6,7 @@ import asyncio
 import json
 from contextlib import suppress
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import nio
@@ -18,6 +18,7 @@ from mindroom.event_journal import DeliveryProjectionPendingError, EventKind
 from mindroom.event_journal import journal as journal_ops
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix_rtc.call_manager import CallManager
 from tests.conftest import make_matrix_client_mock, start_call_manager
 from tests.journal_helpers import membership_position
 from tests.matrix_state_helpers import save_matrix_state
@@ -93,7 +94,7 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
     session = open_durable_sync(client, consumer_id=consumer.generation, store_path=tmp_path / "crypto")
     await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=session.stream_id)
     bot.client = client
-    call_manager = AsyncMock()
+    call_manager = MagicMock(spec=CallManager)
     await start_call_manager(bot, call_manager)
     source: asyncio.Queue[bytes] = asyncio.Queue()
 

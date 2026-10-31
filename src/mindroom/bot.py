@@ -1250,10 +1250,11 @@ class AgentBot:
 
     def schedule_reply_authorized_call_revocation(self) -> None:
         """End this bot's denied calls in the background, in every phase, since revocation is cleanup."""
-        if self._call_manager is None:
+        call_manager = self._call_manager
+        if call_manager is None:
             return
         create_background_task(
-            self.revoke_reply_authorized_calls(),
+            call_manager.revoke_reply_authorization(),
             name=f"matrix_rtc_reply_authorization_revoke_{self.agent_name}",
             owner=self._runtime_view,
         )
@@ -2105,7 +2106,7 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.RoomMemberEvent,
     ) -> None:
-        """Expose live human room joins and self-leaves to router-owned hooks."""
+        """Forward one live room member event to the call manager, the personal-room lifecycle, and the router's hooks."""
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
