@@ -58,6 +58,7 @@ from backend.config import (
 from backend.deps import ensure_supabase
 from backend.k8s import (
     check_deployment_exists,
+    get_deployment,
     instance_deployment_ref,
     run_kubectl,
     tenant_start_deployment_refs,
@@ -1204,25 +1205,13 @@ def _deployment_status(deployment: Mapping[str, Any]) -> str:
     return "running" if ready >= desired else "provisioning"
 
 
-async def _get_deployment(instance_id: int | str) -> dict[str, Any] | None:
-    """Return the instance's MindRoom deployment as Kubernetes reports it, or None when it does not exist."""
-    deployment_ref = instance_deployment_ref(instance_id)
-    code, out, err = await run_kubectl(
-        ["get", deployment_ref, "-o=json", "--ignore-not-found"], namespace=_INSTANCES_NAMESPACE
-    )
-    if code != 0:
-        msg = f"kubectl get {deployment_ref} failed: {err or out}"
-        raise RuntimeError(msg)
-    return json.loads(out) if out.strip() else None
-
-
 async def sync_instance_status(sb: Any, instance_id: int | str, stored_status: str) -> SyncUpdateOut | None:
     """Record the status Kubernetes shows for an instance, unless its row left `stored_status` meanwhile.
 
     Returns the change it recorded, or None when the status stayed or another writer changed the row first.
     Raises when kubectl fails, before stamping the row, so the next dashboard poll checks again.
     """
-    deployment = await _get_deployment(instance_id)
+    deployment = await get_deployment(instance_id, namespace=_INSTANCES_NAMESPACE)
     if deployment is not None:
         status, reason = _deployment_status(deployment), "status_mismatch"
     elif stored_status in ("provisioning", "deprovisioned"):

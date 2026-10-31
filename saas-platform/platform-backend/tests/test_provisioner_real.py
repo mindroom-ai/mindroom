@@ -786,6 +786,19 @@ class TestProvisionerRealScenarios:
                     assert "quota" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
+    async def test_unreachable_cluster_is_not_a_missing_deployment(self):
+        """A kubectl failure raises instead of reporting the deployment missing, which would redeploy or fail it."""
+        from backend.k8s import check_deployment_exists
+
+        with patch("backend.k8s.run_kubectl") as mock_kubectl:
+            mock_kubectl.return_value = (0, "", "")
+            assert await check_deployment_exists("123") is False
+
+            mock_kubectl.return_value = (1, "", "The connection to the server was refused")
+            with pytest.raises(RuntimeError, match="connection to the server was refused"):
+                await check_deployment_exists("123")
+
+    @pytest.mark.asyncio
     async def test_provision_with_pvc_mount_failure(self):
         """Test when PersistentVolumeClaim cannot be mounted."""
         from backend.k8s import wait_for_deployment_ready
