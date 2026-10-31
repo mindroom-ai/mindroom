@@ -60,6 +60,7 @@ Lowering a cap also limits existing triggers.
 Top-level `administrators` and `admin_users` can list, enable, disable, rotate, and delete any owner's triggers, and can target other agents, teams, and rooms.
 `admin_users` grants only this trigger authority, not wider administrator rights.
 Both lists match canonical identities after `authorization.aliases` resolution.
+Every trigger function needs a human requester, so agents and bot accounts get no trigger authority, even when listed.
 
 To stop users from creating triggers without review, add [tool approval](tool-approval.md) rules for `create_trigger`, `rotate_trigger_key`, `disable_trigger`, and `delete_trigger`.
 

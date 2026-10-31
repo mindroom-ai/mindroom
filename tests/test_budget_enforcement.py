@@ -426,6 +426,7 @@ async def test_dynamic_workflow_room_agent_participant_uses_fallback(
         context,
         RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "specialist"}),
         "Write a report.",
+        run_key="report:run_1",
     )
 
     assert loaded == ["luna"]

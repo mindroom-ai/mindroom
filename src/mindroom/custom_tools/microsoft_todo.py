@@ -5,20 +5,23 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
-from typing import TYPE_CHECKING, Any, Literal, cast
+from functools import partial
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
-    graph_error_payload,
+    graph_call,
     graph_int,
+    graph_object,
+    graph_records,
     graph_session,
-    graph_tool_result,
     html_to_text,
     next_page_token,
     page_path,
     path_segment,
+    required_text,
     text_to_html,
     time_zone_name,
 )
@@ -40,7 +43,6 @@ _MAX_TASKS = 50
 _MAX_LISTS = 100
 _TOOL_NAME = "microsoft_todo"
 _OPEN_TASKS_FILTER = "status ne 'completed'"
-_IMPORTANCE = frozenset({"low", "normal", "high"})
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
@@ -54,30 +56,18 @@ class _Request:
     body: dict[str, object] | None = None
 
 
-def _list_path(list_id: object) -> str:
+def _list_path(list_id: str) -> str:
     return f"/me/todo/lists/{path_segment(list_id, 'list_id')}"
 
 
-def _task_path(list_id: object, task_id: object) -> str:
+def _task_path(list_id: str, task_id: str) -> str:
     return f"{_list_path(list_id)}/tasks/{path_segment(task_id, 'task_id')}"
 
 
-def _flag(value: object, field_name: str) -> bool:
-    if not isinstance(value, bool):
-        raise MicrosoftGraphError(code="invalid_argument", message=f"{field_name} must be true or false.")
-    return value
-
-
-def _title(value: object) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise MicrosoftGraphError(code="invalid_argument", message="title must not be empty.")
-    return value
-
-
-def _due(value: object, zone: object) -> dict[str, str]:
+def _due(value: str, zone: str) -> dict[str, str]:
     """Return Graph's due date for a YYYY-MM-DD calendar date, as midnight in the given zone."""
     try:
-        day = date.fromisoformat(value) if isinstance(value, str) and _DATE.fullmatch(value) else None
+        day = date.fromisoformat(value) if _DATE.fullmatch(value) else None
     except ValueError:
         day = None
     if day is None:
@@ -88,25 +78,13 @@ def _due(value: object, zone: object) -> dict[str, str]:
     return {"dateTime": f"{day.isoformat()}T00:00:00", "timeZone": time_zone_name(zone)}
 
 
-def _notes(value: object) -> dict[str, str]:
+def _notes(value: str) -> dict[str, str]:
     """Return plain-text notes as the HTML body To Do shows, keeping their text and line breaks."""
-    if not isinstance(value, str):
-        raise MicrosoftGraphError(code="invalid_argument", message="notes must be text.")
     return {"content": text_to_html(value), "contentType": "html"}
 
 
-def _importance(value: object) -> str:
-    if not isinstance(value, str) or value not in _IMPORTANCE:
-        raise MicrosoftGraphError(code="invalid_argument", message="importance must be low, normal, or high.")
-    return value
-
-
-def _fields(value: object) -> Mapping[str, Any]:
-    return cast("Mapping[str, Any]", value) if isinstance(value, dict) else {}
-
-
 def _date_time(value: object) -> dict[str, object] | None:
-    fields = _fields(value)
+    fields = graph_object(value)
     if not fields.get("dateTime"):
         return None
     return {"date_time": fields["dateTime"], "time_zone": fields.get("timeZone")}
@@ -114,7 +92,7 @@ def _date_time(value: object) -> dict[str, object] | None:
 
 def _task(task: Mapping[str, Any]) -> dict[str, Any]:
     """Return the fields a caller needs to identify, read, and change one task."""
-    body = _fields(task.get("body"))
+    body = graph_object(task.get("body"))
     content = body.get("content")
     notes = content if isinstance(content, str) else ""
     if body.get("contentType") == "html":
@@ -146,10 +124,6 @@ def _list(task_list: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _records(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [record for record in payload.get("value") or [] if isinstance(record, dict)]
-
-
 class MicrosoftTodoTools(Toolkit):
     """List, create, update, complete, and delete Microsoft To Do tasks as the requester."""
 
@@ -165,11 +139,14 @@ class MicrosoftTodoTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftTodoTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         functions: dict[str, Callable[..., str]] = {
             "microsoft_todo_list_lists": self.microsoft_todo_list_lists,
             "microsoft_todo_list_tasks": self.microsoft_todo_list_tasks,
@@ -188,22 +165,14 @@ class MicrosoftTodoTools(Toolkit):
         result: Callable[[dict[str, Any]], Mapping[str, object]],
     ) -> str:
         """Refuse malformed arguments before any request, then send the request and render its result."""
-        try:
-            request = build()
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-
-        def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                return result(session.json(request.method, request.path, params=request.params, json=request.body))
-
-        return graph_tool_result(_TOOL_NAME, run)
+        return graph_call(
+            _TOOL_NAME,
+            self._session,
+            build,
+            lambda session, request: result(
+                session.json(request.method, request.path, params=request.params, json=request.body),
+            ),
+        )
 
     def microsoft_todo_list_lists(self, page_token: str | None = None) -> str:
         """List the requester's Microsoft To Do task lists.
@@ -224,7 +193,7 @@ class MicrosoftTodoTools(Toolkit):
         return self._send(
             build,
             lambda payload: {
-                "lists": [_list(task_list) for task_list in _records(payload)],
+                "lists": [_list(task_list) for task_list in graph_records(payload)],
                 "next_page_token": next_page_token(payload),
             },
         )
@@ -254,14 +223,14 @@ class MicrosoftTodoTools(Toolkit):
             if page_token is not None:
                 return _Request("GET", page_path(page_token, r"/me/todo/lists/[^/]+/tasks"))
             params = {"$top": str(graph_int(limit, "limit", maximum=_MAX_TASKS))}
-            if not _flag(include_completed, "include_completed"):
+            if not include_completed:
                 params["$filter"] = _OPEN_TASKS_FILTER
             return _Request("GET", f"{_list_path(list_id)}/tasks", params=params)
 
         return self._send(
             build,
             lambda payload: {
-                "tasks": [_task(task) for task in _records(payload)],
+                "tasks": [_task(task) for task in graph_records(payload)],
                 "next_page_token": next_page_token(payload),
             },
         )
@@ -294,7 +263,7 @@ class MicrosoftTodoTools(Toolkit):
         """
 
         def build() -> _Request:
-            body: dict[str, object] = {"title": _title(title), "importance": _importance(importance)}
+            body: dict[str, object] = {"title": required_text(title, "title"), "importance": importance}
             if due_date is not None:
                 body["dueDateTime"] = _due(due_date, time_zone)
             if notes is not None:
@@ -337,15 +306,15 @@ class MicrosoftTodoTools(Toolkit):
             path = _task_path(list_id, task_id)
             body: dict[str, object] = {}
             if title is not None:
-                body["title"] = _title(title)
+                body["title"] = required_text(title, "title")
             if due_date is not None:
                 body["dueDateTime"] = _due(due_date, time_zone) if due_date != "" else None
             if notes is not None:
                 body["body"] = _notes(notes)
             if importance is not None:
-                body["importance"] = _importance(importance)
+                body["importance"] = importance
             if completed is not None:
-                body["status"] = "completed" if _flag(completed, "completed") else "notStarted"
+                body["status"] = "completed" if completed else "notStarted"
             if not body:
                 raise MicrosoftGraphError(
                     code="invalid_argument",

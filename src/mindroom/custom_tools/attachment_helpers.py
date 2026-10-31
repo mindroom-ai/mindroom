@@ -15,21 +15,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def normalize_str_list(values: list[str] | None, *, field_name: str) -> tuple[list[str], str | None]:
-    """Validate and strip a list of string values, returning normalized list and optional error."""
-    if values is None:
-        return [], None
-
-    normalized: list[str] = []
-    for raw_value in values:
-        if not isinstance(raw_value, str):
-            return [], f"{field_name} entries must be strings."
-        value = raw_value.strip()
-        if value:
-            normalized.append(value)
-    return normalized, None
-
-
 async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str) -> bool:
     """Return whether the requester currently belongs to one requested room.
 
@@ -56,7 +41,7 @@ async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str
 
 async def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
     """Return whether the requester may act in the given room."""
-    if not isinstance(room_id, str) or not room_id:
+    if not room_id:
         return False
     if room_id == context.room_id:
         return True
@@ -72,13 +57,11 @@ async def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool
 
 def resolve_requested_room_id(
     context: ToolRuntimeContext,
-    room_id: object,
+    room_id: str | None,
 ) -> tuple[str | None, str | None]:
     """Resolve the requested room target or return a validation error."""
     if room_id is None:
         return context.room_id, None
-    if not isinstance(room_id, str):
-        return None, "room_id must be a non-empty string."
     normalized_room_id = room_id.strip()
     if not normalized_room_id:
         return None, "room_id must be a non-empty string."

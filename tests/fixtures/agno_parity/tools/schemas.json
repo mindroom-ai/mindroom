@@ -1037,29 +1037,12 @@
       },
       {
         "name": "view_file",
-        "description": "View an image in your own model context without posting or invoking another model.\nSupply exactly one source: a workspace path or an authorized attachment ID.\nPNG, JPEG, GIF and WebP images are supported, up to 20 MiB and 40 million pixels.\nLarge images are resized to 2048 pixels; animation uses its first frame, with disclosure.\nThe source path and a reusable attachment handle are retained when available.\nUse read_file for ordinary text/code; use matrix_message only when sharing is requested.",
+        "description": "View an image in your own model context without posting or invoking another model.\nTo view an attachment ID, use get_attachment with view instead.\nPNG, JPEG, GIF and WebP images are supported, up to 20 MiB and 40 million pixels.\nLarge images are resized to 2048 pixels; animation uses its first frame, with disclosure.\nThe source path and a reusable attachment handle are retained when available.\nUse read_file for ordinary text/code; use matrix_message only when sharing is requested.",
         "parameters": {
           "type": "object",
           "properties": {
             "path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "attachment_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1074,7 +1057,9 @@
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
             }
           },
-          "required": []
+          "required": [
+            "path"
+          ]
         },
         "strict": false,
         "gate": null,
@@ -1705,7 +1690,6 @@
           "properties": {
             "action": {
               "type": "string",
-              "description": "Browser action. Valid actions: act, actions, close, console, dialog, focus, help, navigate, open, pdf, profiles, screenshot, snapshot, start, status, stop, tabs, upload. Use action='help' to inspect the full table.",
               "enum": [
                 "act",
                 "actions",
@@ -1725,22 +1709,16 @@
                 "stop",
                 "tabs",
                 "upload"
-              ]
+              ],
+              "description": "Browser action. Page interactions such as click or type use action='act' with request.kind.\nUse action='help' to inspect the full table."
             },
             "target": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Execution target. Use host for MindRoom's own browser profile or desktop for the pinned local Playwright extension in the user's existing profile. Desktop supports observation and start, stop, open; existing-page control requires upstream stable targeting. Reconnecting or reselecting does not enable it.",
+              "type": "string",
               "enum": [
                 "host",
                 "desktop"
-              ]
+              ],
+              "description": "Execution target. Use host for MindRoom's own browser profile or desktop for the pinned local\nPlaywright extension in the user's existing profile.\nDesktop supports observation and start, stop, open;\nexisting-page control requires upstream stable targeting.\nReconnecting or reselecting does not enable it."
             },
             "node": {
               "anyOf": [
@@ -1784,7 +1762,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Opaque host-browser tab ID. The desktop target rejects targetId because Playwright MCP exposes mutable numeric indices, not stable page identity. Desktop observations refer to its current tab only."
+              "description": "Opaque host-browser tab ID. The desktop target rejects targetId because Playwright MCP exposes\nmutable numeric indices, not stable page identity. Desktop observations refer to its current tab only."
             },
             "limit": {
               "anyOf": [
@@ -1953,11 +1931,11 @@
             },
             "saveOnly": {
               "type": "boolean",
-              "description": "For host action=screenshot, return only the saved artifact metadata instead of model-visible image bytes."
+              "description": "For host action=screenshot, return only the saved artifact metadata instead of model-visible\nimage bytes."
             },
             "returnAttachment": {
               "type": "boolean",
-              "description": "For action=screenshot with target=desktop, return a turn-scoped att_* handle so matrix_message can send the captured image without saving plaintext to disk."
+              "description": "For action=screenshot with target=desktop, return a turn-scoped att_* handle so\nmatrix_message can send the captured image without saving plaintext to disk."
             },
             "level": {
               "anyOf": [
@@ -2041,7 +2019,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Act request object for action='act'. Set request.kind to one of: click, type, press, hover, drag, select, fill, resize, wait, evaluate, close. Common shapes: click {kind, ref, doubleClick?, button?, modifiers?}; type {kind, ref, text, submit?, slowly?}; press {kind, key}; hover {kind, ref}; drag {kind, startRef, endRef}; select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]}; resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; evaluate {kind, fn, ref?}; close {kind}. Refs come from action='snapshot'."
+              "description": "Act request object for action='act'. Set request.kind to one of: click, type, press, hover,\ndrag, select, fill, resize, wait, evaluate, close.\nCommon shapes: click {kind, ref, doubleClick?, button?, modifiers?};\ntype {kind, ref, text, submit?, slowly?}; press {kind, key}; hover {kind, ref};\ndrag {kind, startRef, endRef}; select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]};\nresize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; evaluate {kind, fn, ref?};\nclose {kind}. Refs come from action='snapshot'."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2058,8 +2036,7 @@
           },
           "required": [
             "action"
-          ],
-          "additionalProperties": false
+          ]
         },
         "strict": false,
         "gate": null,
@@ -4072,34 +4049,9 @@
     ]
   },
   "chat_ui": {
-    "instructions": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- show_computer() is the same as open_panel(panel='computer').\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
-    "guidance": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- show_computer() is the same as open_panel(panel='computer').\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
+    "instructions": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
+    "guidance": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
     "functions": [
-      {
-        "name": "show_computer",
-        "description": "Show the user the Computer panel: a live view of your own worker browser.\nThat is the browser browser_control drives with target='host'. The user starts\nout watching. They can take control, for example to log in; while they have it\nyour browser calls are blocked, and when they hand it back you get a message.\nOpening the panel does not navigate, send a prompt to ChatGPT, or take control,\nand it never opens or controls the user's own browser. Your first worker\nbrowser call in a conversation (browser_control with target='host', or any\nbrowser_mcp function) already shows the user this panel; call show_computer\nonly to show it again in a later reply, for example when the user should log\nin or after they closed it. One reply shows the panel once. Success means the\nrequest was sent, not that the client opened the panel.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
       {
         "name": "open_settings",
         "description": "Open the user's MindRoom Chat Settings dialog at one section.\nThis works on the Chat app's own settings screen. It changes no setting; the\nuser decides what to do there. Success means the UI request was sent, not that\nthe client opened Settings.",
@@ -4945,7 +4897,7 @@
           "properties": {
             "info_type": {
               "type": "string",
-              "description": "Type of information to retrieve. Options:\n- \"mindroom_docs\": MindRoom documentation and help\n- \"config_schema\": Configuration schema for agents and teams\n- \"available_models\": List of configured AI models\n- \"agents\": List agents in the current room by default\n- \"teams\": List all configured teams\n- \"available_tools\": List all available tools by category\n- \"tool_details\": Get details about a specific tool (requires name)\n- \"agent_config\": Get redacted configuration for a specific agent (requires name and a\n  platform administrator requester)\n- \"agent_template\": Generate template for agent type (requires name as type)"
+              "description": "Type of information to retrieve. Options:\n- \"config_schema\": Configuration schema for agents and teams\n- \"available_models\": List of configured AI models\n- \"agents\": List agents in the current room by default\n- \"teams\": List all configured teams\n- \"available_tools\": List all available tools by category\n- \"tool_details\": Get details about a specific tool (requires name)\n- \"agent_config\": Get redacted configuration for a specific agent (requires name and a\n  platform administrator requester)\n- \"agent_template\": Generate template for agent type (requires name as type)"
             },
             "name": {
               "anyOf": [
@@ -8032,43 +7984,17 @@
     "functions": [
       {
         "name": "create_workflow",
-        "description": "Create a Dynamic Workflow from a declarative workflow spec. Minimal valid spec: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]} Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, and only the skills it names from your own. Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room without tools.",
+        "description": "Create a Dynamic Workflow from a declarative workflow spec. Minimal valid spec: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]} Required spec fields: schema_version (must be 1), kind (must be 'workflow'), id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as {id, participant, prompt}). Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, and only the skills it names from your own. Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room without tools.",
         "parameters": {
           "type": "object",
           "properties": {
             "spec": {
               "type": "object",
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": true
-                  },
-                  {
-                    "type": "array",
-                    "items": {}
-                  },
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+              "propertyNames": {
+                "type": "string"
               },
-              "description": "Declarative workflow spec. Minimal valid example: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]} Required fields: schema_version (must be 1), kind (must be 'workflow'), id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as {id, participant, prompt})."
-            },
-            "scope": {
-              "type": "string"
+              "additionalProperties": {},
+              "description": "Declarative workflow spec with the required fields the description lists."
             },
             "reason": {
               "anyOf": [
@@ -8078,7 +8004,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Why the workflow is created, recorded with its first revision."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8103,40 +8030,17 @@
       },
       {
         "name": "validate_workflow",
-        "description": "Validate a declarative Dynamic Workflow spec without saving it. Reports every detected validation error in one call. Minimal valid spec: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]}",
+        "description": "Validate a declarative Dynamic Workflow spec without saving it. Reports every detected validation error in one call. Minimal valid spec: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]} Required spec fields: schema_version (must be 1), kind (must be 'workflow'), id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as {id, participant, prompt}).",
         "parameters": {
           "type": "object",
           "properties": {
             "spec": {
               "type": "object",
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": true
-                  },
-                  {
-                    "type": "array",
-                    "items": {}
-                  },
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+              "propertyNames": {
+                "type": "string"
               },
-              "description": "Declarative workflow spec. Minimal valid example: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]} Required fields: schema_version (must be 1), kind (must be 'workflow'), id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as {id, participant, prompt})."
+              "additionalProperties": {},
+              "description": "Declarative workflow spec with the required fields the description lists."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8170,38 +8074,12 @@
             },
             "patch": {
               "type": "object",
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": true
-                  },
-                  {
-                    "type": "array",
-                    "items": {}
-                  },
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
             },
             "reason": {
-              "type": "string"
-            },
-            "scope": {
               "type": "string"
             },
             "mindroom_output_path": {
@@ -8238,36 +8116,10 @@
             },
             "input": {
               "type": "object",
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": true
-                  },
-                  {
-                    "type": "array",
-                    "items": {}
-                  },
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "scope": {
-              "type": "string"
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8303,9 +8155,6 @@
             "run_id": {
               "type": "string"
             },
-            "scope": {
-              "type": "string"
-            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -8330,13 +8179,10 @@
       },
       {
         "name": "list_workflows",
-        "description": "List Dynamic Workflows available in one scope.",
+        "description": "List your saved Dynamic Workflows.",
         "parameters": {
           "type": "object",
           "properties": {
-            "scope": {
-              "type": "string"
-            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -8363,9 +8209,6 @@
           "type": "object",
           "properties": {
             "workflow_id": {
-              "type": "string"
-            },
-            "scope": {
               "type": "string"
             },
             "mindroom_output_path": {

@@ -341,7 +341,7 @@ agents:
 
 The tool exposes `create_workflow()`, `validate_workflow()`, `update_workflow()`, `run_workflow()`, `get_workflow_run()`, `list_workflows()`, and `list_workflow_revisions()`, each returning JSON with a `status` field.
 `validate_workflow()` reports every validation error in a spec without saving it.
-Workflows belong to the calling agent; `scope="agent"` is the default and the only scope agent tools can use, and `room` or `tenant` returns an error.
+Workflows belong to the calling agent.
 `update_workflow(workflow_id, patch, reason)` merges `patch` into the current spec: nested objects merge, but a list such as `workflow` or `participants` replaces the old list, so pass the complete list when changing one entry.
 Each `update_workflow()` publishes a new immutable revision, and each run uses the revision active when it starts.
 Saved workflows and run records live under `MINDROOM_STORAGE_PATH/dynamic_workflows/`.
@@ -475,7 +475,7 @@ Anyone with the link can open it without signing in until it is revoked.
 Only the user who requested the source run or published the link can revoke it.
 The tool never accepts arbitrary filesystem paths; it publishes only these sources, and only when the current requester may read them:
 
-- **`dynamic_workflow_run`**: `source` takes `workflow_id`, `run_id`, and optional `scope` (default `agent`), and the run must be completed.
+- **`dynamic_workflow_run`**: `source` takes `workflow_id` and `run_id`, and the run must be completed.
 - **`static_site`**: `source` takes a workspace-relative `path` and a required `title`.
   The path is a directory containing `index.html` plus optional CSS, JavaScript, images, fonts, or JSON, or a single HTML file served as `index.html`.
   Publishing copies the site, so later workspace edits need a new `publish_report()` call.
@@ -517,11 +517,15 @@ agents:
     model: sonnet
     tools:
       - config_manager
+    skills:
+      - mindroom-docs
 ```
+
+The bundled `mindroom-docs` skill gives the agent MindRoom's documentation, which `config_manager` does not provide.
 
 The tool exposes four functions:
 
-- **`get_info(info_type, name=None, agent_scope="current_room")`**: `info_type` is `mindroom_docs`, `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, or `agent_template`.
+- **`get_info(info_type, name=None, agent_scope="current_room")`**: `info_type` is `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, or `agent_template`.
   `agents` lists agents in the current room unless `agent_scope="all"`.
   `tool_details` takes a tool name and shows its config fields and status.
   `agent_config` returns one agent's redacted YAML.

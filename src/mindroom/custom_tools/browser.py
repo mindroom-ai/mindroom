@@ -12,12 +12,13 @@ import os
 import re
 import shutil
 import time
+from collections import defaultdict
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from itertools import count
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from uuid import uuid4
 
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
@@ -34,7 +35,7 @@ from mindroom.custom_tools.desktop_attachment import (
 )
 from mindroom.desktop.client import desktop_response_router
 from mindroom.desktop.media import download_encrypted_screenshot
-from mindroom.desktop.playwright_mcp import browser_action_requires_control
+from mindroom.desktop.playwright_mcp import SUPPORTED_BROWSER_ACTIONS, browser_action_requires_control
 from mindroom.desktop.protocol import MAX_COMMAND_TTL_MS, DesktopCommand
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.logging_config import get_logger
@@ -53,7 +54,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import (
     ToolValue,  # noqa: TC001 - The schema reads the tool's annotations at runtime.
 )
-from mindroom.tool_system.tool_schema import closed_parameters
+from mindroom.tool_system.tool_schema import tool_parameters
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
 from mindroom.worker_computer.browser_proxy import (
     PROXIED_WEBRTC_ONLY_ARG,
@@ -70,7 +71,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.worker_computer.browser_proxy import BrowserEgress
 
 _DEFAULT_PROFILE = "mindroom"
 _DEFAULT_SNAPSHOT_LIMIT = 200
@@ -93,26 +94,26 @@ _UNIX_SOCKET_PATH_MAX_BYTES = 107
 
 logger = get_logger(__name__)
 
-_BROWSER_ACTIONS = {
-    "actions",
-    "status",
-    "start",
-    "stop",
-    "profiles",
-    "tabs",
-    "open",
-    "focus",
-    "close",
-    "snapshot",
-    "screenshot",
-    "navigate",
-    "console",
-    "pdf",
-    "upload",
-    "dialog",
+_BrowserAction = Literal[
     "act",
+    "actions",
+    "close",
+    "console",
+    "dialog",
+    "focus",
     "help",
-}
+    "navigate",
+    "open",
+    "pdf",
+    "profiles",
+    "screenshot",
+    "snapshot",
+    "start",
+    "status",
+    "stop",
+    "tabs",
+    "upload",
+]
 
 # Actions that only return reference data and never use a browser.
 _REFERENCE_ACTIONS = frozenset({"actions", "help"})
@@ -174,17 +175,6 @@ _BROWSER_ACTION_TABLE = (
     },
     {"action": "help", "description": "Return this browser action and request-kind table."},
     {"action": "actions", "description": "Alias for help."},
-)
-
-_ACT_REQUEST_DESCRIPTION = (
-    "Act request object for action='act'. Set request.kind to one of: click, type, press, hover, drag, select, "
-    "fill, resize, wait, evaluate, close. "
-    "Common shapes: click {kind, ref, doubleClick?, button?, modifiers?}; "
-    "type {kind, ref, text, submit?, slowly?}; press {kind, key}; "
-    "hover {kind, ref}; drag {kind, startRef, endRef}; "
-    "select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]}; "
-    "resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; "
-    "evaluate {kind, fn, ref?}; close {kind}. Refs come from action='snapshot'."
 )
 
 _SNAPSHOT_JS = """
@@ -291,6 +281,14 @@ _SNAPSHOT_JS = """
 """
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingDialog:
+    """How a tab answers its next dialog."""
+
+    accept: bool
+    prompt_text: str | None
+
+
 @dataclass
 class _BrowserTabState:
     """State for one browser tab."""
@@ -298,7 +296,7 @@ class _BrowserTabState:
     target_id: str
     page: Page
     refs: dict[str, str] = field(default_factory=dict)
-    pending_dialog: dict[str, Any] | None = None
+    pending_dialog: _PendingDialog | None = None
     console: list[dict[str, Any]] = field(default_factory=list)
     upload_staging: list[TemporaryDirectory[str]] = field(default_factory=list)
     upload_staged_bytes: int = 0
@@ -310,10 +308,44 @@ class _BrowserProfileState:
 
     playwright: Playwright
     context: BrowserContext
+    launch_settings: _LaunchSettings
     destination_proxy: BrowserDestinationProxy | None = None
     tabs: dict[str, _BrowserTabState] = field(default_factory=dict)
     active_target_id: str | None = None
     cleanup_required: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _LaunchSettings:
+    """The settings a profile starts with; a profile whose settings differ from a toolkit's restarts before it uses it.
+
+    ``options`` are Chromium's launch options without an environment, which a worker runtime owns and the primary
+    inherits.
+    """
+
+    options: dict[str, Any]
+    egress: BrowserEgress
+    allow_private_networks: bool
+
+
+@dataclass
+class _BrowserSession:
+    """The running profiles of one profile root and the locks every toolkit using them shares.
+
+    Calls are not serialized: the primary has no per-call timeout, so one call that never settles would hold every other
+    reply's calls. A stop or a settings restart therefore closes pages another call may still be using, which fails.
+    """
+
+    profiles: dict[str, _BrowserProfileState] = field(default_factory=dict)
+    startup_cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+# Chromium holds a profile directory for its whole process, and every reply or call builds a fresh toolkit, so a
+# process keeps one session per profile root, which every toolkit not bound to a worker browser runtime shares,
+# until a stop or process exit closes it. That is the primary's, and a sandbox runner's for calls it runs unbound.
+_PROFILE_SESSIONS: defaultdict[Path, _BrowserSession] = defaultdict(_BrowserSession)
 
 
 def _clean_str(value: object) -> str | None:
@@ -378,26 +410,15 @@ def _browser_help_payload(action: str) -> dict[str, Any]:
     """Return a compact browser action discovery payload."""
     return {
         "action": action,
-        "actions": sorted(_BROWSER_ACTIONS),
+        "actions": list(get_args(_BrowserAction)),
         "actKinds": list(_ACT_REQUEST_KINDS),
-        "actRequestDescription": _ACT_REQUEST_DESCRIPTION,
+        "actRequestDescription": tool_parameters(BrowserTools.browser)["properties"]["request"]["description"],
         "actionTable": list(_BROWSER_ACTION_TABLE),
         "status": "ok",
     }
 
 
-def _unknown_browser_action_message(action: str) -> str:
-    """Return an actionable unknown-action error for browser callers."""
-    valid_actions = ", ".join(sorted(_BROWSER_ACTIONS))
-    return (
-        f"Unknown action: {action}. Valid actions: {valid_actions}. "
-        "For click/type/press/hover/drag/select/fill/resize/wait/evaluate/close interactions, "
-        "use action='act' with request.kind='click' (or another act kind). "
-        "Use action='help' to inspect the full table."
-    )
-
-
-def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
+def _desktop_browser_parameters(  # noqa: C901
     action: str,
     *,
     target_url: str | None,
@@ -410,41 +431,29 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
     element: str | None,
     image_type: str | None,
     level: str | None,
-    paths: list[str] | None,
-    accept: bool | None,
-    prompt_text: str | None,
-    request: dict[str, Any] | None,
     allow_private_networks: bool,
 ) -> dict[str, object]:
+    """Return the extension's parameters for one action it serves; status, start, stop, profiles, and tabs take none."""
     if target_id is not None:
         msg = (
             "Browser target=desktop does not support targetId because Playwright MCP tab indices can change; "
             "existing-page control requires upstream stable targeting. Observation, start, stop, and open remain available."
         )
         raise ValueError(msg)
-    if action in {"status", "start", "stop", "profiles", "tabs"}:
-        return {}
-    if action in {"open", "navigate"}:
+    if action == "open":
         normalized_url = _clean_str(target_url)
         if normalized_url is None:
-            msg = f"targetUrl required for action={action}"
+            msg = "targetUrl required for action=open"
             raise ValueError(msg)
-        normalized_url = validate_server_fetch_url(normalized_url, allow_private_networks=allow_private_networks)
-        parameters: dict[str, object] = {"targetUrl": normalized_url}
-        return parameters
-    if action == "focus":
-        msg = "Browser target=desktop does not support focus because Playwright MCP exposes only mutable tab indices."
-        raise ValueError(msg)
-    if action == "close":
-        return {}
+        return {"targetUrl": validate_server_fetch_url(normalized_url, allow_private_networks=allow_private_networks)}
     if action == "snapshot":
         parameters: dict[str, object] = {}
         normalized_selector = _clean_str(selector)
         if normalized_selector is not None:
             parameters["selector"] = normalized_selector
-        if isinstance(depth, int) and not isinstance(depth, bool) and depth > 0:
+        if depth is not None and depth > 0:
             parameters["depth"] = depth
-        if isinstance(max_chars, int) and not isinstance(max_chars, bool) and max_chars > 0:
+        if max_chars is not None and max_chars > 0:
             parameters["maxChars"] = max_chars
         return parameters
     if action == "screenshot":
@@ -463,36 +472,7 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if normalized_level is not None:
             parameters["level"] = normalized_level
         return parameters
-    if action == "pdf":
-        return {}
-    if action == "upload":
-        if not paths:
-            msg = "paths required for action=upload"
-            raise ValueError(msg)
-        if ref is not None or element is not None:
-            msg = "Browser target=desktop upload does not support ref or element; page control requires upstream stable targeting."
-            raise ValueError(msg)
-        parameters: dict[str, object] = {"paths": paths}
-        return parameters
-    if action == "dialog":
-        parameters: dict[str, object] = {"accept": bool(accept)}
-        normalized_prompt = _clean_str(prompt_text)
-        if normalized_prompt is not None:
-            parameters["promptText"] = normalized_prompt
-        return parameters
-    if action == "act":
-        if not isinstance(request, dict):
-            msg = "request required for action=act"
-            raise ValueError(msg)
-        if request.get("targetId") is not None:
-            msg = (
-                "Browser target=desktop does not support request.targetId because Playwright MCP tab indices can "
-                "change; page control requires upstream stable targeting."
-            )
-            raise ValueError(msg)
-        return {"request": request}
-    msg = f"Unsupported desktop browser action: {action}"
-    raise ValueError(msg)
+    return {}
 
 
 def _playwright_cache_root(expected_executable_path: Path | None) -> Path | None:
@@ -628,7 +608,7 @@ class BrowserTools(Toolkit):
         # Signed-in profiles and default artifacts are agent state: an agent's toolkit keeps them in its
         # resolved state root, which is requester-scoped for private agents. Worker runtimes own their storage root.
         self._agent_state_root = agent_state_root
-        self._profiles_root = (agent_state_root or runtime_paths.storage_root) / "browser-profiles"
+        self._profiles_root = ((agent_state_root or runtime_paths.storage_root) / "browser-profiles").resolve()
         self._allow_private_networks = allow_private_networks
         self._default_target = self._validated_default_target(default_target)
         self._desktop_target = self._configured_desktop_target(
@@ -645,20 +625,22 @@ class BrowserTools(Toolkit):
         self._timeout_seconds = float(timeout_seconds)
         self._command_session_id = uuid4().hex
         self._command_sequences = count()
-        self._profiles: dict[str, _BrowserProfileState] = {}
         self._worker_display: str | None = None
         self._worker_workspace: Path | None = None
         self._worker_process_env: dict[str, str] | None = None
-        self._lock = asyncio.Lock()
-        self._upload_lock = asyncio.Lock()
+        self._worker_session = _BrowserSession()
+        self._launch_settings_by_profile: dict[str, _LaunchSettings] = {}
         self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
         # Keep the caller's spelling: uploads open from it without following links, so a root swapped for a link is refused.
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
         if self._configured_output_dir is not None:
             self._configured_output_dir.mkdir(parents=True, exist_ok=True)
-        self._close_task: asyncio.Task[None] | None = None
-        self._startup_cleanup_tasks: set[asyncio.Task[None]] = set()
+
+    @property
+    def _session(self) -> _BrowserSession:
+        """Return the worker's own session once bound to a worker, else this process's shared one for the profile root."""
+        return self._worker_session if self._worker_workspace is not None else _PROFILE_SESSIONS[self._profiles_root]
 
     def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
         """Keep Matrix desktop calls with their live context while isolating host calls."""
@@ -686,15 +668,13 @@ class BrowserTools(Toolkit):
 
     def take_worker_session(self, previous: BrowserTools) -> None:
         """Move resources between serialized worker calls, retaining fresh request policy."""
-        if self._profiles or self._startup_cleanup_tasks:
+        if self._worker_session.profiles or self._worker_session.startup_cleanup_tasks:
             msg = "Only a fresh browser toolkit can receive a worker session."
             raise ValueError(msg)
-        self._profiles, previous._profiles = previous._profiles, {}
-        self._startup_cleanup_tasks, previous._startup_cleanup_tasks = previous._startup_cleanup_tasks, set()
-        self._lock, previous._lock = previous._lock, asyncio.Lock()
+        self._worker_session, previous._worker_session = previous._worker_session, _BrowserSession()
 
     def _bind_worker_browser(self, display: str | None, workspace: Path) -> str:
-        if self._profiles:
+        if self._worker_session.profiles:
             msg = "Bind the worker display before starting browser profiles."
             raise ValueError(msg)
         workspace = workspace.resolve()
@@ -722,17 +702,21 @@ class BrowserTools(Toolkit):
         )
 
     async def aclose(self) -> None:
-        """Close persistent browser resources on their owning event loop."""
+        """Close persistent browser resources on their owning event loop.
+
+        Outside a worker this closes the profiles every toolkit on this profile root shares.
+        """
         await run_coroutine_until_complete(self._aclose())
 
     async def _aclose(self) -> None:
         """Drain all profiles and retained startup cleanup before releasing ownership."""
+        session = self._session
         try:
             await self._close_profiles()
         finally:
             # Startup owns the driver until its handshake settles. A second
             # cancellation must not orphan cleanup or cancel that handshake.
-            tasks = tuple(self._startup_cleanup_tasks)
+            tasks = tuple(session.startup_cleanup_tasks)
             cleanup = asyncio.gather(*tasks, return_exceptions=True)
             cancelled: asyncio.CancelledError | None = None
             while not cleanup.done():
@@ -741,67 +725,19 @@ class BrowserTools(Toolkit):
                 except asyncio.CancelledError as exc:
                     cancelled = exc
             results = cleanup.result()
-            self._startup_cleanup_tasks.difference_update(tasks)
+            session.startup_cleanup_tasks.difference_update(tasks)
             if cancelled is not None:
                 raise cancelled
             for result in results:
                 if isinstance(result, BaseException):
                     raise result
 
-    def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Describe the browser actions, targets, and screenshot options the model routes a call by."""
-        parameters = dict(function.parameters)
-        properties = dict(parameters.get("properties") or {})
-
-        action_schema = dict(properties.get("action") or {})
-        action_schema["description"] = (
-            f"Browser action. Valid actions: {', '.join(sorted(_BROWSER_ACTIONS))}. "
-            "Use action='help' to inspect the full table."
-        )
-        action_schema["enum"] = sorted(_BROWSER_ACTIONS)
-        properties["action"] = action_schema
-
-        request_schema = dict(properties.get("request") or {})
-        request_schema["description"] = _ACT_REQUEST_DESCRIPTION
-        properties["request"] = request_schema
-
-        target_schema = dict(properties.get("target") or {})
-        target_schema["description"] = (
-            "Execution target. Use host for MindRoom's own browser profile or desktop for the pinned local "
-            "Playwright extension in the user's existing profile. Desktop supports observation and start, stop, open; "
-            "existing-page control requires upstream stable targeting. Reconnecting or reselecting does not enable it."
-        )
-        target_schema["enum"] = ["host", "desktop"]
-        properties["target"] = target_schema
-
-        target_id_schema = dict(properties.get("targetId") or {})
-        target_id_schema["description"] = (
-            "Opaque host-browser tab ID. The desktop target rejects targetId because Playwright MCP exposes mutable "
-            "numeric indices, not stable page identity. Desktop observations refer to its current tab only."
-        )
-        properties["targetId"] = target_id_schema
-
-        attachment_schema = dict(properties.get("returnAttachment") or {})
-        attachment_schema["description"] = (
-            "For action=screenshot with target=desktop, return a turn-scoped att_* handle so matrix_message can "
-            "send the captured image without saving plaintext to disk."
-        )
-        properties["returnAttachment"] = attachment_schema
-
-        save_only_schema = dict(properties.get("saveOnly") or {})
-        save_only_schema["description"] = (
-            "For host action=screenshot, return only the saved artifact metadata instead of model-visible image bytes."
-        )
-        properties["saveOnly"] = save_only_schema
-
-        parameters["properties"] = properties
-        return replace(function, parameters=closed_parameters(self.browser, parameters))
-
     async def _close_profiles(self) -> None:
         """Close all active browser profiles."""
         errors: list[Exception] = []
-        async with self._lock:
-            for profile_name in list(self._profiles):
+        session = self._session
+        async with session.lock:
+            for profile_name in list(session.profiles):
                 try:
                     await self._stop_profile_locked(profile_name)
                 except Exception as exc:
@@ -810,20 +746,11 @@ class BrowserTools(Toolkit):
             msg = "Failed to close browser profiles"
             raise ExceptionGroup(msg, errors)
 
-    def close(self) -> None:
-        """Close toolkit resources."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(self.aclose())
-            return
-        self._close_task = loop.create_task(self.aclose())
-
     @tool(name="browser_control")
     async def browser(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
-        action: str,
-        target: str | None = None,
+        action: _BrowserAction,
+        target: Literal["host", "desktop"] | None = None,
         node: str | None = None,
         profile: str | None = None,
         targetUrl: str | None = None,
@@ -861,12 +788,18 @@ class BrowserTools(Toolkit):
         The user's local browser is separate and requires the configured desktop target.
 
         Args:
-            action: Browser action (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act/help/actions)
-            target: Browser target location: ``host`` or the configured ``desktop`` Matrix device.
+            action: Browser action. Page interactions such as click or type use action='act' with request.kind.
+                Use action='help' to inspect the full table.
+            target: Execution target. Use host for MindRoom's own browser profile or desktop for the pinned local
+                Playwright extension in the user's existing profile.
+                Desktop supports observation and start, stop, open;
+                existing-page control requires upstream stable targeting.
+                Reconnecting or reselecting does not enable it.
             node: Node id compatibility field; unsupported in MindRoom runtime.
             profile: Host-target browser profile name (defaults to ``mindroom``).
             targetUrl: URL for ``open`` and ``navigate`` actions.
-            targetId: Opaque host-browser tab id. Desktop cannot bind existing-page control to stable identity.
+            targetId: Opaque host-browser tab ID. The desktop target rejects targetId because Playwright MCP exposes
+                mutable numeric indices, not stable page identity. Desktop observations refer to its current tab only.
             limit: Host-target snapshot item limit.
             maxChars: Snapshot text limit.
             mode: Host-target snapshot mode (supports ``efficient``).
@@ -882,8 +815,10 @@ class BrowserTools(Toolkit):
             ref: Snapshot ref id or CSS selector.
             element: CSS selector for element-specific actions.
             type: Screenshot type (``png`` or ``jpeg``).
-            saveOnly: For host screenshots, return saved artifact metadata without model-visible image bytes.
-            returnAttachment: For desktop screenshots, expose an ephemeral handle that matrix_message can send.
+            saveOnly: For host action=screenshot, return only the saved artifact metadata instead of model-visible
+                image bytes.
+            returnAttachment: For action=screenshot with target=desktop, return a turn-scoped att_* handle so
+                matrix_message can send the captured image without saving plaintext to disk.
             level: Console log level filter.
             paths: Browser artifact or workspace file paths, or att_* context attachment IDs to upload.
                 Workspace-relative paths are allowed; use ./ for a workspace file named att_*.
@@ -893,42 +828,41 @@ class BrowserTools(Toolkit):
             timeoutMs: Host-target timeout for upload/dialog actions.
             accept: Whether to accept dialog.
             promptText: Prompt text for dialog accept.
-            request: Act request object.
+            request: Act request object for action='act'. Set request.kind to one of: click, type, press, hover,
+                drag, select, fill, resize, wait, evaluate, close.
+                Common shapes: click {kind, ref, doubleClick?, button?, modifiers?};
+                type {kind, ref, text, submit?, slowly?}; press {kind, key}; hover {kind, ref};
+                drag {kind, startRef, endRef}; select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]};
+                resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; evaluate {kind, fn, ref?};
+                close {kind}. Refs come from action='snapshot'.
 
         Returns:
             JSON-encoded result payload.
 
         """
-        normalized_action = action.strip().lower()
-        if normalized_action not in _BROWSER_ACTIONS:
-            msg = _unknown_browser_action_message(action)
-            raise ValueError(msg)
-        if normalized_action in _REFERENCE_ACTIONS:
-            return json.dumps(_browser_help_payload(normalized_action), sort_keys=True)
-        if not isinstance(returnAttachment, bool):
-            msg = "returnAttachment must be a boolean."
-            raise TypeError(msg)
-        if not isinstance(saveOnly, bool):
-            msg = "saveOnly must be a boolean."
-            raise TypeError(msg)
-        if returnAttachment and normalized_action != "screenshot":
+        if action in _REFERENCE_ACTIONS:
+            return json.dumps(_browser_help_payload(action), sort_keys=True)
+        if returnAttachment and action != "screenshot":
             msg = "returnAttachment is only supported for action=screenshot."
             raise ValueError(msg)
-        if saveOnly and normalized_action != "screenshot":
+        if saveOnly and action != "screenshot":
             msg = "saveOnly is only supported for action=screenshot."
             raise ValueError(msg)
 
-        resolved_target = self._resolve_target(target=target, node=node)
-        if returnAttachment and resolved_target != "desktop":
-            msg = "returnAttachment requires target=desktop."
-            raise ValueError(msg)
-        if saveOnly and resolved_target == "desktop":
-            msg = "saveOnly requires target=host because desktop captures do not retain a local artifact path."
-            raise ValueError(msg)
-        if resolved_target == "desktop" and normalized_action == "open" and paths:
-            msg = "Opening a file requires target=host."
-            raise ValueError(msg)
-        if resolved_target == "desktop":
+        if self._resolve_target(target=target, node=node) == "desktop":
+            if saveOnly:
+                msg = "saveOnly requires target=host because desktop captures do not retain a local artifact path."
+                raise ValueError(msg)
+            if action == "open" and paths:
+                msg = "Opening a file requires target=host."
+                raise ValueError(msg)
+            if action not in SUPPORTED_BROWSER_ACTIONS:
+                msg = (
+                    f"Browser target=desktop does not support action={action}: existing-page control "
+                    "requires upstream stable targeting. Supported desktop actions: "
+                    f"{', '.join(sorted(SUPPORTED_BROWSER_ACTIONS))}."
+                )
+                raise ValueError(msg)
             unsupported = {
                 "compact": compact,
                 "frame": frame,
@@ -949,7 +883,7 @@ class BrowserTools(Toolkit):
                 msg = f"Browser target=desktop does not support: {', '.join(provided_unsupported)}."
                 raise ValueError(msg)
             return await self._desktop_browser(
-                action=normalized_action,
+                action=action,
                 target_url=targetUrl,
                 target_id=targetId,
                 max_chars=maxChars,
@@ -961,29 +895,28 @@ class BrowserTools(Toolkit):
                 image_type=type,
                 return_attachment=returnAttachment,
                 level=level,
-                paths=paths,
-                accept=accept,
-                prompt_text=promptText,
-                request=request,
             )
+        if returnAttachment:
+            msg = "returnAttachment requires target=desktop."
+            raise ValueError(msg)
         profile_name = _clean_str(profile) or _DEFAULT_PROFILE
 
-        if normalized_action == "status":
+        if action == "status":
             return json.dumps(await self._status_payload(profile_name), sort_keys=True)
-        if normalized_action == "start":
+        if action == "start":
             state = await self._ensure_profile(profile_name)
             payload = await self._profile_status(profile_name, state)
             payload["action"] = "start"
             return json.dumps(payload, sort_keys=True)
-        if normalized_action == "stop":
+        if action == "stop":
             await self._stop_profile(profile_name)
             return json.dumps({"action": "stop", "profile": profile_name, "status": "ok"}, sort_keys=True)
-        if normalized_action == "profiles":
+        if action == "profiles":
             return json.dumps(await self._profiles_payload(profile_name), sort_keys=True)
-        if normalized_action == "tabs":
+        if action == "tabs":
             state = await self._ensure_profile(profile_name)
             return json.dumps(await self._tabs_payload(profile_name, state), sort_keys=True)
-        if normalized_action == "open":
+        if action == "open":
             target_url = _clean_str(targetUrl)
             if paths:
                 if target_url is not None or len(paths) != 1:
@@ -1003,15 +936,15 @@ class BrowserTools(Toolkit):
                 allow_loopback=self._worker_display is not None,
             )
             return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
-        if normalized_action == "focus":
+        if action == "focus":
             target_id = _clean_str(targetId)
             if target_id is None:
                 msg = "targetId required for action=focus"
                 raise ValueError(msg)
             return json.dumps(await self._focus_tab(profile_name, target_id), sort_keys=True)
-        if normalized_action == "close":
+        if action == "close":
             return json.dumps(await self._close_tab(profile_name, _clean_str(targetId)), sort_keys=True)
-        if normalized_action == "snapshot":
+        if action == "snapshot":
             return json.dumps(
                 await self._snapshot(
                     profile_name=profile_name,
@@ -1025,12 +958,10 @@ class BrowserTools(Toolkit):
                     compact=compact,
                     depth=depth,
                     selector=_clean_str(selector),
-                    frame=_clean_str(frame),
-                    labels=labels,
                 ),
                 sort_keys=True,
             )
-        if normalized_action == "screenshot":
+        if action == "screenshot":
             screenshot, image_bytes = await self._screenshot(
                 profile_name=profile_name,
                 target_id=_clean_str(targetId),
@@ -1043,7 +974,7 @@ class BrowserTools(Toolkit):
                 return json.dumps(screenshot, sort_keys=True)
             result = await asyncio.to_thread(image_result, image_bytes, metadata=screenshot)
             return await asyncio.to_thread(finalize_tool_media, result)
-        if normalized_action == "navigate":
+        if action == "navigate":
             target_url = _clean_str(targetUrl)
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
@@ -1058,7 +989,7 @@ class BrowserTools(Toolkit):
                 await self._navigate(profile_name, target_url, _clean_str(targetId)),
                 sort_keys=True,
             )
-        if normalized_action == "console":
+        if action == "console":
             return json.dumps(
                 await self._console(
                     profile_name=profile_name,
@@ -1067,9 +998,9 @@ class BrowserTools(Toolkit):
                 ),
                 sort_keys=True,
             )
-        if normalized_action == "pdf":
+        if action == "pdf":
             return json.dumps(await self._pdf(profile_name, _clean_str(targetId)), sort_keys=True)
-        if normalized_action == "upload":
+        if action == "upload":
             if not paths:
                 msg = "paths required for action=upload"
                 raise ValueError(msg)
@@ -1085,7 +1016,7 @@ class BrowserTools(Toolkit):
                 ),
                 sort_keys=True,
             )
-        if normalized_action == "dialog":
+        if action == "dialog":
             return json.dumps(
                 await self._dialog(
                     profile_name=profile_name,
@@ -1096,8 +1027,8 @@ class BrowserTools(Toolkit):
                 ),
                 sort_keys=True,
             )
-        if normalized_action == "act":
-            if not isinstance(request, dict):
+        if action == "act":
+            if request is None:
                 msg = "request required for action=act"
                 raise ValueError(msg)
             return json.dumps(
@@ -1112,22 +1043,11 @@ class BrowserTools(Toolkit):
         msg = f"Unhandled action: {action}"
         raise ValueError(msg)
 
-    @staticmethod
-    def _validate_target(*, target: str | None, node: str | None) -> None:
-        normalized_target = _clean_str(target)
-        if node is not None and normalized_target not in {None, "node"}:
+    def _resolve_target(self, *, target: str | None, node: str | None) -> str:
+        if node is not None:
             msg = "node parameter is not supported in MindRoom."
             raise ValueError(msg)
-        if normalized_target in {"sandbox", "node"} or node is not None:
-            msg = "MindRoom browser tool does not support sandbox or node targets."
-            raise ValueError(msg)
-        if normalized_target not in {None, "host", "desktop"}:
-            msg = f"Unsupported target: {target}"
-            raise ValueError(msg)
-
-    def _resolve_target(self, *, target: str | None, node: str | None) -> str:
-        self._validate_target(target=target, node=node)
-        resolved = _clean_str(target) or self._default_target
+        resolved = target or self._default_target
         if self._worker_workspace is not None and resolved != "host":
             msg = "Worker browser does not support desktop routing."
             raise ValueError(msg)
@@ -1174,10 +1094,6 @@ class BrowserTools(Toolkit):
         image_type: str | None,
         return_attachment: bool,
         level: str | None,
-        paths: list[str] | None,
-        accept: bool | None,
-        prompt_text: str | None,
-        request: dict[str, Any] | None,
     ) -> str | ToolValue:
         target = self._desktop_target
         if target is None:
@@ -1201,10 +1117,6 @@ class BrowserTools(Toolkit):
             element=element,
             image_type=image_type,
             level=level,
-            paths=paths,
-            accept=accept,
-            prompt_text=prompt_text,
-            request=request,
             allow_private_networks=self._allow_private_networks,
         )
         now_ms = round(time.time() * 1000)
@@ -1245,15 +1157,17 @@ class BrowserTools(Toolkit):
         return await asyncio.to_thread(finalize_tool_media, result)
 
     async def _status_payload(self, profile_name: str) -> dict[str, Any]:
-        async with self._lock:
-            state = self._profiles.get(profile_name)
+        session = self._session
+        async with session.lock:
+            state = session.profiles.get(profile_name)
             if state is None or state.cleanup_required:
                 return {"action": "status", "profile": profile_name, "running": False, "status": "ok", "tabs": []}
             return await self._profile_status(profile_name, state)
 
     async def _profiles_payload(self, selected_profile: str) -> dict[str, Any]:
-        async with self._lock:
-            running = sorted(name for name, state in self._profiles.items() if not state.cleanup_required)
+        session = self._session
+        async with session.lock:
+            running = sorted(name for name, state in session.profiles.items() if not state.cleanup_required)
         advertised = sorted({_DEFAULT_PROFILE, "chrome", *running})
         return {
             "action": "profiles",
@@ -1429,10 +1343,11 @@ class BrowserTools(Toolkit):
         sources = [self._resolve_upload_path(path) for path in paths]
         locator = tab.page.locator(selector).first
         # Count this upload before another one measures the budget, so parallel uploads cannot each spend all of it.
-        async with self._upload_lock:
+        session = self._session
+        async with session.upload_lock:
             retained_bytes = sum(
                 open_tab.upload_staged_bytes
-                for profile in self._profiles.values()
+                for profile in session.profiles.values()
                 for open_tab in profile.tabs.values()
             )
             staging = TemporaryDirectory(prefix="mindroom-browser-upload-")
@@ -1474,11 +1389,7 @@ class BrowserTools(Toolkit):
     ) -> dict[str, Any]:
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
-        tab.pending_dialog = {
-            "accept": accept,
-            "promptText": prompt_text,
-            "timeoutMs": timeout_ms,
-        }
+        tab.pending_dialog = _PendingDialog(accept=accept, prompt_text=prompt_text)
         return {
             "accept": accept,
             "action": "dialog",
@@ -1538,20 +1449,14 @@ class BrowserTools(Toolkit):
         compact: bool | None,
         depth: int | None,
         selector: str | None,
-        frame: str | None,
-        labels: bool | None,
     ) -> dict[str, Any]:
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
-        if frame is not None:
-            del frame  # Not implemented in local Playwright path yet.
-        if labels is not None:
-            del labels  # Label overlays are currently not implemented.
 
         fmt = "aria" if snapshot_format == "aria" else "ai"
-        resolved_limit = max(1, limit) if isinstance(limit, int) and limit > 0 else _DEFAULT_SNAPSHOT_LIMIT
-        resolved_depth = max(1, depth) if isinstance(depth, int) and depth > 0 else 12
-        interactive_only = interactive if isinstance(interactive, bool) else True
+        resolved_limit = limit if limit is not None and limit > 0 else _DEFAULT_SNAPSHOT_LIMIT
+        resolved_depth = depth if depth is not None and depth > 0 else 12
+        interactive_only = interactive if interactive is not None else True
         rows = await tab.page.evaluate(
             _SNAPSHOT_JS,
             {
@@ -1587,21 +1492,21 @@ class BrowserTools(Toolkit):
 
         state.active_target_id = resolved_target_id
         title = await tab.page.title()
+        payload: dict[str, Any] = {
+            "action": "snapshot",
+            "count": len(ref_entries),
+            "format": fmt,
+            "interactive": interactive_only,
+            "mode": mode,
+            "profile": profile_name,
+            "refs": refs_mode or "role",
+            "status": "ok",
+            "targetId": resolved_target_id,
+            "title": title,
+            "url": tab.page.url,
+        }
         if fmt == "aria":
-            return {
-                "action": "snapshot",
-                "count": len(ref_entries),
-                "format": "aria",
-                "interactive": interactive_only,
-                "mode": mode,
-                "profile": profile_name,
-                "refs": refs_mode or "role",
-                "status": "ok",
-                "targetId": resolved_target_id,
-                "title": title,
-                "url": tab.page.url,
-                "elements": ref_entries,
-            }
+            return {**payload, "elements": ref_entries}
 
         lines: list[str] = [f"URL: {tab.page.url}", f"Title: {title}", "Elements:"]
         for entry in ref_entries:
@@ -1613,25 +1518,11 @@ class BrowserTools(Toolkit):
         resolved_max_chars = self._resolve_max_chars(max_chars=max_chars, mode=mode)
         if resolved_max_chars is not None and len(snapshot_text) > resolved_max_chars:
             snapshot_text = snapshot_text[:resolved_max_chars].rstrip() + "\n…"
-
-        return {
-            "action": "snapshot",
-            "count": len(ref_entries),
-            "format": "ai",
-            "interactive": interactive_only,
-            "mode": mode,
-            "profile": profile_name,
-            "refs": refs_mode or "role",
-            "snapshot": snapshot_text,
-            "status": "ok",
-            "targetId": resolved_target_id,
-            "title": title,
-            "url": tab.page.url,
-        }
+        return {**payload, "snapshot": snapshot_text}
 
     @staticmethod
     def _resolve_max_chars(*, max_chars: int | None, mode: str | None) -> int | None:
-        if isinstance(max_chars, int):
+        if max_chars is not None:
             return max_chars if max_chars > 0 else None
         if mode == "efficient":
             return None
@@ -1793,19 +1684,17 @@ class BrowserTools(Toolkit):
         payload.update(extra)
         return payload
 
-    async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:  # noqa: C901, PLR0915 - one startup ownership boundary
-        async with self._lock:
-            state = self._profiles.get(profile_name)
-            if state is not None:
-                if not state.cleanup_required:
-                    return state
-                await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
+    def _launch_settings(self, profile_name: str) -> _LaunchSettings:
+        """Return the settings that start ``profile_name``, worked out once per profile.
 
-            allow_loopback = self._worker_display is not None
-            user_data_dir = _profile_dir(self._profiles_root, profile_name)
+        A worker binds the toolkit before it starts any profile, so they are fixed from the first start on, and an
+        ignored proxy setting is logged once rather than on every call.
+        """
+        settings = self._launch_settings_by_profile.get(profile_name)
+        if settings is None:
             launch_kwargs = _persistent_launch_kwargs(
                 self._runtime_paths,
-                user_data_dir,
+                _profile_dir(self._profiles_root, profile_name),
                 headless=self._worker_display is None,
                 executable_override=(
                     self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") or COMPUTER_BROWSER_EXECUTABLE
@@ -1820,6 +1709,23 @@ class BrowserTools(Toolkit):
                 egress_control=self._worker_workspace is not None
                 or self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
             )
+            settings = _LaunchSettings(launch_kwargs, egress, self._allow_private_networks)
+            self._launch_settings_by_profile[profile_name] = settings
+        return settings
+
+    async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:  # noqa: C901, PLR0915 - one startup ownership boundary
+        session = self._session
+        async with session.lock:
+            launch_settings = self._launch_settings(profile_name)
+            egress, allow_private_networks = launch_settings.egress, launch_settings.allow_private_networks
+            allow_loopback = self._worker_display is not None
+            state = session.profiles.get(profile_name)
+            if state is not None:
+                # A toolkit sharing this session may have launched it under settings the operator has since changed.
+                if not state.cleanup_required and state.launch_settings == launch_settings:
+                    return state
+                await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
+            launch_kwargs = dict(launch_settings.options)
             if self._worker_process_env is not None:
                 launch_kwargs["env"] = self._worker_process_env
             if self._worker_display is not None:
@@ -1843,26 +1749,27 @@ class BrowserTools(Toolkit):
                 # Chromium's only proxy: every TCP connection, including redirects and service-worker fetches, is
                 # validated at dial time before it goes direct or through the operator's egress proxy.
                 destination_proxy = BrowserDestinationProxy(
-                    allow_private_networks=self._allow_private_networks,
+                    allow_private_networks=allow_private_networks,
                     allow_loopback=allow_loopback,
                     egress=egress,
                 )
                 await destination_proxy.start()
                 launch_kwargs["proxy"] = {"server": destination_proxy.endpoint, "bypass": RELAY_ONLY_PROXY_BYPASS}
                 _give_chromium_a_short_tmpdir(launch_kwargs)
-                clear_stale_singleton_locks(user_data_dir)
+                clear_stale_singleton_locks(Path(launch_settings.options["user_data_dir"]))
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
                 await context.route(
                     "**/*",
                     lambda route: continue_or_abort_browser_fetch(
                         route,
-                        allow_private_networks=self._allow_private_networks,
+                        allow_private_networks=allow_private_networks,
                         allow_loopback=allow_loopback,
                     ),
                 )
                 state = _BrowserProfileState(
                     playwright=playwright,
                     context=context,
+                    launch_settings=launch_settings,
                     destination_proxy=destination_proxy,
                 )
 
@@ -1896,23 +1803,24 @@ class BrowserTools(Toolkit):
                             await destination_proxy.close()
 
                 cleanup = asyncio.create_task(cleanup_startup())
-                self._startup_cleanup_tasks.add(cleanup)
+                session.startup_cleanup_tasks.add(cleanup)
                 await asyncio.shield(cleanup)
-                self._startup_cleanup_tasks.discard(cleanup)
+                session.startup_cleanup_tasks.discard(cleanup)
                 if isinstance(exc, PlaywrightError):
                     friendly_message = _friendly_playwright_browser_error_message(exc)
                     if friendly_message is not None:
                         raise RuntimeError(friendly_message) from exc
                 raise
-            self._profiles[profile_name] = state
+            session.profiles[profile_name] = state
             return state
 
     async def _stop_profile(self, profile_name: str) -> None:
-        async with self._lock:
+        async with self._session.lock:
             await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
 
     async def _stop_profile_locked(self, profile_name: str) -> None:
-        state = self._profiles.get(profile_name)
+        profiles = self._session.profiles
+        state = profiles.get(profile_name)
         if state is None:
             return
         state.cleanup_required = True
@@ -1928,33 +1836,22 @@ class BrowserTools(Toolkit):
                 finally:
                     for target_id in tuple(state.tabs):
                         self._remove_tab(state, target_id)
-        del self._profiles[profile_name]
+        del profiles[profile_name]
 
     async def _resolve_tab(
         self,
         state: _BrowserProfileState,
         target_id: str | None,
     ) -> tuple[str, _BrowserTabState]:
-        resolved_target_id = target_id or state.active_target_id
-        if resolved_target_id is not None:
-            tab = state.tabs.get(resolved_target_id)
-            if tab is not None and not tab.page.is_closed():
-                if self._worker_display is not None:
-                    await tab.page.bring_to_front()
-                state.active_target_id = resolved_target_id
-                return resolved_target_id, tab
-        for candidate_id, tab in state.tabs.items():
-            if not tab.page.is_closed():
-                if self._worker_display is not None:
-                    await tab.page.bring_to_front()
-                state.active_target_id = candidate_id
-                return candidate_id, tab
-        page = await state.context.new_page()
-        candidate_id = self._register_tab(state, page)
+        tab = state.tabs.get(target_id or state.active_target_id or "")
+        if tab is None or tab.page.is_closed():
+            tab = next((candidate for candidate in state.tabs.values() if not candidate.page.is_closed()), None)
+        if tab is None:
+            tab = state.tabs[self._register_tab(state, await state.context.new_page())]
         if self._worker_display is not None:
-            await page.bring_to_front()
-        state.active_target_id = candidate_id
-        return candidate_id, state.tabs[candidate_id]
+            await tab.page.bring_to_front()
+        state.active_target_id = tab.target_id
+        return tab.target_id, tab
 
     def _register_tab(self, state: _BrowserProfileState, page: Page) -> str:
         for tab in state.tabs.values():
@@ -2022,14 +1919,15 @@ class BrowserTools(Toolkit):
         if len(tab.console) > _MAX_CONSOLE_ENTRIES:
             del tab.console[:-_MAX_CONSOLE_ENTRIES]
 
-    async def _handle_dialog(self, tab: _BrowserTabState, dialog: Dialog) -> None:
+    @staticmethod
+    async def _handle_dialog(tab: _BrowserTabState, dialog: Dialog) -> None:
         behavior = tab.pending_dialog
         if behavior is None:
             await dialog.dismiss()
             return
         tab.pending_dialog = None
-        if behavior.get("accept"):
-            await dialog.accept(str(behavior.get("promptText") or ""))
+        if behavior.accept:
+            await dialog.accept(behavior.prompt_text or "")
             return
         await dialog.dismiss()
 

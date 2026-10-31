@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
@@ -55,6 +54,8 @@ from tests.test_model_selection_commands import OTHER, resolved_thread_models, r
 from tests.test_model_selection_scope import ROOM, USER
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -569,8 +570,8 @@ def test_store_drops_records_with_corrupt_set_at(tmp_path: Path) -> None:
     assert _stored_model(runtime_paths, THREAD_ID) == "large"
 
 
-def _make_tool_context(*, thread_id: str | None = THREAD_ID) -> ToolRuntimeContext:
-    config = _config_with_models(Path(tempfile.mkdtemp()))
+def _make_tool_context(tmp_path: Path, *, thread_id: str | None = THREAD_ID) -> ToolRuntimeContext:
+    config = _config_with_models(tmp_path)
     return make_test_tool_runtime_context(
         agent_name="test_agent",
         target=MessageTarget.resolve(
@@ -589,9 +590,9 @@ def _make_tool_context(*, thread_id: str | None = THREAD_ID) -> ToolRuntimeConte
     )
 
 
-def test_thread_model_tool_registered() -> None:
+def test_thread_model_tool_registered(tmp_path: Path) -> None:
     """The thread_model tool should be available from the metadata registry."""
-    config = _config_with_models(Path(tempfile.mkdtemp()))
+    config = _config_with_models(tmp_path)
     toolkit = get_tool_by_name(
         "thread_model",
         runtime_paths_for(config),
@@ -631,7 +632,7 @@ def _configured_thread_model_functions(context: ToolRuntimeContext, workspace: P
 
 def test_a_configured_switch_offers_no_output_path(tmp_path: Path) -> None:
     """A switch's result is for its run, so the model cannot ask to save it to a file, as it can for the other calls."""
-    functions = _configured_thread_model_functions(_make_tool_context(), tmp_path / "workspace")
+    functions = _configured_thread_model_functions(_make_tool_context(tmp_path), tmp_path / "workspace")
 
     assert OUTPUT_PATH_ARGUMENT not in functions["switch_thread_model"].parameters["properties"]
     assert OUTPUT_PATH_ARGUMENT in functions["get_thread_model"].parameters["properties"]
@@ -640,7 +641,7 @@ def test_a_configured_switch_offers_no_output_path(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_a_configured_switch_for_the_current_response_is_never_auto_saved(tmp_path: Path) -> None:
     """A saved result would answer with a receipt, which no longer stops the run or names the new model."""
-    context = _make_tool_context()
+    context = _make_tool_context(tmp_path)
     switch = _configured_thread_model_functions(context, tmp_path / "workspace")["switch_thread_model"]
 
     with tool_runtime_context(context):
@@ -667,9 +668,9 @@ async def test_thread_model_tool_requires_runtime_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_thread_model_tool_lists_configured_models_without_thread() -> None:
+async def test_thread_model_tool_lists_configured_models_without_thread(tmp_path: Path) -> None:
     """Removing explicit discovery would leave agents unable to choose a configured alias."""
-    context = _make_tool_context(thread_id=None)
+    context = _make_tool_context(tmp_path, thread_id=None)
 
     with tool_runtime_context(context):
         payload = json.loads(await ThreadModelTools().list_models())
@@ -686,9 +687,9 @@ async def test_thread_model_tool_lists_configured_models_without_thread() -> Non
 
 
 @pytest.mark.asyncio
-async def test_thread_model_tool_requires_thread() -> None:
+async def test_thread_model_tool_requires_thread(tmp_path: Path) -> None:
     """Switching should fail clearly without an active thread."""
-    context = _make_tool_context(thread_id=None)
+    context = _make_tool_context(tmp_path, thread_id=None)
     with tool_runtime_context(context):
         payload = json.loads(await ThreadModelTools().switch_thread_model("large"))
 
@@ -697,9 +698,9 @@ async def test_thread_model_tool_requires_thread() -> None:
 
 
 @pytest.mark.asyncio
-async def test_thread_model_tool_switch_get_and_reset() -> None:
+async def test_thread_model_tool_switch_get_and_reset(tmp_path: Path) -> None:
     """Switch, get, and reset should round-trip through the store."""
-    context = _make_tool_context()
+    context = _make_tool_context(tmp_path)
     tool = ThreadModelTools()
 
     with tool_runtime_context(context):
@@ -717,9 +718,9 @@ async def test_thread_model_tool_switch_get_and_reset() -> None:
 
 
 @pytest.mark.asyncio
-async def test_thread_model_tool_can_switch_after_current_tool_call() -> None:
+async def test_thread_model_tool_can_switch_after_current_tool_call(tmp_path: Path) -> None:
     """Ignoring the timing argument would leave the current response on the old model."""
-    context = _make_tool_context()
+    context = _make_tool_context(tmp_path)
 
     with tool_runtime_context(context):
         outcome = await ThreadModelTools().switch_thread_model("large", when="after-toolcall")
@@ -736,9 +737,9 @@ async def test_thread_model_tool_can_switch_after_current_tool_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_over_budget_switch_continues_this_response_on_the_fallback() -> None:
+async def test_over_budget_switch_continues_this_response_on_the_fallback(tmp_path: Path) -> None:
     """A mid-response switch to a priced model must not bypass the requester's budget."""
-    context = _make_tool_context()
+    context = _make_tool_context(tmp_path)
     context.config.models["large"].pricing = ModelPricing(input=5, output=30)
     context.config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
     context.config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
@@ -757,9 +758,9 @@ async def test_over_budget_switch_continues_this_response_on_the_fallback() -> N
 
 
 @pytest.mark.asyncio
-async def test_over_budget_next_turn_switch_says_replies_use_the_fallback() -> None:
+async def test_over_budget_next_turn_switch_says_replies_use_the_fallback(tmp_path: Path) -> None:
     """The agent should not promise the requested model while the requester is over budget."""
-    context = _make_tool_context()
+    context = _make_tool_context(tmp_path)
     context.config.models["large"].pricing = ModelPricing(input=5, output=30)
     context.config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model")
     context.config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
@@ -773,24 +774,21 @@ async def test_over_budget_next_turn_switch_says_replies_use_the_fallback() -> N
 
 
 @pytest.mark.asyncio
-async def test_thread_model_tool_rejects_unknown_switch_timing() -> None:
+async def test_thread_model_tool_rejects_unknown_switch_timing(tmp_path: Path) -> None:
     """Accepting an unknown timing value could persist a change with undefined execution semantics."""
-    context = _make_tool_context()
+    context = _make_tool_context(tmp_path)
+    entrypoint = toolkit_offers(ThreadModelTools(), "switch_thread_model").entrypoint
 
-    with tool_runtime_context(context):
-        payload = json.loads(
-            await ThreadModelTools().switch_thread_model("large", when="later"),  # type: ignore[arg-type]
-        )
+    with tool_runtime_context(context), pytest.raises(ValidationError):
+        await entrypoint(model_name="large", when="later")
 
-    assert payload["status"] == "error"
-    assert payload["available_when"] == ["after-toolcall", "next-turn"]
     assert _stored_model(context.runtime_paths, THREAD_ID) is None
 
 
 @pytest.mark.asyncio
-async def test_thread_model_tool_rejects_unknown_model() -> None:
+async def test_thread_model_tool_rejects_unknown_model(tmp_path: Path) -> None:
     """Switching should reject names missing from config.models."""
-    context = _make_tool_context()
+    context = _make_tool_context(tmp_path)
 
     with tool_runtime_context(context):
         payload = json.loads(await ThreadModelTools().switch_thread_model("nonexistent"))
@@ -801,9 +799,9 @@ async def test_thread_model_tool_rejects_unknown_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
+async def test_thread_model_tool_reports_stale_override_as_inactive(tmp_path: Path) -> None:
     """An override naming a removed model must not be reported as active."""
-    context = _make_tool_context()
+    context = _make_tool_context(tmp_path)
     set_thread_model_override(
         context.runtime_paths,
         thread_id=THREAD_ID,

@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from functools import partial
 from typing import TYPE_CHECKING
 
 import httpx
@@ -14,10 +15,10 @@ import pytest
 from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     MicrosoftGraphError,
+    graph_call,
     graph_int,
     graph_session,
     graph_time,
-    graph_tool_result,
     html_to_text,
     mailbox_next_page_token,
     mailbox_page_path,
@@ -46,6 +47,7 @@ from tests.oauth_test_utils import serve_token_endpoint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from mindroom.custom_tools.microsoft_graph import GraphSession
@@ -67,11 +69,15 @@ def _result(
     if connected:
         publish_grant(PROVIDER, manager, **grant_overrides)
 
-    def run() -> Mapping[str, object]:
-        with graph_session(PROVIDER, paths, manager, worker_target() if requester else None, None) as session:
-            return operation(session)
+    session = partial(graph_session, PROVIDER, paths, manager, worker_target() if requester else None, None)
+    return json.loads(_call(session, operation))
 
-    return json.loads(graph_tool_result("microsoft_files", run))
+
+def _call(
+    session: Callable[[], AbstractContextManager[GraphSession]],
+    operation: Callable[[GraphSession], Mapping[str, object]],
+) -> str:
+    return graph_call("microsoft_files", session, lambda: None, lambda opened, _request: operation(opened))
 
 
 def _answer(status: int, **kwargs: object) -> Callable[[httpx.Request], httpx.Response]:
@@ -93,6 +99,40 @@ def test_requests_carry_the_requester_token_to_graph(tmp_path: Path, monkeypatch
     [request] = graph.requests
     assert str(request.url) == f"{GRAPH_URL}/me/drive"
     assert bearer(request) == TOKEN
+
+
+@pytest.mark.parametrize("content", [b"not json", b"[1, 2]"])
+def test_a_response_that_is_not_a_json_object_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: bytes,
+) -> None:
+    FakeGraph(_answer(200, content=content)).install(monkeypatch)
+
+    result = _result(tmp_path, lambda session: session.json("GET", "/me/drive"))
+
+    assert result["code"] == "graph_invalid_response"
+
+
+def test_graph_call_refuses_malformed_arguments_before_asking_for_a_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = FakeGraph(_answer(200, json={})).install(monkeypatch)
+    paths = runtime_paths(tmp_path)
+    session = partial(graph_session, PROVIDER, paths, save_client_config(paths), worker_target(), None)
+
+    result = json.loads(
+        graph_call(
+            "microsoft_files",
+            session,
+            lambda: graph_int(0, "limit", maximum=50),
+            lambda _session, _limit: {},
+        ),
+    )
+
+    assert result["code"] == "invalid_argument"
+    assert graph.requests == []
 
 
 def test_a_missing_connection_returns_a_connect_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -434,8 +474,8 @@ def test_path_segments_refuse_anything_that_changes_the_path(value: object) -> N
     assert excinfo.value.code == "invalid_argument"
 
 
-@pytest.mark.parametrize("value", [0, 51, True, "5", 5.0, None])
-def test_graph_int_refuses_values_outside_the_range_and_non_integers(value: object) -> None:
+@pytest.mark.parametrize("value", [0, 51])
+def test_graph_int_refuses_values_outside_the_range(value: int) -> None:
     assert graph_int(50, "limit", maximum=50) == 50
     with pytest.raises(MicrosoftGraphError) as excinfo:
         graph_int(value, "limit", maximum=50)
@@ -459,8 +499,8 @@ def test_time_zone_names_accept_windows_and_iana_names(value: str) -> None:
     assert time_zone_name(value) == value
 
 
-@pytest.mark.parametrize("value", ["", " UTC", "UTC ", "Europe/Berlin;x", "(Mexico)", "Europe/Berlin\n", 7, None])
-def test_time_zone_names_refuse_anything_else(value: object) -> None:
+@pytest.mark.parametrize("value", ["", " UTC", "UTC ", "Europe/Berlin;x", "(Mexico)", "Europe/Berlin\n"])
+def test_time_zone_names_refuse_anything_else(value: str) -> None:
     with pytest.raises(MicrosoftGraphError) as excinfo:
         time_zone_name(value)
 
@@ -537,11 +577,9 @@ def test_a_tenant_change_retires_connections_made_for_another_tenant(
     manager = save_client_config(paths)
     publish_grant(PROVIDER, manager)
 
-    def run() -> Mapping[str, object]:
-        with graph_session(PROVIDER, paths, manager, worker_target(), None) as session:
-            return session.json("GET", "/me/drive")
+    session = partial(graph_session, PROVIDER, paths, manager, worker_target(), None)
 
-    result = json.loads(graph_tool_result("microsoft_files", run))
+    result = json.loads(_call(session, lambda opened: opened.json("GET", "/me/drive")))
 
     assert result["oauth_connection_required"] is True
     assert result["reason"] == "refresh_rejected"
@@ -554,11 +592,9 @@ def test_a_malformed_tenant_setting_is_reported_not_raised(tmp_path: Path, monke
     manager = save_client_config(paths)
     publish_grant(PROVIDER, manager)
 
-    def run() -> Mapping[str, object]:
-        with graph_session(PROVIDER, paths, manager, worker_target(), None) as session:
-            return session.json("GET", "/me/drive")
+    session = partial(graph_session, PROVIDER, paths, manager, worker_target(), None)
 
-    result = json.loads(graph_tool_result("microsoft_files", run))
+    result = json.loads(_call(session, lambda opened: opened.json("GET", "/me/drive")))
 
     assert result["code"] == "invalid_tenant"
     assert graph.requests == []
@@ -728,11 +764,9 @@ def test_mailbox_paths_name_the_requester_or_one_address(value: str | None, path
         "kim@contoso.com?x=1",
         "Kim <kim@contoso.com>",
         f"{'k' * 250}@contoso.com",
-        5,
-        ["kim@contoso.com"],
     ],
 )
-def test_mailbox_paths_refuse_anything_but_one_printable_address(value: object) -> None:
+def test_mailbox_paths_refuse_anything_but_one_printable_address(value: str) -> None:
     with pytest.raises(MicrosoftGraphError) as excinfo:
         mailbox_path(value, "calendar_owner")
 

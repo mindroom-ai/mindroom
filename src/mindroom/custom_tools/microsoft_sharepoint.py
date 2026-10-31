@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlsplit
 
@@ -15,15 +16,16 @@ from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contr
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
-    graph_error_payload,
+    graph_call,
     graph_int,
+    graph_object,
     graph_session,
-    graph_tool_result,
     html_to_text,
     next_page_token,
     page_offset,
     page_path,
     path_segment,
+    required_text,
 )
 from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.authoring import Toolkit
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
     from mindroom.constants import RuntimePaths
+    from mindroom.custom_tools.microsoft_graph import GraphSession
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _WRITE_FUNCTIONS = frozenset({"microsoft_sharepoint_create_item", "microsoft_sharepoint_update_item"})
@@ -93,31 +96,30 @@ class _Request:
     target: _Target | None = None
 
 
-def _site_path(site_id: object) -> str:
+def _site_path(site_id: str) -> str:
     return f"/sites/{path_segment(site_id, 'site_id')}"
 
 
-def _list_path(site_id: object, list_id: object) -> str:
+def _list_path(site_id: str, list_id: str) -> str:
     return f"{_site_path(site_id)}/lists/{path_segment(list_id, 'list_id')}"
 
 
-def _target(site_id: object, list_id: object, expected_web_url: object) -> _Target:
+def _target(site_id: str, list_id: str, expected_web_url: str) -> _Target:
     list_path = _list_path(site_id, list_id)
-    if not isinstance(expected_web_url, str) or not expected_web_url.strip():
+    if not expected_web_url.strip():
         msg = "expected_web_url must be the web_url of the list this call writes to."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return _Target(list_path, expected_web_url.strip())
 
 
-def _site_url_path(url: object) -> str:
+def _site_url_path(url: str) -> str:
     """Return the Graph path of the site an https SharePoint address names, as /sites/{hostname}:/{site path}.
 
     The address's query and fragment are ignored. Each path segment is decoded and must stay one segment: a
     colon would end Graph's path addressing and reach another resource, so none may hold one.
     """
-    text = url if isinstance(url, str) else ""
     try:
-        parts = urlsplit(text)
+        parts = urlsplit(url)
         host = parts.hostname or ""
     except ValueError:
         raise MicrosoftGraphError(code="invalid_argument", message=_INVALID_URL) from None
@@ -125,7 +127,7 @@ def _site_url_path(url: object) -> str:
         parts.scheme != "https"
         or parts.netloc.lower() != host
         or not _SHAREPOINT_HOST.fullmatch(host)
-        or any(ord(character) < 32 or ord(character) == 127 for character in text)
+        or any(ord(character) < 32 or ord(character) == 127 for character in url)
     ):
         raise MicrosoftGraphError(code="invalid_argument", message=_INVALID_URL)
     segments = [unquote(segment) for segment in parts.path.split("/") if segment]
@@ -138,7 +140,7 @@ def _site_url_path(url: object) -> str:
     return f"/sites/{host}:/{'/'.join(quoted)}" if quoted else f"/sites/{host}"
 
 
-def _listing(page_token: object, collection: str, first_page: Callable[[], _Request]) -> _Request:
+def _listing(page_token: str | None, collection: str, first_page: Callable[[], _Request]) -> _Request:
     """Return the request for a listing's first page, or for the page a token continues, without other arguments."""
     if page_token is not None:
         return _Request("GET", page_path(page_token, collection))
@@ -149,19 +151,15 @@ def _scalar(value: object) -> bool:
     return value is None or isinstance(value, (str, bool, int)) or (isinstance(value, float) and math.isfinite(value))
 
 
-def _field_values(fields: object) -> dict[str, object]:
+def _field_values(fields: dict[str, Any]) -> dict[str, Any]:
     """Return model-supplied column values, refusing anything but JSON scalars and flat lists under column names."""
-    if not isinstance(fields, dict) or not fields:
+    if not fields:
         raise MicrosoftGraphError(code="invalid_argument", message=_INVALID_FIELDS)
-    for name, value in cast("dict[object, object]", fields).items():
+    for name, value in fields.items():
         flat_list = isinstance(value, list) and all(item is not None and _scalar(item) for item in value)
-        if not isinstance(name, str) or not name.strip() or not (_scalar(value) or flat_list):
+        if not name.strip() or not (_scalar(value) or flat_list):
             raise MicrosoftGraphError(code="invalid_argument", message=_INVALID_FIELDS)
-    return cast("dict[str, object]", fields)
-
-
-def _mapping(value: object) -> Mapping[str, Any]:
-    return cast("Mapping[str, Any]", value) if isinstance(value, dict) else {}
+    return fields
 
 
 def _records(value: object) -> list[dict[str, Any]]:
@@ -182,14 +180,14 @@ def _list(entry: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": entry.get("id"),
         "name": entry.get("displayName") or entry.get("name"),
-        "template": _mapping(entry.get("list")).get("template"),
+        "template": graph_object(entry.get("list")).get("template"),
         "web_url": entry.get("webUrl"),
     }
 
 
 def _hidden(entry: Mapping[str, Any]) -> bool:
     """Graph leaves out system lists unless asked for them, but returns hidden lists flagged as hidden."""
-    return _mapping(entry.get("list")).get("hidden") is True
+    return graph_object(entry.get("list")).get("hidden") is True
 
 
 def _column(column: Mapping[str, Any]) -> dict[str, Any]:
@@ -202,11 +200,11 @@ def _column(column: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _values(fields: object) -> tuple[dict[str, Any], list[str]]:
+def _fields(item_id: object, fields: object) -> dict[str, Any]:
     """Return an item's column values without OData annotations, each text cut short, and the names of cut ones."""
     values: dict[str, Any] = {}
     truncated: list[str] = []
-    for name, value in _mapping(fields).items():
+    for name, value in graph_object(fields).items():
         if "@odata." in name:
             continue
         if isinstance(value, str) and len(value) > _MAX_VALUE_CHARACTERS:
@@ -214,11 +212,6 @@ def _values(fields: object) -> tuple[dict[str, Any], list[str]]:
             values[name] = value[:_MAX_VALUE_CHARACTERS]
         else:
             values[name] = value
-    return values, truncated
-
-
-def _fields(item_id: object, fields: object) -> dict[str, Any]:
-    values, truncated = _values(fields)
     summary = {"id": item_id, "fields": values}
     if truncated:
         summary["truncated_fields"] = truncated
@@ -248,14 +241,14 @@ def _web_parts(layout: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
     for section in _records(layout.get("horizontalSections")):
         for column in _records(section.get("columns")):
             yield from _records(column.get("webparts"))
-    yield from _records(_mapping(layout.get("verticalSection")).get("webparts"))
+    yield from _records(graph_object(layout.get("verticalSection")).get("webparts"))
 
 
 def _page_text(page: Mapping[str, Any]) -> str:
     """Return a page's title and the text of its text web parts, one block per part."""
     title = page.get("title")
     blocks = [title] if isinstance(title, str) and title.strip() else []
-    for part in _web_parts(_mapping(page.get("canvasLayout"))):
+    for part in _web_parts(graph_object(page.get("canvasLayout"))):
         html = part.get("innerHtml")
         if isinstance(html, str) and (text := html_to_text(html)):
             blocks.append(text)
@@ -283,11 +276,14 @@ class MicrosoftSharePointTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftSharePointTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         functions: dict[str, Callable[..., str]] = {
             "microsoft_sharepoint_search_sites": self.microsoft_sharepoint_search_sites,
             "microsoft_sharepoint_get_site": self.microsoft_sharepoint_get_site,
@@ -313,26 +309,15 @@ class MicrosoftSharePointTools(Toolkit):
 
         A write is sent only after reading its list and finding it at the web_url the call expects.
         """
-        try:
-            request = build()
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
 
-        def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                if (target := request.target) is not None:
-                    web_url = session.json("GET", target.list_path, params={"$select": "webUrl"}).get("webUrl")
-                    if web_url != target.web_url:
-                        raise MicrosoftGraphError(code="target_mismatch", message=_TARGET_MISMATCH, web_url=web_url)
-                return result(session.json(request.method, request.path, params=request.params, json=request.body))
+        def run(session: GraphSession, request: _Request) -> Mapping[str, object]:
+            if (target := request.target) is not None:
+                web_url = session.json("GET", target.list_path, params={"$select": "webUrl"}).get("webUrl")
+                if web_url != target.web_url:
+                    raise MicrosoftGraphError(code="target_mismatch", message=_TARGET_MISMATCH, web_url=web_url)
+            return result(session.json(request.method, request.path, params=request.params, json=request.body))
 
-        return graph_tool_result(_TOOL_NAME, run)
+        return graph_call(_TOOL_NAME, self._session, build, run)
 
     def microsoft_sharepoint_search_sites(self, query: str, page_token: str | None = None) -> str:
         """Search the SharePoint sites the requester can open by keyword, with the site_id the other functions take.
@@ -344,9 +329,7 @@ class MicrosoftSharePointTools(Toolkit):
         """
 
         def first_page() -> _Request:
-            if not isinstance(query, str) or not query.strip():
-                raise MicrosoftGraphError(code="invalid_argument", message="query must not be empty.")
-            return _Request("GET", "/sites", params={"search": query})
+            return _Request("GET", "/sites", params={"search": required_text(query, "query")})
 
         return self._send(
             lambda: _listing(page_token, "/sites", first_page),

@@ -121,3 +121,15 @@ async def test_current_room_access_needs_no_membership_fetch(tmp_path: Path) -> 
 
     assert await room_access_allowed(context, "!current:example.org")
     client.joined_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_blank_room_access_is_denied(tmp_path: Path) -> None:
+    """A blank room ID names no room, so it is denied without a membership fetch."""
+    client = AsyncMock()
+    client.joined_members.return_value = _joined_members_response("@alice:example.org")
+    context = _context(tmp_path, current_config=_config(tmp_path, allowed=True), client=client)
+
+    assert not await room_access_allowed(context, "")
+    client.joined_members.assert_not_awaited()

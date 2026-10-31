@@ -41,7 +41,6 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "show_computer",
         "open_settings",
         "open_panel",
         "show_canvas",
