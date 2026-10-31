@@ -208,6 +208,8 @@ class _PersonalAgentExpansion:
     data: object
     instances: dict[str, PersonalAgentInstance]
     probe_data: object | None
+    # Call profile by template key for templates named in calls.agents; data lists their generated agents instead.
+    call_templates: dict[str, str]
 
 
 class PersonalAgentRoster(BaseModel):
@@ -320,9 +322,40 @@ def _probe_agents(
     return agents
 
 
+def _call_templates(config: Mapping[str, Any], templates: Mapping[str, dict[str, Any]]) -> dict[str, str]:
+    """Return the call profile of each template that calls.agents names."""
+    calls = config.get("calls")
+    call_agents = calls.get("agents") if isinstance(calls, dict) else None
+    if not isinstance(call_agents, dict):
+        return {}
+    assigned = {key: profile for key, profile in call_agents.items() if key in templates}
+    for key in assigned:
+        if templates[key]["agent"].get("rooms"):
+            msg = (
+                f"calls.agents names personal_agents.{key}, whose agent lists rooms; every user's agent would join "
+                "them, and a room takes only one calls-enabled agent"
+            )
+            raise ValueError(msg)
+    return assigned
+
+
+def _with_call_agents(
+    config: Mapping[str, Any],
+    call_templates: Mapping[str, str],
+    instances: Mapping[str, PersonalAgentInstance],
+) -> dict[str, Any]:
+    """Replace each template key in calls.agents with the agents generated from that template."""
+    calls = config["calls"]
+    call_agents = {key: profile for key, profile in calls["agents"].items() if key not in call_templates}
+    for agent_name, instance in instances.items():
+        if instance.template in call_templates:
+            call_agents[agent_name] = call_templates[instance.template]
+    return {**config, "calls": {**calls, "agents": call_agents}}
+
+
 def expand_personal_agents(data: object, roster: Sequence[PersonalAgentRosterEntry]) -> _PersonalAgentExpansion:
     """Add one generated agent per roster entry to raw config data without mutating the input."""
-    unexpanded = _PersonalAgentExpansion(data, {}, None)
+    unexpanded = _PersonalAgentExpansion(data, {}, None, {})
     if not isinstance(data, dict):
         return unexpanded
     config = cast("dict[str, Any]", data)
@@ -359,11 +392,14 @@ def expand_personal_agents(data: object, roster: Sequence[PersonalAgentRosterEnt
         owners.setdefault(entry.template, set()).add(entry.user_id)
 
     probes = _probe_agents(templates, owners)
-    return _PersonalAgentExpansion(
-        {**config, "agents": agents} if instances else config,
-        instances,
-        {**config, "agents": {**agents, **probes}} if probes else None,
-    )
+    expanded: dict[str, Any] = {**config, "agents": agents} if instances else config
+    probe_data: dict[str, Any] | None = {**config, "agents": {**agents, **probes}} if probes else None
+    call_templates = _call_templates(config, templates)
+    if call_templates:
+        expanded = _with_call_agents(expanded, call_templates, instances)
+        if probe_data is not None:
+            probe_data = _with_call_agents(probe_data, call_templates, instances)
+    return _PersonalAgentExpansion(expanded, instances, probe_data, call_templates)
 
 
 def personal_agent_roster_path(runtime_paths: RuntimePaths) -> Path:
