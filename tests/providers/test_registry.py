@@ -40,7 +40,7 @@ from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
-from mindroom.providers.registry import build_model_provider, model_capabilities, stream_idle_timeout_seconds
+from mindroom.providers.registry import build_model_provider, stream_idle_timeout_seconds
 from mindroom.providers.synthetic_adapter import SyntheticProvider
 from tests.agno_parity.golden_files import render
 from tests.providers.bare_adapter import bare_adapter
@@ -370,7 +370,8 @@ def test_a_cli_style_model_id_gets_the_capabilities_of_the_model_it_names(
         },
     )
 
-    assert model_capabilities(config, runtime_paths, "prefixed") == model_capabilities(config, runtime_paths, "bare")
+    prefixed = build_model_provider(config, runtime_paths, "prefixed").capabilities
+    assert prefixed == build_model_provider(config, runtime_paths, "bare").capabilities
 
 
 def test_the_model_in_use_is_logged_with_its_effective_id(runtime_paths: RuntimePaths) -> None:
@@ -524,25 +525,6 @@ async def test_api_key_precedence(
         await complete(build_model_provider(config, runtime_paths, "target"), ModelRequest(messages=[_user()]))
 
     assert wire.requests[0].headers["authorization"] == f"Bearer {expected_key}"
-
-
-@pytest.mark.parametrize("model_name", ["openrouter", "zai"])
-def test_the_capabilities_of_a_model_keyed_by_the_dashboard_are_read_without_a_missing_key_warning(
-    model_name: str,
-    runtime_paths: RuntimePaths,
-) -> None:
-    """The route a model's capabilities come from is built with the model's dashboard key, as its requests are."""
-    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
-        f"model:{model_name}",
-        {"api_key": "sk-dashboard"},
-    )
-    config = Config(models={model_name: ModelConfig(provider=model_name, id="glm-5.3")})
-
-    with capture_logs() as logs:
-        capabilities = model_capabilities(config, runtime_paths, model_name)
-
-    assert capabilities == build_model_provider(config, runtime_paths, model_name).capabilities
-    assert [entry["event"] for entry in logs if entry["log_level"] == "warning"] == []
 
 
 # The header each keyed family sends its key in, and how it formats it.

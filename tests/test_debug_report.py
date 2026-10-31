@@ -775,8 +775,7 @@ def _write_config(path: Path) -> None:
         "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5-5\n"
         "agents:\n  general:\n    display_name: General Agent\n    model: default\n"
         "router:\n  model: default\n"
-        "matrix_space:\n  enabled: false\n"
-        "authorization:\n  global_users: []\n",
+        "matrix_space:\n  enabled: false\n",
         encoding="utf-8",
     )
 
@@ -928,6 +927,7 @@ def test_cli_reads_the_config_without_migrating_it(tmp_path: Path) -> None:
     config_dir.mkdir()
     config = config_dir / "config.yaml"
     _write_config(config)
+    config.write_text(config.read_text(encoding="utf-8") + "authorization:\n  global_users: []\n", encoding="utf-8")
     original = config.read_bytes()
     storage = tmp_path / "storage"
     _seed_journal(storage / "tracking" / "event_journal.db")

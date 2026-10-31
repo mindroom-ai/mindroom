@@ -30,8 +30,6 @@ from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.skill_usage import record_skill_use
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
@@ -62,9 +60,6 @@ _GET_SKILL_REFERENCE_DESCRIPTION = (
 _GET_SKILL_SCRIPT_DESCRIPTION = (
     "Read a script from a skill. This never runs the script; run it with your shell tool if you have one."
 )
-# TODO(simplify): the fixed header of the system prompt's skills section is Agno's text, which calls scripts
-# "Executable code templates" though get_skill_script only reads them. Write MindRoom's own skills prompt (#3105).
-# Models would notice.
 _PROMPT_HEADER = (
     "<skills_system>",
     "",
@@ -103,7 +98,9 @@ _OS_ALIASES = {
     "windows": {"windows", "win", "win32"},
 }
 
-_SkillSnapshot = tuple[tuple[str, int, int], ...]
+# One SKILL.md path with its mtime and size, and the script and reference file names its folder lists.
+_SkillFilesEntry = tuple[str, int, int, tuple[str, ...], tuple[str, ...]]
+_SkillSnapshot = tuple[_SkillFilesEntry, ...]
 _SKILL_CACHE: dict[Path, tuple[_SkillSnapshot, list[Skill]]] = {}
 _THIS_DIR = Path(__file__).resolve().parent
 _BUNDLED_SKILLS_DEV_DIR = _THIS_DIR.parents[2] / "skills"
@@ -555,7 +552,10 @@ def agent_workspace_skills_root(workspace_root: Path) -> Path:
 
 
 def list_skill_listings(plugin_skill_roots: Sequence[Path]) -> list[SkillListing]:
-    """Return the skill listings of the default skill roots with precedence rules applied, the plugins' labeled plugin."""
+    """Return the skill listings of the default skill roots with precedence rules applied, the plugins' labeled plugin.
+
+    Each root is read as agents load it, so the listings name every skill an agent can be given.
+    """
     bundled_root = _get_bundled_skills_dir().expanduser().resolve()
     user_root = get_user_skills_dir().expanduser().resolve()
     plugin_roots = {root.expanduser().resolve() for root in plugin_skill_roots}
@@ -563,11 +563,11 @@ def list_skill_listings(plugin_skill_roots: Sequence[Path]) -> list[SkillListing
     skills_by_name: dict[str, SkillListing] = {}
     for root in default_skill_roots(plugin_skill_roots):
         origin = _root_origin(root, bundled_root, user_root, plugin_roots)
-        for skill_dir in _iter_skill_dirs(root):
-            identity = _listed_skill_identity(skill_dir)
+        for skill in _load_root_skills(root):
+            identity = _normalize_skill_identity(skill.name, skill.description, path=str(skill.source_path))
             if identity is not None:
                 name, description = identity
-                skills_by_name[name] = SkillListing(name, description, skill_dir / SKILL_FILENAME, origin)
+                skills_by_name[name] = SkillListing(name, description, skill.source_path / SKILL_FILENAME, origin)
 
     return sorted(skills_by_name.values(), key=lambda item: item.name.lower())
 
@@ -601,33 +601,33 @@ def clear_skill_cache() -> None:
 
 
 def get_skill_snapshot(roots: Sequence[Path]) -> _SkillSnapshot:
-    """Return a snapshot of SKILL.md files under the provided roots."""
-    entries: list[tuple[str, int, int]] = []
+    """Return a snapshot of SKILL.md files under the provided roots, with the support file names beside each."""
+    entries: list[_SkillFilesEntry] = []
     for root in _unique_paths(roots):
         entries.extend(_snapshot_skill_files(root))
     entries.sort()
     return tuple(entries)
 
 
-def _snapshot_skill_files(root: Path) -> list[tuple[str, int, int]]:
+def _snapshot_skill_files(root: Path) -> list[_SkillFilesEntry]:
+    """Return the state of each skill folder ``_read_skill_root`` reads, so a linked folder changes the snapshot too."""
     if not root.exists() or not root.is_dir():
         return []
+    try:
+        folders = _skill_folders(root)
+    except OSError:
+        return []
 
-    entries: list[tuple[str, int, int]] = []
-    for skill_file in root.rglob(SKILL_FILENAME):
+    entries: list[_SkillFilesEntry] = []
+    for folder in folders:
+        skill_file = folder / SKILL_FILENAME
         try:
             stat = skill_file.stat()
+            entries.append((str(skill_file), stat.st_mtime_ns, stat.st_size, *_support_file_names(folder)))
         except OSError:
             continue
-        entries.append((str(skill_file), stat.st_mtime_ns, stat.st_size))
     entries.sort()
     return entries
-
-
-def _iter_skill_dirs(root: Path) -> list[Path]:
-    if not root.exists() or not root.is_dir():
-        return []
-    return sorted(_skill_folders(root))
 
 
 def _skill_folders(root: Path) -> list[Path]:
@@ -650,22 +650,22 @@ def _match_skill_frontmatter(content: str) -> re.Match[str] | None:
     return _FRONTMATTER_PATTERN.match(content) if "\n---" in content else None
 
 
-def parse_skill_markdown(
-    content: str,
-    *,
-    load_yaml: Callable[[str], Any] = yaml_io.safe_load_without_aliases,
-) -> tuple[dict[str, Any], str]:
-    """Split one ``SKILL.md`` into its frontmatter mapping and instructions, as skill loading reads them.
+def _frontmatter_yaml(content: str, match: re.Match[str]) -> str:
+    """Return the frontmatter of ``match``, led by line breaks so YAML errors name lines of ``SKILL.md``."""
+    return "\n" * content.count("\n", 0, match.start(1)) + match.group(1)
 
-    The default loader refuses frontmatter that worker code could write to exhaust the primary.
+
+def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
+    """Split one ``SKILL.md`` into its frontmatter mapping and instructions, as workspace skill loading reads them.
+
+    The YAML loader refuses frontmatter that worker code could write to exhaust the primary.
     """
     match = _match_skill_frontmatter(content)
     if not match:
         msg = "Skill missing frontmatter"
         raise SkillMarkdownError(msg)
     try:
-        # Leading line breaks keep the lines YAML errors name at their lines in SKILL.md.
-        frontmatter = load_yaml("\n" * content.count("\n", 0, match.start(1)) + match.group(1)) or {}
+        frontmatter = yaml_io.safe_load_without_aliases(_frontmatter_yaml(content, match)) or {}
     except Exception as exc:
         msg = f"Failed to parse skill frontmatter: {exc}"
         raise SkillMarkdownError(msg) from exc
@@ -675,29 +675,11 @@ def parse_skill_markdown(
     return cast("dict[str, Any]", frontmatter), match.group(2).strip()
 
 
-def _parse_skill_frontmatter(
-    content: str,
-    *,
-    load_yaml: Callable[[str], Any] = yaml_io.safe_load_without_aliases,
-) -> tuple[dict[str, Any], str]:
+def _parse_skill_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """Split one ``SKILL.md`` like ``parse_skill_markdown``, reading one without frontmatter as all instructions."""
     if not _match_skill_frontmatter(content):
         return {}, content
-    return parse_skill_markdown(content, load_yaml=load_yaml)
-
-
-def _read_skill_frontmatter(skill_path: Path) -> dict[str, Any] | None:
-    try:
-        content = skill_path.read_text(encoding="utf-8")
-    except Exception as exc:
-        logger.warning("Failed to read skill file", path=str(skill_path), error=str(exc))
-        return None
-    # Only operator skill roots are listed here, and agents load them with plain YAML, so parse alike.
-    try:
-        return _parse_skill_frontmatter(content, load_yaml=yaml_io.safe_load)[0]
-    except SkillMarkdownError as exc:
-        logger.warning("Refused skill frontmatter", path=str(skill_path), error=str(exc))
-        return None
+    return parse_skill_markdown(content)
 
 
 def _normalize_skill_identity(
@@ -714,18 +696,6 @@ def _normalize_skill_identity(
     if not isinstance(description, str) or not description.strip():
         return normalized_name, normalized_name
     return normalized_name, description.strip()
-
-
-def _listed_skill_identity(skill_dir: Path) -> tuple[str, str] | None:
-    """Return the name and description a skill listing shows for one skill folder."""
-    frontmatter = _read_skill_frontmatter(skill_dir / SKILL_FILENAME)
-    if frontmatter is None:
-        return None
-    return _normalize_skill_identity(
-        frontmatter.get("name", skill_dir.name),
-        frontmatter.get("description", ""),
-        path=str(skill_dir),
-    )
 
 
 def _load_root_skills(root: Path) -> list[Skill]:
@@ -750,9 +720,6 @@ def _load_root_skills(root: Path) -> list[Skill]:
     return skills
 
 
-# TODO(simplify): Operator skill roots load leniently: frontmatter that is not YAML reads as ``key: value`` lines, and
-# a folder that fails to load is skipped with a warning, while workspace skills load strictly and report each refusal.
-# Load both with the strict loader (#3105). Operators would notice: a malformed operator skill would be refused.
 def _read_skill_root(root: Path) -> list[Skill]:
     """Read one skill folder, or every skill folder directly below ``root``, in directory order."""
     return [skill for folder in _skill_folders(root) if (skill := _read_skill_folder(folder)) is not None]
@@ -761,16 +728,16 @@ def _read_skill_root(root: Path) -> list[Skill]:
 def _read_skill_folder(folder: Path) -> Skill | None:
     """Read one operator skill folder; its frontmatter is validated when an agent loads the skill."""
     try:
-        frontmatter, instructions = _parse_operator_skill_markdown(
-            (folder / SKILL_FILENAME).read_text(encoding="utf-8"),
-        )
+        skill_file = folder / SKILL_FILENAME
+        frontmatter, instructions = _parse_operator_skill_markdown(skill_file.read_text(encoding="utf-8"), skill_file)
+        scripts, references = _support_file_names(folder)
         return Skill(
             name=frontmatter.get("name", folder.name),
             description=frontmatter.get("description", ""),
             instructions=instructions,
             source_path=folder,
-            scripts=_listed_file_names(folder / "scripts"),
-            references=_listed_file_names(folder / "references"),
+            scripts=scripts,
+            references=references,
             metadata=frontmatter.get("metadata"),
         )
     except Exception as exc:
@@ -778,15 +745,19 @@ def _read_skill_folder(folder: Path) -> Skill | None:
         return None
 
 
-def _parse_operator_skill_markdown(content: str) -> tuple[Any, str]:
-    """Split an operator ``SKILL.md``; frontmatter that is not valid YAML is read as ``key: value`` lines."""
+def _parse_operator_skill_markdown(content: str, path: Path) -> tuple[Any, str]:
+    """Split an operator ``SKILL.md``; frontmatter that is not valid YAML is read as ``key: value`` lines.
+
+    Bundled, plugin, and user skills are the operator's, so one whose frontmatter is not YAML still loads and lists.
+    Workspace skills, which worker code can write, parse strictly through ``parse_skill_markdown`` instead.
+    """
     match = _match_skill_frontmatter(content)
     if match is None:
         return {}, content
     try:
-        frontmatter = yaml_io.safe_load(match.group(1)) or {}
+        frontmatter = yaml_io.safe_load(_frontmatter_yaml(content, match)) or {}
     except Exception as exc:
-        logger.warning("Error parsing skill frontmatter as YAML", error=str(exc))
+        logger.warning("Error parsing skill frontmatter as YAML", path=str(path), error=str(exc))
         frontmatter = _simple_frontmatter(match.group(1))
     return frontmatter, match.group(2).strip()
 
@@ -798,6 +769,11 @@ def _simple_frontmatter(text: str) -> dict[str, str]:
             key, value = line.split(":", 1)
             result[key.strip()] = value.strip().strip('"').strip("'")
     return result
+
+
+def _support_file_names(folder: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the script and reference file names of one operator skill folder, for its skill and its cache entry."""
+    return _listed_file_names(folder / _SCRIPTS.dirname), _listed_file_names(folder / _REFERENCES.dirname)
 
 
 def _listed_file_names(directory: Path) -> tuple[str, ...]:

@@ -35,6 +35,7 @@ from mindroom.matrix_rtc.call_tools import _function_available_during_call
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from tests.conftest import bind_runtime_paths, publish_test_plugins, test_runtime_paths
 from tests.turn_model_helpers import turn_model
@@ -209,7 +210,7 @@ def test_approval_rules_gate_configured_functions_and_hide_generated_ones(tmp_pa
 
     offered = _offered(build)
     assert set(offered) == _CALCULATOR_FUNCTIONS
-    assert all(function.requires_confirmation is True for function in offered.values())
+    assert all(function.gate is ToolGate.POLICY for function in offered.values())
     assert (build.prompt.knowledge_block, build.prompt.skills_block) == (None, None)
     assert build.surface.knowledge_sources == ()
     assert config.get_prompt("SKILLS_TOOL_USAGE_PROMPT") not in build.prompt.instructions
@@ -543,14 +544,19 @@ def _no_hook(*_args: object, **_kwargs: object) -> None:
     return None
 
 
-_REFUSED_FIELDS = [{"pre_hook": _no_hook}, {"requires_user_input": True}, {"instructions": "Look up named pages."}]
+_REFUSED_FIELDS = [
+    {"pre_hook": _no_hook},
+    {"requires_user_input": True},
+    {"external_execution": True},
+    {"instructions": "Look up named pages."},
+]
 
 
 @pytest.mark.parametrize(
     ("agent_mode", "narrowed_by"),
     [("standard", "caller"), ("standard", "persona"), ("minimal", "caller")],
 )
-@pytest.mark.parametrize("refused", _REFUSED_FIELDS, ids=["hook", "user_input", "instructions"])
+@pytest.mark.parametrize("refused", _REFUSED_FIELDS, ids=["hook", "user_input", "external_execution", "instructions"])
 def test_a_refused_function_the_agent_never_offers_costs_its_toolkit_nothing(
     tmp_path: Path,
     agent_mode: str,

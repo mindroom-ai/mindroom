@@ -993,14 +993,17 @@ Set up the homeserver (examples use `chat.example.com`):
    The handoff URL must use HTTPS on the homeserver's own origin.
    Add `"push": false` to turn push off: the app then registers no pusher for the homeserver and hides the push setting.
    Signed-in accounts pick up a change of the advert only when they sign out and in again.
-2. Serve the handoff page behind Access. It redirects to the app with the value of the `CF_Authorization` cookie:
+2. Serve the handoff page behind Access. It redirects to the app with the homeserver's own origin and the value of the `CF_Authorization` cookie:
 
     ```nginx
     location = /native/cloudflare-access {
       add_header Cache-Control "no-store" always;
-      return 302 "mindroom://cloudflare-access#token=$cookie_CF_Authorization";
+      return 302 "mindroom://cloudflare-access#origin=https://chat.example.com&token=$cookie_CF_Authorization";
     }
     ```
+
+   Write the origin into the config rather than taking it from the request; the app refuses a token whose callback names no origin or another one.
+   Without `origin` the app's Access sign-in fails with "Cloudflare Access sign-in returned no valid token."; earlier app releases ignore it, so add it before users update the app.
 
    If the same origin serves the MindRoom Chat web app, exclude `/native` from its service worker's navigation fallback (`serviceWorker.navigationFallbackExcludePaths` in the client chart, or `window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__`), or a Safari that has opened the web app answers the handoff with its own page.
    The page also answers when opened in Safari, where iOS hands the token to whichever app handles `mindroom://`.
@@ -8321,6 +8324,7 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
 - Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
 - The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, `skill_manage`, and `slack` toolkits are never available to scripts, even when the agent has them.
+- Functions that can stop the agent's current model step, such as `thread_model`'s `switch_thread_model`, are never available to scripts either; the toolkit's other functions are.
 - Listing `config_manager` or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
 - Operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
 - Only the original requester can approve or deny a script's call, and approval cards for a cancelled or finished run are settled without running the call.
@@ -14183,7 +14187,7 @@ Tools that can run as background jobs accept an optional `background_after` argu
 It is how many seconds the call may hold the reply before it continues in the background, separate from a tool's own execution or network timeout.
 The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
-Tools that stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
+Tools that can stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
 Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
 
@@ -14283,7 +14287,7 @@ The reply waits for the decision for `background_tool_jobs.approval_wait_timeout
 The setting is a non-negative number of seconds, defaulting to `300`; `0` goes on at once, and `null` waits until the decision or a newer human message.
 A call's own `background_after`, or a newer human message, releases the reply the same way.
 Cancelling the job before the decision denies its card.
-Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits, subagent calls, and minimal mode.
+Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that can stop the current model step (such as model switching) or ask the user for input, run-connected toolkits, excluded toolkits, subagent calls, and minimal mode.
 
 A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
 Cancelling the job denies its open cards.
@@ -16043,6 +16047,7 @@ The config sent to runners with each request, and the config file projected into
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
 The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, auto-approve windows, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
 Agent and private-instance conversation databases stay in those directories, so opening a conversation store refuses a `sessions` directory or database file that is a link; the store's later operations do not check again (see [Known gaps](#known-gaps)).
+The runtime images link SQLite 3.53.3 or later instead of Debian's 3.46, which plays back a journal file planted beside a database and deletes whatever file the journal names as its super-journal; the newer library deletes only real super-journals, so a journal written beside a database the primary opens through Python's `sqlite3` cannot make the primary delete other files.
 Team memory lives in `team_memory/`, which no worker mounts; the one-time merge of the per-member team copies earlier releases kept below `agents/` reads file copies without following links, and opens only the Mem0 stores the runtime itself opens, and only when they hold nothing but directories and regular files.
 It merges a team's copies only from its members, the stores each member read, so what any member's copy held, including anything that member's dedicated worker wrote there while releases mounted its state root, becomes the team's memory, which each member reads through its own backend.
 Every team's Mem0 records share one store, so the merge moves only records of the embedding size the team store's own records or the configured embedder give, never a size read from a worker-writable member store, and a planted record of another size cannot make that store refuse other teams' records.
@@ -16230,6 +16235,7 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   Only code in the Kubernetes `static_runner` sidecar can write a `sessions` directory.
 - Mem0 opens an agent's Chroma store below `agents/` by path on every memory call, without a link check, so a link planted there can send that store's reads and writes to the link's target.
   The one-time merge of the team memory copies earlier releases kept there refuses a member store holding a link when it starts, but not a link swapped in while Chroma opens it.
+  Chroma also bundles its own SQLite 3.46, so a journal planted beside that store makes the primary delete the file the journal names when Chroma next opens it.
   Only code in the Kubernetes `static_runner` sidecar can write below `agents/`, and team memory itself lives in `team_memory/`, which no worker mounts.
 
 ## Intentional behaviors
@@ -16252,6 +16258,7 @@ Do not report or "fix" these; they are deliberate.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, and start time, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
 - Each agent, team, and the router also publishes its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one.
   MindRoom Chat uses a published origin only from agents on the viewer's homeserver, and only while that homeserver binds tokens, so a hostile agent can collect at most tokens bound to its own origin.
+- Administrators may use every agent created with `create_agent`, whose instructions its owner wrote, and its tools act for the administrator, so a copy of a creator that has an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
@@ -22456,8 +22463,9 @@ See [Membership Access Migration](https://docs.mindroom.chat/deployment/upgrades
 Check your environment for common issues before running `mindroom run`.
 It checks, in one pass:
 
-- **Config file**: exists, is valid YAML, and matches the config schema.
+- **Config file**: exists, is valid YAML, matches the config schema, and lists only automations a loaded plugin provides, the same checks `config validate` fails on.
 - **Providers**: API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, and others) are valid.
+  Doctor also warns about each environment variable a model needs but nothing sets, such as a missing key, Bedrock region, or Azure endpoint, as `config validate` does.
   Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
   Doctor skips the key check and reports it as not checked for a model that uses a custom endpoint, meaning its config sets an endpoint or headers (such as `base_url` or `default_headers`) or its provider's endpoint variable (such as `OPENAI_BASE_URL`) is set.
 - **Memory config**: the memory LLM and embedder are reachable (Ollama, OpenAI embeddings, sentence-transformers).

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from mindroom.llm.media import rendered_label
 from mindroom.providers.claude_wire_blocks import (
     SERVER_TOOL_USE_BLOCK_TYPE,
     TOOL_SEARCH_RESULT_BLOCK_TYPE,
@@ -120,7 +121,7 @@ def _inline_media_note(
     # The SDK sends text as escaped JSON, where a newline or quote takes two bytes.
     data_bytes = len(json.dumps(data, ensure_ascii=False).encode()) if source_type == "text" else len(data)
     if kind == "document" and source_type == "base64" and media_type != _BASE64_DOCUMENT_MEDIA_TYPE:
-        reason = f"Claude reads only PDF and plain-text documents inline, not {media_type}"
+        reason = f"Claude reads only PDF and plain-text documents inline, not {rendered_label(str(media_type))}"
     elif kind == "image" and data_bytes > max_image_bytes:
         reason = f"its {data_bytes / 1_000_000:.1f} MB inline payload exceeds the provider's per-image limit"
     elif inline_bytes + data_bytes > max_inline_bytes:
