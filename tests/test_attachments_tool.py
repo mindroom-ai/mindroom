@@ -258,6 +258,7 @@ async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
     assert len(result.images) == 1
     assert result.images[0].content == image_bytes
     assert result.images[0].mime_type == "image/png"
+    assert result.images[0].id.startswith("mindroom_viewed_")
 
 
 @pytest.mark.asyncio
@@ -279,12 +280,14 @@ async def test_get_attachment_view_returns_other_media(
     media_field: str,
     mime_type: str,
 ) -> None:
-    """Audio, documents, and video use their native model media fields."""
+    """The model, offered ``view``, gets audio, documents, and video in their native model media fields."""
     (tmp_path / filename).write_bytes(payload_bytes)
     tool = AttachmentTools(tool_output_workspace_root=tmp_path)
+    get_attachment = toolkit_offers(tool, "get_attachment")
+    assert "view" in get_attachment.parameters["properties"]
     with tool_runtime_context(_tool_context(tmp_path)):
         registered = json.loads(await tool.register_attachment(filename))
-        result = await tool.get_attachment(registered["attachment_id"], view=True)
+        result = await get_attachment.entrypoint(attachment_id=registered["attachment_id"], view=True)
 
     assert isinstance(result, ToolValue)
     media = {"audios": result.audios, "files": result.files, "videos": result.videos}[media_field]
@@ -295,31 +298,6 @@ async def test_get_attachment_view_returns_other_media(
         assert result.audios[0].format == "mp3"
     if result.files:
         assert result.files[0].filename == filename
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("filename", "payload_bytes", "media_field"),
-    [("document.pdf", b"%PDF-1.4 document bytes", "files"), ("recording.mp3", b"ID3 audio bytes", "audios")],
-)
-async def test_the_offered_get_attachment_sends_a_pdf_or_audio_file_it_is_asked_to_view(
-    tmp_path: Path,
-    filename: str,
-    payload_bytes: bytes,
-    media_field: str,
-) -> None:
-    """The model, offered ``view``, can ask for an attached PDF or audio file as media."""
-    (tmp_path / filename).write_bytes(payload_bytes)
-    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
-    get_attachment = toolkit_offers(tool, "get_attachment")
-    assert "view" in get_attachment.parameters["properties"]
-    with tool_runtime_context(_tool_context(tmp_path)):
-        registered = json.loads(await tool.register_attachment(filename))
-        result = await get_attachment.entrypoint(attachment_id=registered["attachment_id"], view=True)
-
-    assert isinstance(result, ToolValue)
-    media = {"audios": result.audios, "files": result.files}[media_field]
-    assert [item.content for item in media] == [payload_bytes]
 
 
 @pytest.mark.asyncio
@@ -918,15 +896,15 @@ async def test_matrix_message_attachments_sends_attachment_ids(tmp_path: Path) -
     assert attachment is not None
 
     context = _tool_context(tmp_path, attachment_ids=("att_upload",))
-    with patch(
-        "mindroom.custom_tools.attachments.send_file_message",
-        new=AsyncMock(return_value="$file_evt"),
-    ) as mocked:
-        with tool_runtime_context(context):
-            result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_upload"]))
-        send_error = result.get("message") if result["status"] == "error" else None
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mocked,
+        tool_runtime_context(context),
+    ):
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_upload"]))
 
-    assert send_error is None
     assert result["status"] == "ok"
     assert result["attachment_event_ids"] == ["$file_evt"]
     assert result["resolved_attachment_ids"] == ["att_upload"]
@@ -996,12 +974,10 @@ async def test_matrix_message_attachments_reuses_ephemeral_encrypted_media(tmp_p
             new=AsyncMock(return_value="$image_evt"),
         ) as send_runtime_media,
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock()) as send_file,
+        tool_runtime_context(context),
     ):
-        with tool_runtime_context(context):
-            result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment.attachment_id]))
-        send_error = result.get("message") if result["status"] == "error" else None
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment.attachment_id]))
 
-    assert send_error is None
     assert result["status"] == "ok"
     assert result["attachment_event_ids"] == ["$image_evt"]
     assert result["resolved_attachment_ids"] == [attachment.attachment_id]
@@ -1098,15 +1074,15 @@ async def test_matrix_message_attachments_reuses_latest_thread_event_id_for_mult
     context = _tool_context(tmp_path, attachment_ids=("att_one", "att_two"))
     context.conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest:localhost")
 
-    with patch(
-        "mindroom.custom_tools.attachments.send_file_message",
-        new=AsyncMock(side_effect=["$file_evt_1", "$file_evt_2"]),
-    ) as mock_send:
-        with tool_runtime_context(context):
-            result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_one", "att_two"]))
-        send_error = result.get("message") if result["status"] == "error" else None
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(side_effect=["$file_evt_1", "$file_evt_2"]),
+        ) as mock_send,
+        tool_runtime_context(context),
+    ):
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_one", "att_two"]))
 
-    assert send_error is None
     assert result["status"] == "ok"
     assert result["attachment_event_ids"] == ["$file_evt_1", "$file_evt_2"]
     context.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
@@ -1150,17 +1126,17 @@ async def test_matrix_message_attachments_cross_room_send_does_not_inherit_sourc
     # Add the target room so the join check passes
     ctx.client.rooms["!other:localhost"] = MagicMock()
 
-    with patch(
-        "mindroom.custom_tools.attachments.send_file_message",
-        new=AsyncMock(return_value="$file_evt"),
-    ) as mocked:
-        with tool_runtime_context(ctx):
-            result = json.loads(
-                await MatrixMessageTools().matrix_message(attachments=["att_cross"], room_id="!other:localhost"),
-            )
-        send_error = result.get("message") if result["status"] == "error" else None
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mocked,
+        tool_runtime_context(ctx),
+    ):
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(attachments=["att_cross"], room_id="!other:localhost"),
+        )
 
-    assert send_error is None
     assert result["status"] == "ok"
     mocked.assert_awaited_once()
     call_kwargs = mocked.await_args.kwargs
@@ -1515,15 +1491,15 @@ async def test_matrix_message_attachments_inherits_resolved_thread_scope(tmp_pat
         attachment_ids=("att_threaded",),
     )
 
-    with patch(
-        "mindroom.custom_tools.attachments.send_file_message",
-        new=AsyncMock(return_value="$file_evt"),
-    ) as mocked:
-        with tool_runtime_context(ctx):
-            result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_threaded"]))
-        send_error = result.get("message") if result["status"] == "error" else None
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mocked,
+        tool_runtime_context(ctx),
+    ):
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_threaded"]))
 
-    assert send_error is None
     assert result["status"] == "ok"
     assert result["thread_id"] == "$thread-root:localhost"
     ctx.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
@@ -1551,14 +1527,12 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
         assert current_context is not None
         attachment_id = register_payload["attachment_id"]
         send_result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
-        send_error = send_result.get("message") if send_result["status"] == "error" else None
 
     assert register_payload["status"] == "ok"
     assert register_payload["tool"] == "attachments"
     assert register_payload["attachment_id"].startswith("att_")
     assert Path(register_payload["attachment"]["local_path"]).read_text(encoding="utf-8") == "artifact"
     assert attachment_id in list_tool_runtime_attachment_ids(current_context)
-    assert send_error is None
     assert send_result["status"] == "ok"
     assert send_result["resolved_attachment_ids"] == [attachment_id]
     mocked.assert_awaited_once()
@@ -1617,10 +1591,8 @@ async def test_attachments_tool_register_attachment_available_after_task_boundar
         assert current_context is not None
         attachment_id = register_payload["attachment_id"]
         send_result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
-        send_error = send_result.get("message") if send_result["status"] == "error" else None
 
     assert register_payload["status"] == "ok"
-    assert send_error is None
     assert send_result["status"] == "ok"
     assert send_result["resolved_attachment_ids"] == [attachment_id]
     assert attachment_id in list_tool_runtime_attachment_ids(current_context)
@@ -1646,16 +1618,14 @@ async def test_matrix_message_attachments_cross_room_send_requires_authorization
     with (
         patch("mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder", return_value=False),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+        tool_runtime_context(ctx),
     ):
-        with tool_runtime_context(ctx):
-            result = json.loads(
-                await MatrixMessageTools().matrix_message(attachments=["att_authz"], room_id="!other:localhost"),
-            )
-        send_error = result.get("message") if result["status"] == "error" else None
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(attachments=["att_authz"], room_id="!other:localhost"),
+        )
 
     assert result["status"] == "error"
-    assert send_error is not None
-    assert "Not authorized" in send_error
+    assert "Not authorized" in result["message"]
     mocked.assert_not_awaited()
 
 
@@ -1675,11 +1645,9 @@ async def test_matrix_message_attachments_sends_local_file_paths_by_auto_registe
                 attachments=[str(generated_file)],
             ),
         )
-        send_error = result.get("message") if result["status"] == "error" else None
         current_context = get_tool_runtime_context()
         assert current_context is not None
 
-    assert send_error is None
     assert result["status"] == "ok"
     assert result["resolved_attachment_ids"][0].startswith("att_")
     assert result["newly_registered_attachment_ids"] == result["resolved_attachment_ids"]

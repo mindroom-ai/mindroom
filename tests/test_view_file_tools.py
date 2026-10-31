@@ -1,4 +1,4 @@
-"""Model-visible file entrypoint enforces sources and existing attachment authority."""
+"""Model-visible image views follow the agent's file access and existing attachment authority."""
 
 import io
 import json
@@ -59,30 +59,6 @@ async def test_view_file_path_outside_workspace_follows_file_access(tmp_path: Pa
     assert result.images[0].content == image_bytes()
     assert receipt["view_status"] == "ready"
     assert receipt["path"] == str(outside.resolve())
-
-
-@pytest.mark.asyncio
-async def test_get_attachment_view_delivers_authorized_image(tmp_path: Path) -> None:
-    """Viewing an attachment of this conversation delivers its image."""
-    path = tmp_path / "image.png"
-    path.write_bytes(image_bytes())
-    record = register_local_attachment(
-        tmp_path,
-        path,
-        kind="image",
-        mime_type="image/png",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-    )
-    assert record
-    context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
-    with tool_runtime_context(context):
-        result = await AttachmentTools().get_attachment(record.attachment_id, view=True)
-    assert isinstance(result, ToolValue)
-    assert result.images
-    assert result.images[0].content == image_bytes()
-    assert result.images[0].id.startswith("mindroom_viewed_")
-    assert json.loads(result.content)["attachment_id"] == record.attachment_id
 
 
 @pytest.mark.asyncio
