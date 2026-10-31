@@ -1199,6 +1199,42 @@ async def test_retention_recovers_create_before_local_receipt(tmp_path: Path, mo
 
 
 @pytest.mark.asyncio
+async def test_cleanup_waits_for_an_in_flight_create_instead_of_leaving_its_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup that sees the creator joined before the alias resolves keeps the room the create records."""
+    server = MatrixServer()
+    _, target = bots(tmp_path, server, monkeypatch)
+    create_room = server.room_create
+    creator_joined = asyncio.Event()
+    create_returns = asyncio.Event()
+
+    async def join_before_alias_resolves(**kwargs: Any) -> object:
+        # A homeserver such as Tuwunel makes the creator a member before the new alias resolves.
+        response = await create_room(**kwargs)
+        del server.aliases[f"#{kwargs['alias']}:localhost"]
+        creator_joined.set()
+        await create_returns.wait()
+        return response
+
+    monkeypatch.setattr(server, "room_create", join_before_alias_resolves)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(side_effect=lambda _client: list(server.state)),
+    )
+    create = asyncio.create_task(target.personal_rooms.ensure("@alice:localhost", "!lobby:localhost", server))
+    await creator_joined.wait()
+    cleanup = asyncio.create_task(target._room_lifecycle._rooms_to_leave())
+    done, _ = await asyncio.wait({cleanup}, timeout=0.5)
+    assert not done
+    create_returns.set()
+    room_id = await create
+    assert room_id == "!personal1:localhost"
+    assert await cleanup == []
+
+
+@pytest.mark.asyncio
 async def test_public_directory_room_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An owned room exposed in the directory cannot receive a private welcome."""
     server = MatrixServer()

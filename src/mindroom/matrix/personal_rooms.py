@@ -70,6 +70,15 @@ _GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
 _UNREADABLE_ROOM_ERRCODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
 
 
+async def is_onboarding_room_member(source_client: nio.AsyncClient, user_id: str, source_room_id: str) -> bool:
+    """Return whether a requester is still in the onboarding room that admits them, failing closed when unknown."""
+    members = await get_room_members(source_client, source_room_id)
+    if members is None:
+        msg = "Personal-room onboarding membership unavailable"
+        raise RuntimeError(msg)
+    return user_id in members
+
+
 class _PolicyChangedError(Exception):
     """Current policy no longer authorizes this provisioning attempt."""
 
@@ -186,11 +195,9 @@ class PersonalRoomService:
     ) -> PersonalRoomsConfig | None:
         if self._current_settings(user_id, source_room_id) is None:
             return None
-        members = await get_room_members(source_client, source_room_id)
-        if members is None:
-            msg = "Personal-room onboarding membership unavailable"
-            raise RuntimeError(msg)
-        return self._current_settings(user_id, source_room_id) if user_id in members else None
+        if not await is_onboarding_room_member(source_client, user_id, source_room_id):
+            return None
+        return self._current_settings(user_id, source_room_id)
 
     async def ensure(
         self,

@@ -140,6 +140,14 @@ def template_coordination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Te
     return TemplateCoordination(lifecycle, target, lookup, provision, config_reload)
 
 
+def set_lobby_members(lifecycle: PersonalRoomLifecycle, *user_ids: str) -> None:
+    """Replace who the router sees in the lobby."""
+    lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
+        {"joined": {user_id: {} for user_id in user_ids}},
+        "!lobby:localhost",
+    )
+
+
 def add_alices_agent(lifecycle: PersonalRoomLifecycle, source_room_id: str = "!lobby:localhost") -> None:
     """Record alice's own agent in the roster and reload the config that contains it."""
     paths = lifecycle.runtime_paths
@@ -995,6 +1003,19 @@ async def test_template_join_provisions_and_settles_without_holding_the_lane(
 
 
 @pytest.mark.asyncio
+async def test_template_join_by_someone_no_longer_in_the_lobby_gets_no_agent(
+    template_coordination: TemplateCoordination,
+) -> None:
+    """A join seen after its sender left the lobby registers no agent and requests no reload."""
+    lifecycle = template_coordination.lifecycle
+    set_lobby_members(lifecycle)
+    await lifecycle.baseline_join(_ALICE_JOIN)
+    template_coordination.provision.assert_not_awaited()
+    template_coordination.config_reload.request_reload.assert_not_called()
+    assert lifecycle._retry_candidates == {}
+
+
+@pytest.mark.asyncio
 async def test_template_provisioning_failure_backs_off_like_any_failure(
     template_coordination: TemplateCoordination,
     clock: Clock,
@@ -1131,6 +1152,7 @@ async def test_template_bridge_alias_onboards_onto_its_persons_agent(
     data["authorization"] = {"aliases": {"@alice:localhost": ["@bridge_alice:localhost"]}}
     lifecycle.runtime.config = Config.validate_with_runtime(data, paths)
     alias = "@bridge_alice:localhost"
+    set_lobby_members(lifecycle, alias)
     await lifecycle.baseline_join(RoomMemberJoin(LOBBY.room_id, "$join", alias, alias, None, None, "join", None))
     assert template_coordination.provisioned() == [("mind", "@alice:localhost", alias, "!lobby:localhost")]
 
@@ -1179,6 +1201,7 @@ async def test_one_users_provisioning_failure_does_not_stop_another_in_the_same_
     """A registration failure for one user still lets the next candidate in that pass onboard."""
     lifecycle = template_coordination.lifecycle
     add_alices_agent(lifecycle)
+    set_lobby_members(lifecycle, "@aaron:localhost", "@alice:localhost")
     # Sorted before alice, so her candidate runs after the failure.
     lifecycle._queue_retry(("@aaron:localhost", "!lobby:localhost"), reinvite_departed_owner=False)
     template_coordination.provision.side_effect = RuntimeError("Failed to register personal agent account")

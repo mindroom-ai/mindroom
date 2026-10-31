@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import ROUTER_AGENT_NAME, primary_records_dir
 from mindroom.durable_write import write_json_file_durable
+from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.tool_system.worker_routing import agent_state_root_path
 
 if TYPE_CHECKING:
@@ -151,11 +152,18 @@ async def personal_room_cleanup_exclusions(
     runtime_paths: RuntimePaths,
     agent_name: str,
 ) -> set[str]:
-    """Conservatively preserve interrupted creates without adopting or joining aliases."""
+    """Wait out in-flight creates and conservatively preserve interrupted ones without adopting or joining aliases."""
     rooms = retained_personal_rooms(runtime_paths, agent_name, user_id=client.user_id)
     for record in _personal_room_records(runtime_paths, agent_name):
-        if record.room_id is not None:
-            rooms.add(record.room_id)
+        room_id = record.room_id
+        if room_id is None:
+            # A homeserver can make the creator a member before the new alias resolves,
+            # so wait for a create in flight, which holds the record's lock, to record its room.
+            path = personal_room_record_path(runtime_paths, agent_name, record.user_id)
+            async with async_exclusive_file_lock(path.with_suffix(".lock")):
+                room_id = (read_personal_room(path) or record).room_id
+        if room_id is not None:
+            rooms.add(room_id)
             continue
         response = await client.room_resolve_alias(record.alias)
         if isinstance(response, nio.RoomResolveAliasResponse):
