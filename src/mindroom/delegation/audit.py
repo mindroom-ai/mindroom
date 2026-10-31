@@ -108,8 +108,7 @@ async def record_child_event(audit: ChildAudit, event: TextDelta | ToolStarted |
             audit.pending_content.append((audit.observed, event.text))
         return
 
-    handle = await audit.owner.reopen(audit.locator)
-    await _flush_pending_content(audit, handle)
+    handle = await flush_child_audit(audit)
     run_id = audit.child.run_id
     if isinstance(event, RunFinished):
         assert isinstance(event.record, RunRecord)
@@ -120,10 +119,21 @@ async def record_child_event(audit: ChildAudit, event: TextDelta | ToolStarted |
         await _append_tool_result(audit.owner, handle, event.call, run_id=run_id)
 
 
-async def flush_child_audit(audit: ChildAudit) -> None:
-    """Record the visible content the stream buffered since its last recorded event."""
+async def flush_child_audit(audit: ChildAudit) -> DelegationRecordHandle:
+    """Record the visible content the stream buffered since its last recorded event; return the reopened record."""
     handle = await audit.owner.reopen(audit.locator)
-    await _flush_pending_content(audit, handle)
+    if audit.pending_content:
+        chunks = audit.pending_content.copy()
+        audit.pending_content.clear()
+        await audit.owner.append_event(
+            handle,
+            DelegationEvent(
+                kind="output",
+                event_id=f"{_stream_prefix(audit.child.run_id)}{chunks[-1][0]}",
+                data={"content": "".join(text for _, text in chunks)},
+            ),
+        )
+    return handle
 
 
 async def record_child_response(
@@ -329,26 +339,6 @@ async def _append_tool_result(
                 "result": call.result,
                 "tool_call_error": call.is_error,
             },
-        ),
-    )
-
-
-async def _flush_pending_content(
-    audit: ChildAudit,
-    handle: DelegationRecordHandle,
-) -> None:
-    if not audit.pending_content:
-        return
-    chunks = audit.pending_content.copy()
-    audit.pending_content.clear()
-    event_id = f"{_stream_prefix(audit.child.run_id)}{chunks[-1][0]}"
-    content = "".join(text for _, text in chunks)
-    await audit.owner.append_event(
-        handle,
-        DelegationEvent(
-            kind="output",
-            event_id=event_id,
-            data={"content": content},
         ),
     )
 

@@ -67,7 +67,7 @@ async def resolve_delegation_target(
     if tool.tool_name == CONTINUE_SUBAGENT:
         return await resolve_follow_up_target(
             args,
-            retained,
+            retained=retained,
             owner=caller_identity,
             config=config,
             runtime_paths=runtime_paths,
@@ -85,7 +85,7 @@ async def resolve_delegation_target(
     context = get_tool_runtime_context()
     return resolve_fresh_target(
         args,
-        retained,
+        retained=retained,
         caller_name=caller_identity.agent_name,
         config=config,
         runtime_paths=runtime_paths,
@@ -97,8 +97,8 @@ async def resolve_delegation_target(
 
 async def resolve_follow_up_target(
     args: Mapping[str, object],
-    retained: DelegationChild | None,
     *,
+    retained: DelegationChild | None = None,
     owner: ToolExecutionIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -139,8 +139,8 @@ async def resolve_follow_up_target(
 
 def resolve_fresh_target(
     args: Mapping[str, object],
-    retained: DelegationChild | None,
     *,
+    retained: DelegationChild | None = None,
     caller_name: str,
     config: Config,
     runtime_paths: RuntimePaths,

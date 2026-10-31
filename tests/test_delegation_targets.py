@@ -62,7 +62,6 @@ async def test_a_follow_up_with_arguments_of_the_wrong_type_is_refused(
     """A stored call whose arguments are not strings resolves to a refusal, never to a session lookup."""
     result = await resolve_follow_up_target(
         args,
-        None,
         owner=_identity(),
         config=_config(("file",)),
         runtime_paths=_runtime_paths(tmp_path),
@@ -82,7 +81,7 @@ async def test_a_resumed_follow_up_keeps_its_child_after_the_caller_lost_a_perso
     with tool_runtime_context(_delegate_runtime_context(without_file, paths, execution_identity=_identity())):
         target = await resolve_follow_up_target(
             {"subagent_id": retained.subagent_id, "message": "Again"},
-            retained,
+            retained=retained,
             owner=_identity(),
             config=without_file,
             runtime_paths=paths,
@@ -101,7 +100,7 @@ async def test_a_resumed_follow_up_naming_another_subagent_fails(tmp_path: Path)
     with pytest.raises(RuntimeError, match="no longer matches its retained requirement"):
         await resolve_follow_up_target(
             {"subagent_id": "b" * 32, "message": "Again"},
-            _retained(paths),
+            retained=_retained(paths),
             owner=_identity(),
             config=_config(("file",)),
             runtime_paths=paths,
@@ -124,7 +123,6 @@ def test_a_fresh_call_with_arguments_of_the_wrong_type_is_refused(
     """A stored call whose arguments have the wrong types resolves to a refusal before any persona is read."""
     result = resolve_fresh_target(
         args,
-        None,
         caller_name="leader",
         config=_config(("file",)),
         runtime_paths=_runtime_paths(tmp_path),

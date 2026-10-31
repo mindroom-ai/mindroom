@@ -14,7 +14,6 @@ from functools import partial
 from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
-from uuid import uuid4
 from weakref import WeakValueDictionary
 
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
@@ -225,7 +224,7 @@ class DelegationRecordOwner:
         *,
         caller_execution_identity: ToolExecutionIdentity | None,
         child_execution_identity: ToolExecutionIdentity | None,
-        delegation_id: str | None = None,
+        delegation_id: str,
     ) -> DelegationRecordHandle:
         """Create an initial record and caller-scoped receipt before child execution."""
         return await run_blocking_until_complete(
@@ -281,10 +280,10 @@ class DelegationRecordOwner:
         *,
         caller_execution_identity: ToolExecutionIdentity | None,
         child_execution_identity: ToolExecutionIdentity | None,
-        delegation_id: str | None,
+        delegation_id: str,
     ) -> DelegationRecordHandle:
         _validate_metadata(metadata)
-        resolved_id = _validated_id(delegation_id or uuid4().hex)
+        resolved_id = _validated_id(delegation_id)
         timestamp = _utc_timestamp()
         locator = DelegationRecordLocator(
             delegation_id=resolved_id,

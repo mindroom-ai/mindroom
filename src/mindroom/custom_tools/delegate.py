@@ -230,7 +230,6 @@ class DelegateTools(Toolkit):
                 "knowledge": knowledge,
                 "profile": profile,
             },
-            None,
             caller_name=self._agent_name,
             config=self._config,
             runtime_paths=self._runtime_paths,
@@ -269,7 +268,6 @@ class DelegateTools(Toolkit):
         """
         target = await resolve_follow_up_target(
             {"subagent_id": subagent_id, "message": message},
-            None,
             owner=self._caller_identity(),
             config=self._config,
             runtime_paths=self._runtime_paths,
@@ -322,9 +320,5 @@ class DelegateTools(Toolkit):
             )
         except SubagentSessionError as error:
             return str(error)
-        return _result_with_receipt(result.text, result.receipt)
-
-
-def _result_with_receipt(result: str, receipt: str) -> str:
-    """Attach the stable child record reference to a direct tool result."""
-    return f"{result}\n\n{receipt}" if receipt else result
+        # The stable child record reference follows the child's answer.
+        return f"{result.text}\n\n{result.receipt}" if result.receipt else result.text

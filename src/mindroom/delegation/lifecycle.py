@@ -57,7 +57,7 @@ type _DelegationGrant = Literal["delegate", "dynamic_workflow"]
 
 @dataclass
 class ChildRunObservation:
-    """Exact terminal evidence collected while one child response envelope runs.
+    """Exact terminal evidence collected while one child response envelope runs, and the child's live audit.
 
     ``response`` is the terminal record of the child's latest run: the record its stream ended with when it ran in
     this context, completed, paused, or failed, else the outcome the envelope returned without running it. A child

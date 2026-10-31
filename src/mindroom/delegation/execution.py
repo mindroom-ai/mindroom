@@ -38,9 +38,7 @@ from mindroom.delegation.lifecycle import (
     start_child_turn,
 )
 from mindroom.delegation.recovery import interrupt_child, interrupt_stopped_child, read_child_run
-from mindroom.delegation.sessions import (
-    subagent_liveness,
-)
+from mindroom.delegation.sessions import subagent_liveness
 from mindroom.delegation.state import (
     DELEGATION_FUNCTIONS,
     DELEGATION_STATE_KEY,

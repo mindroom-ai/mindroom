@@ -39,7 +39,7 @@ async def _start(module: ModuleType, owner: object, **overrides: object) -> obje
         _metadata(module),
         caller_execution_identity=_identity("caller"),
         child_execution_identity=_identity("child"),
-        **overrides,
+        **{"delegation_id": "delegation-123", **overrides},
     )
 
 
@@ -191,12 +191,14 @@ async def test_a_task_too_large_to_finish_is_refused_at_start(tmp_path: Path) ->
             _metadata(module, task="t" * near_cap),
             caller_execution_identity=_identity("caller"),
             child_execution_identity=_identity("child"),
+            delegation_id="delegation-123",
         )
 
     handle = await owner.start(
         _metadata(module, task="t" * (near_cap - 4 * (64 << 10))),
         caller_execution_identity=_identity("caller"),
         child_execution_identity=_identity("child"),
+        delegation_id="delegation-123",
     )
     large_inline = "v" * ((64 << 10) - 16)
     await owner.finish(handle, status="failed", output=large_inline, error=large_inline, usage={"note": large_inline})
@@ -551,6 +553,7 @@ async def test_unicode_separators_preserve_delegation_event_boundaries(tmp_path:
         _metadata(module),
         caller_execution_identity=_identity("caller"),
         child_execution_identity=_identity("child"),
+        delegation_id="delegation-123",
     )
     content = f"First{separator}second"
     await owner.append_event(handle, module.DelegationEvent(kind="tool_result", data={"result": content}))

@@ -633,10 +633,7 @@ def pending_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
     A delegation driver lists the calls it asked about as pending requirements, its own or those of the child it
     waits on, whose approved calls ``own_approved_calls`` leaves to the child executor.
     """
-    delegation = DelegationState.from_metadata(record.metadata)
-    if delegation.pending_requirements:
-        return delegation.pending_calls()
-    return deepcopy(record.requirements or [])
+    return DelegationState.from_metadata(record.metadata).pending_calls() or deepcopy(record.requirements or [])
 
 
 def paused_attempt_from_response(
@@ -651,8 +648,7 @@ def paused_attempt_from_response(
         msg = f"Paused run {record.run_id!r} names no session"
         raise RuntimeError(msg)
     delegation = DelegationState.from_metadata(record.metadata)
-    if delegation.pending_requirements:
-        requirements = delegation.pending_calls()
+    if requirements := delegation.pending_calls():
         if delegation.pending_child_id is not None:
             # A source that recorded no toolkit leaves its call unowned, as a missing key does.
             toolkit_owners = {

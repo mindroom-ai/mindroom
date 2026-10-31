@@ -22,7 +22,7 @@ __all__ = ["minimal_bash_toolkit"]
 def minimal_bash_toolkit(
     execute: Callable[[ToolKey, dict[str, object], str], Awaitable[str | ToolValue]] | None = None,
 ) -> AdaptedToolkit:
-    """Project only effective shell functions into one provider-visible function.
+    """Project the agent's shell function into one provider-visible Bash function.
 
     The required execution owner retains the canonical prepared call, approval
     state, hooks, operation mutex and dispatch-window lifetimes. There is
