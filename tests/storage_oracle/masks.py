@@ -38,7 +38,9 @@ from mindroom.session_storage.legacy_scope_metadata import (
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.summary_rows import folded_tool_call_ids, history_event_ids, latest_row
-from tests.storage_oracle.backend import NOTICE_TURN_KEY, SESSION_ID
+from tests.storage_oracle import notice_rewrites
+from tests.storage_oracle.backend import SESSION_ID
+from tests.storage_oracle.observe import probe_request, resume_requests
 from tests.storage_oracle.store_backend import (
     StoreBackend,
     edit_cut,
@@ -301,6 +303,9 @@ class MaskedBackend(StoreBackend):
         self.flag_restored = False
         # The update time an interrupted record's save moved the row to, and the one the old store left it at.
         self.news_at: tuple[int, int] | None = None
+        # The probe request, resume requests, and loaded runs of the old store's messages, when its notice rewrites set
+        # them apart from the v2 store's at the latest observation.
+        self.held_requests: tuple[object, object, list[dict[str, Any]]] | None = None
         super().__init__(root, kind, determinism)
 
     # What the masks read of the v2 store.
@@ -547,41 +552,32 @@ class MaskedBackend(StoreBackend):
         self.link_only.discard(run_id)
         return ["written"]
 
-    def _diverge_where_notices_were_rewritten(self, notices: list[Message], action: str) -> None:
-        """End the comparison where the old store rewrote ``notices``, which the v2 store keeps as their runs held them."""
-        if notices:
-            self._diverge("queued_notices_stored_once", f"the old store's {action} rewrote {len(notices)} notices")
+    def _old_notice_rewrite(self, changed: Sequence[AnyRunRecord]) -> object:
+        """Hold the messages of the runs the old store's notice rewrite changed, which the v2 store keeps; report it."""
+        for run in changed:
+            self.old_messages[run.run_id] = _old_kept(_dicts(run), run.status.value)
+            self.used.add("queued_notices_stored_once")
+        return ["written"] * len(changed) if changed else "unchanged"
+
+    def _stored_messages(self) -> list[list[dict[str, Any]]]:
+        return [_dicts(run) for run in self.store.list_runs(SESSION_ID)]
 
     @override
     def finalize_notice(self, response_turn_id: str) -> object:
-        # The old finalization rewrote every run holding the response's notice, each still marked live.
-        session = self.load()
-        if session is not None:
-            self._diverge_where_notices_were_rewritten(
-                [
-                    message
-                    for run in self._old_view_runs(session.runs)
-                    for message in run.messages
-                    if is_queued_notice_message(message)
-                    and (message.provider_data or {}).get(NOTICE_TURN_KEY) == response_turn_id
-                ],
-                "finalization",
-            )
-        return super().finalize_notice(response_turn_id)
+        # The v2 store keeps every notice as its run stored it; the old store rewrote the reply's notices.
+        session, stored = self.load(), self._stored_messages()
+        outcome = super().finalize_notice(response_turn_id)
+        assert self._stored_messages() == stored, "a notice finalization changed the v2 store"
+        if session is None:
+            return outcome
+        return self._old_notice_rewrite(notice_rewrites.finalize(self._old_view_runs(session.runs), response_turn_id))
 
     @override
     def scrub_notices(self, session: ConversationSession) -> object:
-        # The old recovery rewrote every loaded run holding a notice still marked live, as each one is here.
-        self._diverge_where_notices_were_rewritten(
-            [
-                message
-                for run in self._old_view_runs(session.runs)
-                for message in run.messages
-                if is_queued_notice_message(message)
-            ],
-            "recovery",
-        )
-        return super().scrub_notices(session)
+        stored = self._stored_messages()
+        super().scrub_notices(session)
+        assert self._stored_messages() == stored, "a reply's opening of its scope changed the v2 store's notices"
+        return self._old_notice_rewrite(notice_rewrites.recover(self._old_view_runs(session.runs)))
 
     @override
     def persist_delegation(self, session: ConversationSession, record: AnyRunRecord, state: DelegationState) -> object:
@@ -892,7 +888,7 @@ class MaskedBackend(StoreBackend):
             view["ledger"] = {"error": f"OperationalError: no such table: {self.names.usage}"}
             self.used.add("tables_exist_at_open")
         readers_in_creation_order(view, self.used)
-        self._old_resume_requests(view, observed)
+        self._old_resume_requests(view, self._old_requests(view, observed))
         if isinstance(view["loaded_runs"], list):
             view["loaded_runs"] = self._old_loaded(view["loaded_runs"])
         if isinstance(view["list_runs"], list):
@@ -917,13 +913,51 @@ class MaskedBackend(StoreBackend):
             self.used.add("a_finished_interrupted_record_is_news")
         return view
 
-    def _old_resume_requests(self, view: dict[str, Any], observed: dict[str, Any]) -> None:
+    @override
+    def observe(self) -> dict[str, object]:
+        """Observe the v2 store, and build the requests the old store's runs built where its notice rewrites set them apart.
+
+        Those runs replay as the old store held them, without the history copies it kept, which no request replayed.
+        The old store's requests are built with the ids the observed ones were given, as one observation of it would.
+        """
+        self.held_requests = None
+        session = self.load()
+        if session is None:
+            return super().observe()
+        old = [
+            replace(run, messages=[message for message in run.messages if not message.from_history])
+            for run in self._old_view_runs(session.runs)
+        ]
+        if [_dicts(run) for run in old] == [_dicts(run) for run in session.runs if not self._hidden(run.to_dict())]:
+            return super().observe()
+        with self.determinism.ids_repeated():
+            observed = super().observe()
+        held = replace(session, runs=old)
+        self.held_requests = (
+            probe_request(held, self.scope),
+            resume_requests(held, self.scope),
+            [run.to_dict() for run in old],
+        )
+        return observed
+
+    def _old_requests(self, view: dict[str, Any], observed: dict[str, Any]) -> object:
+        """Show the requests the old store's runs built, when its notice rewrites set them apart; return the loaded runs.
+
+        The loaded runs are those whose paused messages the resume requests repeat.
+        """
+        if self.held_requests is None:
+            return observed["loaded_runs"]
+        view["request"], view["resume_requests"], loaded = deepcopy(self.held_requests)
+        self.used.add("queued_notices_stored_once")
+        return loaded
+
+    def _old_resume_requests(self, view: dict[str, Any], loaded: object) -> None:
         """Show each paused run's resume request with the queued-message notices its paused run holds, as it was sent.
 
         Each notice goes back before the paused message that follows it, so after a scope summary placed after the
         paused prompt, as the request held it.
         """
-        requests, loaded = view["resume_requests"], observed["loaded_runs"]
+        requests = view["resume_requests"]
         if not (isinstance(requests, dict) and isinstance(loaded, list)):
             return
         for run in loaded:
