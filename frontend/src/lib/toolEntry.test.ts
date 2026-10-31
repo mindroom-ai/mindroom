@@ -158,30 +158,32 @@ describe("toolEntry", () => {
         entries,
       ),
     ).toEqual([{ shell: { future_field: "keep-me" } }]);
+  });
+
+  it("collapses a structured entry back to a plain string when overrides are cleared", () => {
+    expect(
+      setToolOverridesInEntries("shell", { extra_env_passthrough: [] }, [
+        { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
+        "browser",
+      ]),
+    ).toEqual(["shell", "browser"]);
     expect(
       setToolOverridesInEntries(
         "shell",
         { defer: null, initial: null, future_field: null },
-        entries,
+        [{ shell: { defer: true, initial: true, future_field: "keep-me" } }],
       ),
     ).toEqual(["shell"]);
   });
 
-  it("collapses a structured entry back to a plain string when overrides are cleared", () => {
-    const entries: ToolEntry[] = [
-      { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
-      "browser",
-    ];
+  it("reads overrides that are not a mapping as none", () => {
+    const entries = [
+      { shell: ["sandbox"] },
+      { name: "browser", overrides: "headless" },
+    ] as unknown as ToolEntry[];
 
-    expect(
-      setToolOverridesInEntries(
-        "shell",
-        {
-          extra_env_passthrough: [],
-        },
-        entries,
-      ),
-    ).toEqual(["shell", "browser"]);
+    expect(getToolOverrides("shell", entries)).toBeNull();
+    expect(getToolOverrides("browser", entries)).toBeNull();
   });
 
   it("keeps the entries of listed tools and adds new names bare", () => {

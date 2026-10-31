@@ -1,3 +1,5 @@
+import { isPlainObject } from "@/lib/configSchema";
+
 export type ToolOverrides = Record<string, unknown>;
 
 type NamedToolEntry = {
@@ -15,10 +17,6 @@ type NamedToolEntry = {
 export type ToolEntry =
   string | NamedToolEntry | Record<string, ToolOverrides | null>;
 
-function isOverrideMapping(value: unknown): value is ToolOverrides {
-  return value != null && typeof value === "object" && !Array.isArray(value);
-}
-
 function parseToolEntry(entry: ToolEntry): {
   name: string;
   overrides: ToolOverrides | null;
@@ -32,7 +30,7 @@ function parseToolEntry(entry: ToolEntry): {
     // The explicit form keeps lazy-loading flags beside its overrides; the
     // compact form this module writes stores them inside the mapping.
     const overrides = {
-      ...(isOverrideMapping(named.overrides) ? named.overrides : {}),
+      ...(isPlainObject(named.overrides) ? named.overrides : {}),
       ...(named.defer === true ? { defer: true } : {}),
       ...(named.initial === true ? { initial: true } : {}),
     };
@@ -48,7 +46,7 @@ function parseToolEntry(entry: ToolEntry): {
   }
   return {
     name,
-    overrides: isOverrideMapping(overrides) ? overrides : null,
+    overrides: isPlainObject(overrides) ? overrides : null,
   };
 }
 

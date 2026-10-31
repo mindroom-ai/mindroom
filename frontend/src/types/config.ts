@@ -9,7 +9,7 @@ export type PrivateWorkerScope = Exclude<WorkerScope, "shared">;
 export type AgentPolicySource =
   "private.per" | "agent.worker_scope" | "defaults.worker_scope" | "unscoped";
 export type AgentPoliciesByAgent = Record<string, AgentPolicy>;
-export const DEFAULT_PRIVATE_KNOWLEDGE_PATH = "memory";
+const DEFAULT_PRIVATE_KNOWLEDGE_PATH = "memory";
 export const SHARED_CONTEXT_FILE_PLACEHOLDER = "SOUL.md";
 
 export interface ModelPricing {
@@ -227,6 +227,21 @@ export function resolveEffectiveDefaultTools(
   return [...DEFAULT_INHERITED_TOOLS];
 }
 
+/** The agent's own tool names, then the inherited defaults it does not opt out of. */
+export function resolveEffectiveAgentTools(
+  agent: Pick<Agent, "tools" | "include_default_tools">,
+  defaults: Config["defaults"] | null | undefined,
+): string[] {
+  return [
+    ...new Set([
+      ...toolNames(agent.tools),
+      ...(agent.include_default_tools === false
+        ? []
+        : resolveEffectiveDefaultTools(defaults)),
+    ]),
+  ];
+}
+
 export interface Agent {
   id: string; // The key in the agents object
   display_name: string;
@@ -389,16 +404,13 @@ function normalizePrivateKnowledgeConfig(
   if (knowledge.enabled === true) {
     return {
       ...knowledge,
-      path:
-        trimmedPath && trimmedPath.length > 0
-          ? trimmedPath
-          : DEFAULT_PRIVATE_KNOWLEDGE_PATH,
+      path: trimmedPath || DEFAULT_PRIVATE_KNOWLEDGE_PATH,
     };
   }
 
   return {
     ...knowledge,
-    path: trimmedPath && trimmedPath.length > 0 ? trimmedPath : undefined,
+    path: trimmedPath || undefined,
   };
 }
 

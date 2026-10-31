@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
 import { readConfigRoot, useConfigStore } from "./configStore";
 import type { ConfigPath } from "@/lib/configSchema";
-import { toolEntriesForNames } from "@/lib/toolEntry";
 import type { Agent, AgentPoliciesByAgent, Team, Config } from "@/types/config";
 
 // Mock fetch globally
@@ -50,36 +49,29 @@ async function savedPayload() {
   return JSON.parse(saveCalls[saveCalls.length - 1][1].body);
 }
 
+// Loads `config` together with the agent policies derived for it.
+async function loadFixture(
+  config: object,
+  agentPolicies: AgentPoliciesByAgent = {},
+) {
+  (global.fetch as any).mockResolvedValueOnce({
+    ok: true,
+    json: async () => structuredClone(config),
+  });
+  (global.fetch as any).mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({ agent_policies: agentPolicies }),
+  });
+  await useConfigStore.getState().loadConfig();
+}
+
 describe("configStore", () => {
   beforeEach(() => {
     // Reset store state
-    useConfigStore.setState({
-      committedGeneration: 0,
-      loadedConfig: null,
-      config: null,
-      recoveryConfigSource: null,
-      recoveryConfigSourceOriginal: null,
-      draftVersion: 0,
-      agents: [],
-      teams: [],
-      rooms: [],
-      agentPoliciesByAgent: {},
-      agentPoliciesStale: false,
-      agentPoliciesRequestId: 0,
-      loadConfigRequestId: 0,
-      saveConfigRequestId: 0,
-      selectedAgentId: null,
-      selectedTeamId: null,
-      selectedRoomId: null,
-      isDirty: false,
-      dirtyRoots: [],
-      isLoading: false,
-      diagnostics: [],
-      syncStatus: "disconnected",
-      configUsesIncludes: false,
-      configJournalPendingRestart: false,
-      privateWorkerScopeBackups: {},
-    });
+    useConfigStore.setState(
+      { ...useConfigStore.getInitialState(), committedGeneration: 0 },
+      true,
+    );
 
     // Clear all mocks
     vi.clearAllMocks();
@@ -336,6 +328,42 @@ describe("configStore", () => {
   });
 
   describe("loadConfig", () => {
+    it("keeps draft edits made during a reload even when they leave the draft clean", async () => {
+      const config = {
+        agents: {},
+        models: { default: { provider: "ollama", id: "test-model" } },
+        router: { model: "default" },
+      };
+      await loadFixture(config);
+      const reload = deferred<unknown>();
+      (global.fetch as any).mockReturnValueOnce(reload.promise);
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: {} }),
+      });
+      const loadPromise = useConfigStore.getState().loadConfig();
+
+      const { isDirty, dirtyRoots, draftVersion } = useConfigStore.getState();
+      useConfigStore.getState().updateConfigValue(["router"], { model: "x" });
+      useConfigStore.getState().restoreConfigValue(["router"], config.router, {
+        isDirty,
+        dirtyRoots,
+        draftVersion,
+      });
+      expect(useConfigStore.getState().isDirty).toBe(false);
+
+      const draft = useConfigStore.getState().config;
+      reload.resolve({
+        ok: true,
+        json: async () => ({ ...config, router: { model: "server" } }),
+      });
+      await loadPromise;
+
+      const state = useConfigStore.getState();
+      expect(state.loadedConfig?.router).toEqual({ model: "server" });
+      expect(state.config).toBe(draft);
+    });
+
     it("should load configuration successfully", async () => {
       const mockConfig = {
         agents: {
@@ -521,48 +549,6 @@ describe("configStore", () => {
       ]);
     });
 
-    it("keeps complete tool entries in the draft when loading configuration", async () => {
-      const mockConfig = {
-        agents: {
-          test: {
-            display_name: "Test Agent",
-            role: "Test role",
-            tools: ["calculator", { shell: { sandbox: "tight" } }],
-            skills: [],
-            instructions: [],
-            rooms: [],
-          },
-        },
-        defaults: {
-          markdown: true,
-          tools: [{ gmail: { label: "support" } }, "file"],
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { test: makeAgentPolicy("test") },
-        }),
-      });
-
-      await useConfigStore.getState().loadConfig();
-
-      const state = useConfigStore.getState();
-      expect(state.agents[0].tools).toEqual(mockConfig.agents.test.tools);
-      expect(state.config?.defaults?.tools).toEqual(mockConfig.defaults.tools);
-    });
-
     describe("agents and teams that omit defaulted fields", () => {
       const authoredAgent = { display_name: "Test Agent" };
       const authoredTeam = {
@@ -576,9 +562,8 @@ describe("configStore", () => {
         team = authoredTeam as object,
         defaults = { markdown: true } as object,
       } = {}) {
-        (global.fetch as any).mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({
+        await loadFixture(
+          {
             agents: { test: agent },
             teams: { ops: team },
             models: { default: { provider: "ollama", id: "test-model" } },
@@ -590,15 +575,9 @@ describe("configStore", () => {
                 config: { model: "text-embedding-3-small" },
               },
             },
-          }),
-        });
-        (global.fetch as any).mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({
-            agent_policies: { test: makeAgentPolicy("test") },
-          }),
-        });
-        await useConfigStore.getState().loadConfig();
+          },
+          { test: makeAgentPolicy("test") },
+        );
       }
 
       it("fills them in on load", async () => {
@@ -1959,6 +1938,47 @@ describe("configStore", () => {
   });
 
   describe("saveConfig", () => {
+    it.each([
+      { mode: "structured", blocking: false },
+      { mode: "raw", blocking: true },
+    ] as const)(
+      "refuses a $mode save without a committed generation",
+      async ({ mode, blocking }) => {
+        useConfigStore.setState({
+          committedGeneration: null,
+          config:
+            mode === "structured"
+              ? ({ agents: {}, models: {} } as unknown as Config)
+              : null,
+          recoveryConfigSource: mode === "raw" ? "agents: {}\n" : null,
+        });
+
+        const result =
+          mode === "structured"
+            ? await useConfigStore.getState().saveConfig()
+            : await useConfigStore.getState().saveRecoveryConfigSource();
+
+        const diagnostics = [
+          {
+            kind: "global",
+            message: "Missing committed configuration generation.",
+            blocking,
+          },
+        ];
+        expect(result).toEqual({
+          status: "error",
+          message: "Missing committed configuration generation.",
+          diagnostics,
+        });
+        expect(useConfigStore.getState()).toMatchObject({
+          diagnostics,
+          isLoading: false,
+          syncStatus: "error",
+        });
+        expect(fetch).not.toHaveBeenCalled();
+      },
+    );
+
     it("surfaces the includes rejection message instead of a stale retry", async () => {
       const includesMessage =
         "configuration is composed from multiple files via !include; edit the source files instead";
@@ -2078,90 +2098,6 @@ describe("configStore", () => {
       expect(state.config?.agents).toEqual({ test: agentWithoutId });
     });
 
-    it("saves the draft's tool entries", async () => {
-      const mockConfig = {
-        agents: {
-          test: {
-            display_name: "Test Agent",
-            role: "Test role",
-            tools: ["calculator", { shell: { sandbox: "tight" } }],
-            skills: [],
-            instructions: [],
-            rooms: [],
-          },
-        },
-        defaults: {
-          markdown: true,
-          tools: [{ gmail: { label: "support" } }, "file"],
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { test: makeAgentPolicy("test") },
-        }),
-      });
-
-      await useConfigStore.getState().loadConfig();
-      useConfigStore
-        .getState()
-        .updateConfigValue(["router"], { model: "default" });
-      useConfigStore.getState().updateAgent("test", {
-        tools: toolEntriesForNames(
-          ["shell", "browser"],
-          useConfigStore.getState().agents[0].tools,
-        ),
-      });
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true }),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const saveCall = (global.fetch as any).mock.calls[2];
-      expect(saveCall[0]).toBe("/api/config/save");
-      expect(saveCall[1]).toMatchObject({
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "x-mindroom-config-generation": "0",
-        },
-      });
-      expect(JSON.parse(saveCall[1].body)).toMatchObject({
-        defaults: {
-          markdown: true,
-          tools: [{ gmail: { label: "support" } }, "file"],
-        },
-        agents: {
-          test: {
-            tools: [{ shell: { sandbox: "tight" } }, "browser"],
-          },
-        },
-        router: { model: "default" },
-      });
-      expect(useConfigStore.getState().agents[0].tools).toEqual([
-        { shell: { sandbox: "tight" } },
-        "browser",
-      ]);
-      expect(useConfigStore.getState().config?.defaults?.tools).toEqual([
-        { gmail: { label: "support" } },
-        "file",
-      ]);
-    });
-
     it("stores backend validation issues without poisoning the global load error", async () => {
       const mockConfig: Config = {
         models: {
@@ -2218,7 +2154,7 @@ describe("configStore", () => {
         }),
       });
 
-      await useConfigStore.getState().saveConfig();
+      const result = await useConfigStore.getState().saveConfig();
 
       const state = useConfigStore.getState();
       expect(state.diagnostics).toEqual([
@@ -2236,6 +2172,11 @@ describe("configStore", () => {
           },
         },
       ]);
+      expect(result).toEqual({
+        status: "error",
+        message: "Configuration validation failed",
+        diagnostics: state.diagnostics,
+      });
     });
 
     it("ignores stale successful save results after a newer validation failure", async () => {
@@ -2795,14 +2736,7 @@ describe("configStore", () => {
         dirtyRoots: ["agents"],
       });
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true }),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const saveBody = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      const saveBody = await savedPayload();
       expect(saveBody.voice.visible_router_echo).toBe(true);
       expect(saveBody.agents.assistant.role).toBe("Edited role");
       expect(useConfigStore.getState().config?.voice?.visible_router_echo).toBe(
@@ -3074,6 +3008,37 @@ describe("configStore", () => {
         watch: true,
       });
     });
+
+    it.each([
+      { enabled: true, path: "memory" },
+      { enabled: false, path: undefined },
+    ])(
+      "replaces a blank private knowledge path (enabled: $enabled)",
+      ({ enabled, path }) => {
+        useConfigStore.setState({
+          agents: [
+            {
+              id: "mind",
+              display_name: "Mind",
+              role: "Assistant",
+              tools: [],
+              skills: [],
+              instructions: [],
+              rooms: [],
+            },
+          ],
+        });
+
+        useConfigStore.getState().updateAgent("mind", {
+          private: { per: "user", knowledge: { enabled, path: "  " } },
+        });
+
+        expect(useConfigStore.getState().agents[0].private?.knowledge).toEqual({
+          enabled,
+          path,
+        });
+      },
+    );
 
     it("restores the backed-up worker_scope when private mode is disabled", () => {
       useConfigStore.setState({
@@ -4277,26 +4242,7 @@ describe("configStore", () => {
             research: { path: "./research", watch: true },
           },
           models: {},
-          agents: {
-            agent1: {
-              display_name: "Agent 1",
-              role: "Test agent",
-              tools: [],
-              skills: [],
-              instructions: [],
-              rooms: [],
-              knowledge_bases: ["research", "legal"],
-            },
-            agent2: {
-              display_name: "Agent 2",
-              role: "Test agent 2",
-              tools: [],
-              skills: [],
-              instructions: [],
-              rooms: [],
-              knowledge_bases: ["research"],
-            },
-          },
+          agents: {},
           defaults: {
             markdown: true,
           },
@@ -4400,6 +4346,38 @@ describe("configStore", () => {
       expect(state.selectedRoomId).toBe("dev");
     });
 
+    it("drops the room model block once its last override is cleared", () => {
+      useConfigStore.setState({
+        config: {
+          agents: {},
+          models: {},
+          room_models: { lobby: "default" },
+        } as unknown as Config,
+      });
+
+      useConfigStore.getState().updateRoom("lobby", { model: undefined });
+
+      expect(useConfigStore.getState().config?.room_models).toBeUndefined();
+    });
+
+    it("keeps an authored room entry when its metadata is cleared", () => {
+      useConfigStore.setState({
+        config: {
+          agents: {},
+          models: {},
+          rooms: { lobby: { display_name: "Lobby", description: "Main room" } },
+        } as unknown as Config,
+      });
+
+      useConfigStore
+        .getState()
+        .updateRoom("lobby", { display_name: "", description: "" });
+
+      expect(useConfigStore.getState().config?.rooms).toEqual({
+        lobby: { description: "" },
+      });
+    });
+
     it("should update room", () => {
       const { updateRoom } = useConfigStore.getState();
       updateRoom("lobby", { display_name: "Updated Lobby" });
@@ -4433,12 +4411,7 @@ describe("configStore", () => {
           ?.display_name,
       ).toBe("Big ");
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-      await useConfigStore.getState().saveConfig();
-      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      const payload = await savedPayload();
       expect(payload.rooms).toEqual({ lobby: { display_name: "Big" } });
     });
 
@@ -4697,14 +4670,7 @@ describe("configStore", () => {
         state.rooms.find((room) => room.id === "project_room")?.display_name,
       ).toBe("Project Room");
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      const payload = await savedPayload();
       expect(payload.rooms).toEqual({
         project_room: {
           description: "Planning space",
@@ -4790,100 +4756,7 @@ describe("configStore", () => {
       expect(state.isDirty).toBe(false);
     });
 
-    it("does not serialize derived rooms for membership-only updates", async () => {
-      const mockConfig = {
-        agents: {
-          agent1: {
-            display_name: "Agent 1",
-            role: "Test agent",
-            tools: [],
-            skills: [],
-            instructions: [],
-            rooms: ["lobby"],
-          },
-          agent2: {
-            display_name: "Agent 2",
-            role: "Test agent 2",
-            tools: [],
-            skills: [],
-            instructions: [],
-            rooms: [],
-          },
-        },
-        memory: {
-          embedder: {
-            provider: "ollama",
-            config: {
-              model: "nomic-embed-text",
-              host: "http://localhost:11434",
-            },
-          },
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-        defaults: {
-          markdown: true,
-        },
-        router: {
-          model: "default",
-        },
-      } as Config;
-
-      useConfigStore.setState({
-        config: mockConfig,
-        loadedConfig: mockConfig,
-        agents: [
-          {
-            id: "agent1",
-            display_name: "Agent 1",
-            role: "Test agent",
-            tools: [],
-            skills: [],
-            instructions: [],
-            rooms: ["lobby"],
-          },
-          {
-            id: "agent2",
-            display_name: "Agent 2",
-            role: "Test agent 2",
-            tools: [],
-            skills: [],
-            instructions: [],
-            rooms: [],
-          },
-        ],
-        rooms: [
-          {
-            id: "lobby",
-            display_name: "Lobby",
-            description: "",
-            agents: ["agent1"],
-          },
-        ],
-      });
-
-      useConfigStore.getState().updateRoom("lobby", {
-        agents: ["agent1", "agent2"],
-      });
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
-      expect(payload.rooms).toBeUndefined();
-      expect(payload.agents.agent1.rooms).toEqual(["lobby"]);
-      expect(payload.agents.agent2.rooms).toEqual(["lobby"]);
-    });
-
-    it("does not create managed room metadata for membership-only updates", () => {
+    it("keeps membership-only updates out of managed room metadata", async () => {
       const mockConfig = {
         agents: {
           agent1: {
@@ -4967,6 +4840,11 @@ describe("configStore", () => {
       expect(state.config?.rooms).toBeUndefined();
       expect(state.dirtyRoots).not.toContain("rooms");
       expect(state.dirtyRoots).toContain("agents");
+
+      const payload = await savedPayload();
+      expect(payload.rooms).toBeUndefined();
+      expect(payload.agents.agent1.rooms).toEqual(["lobby"]);
+      expect(payload.agents.agent2.rooms).toEqual(["lobby"]);
     });
 
     it("does not serialize derived rooms for model-only updates", async () => {
@@ -5034,14 +4912,7 @@ describe("configStore", () => {
 
       useConfigStore.getState().updateRoom("lobby", { model: "claude" });
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      const payload = await savedPayload();
       expect(payload.rooms).toBeUndefined();
       expect(payload.room_models).toEqual({
         lobby: "claude",
@@ -5185,14 +5056,7 @@ describe("configStore", () => {
         expect.arrayContaining(["rooms", "room_models"]),
       );
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      const payload = await savedPayload();
       expect(payload.room_models).toEqual({
         project_room: "claude",
       });
@@ -5282,14 +5146,7 @@ describe("configStore", () => {
         agents: [],
       });
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      const payload = await savedPayload();
       expect(payload.rooms).toEqual({
         project_room: {
           display_name: "Project Room",
@@ -5346,14 +5203,7 @@ describe("configStore", () => {
         agents: [],
       });
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      const payload = await savedPayload();
       expect(payload.rooms).toEqual({
         analysis_room: {},
         project_room: {
@@ -5415,22 +5265,14 @@ describe("configStore", () => {
         rooms: [],
       });
 
-      const { createRoom, saveConfig } = useConfigStore.getState();
+      const { createRoom } = useConfigStore.getState();
       createRoom({
         display_name: "Project Room",
         description: "Planning space",
         agents: [],
       });
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await saveConfig();
-
-      const saveCall = (global.fetch as any).mock.calls[0];
-      const payload = JSON.parse(saveCall[1].body);
+      const payload = await savedPayload();
       expect(payload.rooms).toEqual({
         project_room: {
           display_name: "Project Room",
@@ -5636,14 +5478,7 @@ describe("configStore", () => {
       expect(state.dirtyRoots).not.toContain("agents");
       expect(state.dirtyRoots).not.toContain("teams");
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      const payload = await savedPayload();
       expect(payload.agents).toEqual(mockConfig.agents);
       expect(payload.teams).toEqual(mockConfig.teams);
       expect(payload.rooms).toEqual({});
@@ -5722,14 +5557,7 @@ describe("configStore", () => {
 
       useConfigStore.getState().deleteRoom("project_room");
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      const payload = await savedPayload();
       expect(payload.rooms).toEqual({});
       expect(payload.agents.agent1.rooms).toEqual(["lobby"]);
     });
@@ -5788,14 +5616,7 @@ describe("configStore", () => {
 
       useConfigStore.getState().deleteRoom("project_room");
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      const payload = await savedPayload();
       expect(payload.rooms).toEqual({
         analysis_room: {},
       });
@@ -5936,17 +5757,7 @@ describe("configStore", () => {
     };
 
     async function loadBaseConfig(config: object = baseConfig) {
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => structuredClone(config),
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { helper: makeAgentPolicy("helper") },
-        }),
-      });
-      await useConfigStore.getState().loadConfig();
+      await loadFixture(config, { helper: makeAgentPolicy("helper") });
     }
 
     it("marks the root dirty and saves its new value", async () => {
@@ -5976,27 +5787,6 @@ describe("configStore", () => {
       const payload = await savedPayload();
       expect(payload.router).toEqual({ model: "fast" });
       expect(payload).not.toHaveProperty("defaults");
-    });
-
-    it("edits overrides of shared default tools", async () => {
-      await loadBaseConfig();
-      expect(
-        useConfigStore.getState().getDefaultToolOverrides("gmail"),
-      ).toEqual({ label: "support" });
-
-      useConfigStore
-        .getState()
-        .updateDefaultToolOverrides("file", { base_dir: "/srv/files" });
-      useConfigStore
-        .getState()
-        .updateDefaultToolOverrides("gmail", { label: null });
-
-      expect(useConfigStore.getState().dirtyRoots).toEqual(["defaults"]);
-      expect((await savedPayload()).defaults.tools).toEqual([
-        "gmail",
-        { file: { base_dir: "/srv/files" } },
-        "scheduler",
-      ]);
     });
 
     it("clears only the diagnostics of the edited field", async () => {
@@ -6115,30 +5905,6 @@ describe("configStore", () => {
 
       expect(await savedPayload()).not.toHaveProperty("personal_rooms");
     });
-
-    it("saves the default tool entries the draft holds", async () => {
-      await loadBaseConfig();
-      const defaults = useConfigStore.getState().config!.defaults!;
-      expect(defaults.tools).toEqual([
-        { gmail: { label: "support" } },
-        "file",
-        "scheduler",
-      ]);
-
-      useConfigStore.getState().updateConfigValue(["defaults"], {
-        ...defaults,
-        tools: toolEntriesForNames(
-          ["gmail", "scheduler", "shell"],
-          defaults.tools!,
-        ),
-      });
-
-      expect((await savedPayload()).defaults.tools).toEqual([
-        { gmail: { label: "support" } },
-        "scheduler",
-        "shell",
-      ]);
-    });
   });
 
   describe("restoreConfigValue", () => {
@@ -6151,15 +5917,7 @@ describe("configStore", () => {
     const path: ConfigPath = ["egress_broker", "services", "extra"];
 
     async function loadAuthored(config: object = authored) {
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => structuredClone(config),
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ agent_policies: {} }),
-      });
-      await useConfigStore.getState().loadConfig();
+      await loadFixture(config);
     }
 
     function mark() {
@@ -6228,6 +5986,7 @@ describe("configStore", () => {
     it("leaves edits made after the write dirty and in the draft", async () => {
       await loadAuthored();
       const before = mark();
+      expect(before.isDirty).toBe(false);
       useConfigStore.getState().updateConfigValue(path, { preset: "openai" });
       // The user edits something else while the write is being saved.
       useConfigStore
@@ -6244,21 +6003,6 @@ describe("configStore", () => {
         authored.egress_broker,
       );
       expect(state.syncStatus).toBe("error");
-    });
-
-    it("does not reset the dirty state when a later edit made a clean draft dirty", async () => {
-      await loadAuthored();
-      const before = mark();
-      expect(before.isDirty).toBe(false);
-      useConfigStore.getState().updateConfigValue(path, { preset: "openai" });
-      useConfigStore.getState().updateConfigValue(["models"], {
-        default: { provider: "ollama", id: "other-model" },
-      });
-
-      useConfigStore.getState().restoreConfigValue(path, undefined, before);
-
-      expect(useConfigStore.getState().dirtyRoots).toContain("models");
-      expect(useConfigStore.getState().isDirty).toBe(true);
     });
 
     it("drops the validation errors that were about the restored path only", async () => {
@@ -6344,9 +6088,8 @@ describe("configStore", () => {
       tools = ["browser", { shell: { sandbox: "tight" } }] as unknown[],
       defaultTools = undefined as unknown[] | undefined,
     } = {}) {
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
+      await loadFixture(
+        {
           agents: {
             coder: { display_name: "Coder", role: "Codes", tools },
           },
@@ -6355,15 +6098,9 @@ describe("configStore", () => {
             markdown: true,
             ...(defaultTools ? { tools: defaultTools } : {}),
           },
-        }),
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { coder: makeAgentPolicy("coder") },
-        }),
-      });
-      await useConfigStore.getState().loadConfig();
+        },
+        { coder: makeAgentPolicy("coder") },
+      );
     }
 
     it("gives an agent re-created under a deleted agent's id no tool overrides", async () => {
@@ -6442,35 +6179,43 @@ describe("configStore", () => {
       ).toEqual({ label: "billing" });
     });
 
-    it("clears lazy-loading flags patched to null and keeps other overrides", async () => {
-      await loadAgentTools({
-        tools: [{ shell: { defer: true, initial: true, sandbox: "tight" } }],
-      });
-
-      useConfigStore.getState().updateAgentToolOverrides("coder", "shell", {
-        defer: null,
-        initial: null,
-      });
-      expect(
-        useConfigStore.getState().getAgentToolOverrides("coder", "shell"),
-      ).toEqual({ sandbox: "tight" });
-      expect((await savedPayload()).agents.coder.tools).toEqual([
-        { shell: { sandbox: "tight" } },
-      ]);
-    });
-
-    it("exposes the overrides of loaded tool entries", async () => {
+    it("keeps loaded tool entries in the draft and exposes their overrides", async () => {
       const tools = [
         "browser",
         { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
       ];
-      await loadAgentTools({ tools });
+      const defaultTools = [{ gmail: { label: "support" } }, "file"];
+      await loadAgentTools({ tools, defaultTools });
 
       const state = useConfigStore.getState();
       expect(state.agents[0].tools).toEqual(tools);
+      expect(state.config?.defaults?.tools).toEqual(defaultTools);
       expect(state.getAgentToolOverrides("coder", "shell")).toEqual({
         extra_env_passthrough: ["GITEA_TOKEN"],
       });
+    });
+
+    it("edits overrides of shared default tools", async () => {
+      await loadAgentTools({
+        defaultTools: [{ gmail: { label: "support" } }, "file", "scheduler"],
+      });
+      expect(
+        useConfigStore.getState().getDefaultToolOverrides("gmail"),
+      ).toEqual({ label: "support" });
+
+      useConfigStore
+        .getState()
+        .updateDefaultToolOverrides("file", { base_dir: "/srv/files" });
+      useConfigStore
+        .getState()
+        .updateDefaultToolOverrides("gmail", { label: null });
+
+      expect(useConfigStore.getState().dirtyRoots).toEqual(["defaults"]);
+      expect((await savedPayload()).defaults.tools).toEqual([
+        "gmail",
+        { file: { base_dir: "/srv/files" } },
+        "scheduler",
+      ]);
     });
 
     it("updates overrides, marks the draft dirty, and saves the edited entry", async () => {
@@ -6578,17 +6323,6 @@ describe("configStore", () => {
           lobby: "claude",
         },
       });
-    });
-
-    it("collapses an empty override object back to a plain string entry on save", async () => {
-      await loadAgentTools({
-        tools: [{ shell: { extra_env_passthrough: ["GITEA_TOKEN"] } }],
-      });
-      useConfigStore.getState().updateAgentToolOverrides("coder", "shell", {
-        extra_env_passthrough: null,
-      });
-
-      expect((await savedPayload()).agents.coder.tools).toEqual(["shell"]);
     });
   });
 });

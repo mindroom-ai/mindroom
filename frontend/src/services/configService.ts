@@ -71,6 +71,28 @@ async function responseDetail(response: Response): Promise<unknown> {
   }
 }
 
+function detailMessage(detail: unknown): string | undefined {
+  return typeof detail === "string" && detail.length > 0 ? detail : undefined;
+}
+
+// The error a failed config save reports: a stale generation, a
+// validation failure, the backend's message, or the fallback.
+function saveError(
+  response: Response,
+  detail: unknown,
+  fallbackMessage: string,
+): Error {
+  if (response.status === 409) {
+    return new ConfigStaleError(detailMessage(detail));
+  }
+  if (response.status === 422 && isConfigValidationIssueList(detail)) {
+    return new ConfigValidationError(detail);
+  }
+  return new Error(
+    detailMessage(detail) ?? `${fallbackMessage} (Error ${response.status})`,
+  );
+}
+
 function responseHeader(response: Response, name: string): string | null {
   return typeof response.headers?.get === "function"
     ? response.headers.get(name)
@@ -87,17 +109,6 @@ function responseGeneration(
       ? Number.NaN
       : Number.parseInt(headerValue, 10);
   return Number.isFinite(parsed) ? parsed : fallbackGeneration;
-}
-
-function responseUsesIncludes(response: Response): boolean {
-  return responseHeader(response, CONFIG_USES_INCLUDES_HEADER) === "true";
-}
-
-// The saved event_journal is read once, when the store is opened, so an edit
-// to it is accepted and then does nothing until a restart. The editor shows
-// the saved value either way; this is what stops that from being a lie.
-function responsePendingRestart(response: Response): boolean {
-  return responseHeader(response, CONFIG_PENDING_RESTART_HEADER) === "true";
 }
 
 export async function loadConfig(): Promise<{
@@ -136,8 +147,13 @@ export async function loadConfig(): Promise<{
   return {
     config: (await response.json()) as Config,
     generation: responseGeneration(response, 0),
-    usesIncludes: responseUsesIncludes(response),
-    pendingRestart: responsePendingRestart(response),
+    usesIncludes:
+      responseHeader(response, CONFIG_USES_INCLUDES_HEADER) === "true",
+    // The saved event_journal is read once, when the store is opened, so an edit
+    // to it is accepted and then does nothing until a restart. The editor shows
+    // the saved value either way; this is what stops that from being a lie.
+    pendingRestart:
+      responseHeader(response, CONFIG_PENDING_RESTART_HEADER) === "true",
   };
 }
 
@@ -190,22 +206,12 @@ export async function saveConfig(
 
   if (!response.ok) {
     const detail = await responseDetail(response);
-    if (response.status === 409) {
-      const includesMessage = composedFromIncludesMessage(detail);
-      if (includesMessage != null) {
-        throw new ConfigComposedFromIncludesError(includesMessage);
-      }
-      throw new ConfigStaleError(
-        typeof detail === "string" && detail.length > 0 ? detail : undefined,
-      );
+    const includesMessage =
+      response.status === 409 ? composedFromIncludesMessage(detail) : null;
+    if (includesMessage != null) {
+      throw new ConfigComposedFromIncludesError(includesMessage);
     }
-    if (response.status === 422 && isConfigValidationIssueList(detail)) {
-      throw new ConfigValidationError(detail);
-    }
-    if (typeof detail === "string" && detail.length > 0) {
-      throw new Error(detail);
-    }
-    throw new Error(`Failed to save configuration (Error ${response.status})`);
+    throw saveError(response, detail, "Failed to save configuration");
   }
 
   return { generation: responseGeneration(response, generation + 1) };
@@ -219,11 +225,9 @@ export async function loadRawConfigSource(): Promise<{
 
   if (!response.ok) {
     const detail = await responseDetail(response);
-    if (typeof detail === "string" && detail.length > 0) {
-      throw new Error(detail);
-    }
     throw new Error(
-      `Failed to load raw configuration (Error ${response.status})`,
+      detailMessage(detail) ??
+        `Failed to load raw configuration (Error ${response.status})`,
     );
   }
 
@@ -248,20 +252,10 @@ export async function saveRawConfigSource(
   });
 
   if (!response.ok) {
-    const detail = await responseDetail(response);
-    if (response.status === 409) {
-      throw new ConfigStaleError(
-        typeof detail === "string" && detail.length > 0 ? detail : undefined,
-      );
-    }
-    if (response.status === 422 && isConfigValidationIssueList(detail)) {
-      throw new ConfigValidationError(detail);
-    }
-    if (typeof detail === "string" && detail.length > 0) {
-      throw new Error(detail);
-    }
-    throw new Error(
-      `Failed to save raw configuration (Error ${response.status})`,
+    throw saveError(
+      response,
+      await responseDetail(response),
+      "Failed to save raw configuration",
     );
   }
 
