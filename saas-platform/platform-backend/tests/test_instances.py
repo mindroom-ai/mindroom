@@ -28,6 +28,13 @@ class TestInstancesEndpoints:
             mock.return_value = sb
             yield sb
 
+    @pytest.fixture
+    def db(self):
+        """In-memory Supabase for routes that query several tables."""
+        db = FakeSupabase()
+        with patch("backend.routes.instances.ensure_supabase", return_value=db):
+            yield db
+
     @pytest.fixture(autouse=True)
     def account_not_pending_deletion(self):
         """These tests use accounts that are not pending deletion; test_instance_lifecycle covers the refusal."""
@@ -174,38 +181,15 @@ class TestInstancesEndpoints:
     def test_provision_user_instance_success(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_provision_instance: Mock,
     ):
         """Test provisioning a new instance for user."""
-        # Setup
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "byok", "status": "active"}
-
-        # Setup mock chains for different queries
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[subscription])
-
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[])  # No existing instance
-
-        call_count = [0]
-
-        def table_side_effect(table_name):
-            call_count[0] += 1
-            if table_name == "subscriptions":
-                return subscription_mock
-            elif table_name == "instances":
-                return instance_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        # Setup: a subscription and no existing instance
+        db.tables["subscriptions"] = [
+            {"id": "sub_123", "account_id": "acc_test_123", "tier": "byok", "status": "active"}
+        ]
 
         # Make request
         response = client.post("/my/instances/provision")
@@ -223,15 +207,14 @@ class TestInstancesEndpoints:
         assert call_args["data"]["subscription_id"] == "sub_123"
         assert call_args["data"]["tier"] == "byok"
 
-    def test_provision_user_instance_existing(
-        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
-    ):
+    def test_provision_user_instance_existing(self, client: TestClient, db: FakeSupabase, mock_verify_user: Mock):
         """Test provisioning when instance already exists."""
         # Setup
         subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "byok", "status": "active"}
         existing_instance = {
             "id": 1,
             "instance_id": "456",
+            "subscription_id": "sub_123",
             "status": "running",
             "frontend_url": "https://456.mindroom.test",
             "backend_url": "https://456.api.mindroom.test",
@@ -241,32 +224,7 @@ class TestInstancesEndpoints:
             "instance_url": "https://456.mindroom.test",  # Some fields check both
         }
 
-        # Setup mock chain for subscription query
-        mock_sub_chain = MagicMock()
-        mock_sub_chain.execute.return_value = Mock(data=[subscription])
-
-        # Setup mock chain for instance query
-        mock_inst_chain = MagicMock()
-        mock_inst_chain.execute.return_value = Mock(data=[existing_instance])
-
-        # Configure mocks to return proper chains
-        call_count = 0
-
-        def table_side_effect(name):
-            nonlocal call_count
-            if name == "subscriptions":
-                return mock_sub_chain
-            elif name == "instances":
-                return mock_inst_chain
-            return MagicMock()
-
-        mock_supabase.table.side_effect = table_side_effect
-        mock_sub_chain.select.return_value = mock_sub_chain
-        mock_sub_chain.eq.return_value = mock_sub_chain
-        mock_sub_chain.limit.return_value = mock_sub_chain
-        mock_inst_chain.select.return_value = mock_inst_chain
-        mock_inst_chain.eq.return_value = mock_inst_chain
-        mock_inst_chain.limit.return_value = mock_inst_chain
+        db.tables.update(subscriptions=[subscription], instances=[existing_instance])
 
         # Make request
         response = client.post("/my/instances/provision")
@@ -282,7 +240,7 @@ class TestInstancesEndpoints:
     def test_provision_user_instance_deprovisioned(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_provision_instance: Mock,
     ):
@@ -292,6 +250,7 @@ class TestInstancesEndpoints:
         deprovisioned_instance = {
             "id": 1,
             "instance_id": "789",
+            "subscription_id": "sub_123",
             "status": "deprovisioned",
             "frontend_url": None,
             "backend_url": None,
@@ -301,32 +260,7 @@ class TestInstancesEndpoints:
             "instance_url": None,
         }
 
-        # Setup mock chain for subscription query
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[subscription])
-
-        # Setup mock chain for instance query
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[deprovisioned_instance])
-
-        # Configure table method to return different mocks
-        call_count = [0]
-
-        def table_side_effect(table_name):
-            call_count[0] += 1
-            if table_name == "subscriptions":
-                return subscription_mock
-            elif table_name == "instances":
-                return instance_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables.update(subscriptions=[subscription], instances=[deprovisioned_instance])
 
         # Make request
         response = client.post("/my/instances/provision")
@@ -387,33 +321,14 @@ class TestInstancesEndpoints:
     def test_provision_user_instance_rejects_free_subscription(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_provision_instance: Mock,
     ):
         """Test free accounts cannot provision hosted infrastructure."""
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "free", "status": "active"}
-
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[subscription])
-
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[])
-
-        def table_side_effect(table_name):
-            if table_name == "subscriptions":
-                return subscription_mock
-            if table_name == "instances":
-                return instance_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables["subscriptions"] = [
+            {"id": "sub_123", "account_id": "acc_test_123", "tier": "free", "status": "active"}
+        ]
 
         response = client.post("/my/instances/provision")
 
@@ -424,31 +339,15 @@ class TestInstancesEndpoints:
     def test_start_user_instance_success(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_start_instance: Mock,
     ):
         """Test starting user's instance successfully."""
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[{"id": 1, "subscription_id": "sub_123"}])
-
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[{"id": "sub_123", "tier": "byok", "status": "active"}])
-
-        def table_side_effect(table_name):
-            if table_name == "instances":
-                return instance_mock
-            if table_name == "subscriptions":
-                return subscription_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables.update(
+            instances=[{"id": 1, "instance_id": "123", "account_id": "acc_test_123", "subscription_id": "sub_123"}],
+            subscriptions=[{"id": "sub_123", "tier": "byok", "status": "active"}],
+        )
 
         # Make request
         response = client.post("/my/instances/123/start")
@@ -465,7 +364,7 @@ class TestInstancesEndpoints:
     def test_start_user_instance_rejects_expired_trial(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_start_instance: Mock,
     ):
@@ -477,27 +376,10 @@ class TestInstancesEndpoints:
             "status": "trialing",
             "trial_ends_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
         }
-
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[{"id": 1, "subscription_id": "sub_123"}])
-
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[expired_trial])
-
-        def table_side_effect(table_name):
-            if table_name == "instances":
-                return instance_mock
-            if table_name == "subscriptions":
-                return subscription_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables.update(
+            instances=[{"id": 1, "instance_id": "123", "account_id": "acc_test_123", "subscription_id": "sub_123"}],
+            subscriptions=[expired_trial],
+        )
 
         response = client.post("/my/instances/123/start")
 
@@ -543,31 +425,15 @@ class TestInstancesEndpoints:
     def test_restart_user_instance_success(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_restart_instance: Mock,
     ):
         """Test restarting user's instance successfully."""
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[{"id": 1, "subscription_id": "sub_123"}])
-
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[{"id": "sub_123", "tier": "byok", "status": "active"}])
-
-        def table_side_effect(table_name):
-            if table_name == "instances":
-                return instance_mock
-            if table_name == "subscriptions":
-                return subscription_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables.update(
+            instances=[{"id": 1, "instance_id": "456", "account_id": "acc_test_123", "subscription_id": "sub_123"}],
+            subscriptions=[{"id": "sub_123", "tier": "byok", "status": "active"}],
+        )
 
         # Make request
         response = client.post("/my/instances/456/restart")
@@ -596,19 +462,14 @@ class TestInstancesEndpoints:
         """Test that background sync prevents duplicate syncs."""
         from backend.routes.instances import _background_sync_instance_status, _syncing_instances
 
-        # Setup
-        original_size = len(_syncing_instances)
         _syncing_instances.add("123")  # Mark as already syncing
-
-        # Run the background task - should return immediately without database calls
-        with patch("backend.routes.instances.ensure_supabase") as mock_sb:
-            asyncio.run(_background_sync_instance_status("123"))
-            # Should not have called database at all
+        try:
+            # Run the background task - should return immediately without database calls
+            with patch("backend.routes.instances.ensure_supabase") as mock_sb:
+                asyncio.run(_background_sync_instance_status("123"))
             mock_sb.assert_not_called()
-
-        # Clean up
-        _syncing_instances.discard("123")
-        assert len(_syncing_instances) == original_size
+        finally:
+            _syncing_instances.discard("123")
 
     def test_unauthorized_access(self, client: TestClient):
         """Test accessing endpoints without authentication."""
@@ -626,15 +487,14 @@ class TestInstancesEndpoints:
         finally:
             app.dependency_overrides.clear()
 
-    def test_provision_with_existing_provisioning(
-        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
-    ):
+    def test_provision_with_existing_provisioning(self, client: TestClient, db: FakeSupabase, mock_verify_user: Mock):
         """Test provisioning when instance is already provisioning."""
         # Setup
         subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "byok", "status": "active"}
         provisioning_instance = {
             "id": 1,
             "instance_id": "456",
+            "subscription_id": "sub_123",
             "status": "provisioning",
             "frontend_url": "https://456.mindroom.test",
             "backend_url": "https://456.api.mindroom.test",
@@ -644,32 +504,7 @@ class TestInstancesEndpoints:
             "instance_url": "https://456.mindroom.test",
         }
 
-        # Setup mock chain for subscription query
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[subscription])
-
-        # Setup mock chain for instance query
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[provisioning_instance])
-
-        # Configure table method to return different mocks
-        call_count = [0]
-
-        def table_side_effect(table_name):
-            call_count[0] += 1
-            if table_name == "subscriptions":
-                return subscription_mock
-            elif table_name == "instances":
-                return instance_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables.update(subscriptions=[subscription], instances=[provisioning_instance])
 
         # Make request
         response = client.post("/my/instances/provision")

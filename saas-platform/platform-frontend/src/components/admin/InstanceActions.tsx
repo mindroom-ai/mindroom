@@ -21,13 +21,7 @@ export function InstanceActions({ instanceId, currentStatus }: InstanceActionsPr
 
     try {
       const method = action === 'uninstall' ? 'DELETE' : 'POST'
-      const endpoint = action === 'uninstall'
-        ? `/admin/instances/${instanceId}/uninstall`
-        : action === 'provision'
-        ? `/admin/instances/${instanceId}/provision`
-        : `/admin/instances/${instanceId}/${action}`
-
-      const response = await apiCall(endpoint, { method })
+      const response = await apiCall(`/admin/instances/${instanceId}/${action}`, { method })
 
       if (!response.ok) {
         throw new Error(`Failed to ${action} instance`)
@@ -71,29 +65,29 @@ export function InstanceActions({ instanceId, currentStatus }: InstanceActionsPr
       )}
 
       {canStopOrRestart && (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="text-yellow-600 dark:text-yellow-400 hover:text-yellow-700 dark:hover:text-yellow-300"
-          onClick={() => performAction('stop')}
-          disabled={loading !== null}
-        >
-          <Square className="w-3 h-3 mr-1" />
-          {loading === 'stop' ? 'Stopping...' : 'Stop'}
-        </Button>
-      )}
+        <>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-yellow-600 dark:text-yellow-400 hover:text-yellow-700 dark:hover:text-yellow-300"
+            onClick={() => performAction('stop')}
+            disabled={loading !== null}
+          >
+            <Square className="w-3 h-3 mr-1" />
+            {loading === 'stop' ? 'Stopping...' : 'Stop'}
+          </Button>
 
-      {canStopOrRestart && (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
-          onClick={() => performAction('restart')}
-          disabled={loading !== null}
-        >
-          <RotateCw className="w-3 h-3 mr-1" />
-          {loading === 'restart' ? 'Restarting...' : 'Restart'}
-        </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+            onClick={() => performAction('restart')}
+            disabled={loading !== null}
+          >
+            <RotateCw className="w-3 h-3 mr-1" />
+            {loading === 'restart' ? 'Restarting...' : 'Restart'}
+          </Button>
+        </>
       )}
 
       {currentStatus !== 'deprovisioned' && (

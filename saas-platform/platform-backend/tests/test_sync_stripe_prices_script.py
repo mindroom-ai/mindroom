@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
-import dotenv
 import pytest
-import stripe
 
-_SCRIPT = Path(__file__).resolve().parents[3] / "cluster/scripts/sync-stripe-prices.py"
+from tests.cluster_scripts import load_stripe_script
+
 _PLAN = {"name": "Bring Your Own Keys", "price_monthly": 1200, "price_yearly": 9600}
 
 
@@ -22,8 +19,8 @@ class _FakePrices:
         self.prices = list(prices)
         self.created: list[dict[str, Any]] = []
 
-    def list(self, *, product: str, active: bool | None = None, limit: int) -> SimpleNamespace:  # noqa: ARG002
-        return SimpleNamespace(data=[p for p in self.prices if active is None or p.active == active])
+    def list(self, *, product: str, active: bool, limit: int) -> SimpleNamespace:  # noqa: ARG002
+        return SimpleNamespace(data=[p for p in self.prices if p.active == active])
 
     def create(self, **params: Any) -> SimpleNamespace:  # noqa: ANN401
         self.created.append(params)
@@ -36,16 +33,7 @@ def _price(price_id: str, amount: int, *, active: bool = True) -> SimpleNamespac
 
 
 def _load_script(monkeypatch: pytest.MonkeyPatch, prices: _FakePrices) -> ModuleType:
-    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_placeholder")
-    # Importing the script sets the shared Stripe client's key, so restore it afterwards.
-    monkeypatch.setattr(stripe, "api_key", stripe.api_key)
-    # Importing the script must not read a developer's real saas-platform/.env.
-    monkeypatch.setattr(dotenv, "load_dotenv", lambda *_args, **_kwargs: False)
-    spec = importlib.util.spec_from_file_location("sync_stripe_prices", _SCRIPT)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_stripe_script(monkeypatch, "sync-stripe-prices")
     monkeypatch.setattr(module, "stripe", SimpleNamespace(Price=prices))
     return module
 

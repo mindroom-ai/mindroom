@@ -7,9 +7,8 @@
 # ruff: noqa: ANN001, ANN201, PTH123
 """Sync pricing configuration with Stripe.
 
-This script reads the pricing-config.yaml and creates/updates
-products and prices in Stripe. It also updates the YAML file
-with the generated Stripe price IDs.
+This script reads pricing-config.yaml, creates or updates the MindRoom product in Stripe,
+reuses or creates a price for each paid plan and billing cycle, and writes the price IDs back to the YAML file.
 """
 
 import os
@@ -20,18 +19,15 @@ import stripe
 import yaml
 from dotenv import load_dotenv
 
-# Load environment variables
 repo_root = Path(__file__).resolve().parents[2]
 env_path = repo_root / "saas-platform" / ".env"
 load_dotenv(env_path)
 
-# Initialize Stripe
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 if not stripe.api_key:
     print("❌ Error: STRIPE_SECRET_KEY not found in environment variables")
     sys.exit(1)
 
-# Load pricing config
 config_path = repo_root / "saas-platform" / "pricing-config.yaml"
 with open(config_path) as f:
     config = yaml.safe_load(f)
@@ -50,25 +46,16 @@ def as_dict(value):
 
 def sync_product():
     """Create or update the main product in Stripe."""
-    products = stripe.Product.list(limit=100)
-
-    # Look for existing product
-    existing_product = None
-    for product in products.data:
+    for product in stripe.Product.list(limit=100).data:
         if as_dict(product.metadata).get("platform") == "mindroom":
-            existing_product = product
-            break
+            print(f"✅ Found existing product: {product.id}")
+            stripe.Product.modify(
+                product.id,
+                name=config["product"]["name"],
+                description=config["product"]["description"],
+            )
+            return product.id
 
-    if existing_product:
-        print(f"✅ Found existing product: {existing_product.id}")
-        # Update product details
-        stripe.Product.modify(
-            existing_product.id,
-            name=config["product"]["name"],
-            description=config["product"]["description"],
-        )
-        return existing_product.id
-    # Create new product
     product = stripe.Product.create(
         name=config["product"]["name"],
         description=config["product"]["description"],
@@ -80,7 +67,7 @@ def sync_product():
 
 def find_or_create_price(product_id, plan_key, plan_data, billing_cycle):
     """Find or create the Stripe price that bills a plan's configured amount for one billing cycle."""
-    amount = plan_data["price_monthly"] if billing_cycle == "monthly" else plan_data["price_yearly"]
+    amount = plan_data[f"price_{billing_cycle}"]
 
     # A Stripe price's amount never changes, so only an active price with the configured amount bills what the
     # pricing page shows.
@@ -121,16 +108,10 @@ def find_or_create_price(product_id, plan_key, plan_data, billing_cycle):
 
 def update_config_with_price_ids(price_ids):
     """Update the YAML config file with Stripe price IDs."""
-    # Read the current config
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-
-    # Update price IDs
     for plan_key, ids in price_ids.items():
         config["plans"][plan_key]["stripe_price_id_monthly"] = ids["monthly"]
         config["plans"][plan_key]["stripe_price_id_yearly"] = ids["yearly"]
 
-    # Write back to file
     with open(config_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
@@ -141,10 +122,8 @@ def main():
     """Main sync function."""
     print("🚀 Syncing pricing configuration with Stripe...\n")
 
-    # Create/update product
     product_id = sync_product()
 
-    # Create/update prices for each plan
     price_ids = {}
     for plan_key, plan_data in config["plans"].items():
         if plan_key in ["free", "enterprise"]:
@@ -155,7 +134,6 @@ def main():
             cycle: find_or_create_price(product_id, plan_key, plan_data, cycle) for cycle in ("monthly", "yearly")
         }
 
-    # Update config file with price IDs
     update_config_with_price_ids(price_ids)
 
     print("\n✨ Stripe sync complete!")

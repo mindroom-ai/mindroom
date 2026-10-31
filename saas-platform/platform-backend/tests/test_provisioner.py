@@ -13,41 +13,21 @@ from fastapi.testclient import TestClient
 from tests.fake_supabase import FakeSupabase
 
 
-def _helm_set_args(helm_args: list[str]) -> dict[str, str]:
-    """Return Helm --set key/value pairs from a captured command."""
-    set_args = {}
+def _helm_args(helm_args: list[str], flag: str) -> dict[str, str]:
+    """Return the key/value pairs a captured Helm command passes with `flag`, such as --set; the last one wins."""
+    values = {}
     for i, arg in enumerate(helm_args):
-        if arg == "--set":
+        if arg == flag:
             key, value = helm_args[i + 1].split("=", 1)
-            set_args[key] = value
-    return set_args
-
-
-def _helm_set_file_args(helm_args: list[str]) -> dict[str, str]:
-    """Return Helm --set-file key/path pairs from a captured command."""
-    set_file_args = {}
-    for i, arg in enumerate(helm_args):
-        if arg == "--set-file":
-            key, path = helm_args[i + 1].split("=", 1)
-            set_file_args[key] = path
-    return set_file_args
-
-
-def _helm_set_string_args(helm_args: list[str]) -> dict[str, str]:
-    """Return Helm --set-string key/value pairs from a captured command."""
-    set_string_args = {}
-    for i, arg in enumerate(helm_args):
-        if arg == "--set-string":
-            key, value = helm_args[i + 1].split("=", 1)
-            set_string_args[key] = value
-    return set_string_args
+            values[key] = value
+    return values
 
 
 def _assert_helm_uses_external_instance_secret(helm_args: list[str]) -> None:
     """Assert Helm only receives the external instance Secret reference."""
-    set_args = _helm_set_args(helm_args)
-    set_file_args = _helm_set_file_args(helm_args)
-    set_string_args = _helm_set_string_args(helm_args)
+    set_args = _helm_args(helm_args, "--set")
+    set_file_args = _helm_args(helm_args, "--set-file")
+    set_string_args = _helm_args(helm_args, "--set-string")
 
     assert set_args["instanceSecrets.create"] == "false"
     assert set_args["instanceSecrets.name"].startswith("mindroom-api-keys-")
@@ -372,7 +352,7 @@ class TestProvisionerEndpoints:
         mock_kubectl.assert_called()
         mock_helm.assert_called()
 
-    def test_byok_provisioning_does_not_inject_platform_openrouter_key(
+    def test_byok_provisioning_secret_holds_only_instance_scoped_credentials(
         self,
         client: TestClient,
         mock_supabase: MagicMock,
@@ -382,7 +362,7 @@ class TestProvisionerEndpoints:
         valid_auth_header: dict,
         mock_config,
     ):
-        """BYOK instances should not receive a shared platform OpenRouter key."""
+        """BYOK tenants get no platform OpenRouter or provider key, and no Supabase service-role key in their Secret."""
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
@@ -401,66 +381,13 @@ class TestProvisionerEndpoints:
 
         assert response.status_code == 200
         secret_data = _applied_instance_secret_data(apply_secret)
-        assert secret_data["openrouter_key"] == ""
         create_key.assert_not_called()
-
-    def test_byok_provisioning_does_not_inject_shared_platform_provider_keys(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_kubectl: AsyncMock,
-        mock_helm: AsyncMock,
-        mock_wait_for_deployment: AsyncMock,
-        valid_auth_header: dict,
-        mock_config,
-    ):
-        """BYOK tenants should not receive shared platform model-provider keys."""
-        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
-        mock_supabase.table().update().eq().execute.return_value = Mock()
-
-        with patch(
-            "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
-        ) as apply_secret:
-            apply_secret.return_value = "hash"
-            response = client.post(
-                "/system/provision",
-                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "byok"},
-                headers=valid_auth_header,
-            )
-
-        assert response.status_code == 200
-        secret_data = _applied_instance_secret_data(apply_secret)
+        assert secret_data["openrouter_key"] == ""
         assert secret_data["openai_key"] == ""
         assert secret_data["anthropic_key"] == ""
         assert secret_data["google_key"] == ""
         assert secret_data["deepseek_key"] == ""
-
-    def test_provisioning_secret_holds_only_instance_scoped_credentials(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_kubectl: AsyncMock,
-        mock_helm: AsyncMock,
-        mock_wait_for_deployment: AsyncMock,
-        valid_auth_header: dict,
-        mock_config,
-    ):
-        """A tenant that reads its own Secret must not obtain the platform's Supabase service-role key."""
-        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
-        mock_supabase.table().update().eq().execute.return_value = Mock()
-
-        with patch(
-            "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
-        ) as apply_secret:
-            apply_secret.return_value = "hash"
-            response = client.post(
-                "/system/provision",
-                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "byok"},
-                headers=valid_auth_header,
-            )
-
-        assert response.status_code == 200
-        secret_data = _applied_instance_secret_data(apply_secret)
+        # A tenant that reads its own Secret must not obtain the platform's Supabase service-role key.
         # Review any new key for tenant scoping before extending this set.
         assert set(secret_data) == {
             "openai_key",
@@ -476,53 +403,6 @@ class TestProvisionerEndpoints:
         }
         assert len(bytes.fromhex(secret_data["sandbox_proxy_token"])) == 32
 
-    def test_hobby_provisioning_only_injects_limited_openrouter_provider_key(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_kubectl: AsyncMock,
-        mock_helm: AsyncMock,
-        mock_wait_for_deployment: AsyncMock,
-        valid_auth_header: dict,
-        mock_config,
-    ):
-        """Included-budget tenants should not receive shared direct provider keys."""
-        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
-        mock_supabase.table().update().eq().execute.return_value = Mock()
-        created_key = CreatedOpenRouterKey(
-            key="sk-or-v1-hobby-customer",
-            hash="hobby_hash",
-            label="MindRoom hobby instance 123",
-            limit_usd=15,
-            limit_reset="monthly",
-        )
-
-        with (
-            patch(
-                "backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY",
-                "sk-or-v1-management",
-                create=True,
-            ),
-            patch("backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True),
-            patch(
-                "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
-            ) as apply_secret,
-        ):
-            apply_secret.return_value = "hash"
-            response = client.post(
-                "/system/provision",
-                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "hobby"},
-                headers=valid_auth_header,
-            )
-
-        assert response.status_code == 200
-        secret_data = _applied_instance_secret_data(apply_secret)
-        assert secret_data["openrouter_key"] == "sk-or-v1-hobby-customer"
-        assert secret_data["openai_key"] == ""
-        assert secret_data["anthropic_key"] == ""
-        assert secret_data["google_key"] == ""
-        assert secret_data["deepseek_key"] == ""
-
     def test_hobby_provisioning_creates_monthly_limited_openrouter_key(
         self,
         client: TestClient,
@@ -533,7 +413,7 @@ class TestProvisionerEndpoints:
         valid_auth_header: dict,
         mock_config,
     ):
-        """Hobby instances should get a per-customer $15 monthly OpenRouter key."""
+        """Hobby instances get a per-customer $15 monthly OpenRouter key and no shared direct provider keys."""
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_supabase.table().update().eq().execute.return_value = Mock()
         created_key = CreatedOpenRouterKey(
@@ -570,6 +450,10 @@ class TestProvisionerEndpoints:
         assert plan.name == "MindRoom hobby account acc_test_123 instance 123"
         secret_data = _applied_instance_secret_data(apply_secret)
         assert secret_data["openrouter_key"] == "sk-or-v1-hobby-customer"
+        assert secret_data["openai_key"] == ""
+        assert secret_data["anthropic_key"] == ""
+        assert secret_data["google_key"] == ""
+        assert secret_data["deepseek_key"] == ""
         update_payloads = [call_.args[0] for call_ in mock_supabase.table().update.call_args_list if call_.args]
         assert any(payload.get("openrouter_key_hash") == "hobby_hash" for payload in update_payloads)
 
@@ -699,7 +583,7 @@ class TestProvisionerEndpoints:
         assert plan.monthly_limit_usd == 150
         secret_data = _applied_instance_secret_data(apply_secret)
         assert secret_data["openrouter_key"] == "sk-or-v1-pro-customer"
-        set_args = _helm_set_args(mock_helm.call_args.args[0])
+        set_args = _helm_args(mock_helm.call_args.args[0], "--set")
         assert set_args["storage"] == "25Gi"
         assert {key: value for key, value in set_args.items() if ".requests." in key} == {
             "mindroomResources.requests.memory": "640Mi",
@@ -739,7 +623,7 @@ class TestProvisionerEndpoints:
             )
 
         assert response.status_code == 200
-        set_args = _helm_set_args(mock_helm.call_args.args[0])
+        set_args = _helm_args(mock_helm.call_args.args[0], "--set")
         assert set_args.get("ingressControllerNamespace") == (namespace or None)
 
     def test_provision_passes_owner_matrix_user_to_instance_chart(
@@ -769,8 +653,8 @@ class TestProvisionerEndpoints:
 
         assert response.status_code == 200
         helm_args = mock_helm.call_args.args[0]
-        set_args = _helm_set_args(helm_args)
-        set_string_args = _helm_set_string_args(helm_args)
+        set_args = _helm_args(helm_args, "--set")
+        set_string_args = _helm_args(helm_args, "--set-string")
         assert set_args["roomDefaults.joinPolicy"] == "public"
         assert set_args["roomDefaults.listed"] == "false"
         assert set_string_args["matrixAutoJoinRoomKeys[0]"] == "personal"
@@ -801,7 +685,7 @@ class TestProvisionerEndpoints:
             )
 
         assert response.status_code == 200
-        set_string_args = _helm_set_string_args(mock_helm.call_args.args[0])
+        set_string_args = _helm_args(mock_helm.call_args.args[0], "--set-string")
         assert "administrators[0]" not in set_string_args
         assert "roomDefaults.inviteUsers[0]" not in set_string_args
         assert "roomDefaults.admins[0]" not in set_string_args
@@ -879,6 +763,10 @@ class TestProvisionerEndpoints:
         updates = [call_.args[0] for call_ in mock_supabase.table().update.call_args_list if call_.args]
         assert {"status": updates[-1]["status"], "tier": updates[-1]["tier"]} == {"status": "stopped", "tier": "byok"}
 
+    @pytest.mark.parametrize(
+        "opt_in",
+        [pytest.param({}, id="default"), pytest.param({"enable_credentials_encryption": True}, id="opt-in")],
+    )
     def test_provision_re_provision_existing_preserves_credentials_encryption(
         self,
         client: TestClient,
@@ -888,8 +776,9 @@ class TestProvisionerEndpoints:
         mock_wait_for_deployment: AsyncMock,
         valid_auth_header: dict,
         mock_config,
+        opt_in: dict,
     ):
-        """Re-provisioning an encrypted instance should keep the stable credential key."""
+        """Re-provisioning an encrypted instance keeps the stable credential key, even with an explicit opt-in."""
         mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "456"}])
         mock_kubectl.side_effect = _kubectl_with_credentials_encryption_secret
 
@@ -900,39 +789,7 @@ class TestProvisionerEndpoints:
                 "account_id": "acc_test_123",
                 "tier": "byok",
                 "instance_id": "456",
-            },
-            headers=valid_auth_header,
-        )
-
-        assert response.status_code == 200
-        helm_args = mock_helm.call_args.args[0]
-        expected_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
-        assert expected_key not in " ".join(helm_args)
-        _assert_helm_uses_external_instance_secret(helm_args)
-        assert any(call_.args[0][:2] == ["apply", "-f"] for call_ in mock_kubectl.call_args_list)
-
-    def test_provision_re_provision_existing_opt_in_preserves_existing_credentials_encryption_key(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_kubectl: AsyncMock,
-        mock_helm: AsyncMock,
-        mock_wait_for_deployment: AsyncMock,
-        valid_auth_header: dict,
-        mock_config,
-    ):
-        """Explicit encryption opt-in should not rotate an already-encrypted instance key."""
-        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "456"}])
-        mock_kubectl.side_effect = _kubectl_with_credentials_encryption_secret
-
-        response = client.post(
-            "/system/provision",
-            json={
-                "subscription_id": "sub_test_123",
-                "account_id": "acc_test_123",
-                "tier": "byok",
-                "instance_id": "456",
-                "enable_credentials_encryption": True,
+                **opt_in,
             },
             headers=valid_auth_header,
         )
@@ -1383,13 +1240,10 @@ class TestProvisionerEndpoints:
         assert response.status_code == 500
         assert "Failed to uninstall instance" in response.json()["detail"]
 
-    def test_sync_instances_no_instances(self, client: TestClient, mock_supabase: MagicMock, valid_auth_header: dict):
+    def test_sync_instances_no_instances(self, client: TestClient, valid_auth_header: dict):
         """Test syncing with no instances."""
-        # Setup
-        mock_supabase.table().select().order().range().execute.return_value = Mock(data=[])
-
-        # Make request
-        response = client.post("/system/sync-instances", headers=valid_auth_header)
+        with patch("backend.routes.provisioner.ensure_supabase", return_value=FakeSupabase()):
+            response = client.post("/system/sync-instances", headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 200

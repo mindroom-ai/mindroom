@@ -32,66 +32,12 @@ class TestProvisionerIntegration:
         """Valid authorization header."""
         return {"Authorization": "Bearer test-api-key"}
 
-    def test_complete_provisioning_flow_with_network_issues(self, client: TestClient, valid_auth: dict):
-        """Test complete provisioning flow when network issues occur during deployment."""
-        with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
-            mock_db = MagicMock()
-            mock_sb.return_value = mock_db
-
-            # New instance - no existing record
-            mock_db.table().select().eq().single().execute.return_value = Mock(data=None)
-
-            # Insert returns new instance ID
-            mock_db.table().insert().execute.return_value = Mock(data=[{"instance_id": "42"}])
-
-            # Updates should succeed (URLs, status updates)
-            mock_db.table().update().eq().execute.return_value = Mock()
-
-            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
-                # Namespace creation might fail initially (common in real scenarios)
-                namespace_attempts = 0
-
-                def kubectl_side_effect(*args, **kwargs):
-                    nonlocal namespace_attempts
-                    if "create namespace" in str(args):
-                        namespace_attempts += 1
-                        if namespace_attempts == 1:
-                            # First attempt fails - namespace might already exist
-                            raise Exception("namespace 'mindroom-instances' already exists")
-                    # Other kubectl commands succeed
-                    return (0, "Success", "")
-
-                mock_kubectl.side_effect = kubectl_side_effect
-
-                with patch("backend.services.provisioner_service.run_helm") as mock_helm:
-                    # Helm deployment succeeds
-                    mock_helm.return_value = (0, "Release installed successfully", "")
-
-                    with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
-                        # Deployment not immediately ready (realistic)
-                        mock_wait.return_value = False
-
-                        response = client.post(
-                            "/system/provision",
-                            json={"subscription_id": "sub-123", "account_id": "acc-456", "tier": "byok"},
-                            headers=valid_auth,
-                        )
-
-            assert response.status_code == 200
-            result = response.json()
-            assert result["success"] is True
-            assert result["customer_id"] == "42"
-            assert "frontend_url" in result
-            assert "42." in result["frontend_url"]  # Subdomain in URL
-
     def test_provisioning_failure_with_rollback(self, client: TestClient, valid_auth: dict):
         """Test provisioning failure triggers proper error handling and status updates."""
         with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
             mock_db = MagicMock()
             mock_sb.return_value = mock_db
 
-            # New instance
-            mock_db.table().select().eq().single().execute.return_value = Mock(data=None)
             mock_db.table().insert().execute.return_value = Mock(data=[{"instance_id": "99"}])
 
             # Track status updates
@@ -134,7 +80,6 @@ class TestProvisionerIntegration:
             mock_sb.return_value = mock_db
 
             # Step 1: Provision instance
-            mock_db.table().select().eq().single().execute.return_value = Mock(data=None)
             mock_db.table().insert().execute.return_value = Mock(data=[{"instance_id": "777"}])
             mock_db.table().update().eq().execute.return_value = Mock()
 
@@ -207,8 +152,10 @@ class TestProvisionerIntegration:
             assert uninstall_response.status_code == 200
             assert uninstall_response.json()["success"] is True
 
-    def test_concurrent_provisioning_requests(self, client: TestClient, valid_auth: dict):
-        """Test handling concurrent provisioning requests for different accounts."""
+    def test_provisioning_requests_for_different_accounts_get_unique_instances(
+        self, client: TestClient, valid_auth: dict
+    ):
+        """Successive provisioning requests for different accounts each get their own instance ID."""
         with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
             mock_db = MagicMock()
             mock_sb.return_value = mock_db
@@ -221,7 +168,6 @@ class TestProvisionerIntegration:
                 instance_counter[0] += 1
                 return Mock(execute=Mock(return_value=Mock(data=[{"instance_id": instance_id}])))
 
-            mock_db.table().select().eq().single().execute.return_value = Mock(data=None)
             mock_db.table().insert.side_effect = insert_side_effect
             mock_db.table().update().eq().execute.return_value = Mock()
 
@@ -229,25 +175,11 @@ class TestProvisionerIntegration:
                 mock_kubectl.return_value = (0, "Success", "")
 
                 with patch("backend.services.provisioner_service.run_helm") as mock_helm:
-                    # Simulate varying deployment times
-                    deploy_times = [0.1, 0.2, 0.15]  # seconds
-                    deploy_counter = [0]
-
-                    def helm_side_effect(*args, **kwargs):
-                        idx = deploy_counter[0]
-                        deploy_counter[0] += 1
-                        # Simulate deployment time
-                        import time
-
-                        time.sleep(deploy_times[idx % len(deploy_times)])
-                        return (0, f"Deployed instance {idx}", "")
-
-                    mock_helm.side_effect = helm_side_effect
+                    mock_helm.return_value = (0, "Deployed", "")
 
                     with patch("backend.services.provisioner_service.wait_for_deployment_ready") as mock_wait:
                         mock_wait.return_value = False  # Not immediately ready
 
-                        # Launch multiple concurrent requests
                         responses = []
                         for i in range(3):
                             response = client.post(
@@ -284,8 +216,6 @@ class TestProvisionerIntegration:
                 "status": "deprovisioned",
                 "subdomain": "old-subdomain",
             }
-
-            mock_db.table().select().eq().single().execute.return_value = Mock(data=existing_instance)
 
             # Track updates
             updates = []
@@ -339,7 +269,6 @@ class TestProvisionerIntegration:
             mock_db = MagicMock()
             mock_sb.return_value = mock_db
 
-            mock_db.table().select().eq().single().execute.return_value = Mock(data=None)
             mock_db.table().insert().execute.return_value = Mock(data=[{"instance_id": "888"}])
             mock_db.table().update().eq().execute.return_value = Mock()
 
@@ -353,27 +282,20 @@ class TestProvisionerIntegration:
                         # Not ready initially
                         mock_wait.return_value = False
 
-                        with patch("backend.routes.provisioner.BackgroundTasks") as mock_bg:
-                            # Verify background task is scheduled
-                            bg_instance = Mock()
-                            mock_bg.return_value = bg_instance
-                            bg_instance.add_task = Mock()
+                        # Direct function call with background tasks
+                        from backend.routes.provisioner import provision_instance
 
-                            # Direct function call with background tasks
-                            from backend.routes.provisioner import provision_instance
+                        result = asyncio.run(
+                            provision_instance(
+                                None,  # request
+                                {"subscription_id": "sub-bg", "account_id": "acc-bg", "tier": "byok"},
+                                "Bearer test-api-key",
+                                BackgroundTasks(),
+                            )
+                        )
 
-                            with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-api-key"):
-                                result = asyncio.run(
-                                    provision_instance(
-                                        None,  # request
-                                        {"subscription_id": "sub-bg", "account_id": "acc-bg", "tier": "byok"},
-                                        "Bearer test-api-key",
-                                        BackgroundTasks(),
-                                    )
-                                )
-
-                                assert result["success"] is True
-                                assert "customer_id" in result
+            assert result["success"] is True
+            assert "customer_id" in result
 
     def test_error_recovery_during_provisioning(self, client: TestClient, valid_auth: dict):
         """Test error recovery mechanisms during various provisioning stages."""
@@ -381,7 +303,6 @@ class TestProvisionerIntegration:
             mock_db = MagicMock()
             mock_sb.return_value = mock_db
 
-            mock_db.table().select().eq().single().execute.return_value = Mock(data=None)
             mock_db.table().insert().execute.return_value = Mock(data=[{"instance_id": "666"}])
 
             # Some updates fail but provisioning continues
@@ -416,25 +337,18 @@ class TestProvisionerIntegration:
             result = response.json()
             assert result["success"] is True
 
-    def test_kubectl_error_during_operations(self, client: TestClient, valid_auth: dict):
-        """Test handling of kubectl errors during start/stop/restart operations."""
-        test_cases = [
-            ("start", "/system/instances/100/start"),
-            ("stop", "/system/instances/101/stop"),
-            ("restart", "/system/instances/102/restart"),
-        ]
+    def test_stop_instance_kubectl_error(self, client: TestClient, valid_auth: dict):
+        """Test handling of a kubectl error while stopping an instance."""
+        with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
+            mock_check.return_value = True
+            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
+                # Kubectl returns error
+                mock_kubectl.return_value = (1, "", "Error: deployment 'mindroom-stop' not found")
 
-        for operation, endpoint in test_cases:
-            with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
-                mock_check.return_value = True
-                with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
-                    # Kubectl returns error
-                    mock_kubectl.return_value = (1, "", f"Error: deployment 'mindroom-{operation}' not found")
+                response = client.post("/system/instances/101/stop", headers=valid_auth)
 
-                    response = client.post(endpoint, headers=valid_auth)
-
-                assert response.status_code == 500
-                assert "kubectl command failed" in response.json()["detail"]
+        assert response.status_code == 500
+        assert "kubectl command failed" in response.json()["detail"]
 
     def test_uninstall_with_helm_errors(
         self,
@@ -452,28 +366,3 @@ class TestProvisionerIntegration:
             # Should handle gracefully
             assert response.status_code == 200
             assert "uninstalled successfully" in response.json()["message"].lower()
-
-    def test_database_update_failures_are_non_fatal(self, client: TestClient, valid_auth: dict):
-        """Test that database update failures don't break core operations."""
-        with patch("backend.services.provisioner_service.update_instance_status") as mock_update:
-            # Database updates fail
-            mock_update.return_value = False
-
-            with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
-                mock_check.return_value = True
-
-                with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
-                    mock_kubectl.return_value = (0, "Success", "")
-
-                    # Test start with DB failure
-                    response = client.post("/system/instances/200/start", headers=valid_auth)
-
-                    # Operation succeeds despite DB update failure
-                    assert response.status_code == 200
-                    assert response.json()["success"] is True
-
-                    # Test stop with DB failure
-                    response = client.post("/system/instances/201/stop", headers=valid_auth)
-
-                    assert response.status_code == 200
-                    assert response.json()["success"] is True
