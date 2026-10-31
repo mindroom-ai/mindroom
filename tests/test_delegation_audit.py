@@ -17,15 +17,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation import records
-from mindroom.delegation.audit import (
-    child_audit_context,
-    finish_child_record,
+from mindroom.delegation.audit import finish_child_record, record_child_response, start_child_record
+from mindroom.delegation.lifecycle import (
+    child_run_context,
     observe_child_event,
-    record_child_response,
-    start_child_record,
+    settle_child_response,
+    start_child_turn,
 )
-from mindroom.delegation.lifecycle import child_run_context, settle_child_response, start_child_turn
-from mindroom.delegation.lifecycle import observe_child_event as observe_live_child_event
 from mindroom.delegation.records import DelegationRecordLimitError, DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import interrupt_child, read_child_run
 from mindroom.delegation.sessions import reserve_subagent_turn
@@ -778,7 +776,7 @@ async def test_live_observer_records_matching_child_events_once(tmp_path: Path) 
         tool_args={"query": "live query"},
         result="live result",
     )
-    async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
+    async with child_run_context(child, config=config, runtime_paths=runtime_paths):
         await observe_child_event(ToolStarted(tool.call))
         await observe_child_event(TextDelta("visible "))
         await observe_child_event(TextDelta("chunk"))
@@ -811,7 +809,7 @@ async def test_live_observer_flushes_buffered_partial_output_during_cancellation
     )
 
     async def cancel_during_context() -> None:
-        async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
+        async with child_run_context(child, config=config, runtime_paths=runtime_paths):
             await observe_child_event(TextDelta("partial before cancel"))
             raise asyncio.CancelledError
 
@@ -840,7 +838,7 @@ async def test_live_observer_distinguishes_retried_attempt_tool_ids(tmp_path: Pa
     tool = ToolExecution(tool_call_id="reused-tool", tool_name="lookup", tool_args={"value": 1})
     first_metrics = RunMetrics(tokens=TokenCounts(input_tokens=9, output_tokens=3))
 
-    async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
+    async with child_run_context(child, config=config, runtime_paths=runtime_paths):
         await observe_child_event(ToolStarted(tool.call))
         await observe_child_event(
             RunFinished(
@@ -883,11 +881,11 @@ async def test_live_observer_numbers_a_resumed_run_past_its_earlier_leg(tmp_path
         caller_execution_identity=_identity("leader", "parent-session"),
     )
     gated = ToolExecution(tool_call_id="gated", tool_name="lookup", tool_args={}, requires_confirmation=True)
-    async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
+    async with child_run_context(child, config=config, runtime_paths=runtime_paths):
         await observe_child_event(TextDelta("first leg"))
         await observe_child_event(ToolStarted(gated.call))
     done = ToolExecution(tool_call_id="gated", tool_name="lookup", tool_args={}, result="ok")
-    async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
+    async with child_run_context(child, config=config, runtime_paths=runtime_paths):
         await observe_child_event(TextDelta("final answer"))
         await observe_child_event(ToolCompleted(done.call))
 
@@ -931,8 +929,8 @@ async def test_a_child_whose_last_buffered_output_fails_to_record_still_settles(
 
     async def run_child() -> None:
         async with child_run_context(child, config=config, runtime_paths=runtime_paths):
-            await observe_live_child_event(RunFinished(finished))
-            await observe_live_child_event(TextDelta("text after the end"))
+            await observe_child_event(RunFinished(finished))
+            await observe_child_event(TextDelta("text after the end"))
 
     with pytest.raises(OSError, match="record is full"):
         await run_child()

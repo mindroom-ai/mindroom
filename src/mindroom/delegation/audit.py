@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from contextlib import asynccontextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
@@ -22,22 +20,22 @@ from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStart
 from mindroom.llm.runs import RunRecord, RunStatus
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, DelegationTerminalStatus
     from mindroom.event_journal import ApprovalCall
-    from mindroom.llm.events import ReportedCall, RunEvent
+    from mindroom.llm.events import ReportedCall
     from mindroom.llm.usage import RunMetrics
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @dataclass
-class _ChildAuditBinding:
+class ChildAudit:
     """One live child stream's record owner, buffered visible content, and its count of numbered events.
 
-    The loop's events carry no index, so the binding numbers them as they arrive; buffered content is recorded under
+    The loop's events carry no index, so the audit numbers them as they arrive; buffered content is recorded under
     the number of its last chunk. The count starts past the highest index the record already holds for the run, so a
     run resumed in a later context never repeats the ids of an earlier leg, which the record would drop.
     """
@@ -47,12 +45,6 @@ class _ChildAuditBinding:
     locator: DelegationRecordLocator
     observed: int
     pending_content: list[tuple[int, str]] = field(default_factory=list)
-
-
-_CHILD_AUDIT: ContextVar[_ChildAuditBinding | None] = ContextVar(
-    "delegation_child_audit",
-    default=None,
-)
 
 
 async def start_child_record(
@@ -89,65 +81,51 @@ async def start_child_record(
     return handle.locator
 
 
-@asynccontextmanager
-async def child_audit_context(
+async def open_child_audit(
     child: DelegationChild,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> AsyncIterator[None]:
-    """Bind one child stream so the shared event observer can audit exact events."""
+) -> ChildAudit:
+    """Reopen the child's record to audit one live stream, numbering past the events it holds for the run."""
     owner = DelegationRecordOwner(config, runtime_paths)
     locator = _record_locator(child)
     handle = await owner.reopen(locator)
-    binding = _ChildAuditBinding(
+    return ChildAudit(
         child=child,
         owner=owner,
         locator=locator,
         observed=await owner.highest_event_index(handle, _stream_prefix(child.run_id)),
     )
-    token = _CHILD_AUDIT.set(binding)
-    try:
-        yield
-    finally:
-        try:
-            handle = await binding.owner.reopen(binding.locator)
-            await _flush_pending_content(binding, handle)
-        finally:
-            _CHILD_AUDIT.reset(token)
 
 
-async def observe_child_event(event: RunEvent) -> None:
+async def record_child_event(audit: ChildAudit, event: TextDelta | ToolStarted | ToolCompleted | RunFinished) -> None:
     """Record one child stream event without persisting token-sized deltas.
 
-    The events are those of the child turn running in this context; the terminal record names the run it ended,
-    and a record of another run is not this child's.
+    A finished run's record is one the caller established is the child's current run's.
     """
-    binding = _CHILD_AUDIT.get()
-    if binding is None or not isinstance(event, TextDelta | ToolStarted | ToolCompleted | RunFinished):
-        return
-    binding.observed += 1
+    audit.observed += 1
     if isinstance(event, TextDelta):
         if event.text:
-            binding.pending_content.append((binding.observed, event.text))
-        return
-    if isinstance(event, RunFinished) and (
-        not isinstance(event.record, RunRecord)
-        or event.record.run_id != binding.child.run_id
-        or event.record.session_id != binding.child.session_id
-    ):
+            audit.pending_content.append((audit.observed, event.text))
         return
 
-    handle = await binding.owner.reopen(binding.locator)
-    await _flush_pending_content(binding, handle)
-    run_id = binding.child.run_id
+    handle = await audit.owner.reopen(audit.locator)
+    await _flush_pending_content(audit, handle)
+    run_id = audit.child.run_id
     if isinstance(event, RunFinished):
         assert isinstance(event.record, RunRecord)
-        await _append_response_events(binding.owner, handle, event.record)
+        await _append_response_events(audit.owner, handle, event.record)
     elif isinstance(event, ToolStarted):
-        await _append_tool_call(binding.owner, handle, event.call, run_id=run_id)
+        await _append_tool_call(audit.owner, handle, event.call, run_id=run_id)
     else:
-        await _append_tool_result(binding.owner, handle, event.call, run_id=run_id)
+        await _append_tool_result(audit.owner, handle, event.call, run_id=run_id)
+
+
+async def flush_child_audit(audit: ChildAudit) -> None:
+    """Record the visible content the stream buffered since its last recorded event."""
+    handle = await audit.owner.reopen(audit.locator)
+    await _flush_pending_content(audit, handle)
 
 
 async def record_child_response(
@@ -310,7 +288,7 @@ def _tool_event_id(run_id: str, tool_call_id: str, phase: str) -> str:
 
 
 def _stream_prefix(run_id: str) -> str:
-    """Return the id prefix of this run's events that the binding numbers: its buffered content."""
+    """Return the id prefix of this run's events that the audit numbers: its buffered content."""
     return f"run:{run_id}:stream:"
 
 
@@ -358,16 +336,16 @@ async def _append_tool_result(
 
 
 async def _flush_pending_content(
-    binding: _ChildAuditBinding,
+    audit: ChildAudit,
     handle: DelegationRecordHandle,
 ) -> None:
-    if not binding.pending_content:
+    if not audit.pending_content:
         return
-    chunks = binding.pending_content.copy()
-    binding.pending_content.clear()
-    event_id = f"{_stream_prefix(binding.child.run_id)}{chunks[-1][0]}"
+    chunks = audit.pending_content.copy()
+    audit.pending_content.clear()
+    event_id = f"{_stream_prefix(audit.child.run_id)}{chunks[-1][0]}"
     content = "".join(text for _, text in chunks)
-    await binding.owner.append_event(
+    await audit.owner.append_event(
         handle,
         DelegationEvent(
             kind="output",
