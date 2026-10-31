@@ -160,13 +160,11 @@ def todo_poke_policy(runtime_paths: RuntimePaths) -> TodoPokePolicy:
             defaults.interval_seconds,
             minimum_enabled_seconds=1,
         ),
-        cooldown_seconds=defaults.cooldown_seconds,
         quiet_seconds=_env_seconds(
             runtime_paths,
             "MINDROOM_TODO_POKE_QUIET_SECONDS",
             defaults.quiet_seconds,
         ),
-        max_pokes_per_scan=defaults.max_pokes_per_scan,
     )
 
 
@@ -208,7 +206,7 @@ def _parse_thread_snapshot(
     for index, raw_item in enumerate(raw_items):
         try:
             item = parse_todo_item(raw_item)
-        except (KeyError, TypeError, ValueError) as exc:
+        except (TypeError, ValueError) as exc:
             if isinstance(raw_item, dict):
                 skipped_item_id = cast("dict[str, Any]", raw_item).get("id")
                 if isinstance(skipped_item_id, str) and skipped_item_id:
@@ -282,7 +280,7 @@ def _read_thread_snapshots(
         except OSError as exc:
             _warn_state_once("todo_poke_state_file_skipped", path, str(exc), seen_warning_keys)
             had_io_failure = True
-        except (KeyError, TypeError, ValueError) as exc:
+        except (TypeError, ValueError) as exc:
             _warn_state_once("todo_poke_state_file_skipped", path, str(exc), seen_warning_keys)
         else:
             snapshots.append(snapshot)
@@ -314,7 +312,7 @@ def _fingerprint(
 
 
 def _poke_scopes(
-    snapshots: list[_TodoThreadSnapshot],
+    snapshots: tuple[_TodoThreadSnapshot, ...],
     seen_warning_keys: set[_StateWarningKey],
     requester_kind: Callable[[str, str, str], TodoPokeRequesterKind],
 ) -> list[_TodoPokeScope]:
@@ -346,9 +344,6 @@ def _poke_scopes(
                     assigned_agent=item.assigned_agent,
                 )
                 continue
-            # A human's work pokes as that human so the assignee applies its access policy to them.
-            # Work from internal senders shares one poke as the assignee's own turn.
-            poke_requester = None
             kind = classify_requester(item.requester_id, item.assigned_agent, snapshot.room_id)
             if kind is TodoPokeRequesterKind.REFUSED:
                 _warn_state_once(
@@ -360,8 +355,9 @@ def _poke_scopes(
                     assigned_agent=item.assigned_agent,
                 )
                 continue
-            if kind is TodoPokeRequesterKind.HUMAN:
-                poke_requester = item.requester_id
+            # A human's work pokes as that human so the assignee applies its access policy to them.
+            # Work from internal senders shares one poke as the assignee's own turn.
+            poke_requester = item.requester_id if kind is TodoPokeRequesterKind.HUMAN else None
             items_by_owner.setdefault((item.assigned_agent, poke_requester), []).append(item)
 
         for assigned_agent, requester_id in sorted(items_by_owner, key=lambda owner: (owner[0], owner[1] or "")):
@@ -498,7 +494,7 @@ def _format_poke_message(scope: _TodoPokeScope) -> str:
     lines = [f"@{scope.assigned_agent} Todo work is ready. Continue with these actionable items:"]
     ordered_items = sorted(
         scope.actionable_items,
-        key=lambda item: (PRIORITY_ORDER.get(item.priority, 9), item.item_id),
+        key=lambda item: (PRIORITY_ORDER[item.priority], item.item_id),
     )
     lines.extend(
         f"- {_literal_code_text(item.item_id)} [{item.priority}] {_literal_code_text(item.title)}"
@@ -656,7 +652,7 @@ async def scan_todo_pokes(
     todo_root = deps.state_root
     snapshot_batch = await asyncio.to_thread(_read_thread_snapshots, todo_root, remembered_warnings)
     try:
-        all_scopes = _poke_scopes(list(snapshot_batch.snapshots), remembered_warnings, deps.requester_kind)
+        all_scopes = _poke_scopes(snapshot_batch.snapshots, remembered_warnings, deps.requester_kind)
     except TodoPokeDeliveryUnavailableError:
         logger.debug("todo_poke_scan_skipped_runtime_unavailable")
         return 0
