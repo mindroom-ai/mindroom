@@ -174,6 +174,10 @@ def remove_runs_answering(storage: ConversationStore, session_id: str, scope: Hi
     a row that holds none is left as it was.
     Returns True if anything was removed.
     """
+
+    def forget(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+        return _without_preserved_seen_event_ids(metadata) if _preserved_seen_event_ids(metadata) else metadata
+
     removed = summary_rows.cut_at_event(
         storage,
         session_id=session_id,
@@ -181,11 +185,8 @@ def remove_runs_answering(storage: ConversationStore, session_id: str, scope: Hi
         event_id=event_id,
         match="answered",
     )
-    if removed and _preserved_seen_event_ids(storage.read_session_metadata(session_id)):
-        storage.update_metadata(
-            new_scope_session(session_id=session_id, scope=scope),
-            _without_preserved_seen_event_ids,
-        )
+    if removed:
+        storage.update_metadata(new_scope_session(session_id=session_id, scope=scope), forget)
     return removed
 
 
