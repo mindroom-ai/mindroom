@@ -9,7 +9,7 @@ import typing
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal
 from weakref import WeakValueDictionary
 from zoneinfo import ZoneInfo
 
@@ -111,14 +111,6 @@ def _runtime_authored_task_content(
         sender=sender,
     )
     return None
-
-
-class _AgentValidationResult(NamedTuple):
-    """Result of agent mention validation."""
-
-    all_valid: bool
-    valid_agents: list[MatrixID]
-    invalid_agents: list[MatrixID]
 
 
 # ---- Workflow scheduling primitives ----
@@ -1009,44 +1001,6 @@ async def _parse_workflow_schedule(
         )
 
 
-async def _validate_agent_mentions(
-    message: str,
-    allowed_agents: list[MatrixID],
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> _AgentValidationResult:
-    """Validate that all mentioned agents or teams are accessible.
-
-    Args:
-        message: The message that may contain @agent mentions
-        allowed_agents: Agents the sender may target in this room
-        config: Application configuration
-        runtime_paths: Explicit runtime context for mention resolution
-
-    Returns:
-        _AgentValidationResult with validation status and agent lists
-
-    """
-    mentioned_agents = _extract_mentioned_agents_from_text(message, config, runtime_paths)
-    if not mentioned_agents:
-        return _AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
-
-    valid_agents: list[MatrixID] = []
-    invalid_agents: list[MatrixID] = []
-
-    for mid in mentioned_agents:
-        if mid in allowed_agents:
-            valid_agents.append(mid)
-        else:
-            invalid_agents.append(mid)
-
-    return _AgentValidationResult(
-        all_valid=len(invalid_agents) == 0,
-        valid_agents=valid_agents,
-        invalid_agents=invalid_agents,
-    )
-
-
 def _format_local_time(dt: datetime, timezone_str: str) -> str:
     """Format a datetime as 24-hour wall time in the configured timezone, like "2024-01-15 15:30 EST"."""
     return dt.astimezone(ZoneInfo(timezone_str)).strftime("%Y-%m-%d %H:%M %Z")
@@ -1235,34 +1189,24 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if existing_task is not None and silent is None and "silent" not in workflow_result.model_fields_set:
         workflow_result.silent = existing_task.workflow.silent
 
-    # Validate that all mentioned agents or teams are accessible.
-    validation_result = await _validate_agent_mentions(
-        workflow_result.message,
-        available_responders,
-        config,
-        runtime_paths,
-    )
-
-    if not validation_result.all_valid:
+    # Every agent or team the scheduled message mentions must be one that may answer here.
+    unavailable = [
+        mentioned
+        for mentioned in _extract_mentioned_agents_from_text(workflow_result.message, config, runtime_paths)
+        if mentioned not in available_responders
+    ]
+    if unavailable:
         scope = "room" if new_thread or not thread_id else "thread"
-        error_msg = "❌ Failed to schedule: The following agents or teams are not available in this "
-        error_msg += scope
-        error_msg += f": {', '.join(agent.full_id for agent in validation_result.invalid_agents)}"
-
-        # Provide helpful suggestions
-        suggestions: list[str] = []
         registry = entity_identity_registry(config, runtime_paths)
-        for agent in validation_result.invalid_agents:
-            agent_name = registry.current_entity_name_for_user_id(agent.full_id, include_router=False)
-            if agent_name:
-                # Entity exists but is not available in this room/thread.
-                suggestions.append(f"@{agent_name} is not available in this {scope}")
-            else:
-                suggestions.append(f"{agent.full_id} does not exist")
-
-        if suggestions:
-            error_msg += "\n\n💡 " + "\n💡 ".join(suggestions)
-
+        suggestions = "\n💡 ".join(
+            f"@{registry.current_entity_name_for_user_id(agent.full_id, include_router=False)} "
+            f"is not available in this {scope}"
+            for agent in unavailable
+        )
+        error_msg = (
+            f"❌ Failed to schedule: The following agents or teams are not available in this {scope}: "
+            f"{', '.join(agent.full_id for agent in unavailable)}\n\n💡 {suggestions}"
+        )
         return (None, error_msg)
 
     # The explicit tool choice or saved choice is authoritative, not the parser.

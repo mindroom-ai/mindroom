@@ -3164,11 +3164,9 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
     with (
         patch("mindroom.scheduling.tasks._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=AsyncMock(return_value=parse_result)),
-        patch("mindroom.scheduling.tasks._validate_agent_mentions") as mock_validate,
         patch("mindroom.scheduling.tasks._save_pending_scheduled_task", new=AsyncMock(return_value=None)),
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task12345"),
     ):
-        mock_validate.return_value = scheduling._AgentValidationResult(True, [], [])
         task_id, message = await schedule_task(
             runtime=runtime,
             room_id="!test:server",
