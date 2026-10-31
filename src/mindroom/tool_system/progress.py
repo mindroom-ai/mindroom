@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
+from mindroom.redaction import redact_sensitive_text
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
@@ -26,19 +28,24 @@ def cap_progress(text: str) -> str:
 
 
 def report_tool_progress(text: str) -> None:
-    """Report the call's latest progress, replacing the previous report; nothing happens when nobody listens."""
+    """Report the call's latest progress, replacing the previous report; nothing happens when nobody listens.
+
+    Output can print credentials, so the report is masked as a result preview is, before the cut can drop the label
+    that identifies a long one.
+    """
     reporter = _REPORTER.get()
     if reporter is not None:
-        reporter(cap_progress(text))
+        reporter(cap_progress(redact_sensitive_text(text)))
 
 
 @contextmanager
-def tool_progress_reporter(reporter: Callable[[str], None]) -> Iterator[None]:
+def tool_progress_reporter(reporter: Callable[[str], None], *, forward: bool = False) -> Iterator[None]:
     """Receive the progress of tool calls run in this context; the reporter may be called from any thread.
 
-    The reporter this one shadows still receives every report, so a call waiting for a job sees the job's progress.
+    With ``forward``, the reporter this one shadows receives every report too, as the call that starts a job does
+    while it waits for the job.
     """
-    shadowed = _REPORTER.get()
+    shadowed = _REPORTER.get() if forward else None
 
     def report(text: str) -> None:
         reporter(text)

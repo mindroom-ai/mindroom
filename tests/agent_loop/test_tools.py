@@ -28,7 +28,7 @@ from mindroom.agent_loop.tools import (
 )
 from mindroom.llm.events import ToolProgress
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
-from mindroom.tool_system.progress import report_tool_progress
+from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
 from tests.agent_loop.helpers import add, boom, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import ScriptedModel, raw_tool_call, tool_call
 
@@ -317,6 +317,30 @@ async def test_a_running_calls_output_is_redacted_before_it_leaves_the_call() ->
     [progress] = [item for item in items if isinstance(item, ToolProgress)]
     assert secret not in progress.text
     assert progress.text == "deploying prod with API_KEY=***redacted***"
+
+
+@pytest.mark.asyncio
+async def test_a_calls_progress_stays_with_the_call() -> None:
+    """A call run inside another call, as a delegated agent's is, reports its output only for itself."""
+    outer: list[str] = []
+
+    def build(app: str) -> str:
+        """Build an app.
+
+        Args:
+            app: Which app to build.
+
+        """
+        report_tool_progress(f"{app}: compiling")
+        return "built"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(build)).functions, tool_call("build", "c1", app="app"))
+
+    with tool_progress_reporter(outer.append):
+        items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    assert [item for item in items if isinstance(item, ToolProgress)] == [ToolProgress("c1", "app: compiling")]
+    assert outer == []
 
 
 @pytest.mark.asyncio

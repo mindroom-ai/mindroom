@@ -12,7 +12,6 @@ from mindroom.llm.events import ToolProgress
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import ToolExecution
 from mindroom.logging_config import get_logger
-from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.invocation import (
     MISSING_TOOL_ERROR_TEXT,
@@ -281,10 +280,9 @@ async def _run_call(
     latest: str | None = None
 
     def deliver(text: str) -> None:
-        # A thread that outlives the call cannot report for it. Output can print credentials; mask them as the call's
-        # result preview does before it leaves the call.
+        # A thread that outlives the call cannot report for it.
         if not returned:
-            emit(ToolProgress(execution.tool_call_id, redact_sensitive_text(text)))
+            emit(ToolProgress(execution.tool_call_id, text))
 
     def flush() -> None:
         nonlocal latest
