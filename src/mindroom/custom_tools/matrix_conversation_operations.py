@@ -470,8 +470,8 @@ class MatrixMessageOperations:
     ) -> MatrixMessageOperationResult:
         if event_id is None:
             return self._result("error", action="edit", message="event_id is required for edit.")
-        new_text = message.strip() if isinstance(message, str) and message.strip() else None
-        if new_text is None:
+        new_text = (message or "").strip()
+        if not new_text:
             return self._result("error", action="edit", message="message is required for edit.")
 
         formatted_text = _format_direct_text(new_text)
