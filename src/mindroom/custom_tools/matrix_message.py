@@ -14,6 +14,7 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_context_thread_id,
     resolve_requested_room_id,
     room_access_allowed,
+    thread_root_for_send,
 )
 from mindroom.custom_tools.matrix_agent_discovery import available_room_agents
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
@@ -244,6 +245,8 @@ class MatrixMessageTools(Toolkit):
                         message=f"Recipient '{recipient}' uses room conversations. Omit new_thread/thread_id or use thread_id=\"room\".",
                     )
                 thread_id = "room"
+        if stored_intent is None and thread_id is not None and thread_id != "room":
+            thread_id = await thread_root_for_send(context, room_id=room_id, thread_id=thread_id)
         effective_thread_id = resolve_context_thread_id(
             context,
             room_id=room_id,

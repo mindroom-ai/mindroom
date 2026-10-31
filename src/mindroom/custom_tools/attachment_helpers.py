@@ -154,6 +154,22 @@ async def resolve_canonical_tool_thread_target(
     )
 
 
+async def thread_root_for_send(context: ToolRuntimeContext, *, room_id: str, thread_id: str) -> str:
+    """Return the root of the thread an explicit send target belongs to.
+
+    Matrix rejects a reply as a thread root, so a reply event ID resolves to its
+    thread's root. An ID no thread contains yet, such as a room-level message,
+    stays as given so a send can start a thread from it.
+    """
+    target = await resolve_canonical_tool_thread_target(
+        context,
+        room_id=room_id,
+        thread_id=thread_id,
+        fail_closed_on_normalization_error=True,
+    )
+    return target.canonical_thread_id or thread_id
+
+
 async def resolve_current_room_thread_root(
     context: ToolRuntimeContext,
     thread_id: str | None,

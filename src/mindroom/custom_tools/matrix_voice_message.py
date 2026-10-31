@@ -16,6 +16,7 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_context_thread_id,
     resolve_optional_room_id,
     room_access_allowed,
+    thread_root_for_send,
 )
 from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOperationResult, MatrixMessageOperations
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
@@ -362,6 +363,8 @@ class MatrixVoiceMessageTools(Toolkit):
         if isinstance(preflight, str):
             return preflight
 
+        if thread_id is not None and thread_id != self._ROOM_TIMELINE_SENTINEL:
+            thread_id = await thread_root_for_send(context, room_id=preflight.room_id, thread_id=thread_id)
         effective_thread_id = resolve_context_thread_id(
             context,
             room_id=preflight.room_id,

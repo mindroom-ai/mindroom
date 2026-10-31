@@ -2235,6 +2235,28 @@ def make_relation_lookup(
     )
 
 
+def make_thread_reply_lookup(reply_event_id: str, thread_root_id: str) -> RelationLookup:
+    """Return a relation lookup whose homeserver serves one reply inside a thread."""
+    client = MagicMock()
+    client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "event_id": reply_event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "reply",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
+                },
+            },
+        ),
+    )
+    return make_relation_lookup(client=client)
+
+
 def _serving_client() -> SimpleNamespace:
     """Return a runtime whose homeserver answers any point lookup."""
     client = MagicMock()
