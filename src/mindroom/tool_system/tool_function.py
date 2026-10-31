@@ -101,8 +101,7 @@ class ToolFunction:
         """Return the execution a call of this function starts as, before it runs.
 
         A call whose gate pauses its run starts paused. A confirmation an approval rule asks for stores
-        ``POLICY_CONFIRMATION_APPROVAL_TYPE``, which decides how it is approved, and a delegation stores
-        ``external_execution_silent``, as its paused rows always have.
+        ``POLICY_CONFIRMATION_APPROVAL_TYPE``, which decides how it is approved.
         """
         # Deferred so that these tool values import no pydantic, which run records pull in through redaction.
         from mindroom.llm.runs import ToolExecution  # noqa: PLC0415
@@ -114,8 +113,6 @@ class ToolFunction:
             execution.external_execution_required = True
         if self.gate is ToolGate.POLICY:
             execution.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
-        if self.gate is ToolGate.DELEGATION:
-            execution.external_execution_silent = True
         return execution
 
 

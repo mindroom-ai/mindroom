@@ -341,10 +341,10 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("gate", "paused"),
     [
-        pytest.param(ToolGate.CONFIRM, (True, None, None, None), id="confirm"),
-        pytest.param(ToolGate.POLICY, (True, "mindroom_policy", None, None), id="policy"),
-        pytest.param(ToolGate.DELEGATION, (None, None, True, True), id="delegation"),
-        pytest.param(ToolGate.EXTERNAL, (None, None, True, None), id="external"),
+        pytest.param(ToolGate.CONFIRM, (True, None, None), id="confirm"),
+        pytest.param(ToolGate.POLICY, (True, "mindroom_policy", None), id="policy"),
+        pytest.param(ToolGate.DELEGATION, (None, None, True), id="delegation"),
+        pytest.param(ToolGate.EXTERNAL, (None, None, True), id="external"),
     ],
 )
 async def test_a_waiting_cli_call_stores_how_its_function_s_gate_pauses_it(
@@ -352,7 +352,7 @@ async def test_a_waiting_cli_call_stores_how_its_function_s_gate_pauses_it(
     gate: ToolGate,
     paused: tuple[object, ...],
 ) -> None:
-    """A CLI call stores the confirmation, approval type, external execution, and silence its function's gate gives."""
+    """A CLI call stores the confirmation, approval type, and external execution its function's gate gives."""
 
     def action(value: int) -> int:
         return value
@@ -362,7 +362,7 @@ async def test_a_waiting_cli_call_stores_how_its_function_s_gate_pauses_it(
 
     assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
     stored = waiting.requirement.tool_execution.to_dict()
-    keys = ("requires_confirmation", "approval_type", "external_execution_required", "external_execution_silent")
+    keys = ("requires_confirmation", "approval_type", "external_execution_required")
     # A field left unset is not stored, and reads as None.
     assert (*(stored.get(key) for key in keys), stored["tool_args"]) == (*paused, {"value": 3})
 

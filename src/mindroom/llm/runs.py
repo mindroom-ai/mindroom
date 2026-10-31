@@ -87,7 +87,6 @@ class ToolExecution:
     confirmed: bool | None = None
     confirmation_note: str | None = None
     external_execution_required: bool | None = None
-    external_execution_silent: bool | None = None
     approval_type: str | None = None
 
     @property
@@ -123,6 +122,16 @@ class ToolExecution:
         # Handling: the keys are ignored on read and never written again, so a rewritten row drops them.
         # Coverage: tests/llm/test_codecs.py::test_tool_execution_round_trips_agno_dict_minus_dropped_keys,
         #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys
+        # LEGACY_COMPAT: Tool executions carry Agno's silence flag for a call executed outside the run.
+        # Legacy format: a stored tool execution holds ``external_execution_silent``, in run rows, summary-row
+        # segments, delegation state, and CLI approval payloads; it is true on a paused delegation, which kept Agno's
+        # pause notice out of the reply text, and no MindRoom code read it.
+        # Last legacy release: v2026.10.747, which wrote it for every paused delegation as every earlier release did;
+        # replacement: the next release, whose tool executions do not store it.
+        # Handling: the key is ignored on read and never written again, so a paused delegation stored with it resumes
+        # as one stored without it, and a rewritten row drops it.
+        # Coverage: tests/llm/test_codecs.py::test_a_paused_delegation_stored_with_agnos_silence_flag_still_loads,
+        #   tests/llm/test_codecs.py::test_tool_execution_round_trips_agno_dict_minus_dropped_keys
         values = {_TOOL_FIELDS[key]: value for key, value in data.items() if key in _TOOL_FIELDS}
         # LEGACY_COMPAT: Tool executions stored without a call id.
         # Legacy format: a stored tool execution whose ``tool_call_id`` is null, empty, or absent. Agno 2.4.7 stored
