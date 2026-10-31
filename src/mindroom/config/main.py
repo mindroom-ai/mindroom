@@ -520,14 +520,7 @@ class Config(BaseModel):
         """Normalize legacy string plugin entries into structured config objects."""
         if not isinstance(value, list):
             return value
-
-        normalized_plugins: list[object] = []
-        for plugin_entry in value:
-            if isinstance(plugin_entry, str):
-                normalized_plugins.append({"path": plugin_entry})
-                continue
-            normalized_plugins.append(plugin_entry)
-        return normalized_plugins
+        return [{"path": plugin_entry} if isinstance(plugin_entry, str) else plugin_entry for plugin_entry in value]
 
     @field_validator("prompts")
     @classmethod
@@ -745,10 +738,7 @@ class Config(BaseModel):
             if base_id not in self.knowledge_bases
         ]
         if invalid_assignments:
-            formatted = ", ".join(
-                f"{agent_name} -> {base_id}"
-                for agent_name, base_id in sorted(invalid_assignments, key=lambda item: (item[0], item[1]))
-            )
+            formatted = ", ".join(f"{agent_name} -> {base_id}" for agent_name, base_id in sorted(invalid_assignments))
             msg = f"Agents reference unknown knowledge bases: {formatted}"
             raise ValueError(msg)
         return self
@@ -1256,29 +1246,15 @@ class Config(BaseModel):
             return configured
 
         agent_name = self.get_private_knowledge_base_agent(base_id)
-        if agent_name is None:
-            msg = f"Knowledge base '{base_id}' is not configured"
-            raise ValueError(msg)
-
-        agent_config = self.get_agent(agent_name)
-        private_config = agent_config.private
-        if private_config is None:
-            msg = f"Knowledge base '{base_id}' is not configured"
-            raise ValueError(msg)
-
-        private_knowledge = private_config.knowledge
-        if private_knowledge is None or not private_knowledge.enabled:
-            msg = f"Knowledge base '{base_id}' is not configured"
-            raise ValueError(msg)
-
-        knowledge_path = private_knowledge.path
-        if knowledge_path is None:
+        private_config = self.get_agent(agent_name).private if agent_name is not None else None
+        private_knowledge = private_config.knowledge if private_config is not None else None
+        if private_knowledge is None or not private_knowledge.enabled or private_knowledge.path is None:
             msg = f"Knowledge base '{base_id}' is not configured"
             raise ValueError(msg)
 
         return KnowledgeBaseConfig(
             description=private_knowledge.description,
-            path=knowledge_path,
+            path=private_knowledge.path,
             watch=private_knowledge.watch,
             chunk_size=private_knowledge.chunk_size,
             chunk_overlap=private_knowledge.chunk_overlap,
@@ -1762,8 +1738,7 @@ def load_config(
         uses_includes=uses_includes,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
-    source_files = frozenset(source_digests)
-    logger.info("loaded_agent_configuration", path=str(path), source_file_count=len(source_files))
+    logger.info("loaded_agent_configuration", path=str(path), source_file_count=len(source_digests))
     logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
     return config
 

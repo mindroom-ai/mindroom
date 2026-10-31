@@ -7,6 +7,7 @@ import re
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from mindroom.agent_policy import PRIVATE_KNOWLEDGE_BASE_ID_PREFIX
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig
@@ -78,6 +79,35 @@ def test_git_backed_private_knowledge_rejects_the_memory_notes_tree(
     }
     with pytest.raises(ValueError, match=r"git-backed private knowledge at 'memory/notes'.*dedicated subtree"):
         Config.model_validate(data)
+
+
+def test_unknown_knowledge_base_assignments_are_listed_sorted() -> None:
+    """Unknown knowledge base assignments are reported sorted by agent and base ID."""
+    data = {
+        "models": {"default": {"provider": "openai", "id": "default-model"}},
+        "agents": {
+            "zed": {"display_name": "Zed", "knowledge_bases": ["notes"]},
+            "amy": {"display_name": "Amy", "knowledge_bases": ["wiki", "docs"]},
+        },
+    }
+    with pytest.raises(
+        ValueError,
+        match=re.escape("Agents reference unknown knowledge bases: amy -> docs, amy -> wiki, zed -> notes"),
+    ):
+        Config.model_validate(data)
+
+
+def test_unknown_knowledge_base_lookup_reports_it_is_not_configured() -> None:
+    """Looking up a base ID that is neither configured nor a private agent base names that ID."""
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "default-model"}},
+            "agents": {"code": {"display_name": "Code"}},
+        },
+    )
+    for base_id in ("missing", f"{PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}code", f"{PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}ghost"):
+        with pytest.raises(ValueError, match=re.escape(f"Knowledge base '{base_id}' is not configured")):
+            config.get_knowledge_base_config(base_id)
 
 
 def test_history_limit_choice_rejects_both_limits_with_existing_message() -> None:
