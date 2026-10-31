@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
@@ -378,11 +379,14 @@ class OutlookCalendarTools(Toolkit):
         if credentials_manager is None:
             msg = "OutlookCalendarTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         functions: dict[str, Callable[..., str]] = {
             "outlook_calendar_list_calendars": self.outlook_calendar_list_calendars,
             "outlook_calendar_list_events": self.outlook_calendar_list_events,
@@ -413,13 +417,7 @@ class OutlookCalendarTools(Toolkit):
 
         def run() -> Mapping[str, object]:
             request = build()
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
+            with self._session() as session:
                 prepared = request if prepare is None else prepare(session, request)
                 return render(prepared.send(session))
 

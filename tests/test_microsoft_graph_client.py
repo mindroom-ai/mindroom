@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from functools import partial
 from typing import TYPE_CHECKING
 
 import httpx
@@ -14,6 +15,7 @@ import pytest
 from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     MicrosoftGraphError,
+    graph_call,
     graph_int,
     graph_session,
     graph_time,
@@ -106,6 +108,27 @@ def test_a_response_that_is_not_a_json_object_is_refused(
     result = _result(tmp_path, lambda session: session.json("GET", "/me/drive"))
 
     assert result["code"] == "graph_invalid_response"
+
+
+def test_graph_call_refuses_malformed_arguments_before_asking_for_a_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = FakeGraph(_answer(200, json={})).install(monkeypatch)
+    paths = runtime_paths(tmp_path)
+    session = partial(graph_session, PROVIDER, paths, save_client_config(paths), worker_target(), None)
+
+    result = json.loads(
+        graph_call(
+            "microsoft_files",
+            session,
+            lambda: graph_int(0, "limit", maximum=50),
+            lambda _session, _limit: {},
+        ),
+    )
+
+    assert result["code"] == "invalid_argument"
+    assert graph.requests == []
 
 
 def test_a_missing_connection_returns_a_connect_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

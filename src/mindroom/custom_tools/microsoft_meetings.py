@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -12,11 +13,10 @@ from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contr
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
-    graph_error_payload,
+    graph_call,
     graph_object,
     graph_records,
     graph_session,
-    graph_tool_result,
     next_page_token,
     page_offset,
     page_path,
@@ -226,11 +226,14 @@ class MicrosoftMeetingsTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftMeetingsTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         super().__init__(
             name=_TOOL_NAME,
             tools=[
@@ -246,22 +249,7 @@ class MicrosoftMeetingsTools(Toolkit):
         result: Callable[[httpx.Response], Mapping[str, object]],
     ) -> str:
         """Refuse malformed arguments before any request, then send the request and render its result."""
-        try:
-            request = build()
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-
-        def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                return result(_get(session, request))
-
-        return graph_tool_result(_TOOL_NAME, run)
+        return graph_call(_TOOL_NAME, self._session, build, lambda session, request: result(_get(session, request)))
 
     def microsoft_meetings_find(self, join_url: str) -> str:
         """Find the Teams meeting behind a join link, with the meeting_id the transcript functions take.

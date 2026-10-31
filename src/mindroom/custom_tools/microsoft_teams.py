@@ -13,11 +13,10 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     MicrosoftGraphError,
-    graph_error_payload,
+    graph_call,
     graph_int,
     graph_records,
     graph_session,
-    graph_tool_result,
     html_to_text,
     next_page_token,
     page_path,
@@ -352,11 +351,14 @@ class MicrosoftTeamsTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftTeamsTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         functions: dict[str, Callable[..., str]] = {
             "microsoft_teams_list_teams": self.microsoft_teams_list_teams,
             "microsoft_teams_list_channels": self.microsoft_teams_list_channels,
@@ -381,22 +383,7 @@ class MicrosoftTeamsTools(Toolkit):
         shape: Callable[[dict[str, Any]], Mapping[str, object]],
     ) -> str:
         """Validate the arguments into one request before any network call, then send it and shape the answer."""
-        try:
-            prepared = request()
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-
-        def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                return shape(prepared.send(session))
-
-        return graph_tool_result(_TOOL_NAME, run)
+        return graph_call(_TOOL_NAME, self._session, request, lambda session, prepared: shape(prepared.send(session)))
 
     def microsoft_teams_list_teams(self) -> str:
         """List the Teams teams the requester is a member of, with the team_id the channel functions take."""

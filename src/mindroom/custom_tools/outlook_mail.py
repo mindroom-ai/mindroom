@@ -8,6 +8,7 @@ import mimetypes
 import re
 import unicodedata
 from datetime import datetime
+from functools import partial
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
@@ -39,7 +40,6 @@ from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from mindroom.config.models import FileAccess
@@ -330,11 +330,14 @@ class OutlookMailTools(Toolkit):
         if credentials_manager is None:
             msg = "OutlookMailTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
         functions: dict[str, Callable[..., str]] = {
@@ -352,15 +355,6 @@ class OutlookMailTools(Toolkit):
         super().__init__(
             name=_TOOL_NAME,
             tools=[function for name, function in functions.items() if write or name not in _WRITE_FUNCTIONS],
-        )
-
-    def _session(self) -> AbstractContextManager[GraphSession]:
-        return graph_session(
-            self._provider,
-            self._runtime_paths,
-            self._credentials_manager,
-            self._worker_target,
-            self._config,
         )
 
     def _call(

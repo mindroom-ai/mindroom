@@ -5,18 +5,18 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
-    graph_error_payload,
+    graph_call,
     graph_int,
     graph_object,
     graph_records,
     graph_session,
-    graph_tool_result,
     html_to_text,
     next_page_token,
     page_path,
@@ -139,11 +139,14 @@ class MicrosoftTodoTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftTodoTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         functions: dict[str, Callable[..., str]] = {
             "microsoft_todo_list_lists": self.microsoft_todo_list_lists,
             "microsoft_todo_list_tasks": self.microsoft_todo_list_tasks,
@@ -162,22 +165,14 @@ class MicrosoftTodoTools(Toolkit):
         result: Callable[[dict[str, Any]], Mapping[str, object]],
     ) -> str:
         """Refuse malformed arguments before any request, then send the request and render its result."""
-        try:
-            request = build()
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-
-        def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                return result(session.json(request.method, request.path, params=request.params, json=request.body))
-
-        return graph_tool_result(_TOOL_NAME, run)
+        return graph_call(
+            _TOOL_NAME,
+            self._session,
+            build,
+            lambda session, request: result(
+                session.json(request.method, request.path, params=request.params, json=request.body),
+            ),
+        )
 
     def microsoft_todo_list_lists(self, page_token: str | None = None) -> str:
         """List the requester's Microsoft To Do task lists.

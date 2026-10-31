@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
-    graph_error_payload,
+    graph_call,
     graph_int,
     graph_records,
     graph_session,
-    graph_tool_result,
     next_page_token,
     page_path,
     path_segment,
@@ -21,7 +21,7 @@ from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
     from mindroom.constants import RuntimePaths
     from mindroom.custom_tools.microsoft_graph import GraphSession
@@ -134,11 +134,14 @@ class MicrosoftPeopleTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftPeopleTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         super().__init__(
             name=_TOOL_NAME,
             tools=[
@@ -147,29 +150,6 @@ class MicrosoftPeopleTools(Toolkit):
                 self.microsoft_people_list_direct_reports,
             ],
         )
-
-    def _send[T](
-        self,
-        build: Callable[[], T],
-        run: Callable[[GraphSession, T], Mapping[str, object]],
-    ) -> str:
-        """Refuse malformed arguments before any request, then send the requests and render their result."""
-        try:
-            request = build()
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-
-        def operation() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                return run(session, request)
-
-        return graph_tool_result(_TOOL_NAME, operation)
 
     def microsoft_people_search(self, query: str, limit: int = 10) -> str:
         """Search the requester's organization directory for people by name or email address.
@@ -184,7 +164,9 @@ class MicrosoftPeopleTools(Toolkit):
             limit: Maximum number of people to return, from 1 to 50.
 
         """
-        return self._send(
+        return graph_call(
+            _TOOL_NAME,
+            self._session,
             lambda: {
                 "$search": _search(query),
                 "$select": _SELECT,
@@ -218,7 +200,7 @@ class MicrosoftPeopleTools(Toolkit):
                 manager = {}
             return {"person": _person(profile), "manager": _person(manager) if manager and _is_user(manager) else None}
 
-        return self._send(lambda: _user_path(person), run)
+        return graph_call(_TOOL_NAME, self._session, lambda: _user_path(person), run)
 
     def microsoft_people_list_direct_reports(self, person: str, page_token: str | None = None) -> str:
         """List the people who report directly to one person.
@@ -243,4 +225,4 @@ class MicrosoftPeopleTools(Toolkit):
             payload = session.json("GET", next_page) if next_page else _read_user(session, person, "/directReports")
             return {"direct_reports": _people(payload), "next_page_token": next_page_token(payload)}
 
-        return self._send(build, run)
+        return graph_call(_TOOL_NAME, self._session, build, run)

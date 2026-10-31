@@ -40,6 +40,7 @@ from mindroom.path_confinement import open_directory_within_root, resolve_path_w
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
+    from contextlib import AbstractContextManager
     from pathlib import Path
     from typing import BinaryIO
 
@@ -574,6 +575,28 @@ def graph_tool_result(tool_name: str, operation: Callable[[], Mapping[str, objec
     except MicrosoftGraphError as exc:
         return graph_error_payload(tool_name, exc)
     return custom_tool_payload(tool_name, "ok", **fields)
+
+
+def graph_call[T](
+    tool_name: str,
+    session: Callable[[], AbstractContextManager[GraphSession]],
+    build: Callable[[], T],
+    run: Callable[[GraphSession, T], Mapping[str, object]],
+) -> str:
+    """Refuse malformed arguments before any request, then send the requests and render their result.
+
+    `build` checks the arguments and returns what `run` sends in one session; its refusal opens no session.
+    """
+    try:
+        request = build()
+    except MicrosoftGraphError as exc:
+        return graph_error_payload(tool_name, exc)
+
+    def operation() -> Mapping[str, object]:
+        with session() as opened:
+            return run(opened, request)
+
+    return graph_tool_result(tool_name, operation)
 
 
 def mailbox_tool_result(

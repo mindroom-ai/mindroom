@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlsplit
 
@@ -15,11 +16,10 @@ from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contr
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
-    graph_error_payload,
+    graph_call,
     graph_int,
     graph_object,
     graph_session,
-    graph_tool_result,
     html_to_text,
     next_page_token,
     page_offset,
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
     from mindroom.constants import RuntimePaths
+    from mindroom.custom_tools.microsoft_graph import GraphSession
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _WRITE_FUNCTIONS = frozenset({"microsoft_sharepoint_create_item", "microsoft_sharepoint_update_item"})
@@ -280,11 +281,14 @@ class MicrosoftSharePointTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftSharePointTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         functions: dict[str, Callable[..., str]] = {
             "microsoft_sharepoint_search_sites": self.microsoft_sharepoint_search_sites,
             "microsoft_sharepoint_get_site": self.microsoft_sharepoint_get_site,
@@ -310,26 +314,15 @@ class MicrosoftSharePointTools(Toolkit):
 
         A write is sent only after reading its list and finding it at the web_url the call expects.
         """
-        try:
-            request = build()
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
 
-        def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                if (target := request.target) is not None:
-                    web_url = session.json("GET", target.list_path, params={"$select": "webUrl"}).get("webUrl")
-                    if web_url != target.web_url:
-                        raise MicrosoftGraphError(code="target_mismatch", message=_TARGET_MISMATCH, web_url=web_url)
-                return result(session.json(request.method, request.path, params=request.params, json=request.body))
+        def run(session: GraphSession, request: _Request) -> Mapping[str, object]:
+            if (target := request.target) is not None:
+                web_url = session.json("GET", target.list_path, params={"$select": "webUrl"}).get("webUrl")
+                if web_url != target.web_url:
+                    raise MicrosoftGraphError(code="target_mismatch", message=_TARGET_MISMATCH, web_url=web_url)
+            return result(session.json(request.method, request.path, params=request.params, json=request.body))
 
-        return graph_tool_result(_TOOL_NAME, run)
+        return graph_call(_TOOL_NAME, self._session, build, run)
 
     def microsoft_sharepoint_search_sites(self, query: str, page_token: str | None = None) -> str:
         """Search the SharePoint sites the requester can open by keyword, with the site_id the other functions take.

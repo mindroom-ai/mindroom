@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
 
@@ -270,11 +271,14 @@ class MicrosoftFilesTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftFilesTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
         functions: dict[str, Callable[..., str]] = {
@@ -295,13 +299,7 @@ class MicrosoftFilesTools(Toolkit):
 
     def _run(self, operation: Callable[[GraphSession], Mapping[str, object]]) -> str:
         def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
+            with self._session() as session:
                 return operation(session)
 
         return graph_tool_result(_TOOL_NAME, run)
