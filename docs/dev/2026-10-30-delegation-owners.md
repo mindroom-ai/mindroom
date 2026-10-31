@@ -27,5 +27,3 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 
 - A finished-run record of another run in a child's stream is neither recorded nor numbered in the child's record.
   No reachable stream hands a child's observer another run's record, so the record's stream numbers match the child's own events.
-- Two team members that pause on the same tool-call id fail the reply when it pauses, and team denials are routed by call id alone.
-  Providers generate unique call ids, so this is accepted rather than handled.

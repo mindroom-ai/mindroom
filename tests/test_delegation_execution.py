@@ -1102,7 +1102,7 @@ async def test_delegate_policy_denial_never_starts_child(tmp_path: Path, monkeyp
     stored = _parent_record(config, paths, identity, "parent-run")
     state = DelegationState.from_metadata(stored.metadata)
     assert state.children == []
-    assert str(state.pending_tools[0]["tool_call_id"]) == "policy-gated"
+    assert state.pending_tools[0]["tool_call_id"] == "policy-gated"
     assert [tool.tool_call_id for tool in paused.tools] == ["policy-gated"]
     assert paused.toolkit_owners[("leader", "run_subagent")] == "delegate"
 
