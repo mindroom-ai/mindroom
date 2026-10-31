@@ -198,12 +198,12 @@ def _log_rows(db_file: Path, names: AgnoTableNames, session_id: str) -> dict[str
 
 
 @pytest.mark.parametrize(("store", "session_id"), _SESSIONS, ids=_SESSION_IDS)
-def test_saving_and_rewriting_every_loaded_golden_run_changes_nothing(
+def test_saving_every_loaded_golden_run_changes_nothing(
     store: GoldenStore,
     session_id: str,
     tmp_path: Path,
 ) -> None:
-    """Saving each loaded run's copy and rewriting their messages unchanged keeps every row but its update time."""
+    """Saving each loaded run's copy unchanged keeps every row but its update time."""
     conversation = store.open(tmp_path)
     session = _load(conversation, session_id)
     loaded = [run.to_dict() for run in session.runs]
@@ -211,7 +211,6 @@ def test_saving_and_rewriting_every_loaded_golden_run_changes_nothing(
 
     for run in list(session.runs):
         conversation.save_run(session, copy.deepcopy(run), record_usage=False)
-    conversation.rewrite_run_messages(session_id, lambda runs: runs, session=session)
 
     assert _log_rows(conversation.path, store.names, session_id) == before
     assert [run.to_dict() for run in session.runs] == loaded

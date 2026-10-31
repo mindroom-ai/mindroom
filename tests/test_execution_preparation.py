@@ -35,12 +35,12 @@ from mindroom.execution_preparation import (
     _build_thread_history_messages,
     _fallback_static_token_budget,
     _messages_with_current_prompt,
-    _prepare_bound_team_execution_context,
     _prepare_execution_context_common,
     _prepared_history_with_scheduled_limit,
     _PreparedExecutionContext,
     _ThreadAttachmentContext,
     prepare_agent_execution_context,
+    prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
 from mindroom.history import runtime as history_runtime
@@ -345,7 +345,7 @@ async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_wi
     prepare_common = AsyncMock(return_value=MagicMock())
     monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
 
-    await _prepare_bound_team_execution_context(
+    await prepare_bound_team_run_context(
         make_turn_context("test_agent"),
         scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
         leader_system_messages=(Message(role="system", content="You lead the team."),),
@@ -862,7 +862,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
         lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
     )
 
-    await _prepare_bound_team_execution_context(
+    await prepare_bound_team_run_context(
         make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
         scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
         leader_system_messages=leader_system_messages,
@@ -904,7 +904,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     monkeypatch.setattr(execution_preparation, "finalize_history_preparation", finalize_history_preparation)
     team_id = "@mindroom_team:localhost"
 
-    prepared = await _prepare_bound_team_execution_context(
+    prepared = await prepare_bound_team_run_context(
         make_turn_context(
             "test_agent",
             room_id="!room:localhost",

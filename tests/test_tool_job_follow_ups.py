@@ -97,7 +97,6 @@ async def _drive_jobs_turn(
         make_text_chunk=str,
         user_message=prompt,
         unexpected_error_text=str,
-        entity_name="test_agent",
     )
     continuation = TurnContinuationRunState.initial(
         prompt=prompt,

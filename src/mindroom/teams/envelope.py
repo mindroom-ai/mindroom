@@ -194,7 +194,7 @@ async def prepare_materialized_team_execution(
         runtime_paths=runtime_paths,
         config=config,
         timezone=built.timezone,
-        entity_name=configured_team_name,
+        team_name=configured_team_name,
         history_settings=built.history_settings,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
@@ -814,7 +814,6 @@ async def team_response_stream(
         make_text_chunk=lambda text: text,
         user_message=ctx.prompt,
         unexpected_error_text=turn.error_text,
-        entity_name=turn.entity_name,
     )
     response_stream = stream_response_turn(
         turn.ctx,

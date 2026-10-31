@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -16,14 +16,9 @@ from agno.media import Image
 from agno.tools.function import ToolResult
 from structlog.testing import capture_logs
 
-from mindroom import ai_runtime
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
-from mindroom.ai_runtime import (
-    queued_message_signal_context,
-    queued_notice_after_tool_batch,
-    register_scope_notice_storage,
-)
+from mindroom.ai_runtime import queued_message_signal_context, queued_notice_after_tool_batch
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing.batch import (
     CoalescingKey,
@@ -59,13 +54,13 @@ from mindroom.final_delivery import (
     TurnEnding,
 )
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
-from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.llm.messages import Message as OwnedMessage
-from mindroom.llm.runs import AnyRunRecord, RunRecord, TeamRunRecord
+from mindroom.llm.runs import AnyRunRecord, RunRecord
 from mindroom.llm.runs import RunStatus as OwnedRunStatus
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
@@ -87,8 +82,7 @@ from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMes
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRunner, _PostLockRequestPreparationError
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
-from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
-from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
@@ -107,7 +101,6 @@ from tests.conftest import (
     make_membership_stub,
     make_pending_event,
     message_origin,
-    record_store_threads,
     request_envelope,
     runtime_paths_for,
     seed_session,
@@ -341,66 +334,24 @@ _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 
 
-def _notice_messages(
-    messages: list[OwnedMessage],
-    *,
-    marker: bool | str | None = None,
-    response_turn_id: str | None = None,
-) -> list[OwnedMessage]:
-    matches: list[OwnedMessage] = []
-    for message in messages:
-        provider_data = message.provider_data
-        if not isinstance(provider_data, dict):
-            continue
-        notice_marker = provider_data.get(_QUEUED_NOTICE_MARKER_KEY)
-        if notice_marker not in (True, "persisted"):
-            continue
-        if marker is not None and notice_marker != marker:
-            continue
-        if response_turn_id is not None and provider_data.get(_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY) != response_turn_id:
-            continue
-        matches.append(message)
-    return matches
+def _notice_messages(messages: list[OwnedMessage], *, response_turn_id: str | None = None) -> list[OwnedMessage]:
+    return [
+        message
+        for message in messages
+        if is_queued_notice_message(message)
+        and (
+            response_turn_id is None
+            or (message.provider_data or {}).get(_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY) == response_turn_id
+        )
+    ]
 
 
-def _notice_count(
-    messages: list[OwnedMessage],
-    *,
-    marker: bool | str | None = None,
-    response_turn_id: str | None = None,
-) -> int:
-    return len(
-        _notice_messages(
-            messages,
-            marker=marker,
-            response_turn_id=response_turn_id,
-        ),
-    )
+def _notice_count(messages: list[OwnedMessage], *, response_turn_id: str | None = None) -> int:
+    return len(_notice_messages(messages, response_turn_id=response_turn_id))
 
 
 def _queued_notice_storage(tmp_path: Path) -> ConversationStore:
     return create_agent_state_storage("queued_notice", tmp_path)
-
-
-def _register_notice_storage(
-    store: ConversationStore,
-    *,
-    storage_factory: Callable[[], ConversationStore] | None = None,
-    session_id: str = "session-1",
-    session_kind: SessionKind = "agent",
-    entity_name: str = "general",
-) -> None:
-    """Register the scope a response ran in, whose runs ``store`` holds, for the response's notice finalization."""
-    register_scope_notice_storage(
-        scope_context=ScopeSessionContext(
-            scope=HistoryScope(kind=session_kind, scope_id=entity_name),
-            storage=store,
-            session=None,
-            session_id=session_id,
-            storage_factory=storage_factory or (lambda: store),
-        ),
-        entity_name=entity_name,
-    )
 
 
 async def _after_batch(
@@ -413,55 +364,13 @@ async def _after_batch(
     await queued_notice_after_tool_batch(notice_text)(messages, results)
 
 
-def _owned_notice(response_turn_id: str, *, marker: bool | str = True, from_history: bool = False) -> OwnedMessage:
+def _owned_notice(response_turn_id: str, *, from_history: bool = False) -> OwnedMessage:
     return OwnedMessage(
         role="user",
         content=QUEUED_MESSAGE_NOTICE_TEXT,
-        provider_data={_QUEUED_NOTICE_MARKER_KEY: marker, _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id},
+        provider_data={_QUEUED_NOTICE_MARKER_KEY: True, _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id},
         from_history=from_history,
     )
-
-
-@dataclass(frozen=True, slots=True)
-class _RecordingStore(ConversationStore):
-    """A conversation store that records the runs each message rewrite stores and can hold each rewrite until released.
-
-    A rewrite whose edit returns no run stores nothing, so it records nothing.
-    """
-
-    held: threading.Event | None = None
-    rewriting: threading.Event = field(default_factory=threading.Event)
-    saves: list[list[str]] = field(default_factory=list)
-
-    def rewrite_run_messages(
-        self,
-        session_id: str,
-        edit: Callable[[list[AnyRunRecord]], list[AnyRunRecord]],
-        *,
-        session: ConversationSession | None = None,
-    ) -> None:
-        self.rewriting.set()
-        if self.held is not None:
-            assert self.held.wait(timeout=1)
-
-        def recorded(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-            edited = edit(runs)
-            if edited:
-                self.saves.append([run.run_id for run in edited])
-            return edited
-
-        ConversationStore.rewrite_run_messages(self, session_id, recorded, session=session)
-
-
-def _recording_store(
-    tmp_path: Path,
-    name: str,
-    *,
-    held: threading.Event | None = None,
-    kind: SessionKind = "agent",
-) -> _RecordingStore:
-    store = create_state_storage(name, tmp_path, HistoryScope(kind=kind, scope_id=name))
-    return _RecordingStore(store.path, held=held)
 
 
 def _completed(run_id: str, messages: list[OwnedMessage], *, agent_id: str = "general") -> RunRecord:
@@ -484,7 +393,7 @@ def _seed(
     owner = "general" if kind == "agent" else "queued-notice-team"
     for run in runs:
         run.session_id = session_id
-    seeded = seed_session(
+    return seed_session(
         store,
         ConversationSession(
             session_id=session_id,
@@ -494,9 +403,6 @@ def _seed(
             created_at=1,
         ),
     )
-    if isinstance(store, _RecordingStore):
-        store.saves.clear()  # Seeding is setup, not a save the test observes.
-    return seeded
 
 
 def _stored_runs(store: ConversationStore, *, session_id: str = "session-1") -> list[AnyRunRecord]:
@@ -2765,21 +2671,21 @@ async def test_notice_hook_uses_configured_notice_text() -> None:
 async def test_notice_hook_scopes_dedupe_to_response_turn_id() -> None:
     """Tool-round dedupe should remove only notices owned by the active response."""
     with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        prior_notice = _owned_notice("prior-response", marker="persisted", from_history=True)
-        current_stale_notice = _owned_notice(notice_context.response_turn_id, marker="persisted")
+        prior_notice = _owned_notice("prior-response", from_history=True)
+        current_stale_notice = _owned_notice(notice_context.response_turn_id)
         messages = [prior_notice, current_stale_notice]
         await _after_batch(messages, OwnedMessage(role="tool", content="result"))
 
     assert messages[0] is prior_notice
-    assert _notice_count(messages, marker="persisted", response_turn_id="prior-response") == 1
-    assert _notice_count(messages, marker="persisted", response_turn_id=notice_context.response_turn_id) == 0
-    assert _notice_count(messages, marker=True, response_turn_id=notice_context.response_turn_id) == 1
+    assert all(message is not current_stale_notice for message in messages)
+    assert _notice_count(messages, response_turn_id="prior-response") == 1
+    assert _notice_count(messages, response_turn_id=notice_context.response_turn_id) == 1
 
 
 @pytest.mark.asyncio
-async def test_notice_hook_preserves_prior_persisted_replay() -> None:
-    """A prior persisted notice should survive later tool-result formatting byte-for-byte."""
-    prior_notice = _owned_notice("prior-response", marker="persisted", from_history=True)
+async def test_notice_hook_preserves_a_prior_replayed_notice() -> None:
+    """A prior reply's replayed notice should survive later tool-result formatting byte-for-byte."""
+    prior_notice = _owned_notice("prior-response", from_history=True)
     original = prior_notice.to_dict()
 
     with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
@@ -2788,8 +2694,8 @@ async def test_notice_hook_preserves_prior_persisted_replay() -> None:
             await _after_batch(messages, OwnedMessage(role="tool", content=f"result {index}"))
 
     assert prior_notice.to_dict() == original
-    assert _notice_count(messages, marker="persisted", response_turn_id="prior-response") == 1
-    assert _notice_count(messages, marker=True, response_turn_id=notice_context.response_turn_id) == 1
+    assert _notice_count(messages, response_turn_id="prior-response") == 1
+    assert _notice_count(messages, response_turn_id=notice_context.response_turn_id) == 1
 
 
 @pytest.mark.asyncio
@@ -2860,467 +2766,6 @@ async def test_notice_follows_a_tool_batch_media_follow_up_message() -> None:
     assert messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
 
 
-@pytest.mark.asyncio
-async def test_response_finalization_collapses_a_team_runs_current_notice_state(tmp_path: Path) -> None:
-    """Outer finalization should leave one exact notice in the top-level completed run; its members hold none."""
-    store = _recording_store(tmp_path, "queued-notice-team", kind="team")
-
-    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        messages: list[OwnedMessage] = []
-        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
-        member = _completed("member-run-1", [], agent_id="member")
-        member.parent_run_id = "run-1"
-        _seed(
-            store,
-            TeamRunRecord(
-                run_id="run-1",
-                session_id="session-1",
-                team_id="queued-notice-team",
-                status=OwnedRunStatus.completed,
-                messages=deepcopy(messages),
-            ),
-            member,
-            kind="team",
-        )
-        _register_notice_storage(store, session_kind="team", entity_name="queued-notice-team")
-        assert _notice_count(messages, marker=True) == 1
-        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
-
-    stored = {run.run_id: run for run in _stored_runs(store)}
-    assert set(stored) == {"run-1", "member-run-1"}
-    stored_team_run = stored["run-1"]
-    assert isinstance(stored_team_run, TeamRunRecord)
-    assert _notice_count(stored_team_run.messages, marker=True) == 0
-    assert _notice_count(stored_team_run.messages, marker="persisted") == 1
-    assert _notice_count(stored["member-run-1"].messages) == 0
-
-
-@pytest.mark.asyncio
-async def test_response_finalization_does_not_copy_notice_to_untouched_target(tmp_path: Path) -> None:
-    """Finalization should persist a notice only in storage that contains its live marker."""
-    untouched_store = _recording_store(tmp_path, "delegated-agent")
-    noticed_store = _recording_store(tmp_path, "outer-agent")
-
-    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        noticed_messages = [OwnedMessage(role="user", content="Outer request")]
-        await _after_batch(noticed_messages, OwnedMessage(role="tool", content="Outer tool result"))
-        delegated = [
-            OwnedMessage(role="user", content="Delegated request"),
-            OwnedMessage(role="assistant", content="Delegated answer"),
-        ]
-        _seed(untouched_store, _completed("untouched-run", delegated), session_id="shared-session")
-        _seed(noticed_store, _completed("noticed-run", noticed_messages), session_id="shared-session")
-        for name, store in (("delegated-agent", untouched_store), ("outer-agent", noticed_store)):
-            _register_notice_storage(store, session_id="shared-session", entity_name=name)
-
-        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
-
-    assert untouched_store.saves == []
-    [untouched_run] = _stored_runs(untouched_store, session_id="shared-session")
-    assert [(message.role, message.content) for message in untouched_run.messages] == [
-        ("user", "Delegated request"),
-        ("assistant", "Delegated answer"),
-    ]
-    assert noticed_store.saves == [["noticed-run"]]
-    # The live list the model saw is left untouched; the finalized stored copy changed.
-    assert _notice_count(noticed_messages, marker=True) == 1
-    [persisted_run] = _stored_runs(noticed_store, session_id="shared-session")
-    assert _notice_count(persisted_run.messages, marker=True) == 0
-    assert _notice_count(persisted_run.messages, marker="persisted") == 1
-
-
-@pytest.mark.asyncio
-async def test_response_finalization_uses_newest_completed_same_turn_run_and_original_notice_position(
-    tmp_path: Path,
-) -> None:
-    """Two completed attempts should leave one exact notice at the newest notice position."""
-    store = _recording_store(tmp_path, "general")
-
-    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        first_messages = [
-            OwnedMessage(role="user", content="First request"),
-            OwnedMessage(role="assistant", content="First tool call"),
-        ]
-        await _after_batch(first_messages, OwnedMessage(role="tool", content="First result"))
-        first_messages.append(OwnedMessage(role="assistant", content="First final"))
-        second_messages = [
-            OwnedMessage(role="user", content="Second request"),
-            OwnedMessage(role="assistant", content="Second tool call"),
-        ]
-        await _after_batch(second_messages, OwnedMessage(role="tool", content="Second result"))
-        second_messages.append(OwnedMessage(role="assistant", content="Second final"))
-        _seed(
-            store,
-            _completed("first-completed-run", first_messages),
-            _completed("second-completed-run", second_messages),
-        )
-        _register_notice_storage(store)
-
-        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
-
-    # Both attempts change: the first loses its notice, the second gets the persisted one.
-    assert [sorted(saved) for saved in store.saves] == [["first-completed-run", "second-completed-run"]]
-    stored_first, stored_second = _stored_runs(store)
-    assert _notice_count(stored_first.messages) == 0
-    assert [(message.role, message.content) for message in stored_second.messages] == [
-        ("user", "Second request"),
-        ("assistant", "Second tool call"),
-        ("tool", "Second result"),
-        ("user", QUEUED_MESSAGE_NOTICE_TEXT),
-        ("assistant", "Second final"),
-    ]
-    assert (
-        _notice_count(stored_second.messages, marker="persisted", response_turn_id=notice_context.response_turn_id) == 1
-    )
-
-
-@pytest.mark.asyncio
-async def test_async_cleanup_keeps_session_storage_io_off_event_loop(tmp_path: Path) -> None:
-    """Slow response-boundary storage finalization must stay off the event loop."""
-    release = threading.Event()
-    store = _recording_store(tmp_path, "queued-notice-agent", held=release)
-    factory_threads: list[int] = []
-    event_loop_thread_id = threading.get_ident()
-
-    def storage_factory() -> ConversationStore:
-        factory_threads.append(threading.get_ident())
-        return store
-
-    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        messages: list[OwnedMessage] = []
-        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
-        _seed(store, _completed("run-1", messages))
-        _register_notice_storage(store, storage_factory=storage_factory, entity_name="queued-notice-agent")
-        cleanup_task = asyncio.create_task(
-            ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
-        )
-        try:
-            assert await asyncio.to_thread(store.rewriting.wait, 1)
-            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
-            assert not cleanup_task.done()
-        finally:
-            release.set()
-
-        await asyncio.wait_for(cleanup_task, timeout=1)
-    assert factory_threads
-    assert event_loop_thread_id not in factory_threads
-    assert store.saves == [["run-1"]]
-
-
-@pytest.mark.asyncio
-async def test_notice_finalization_waits_its_turn_in_the_database_s_lane(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The finalizing rewrite queues behind storage work already in its database's lane and then runs on its thread."""
-    store = _recording_store(tmp_path, "general")
-    rewrite_threads = record_store_threads(monkeypatch, "rewrite_run_messages")["rewrite_run_messages"]
-    started, release = threading.Event(), threading.Event()
-
-    def hold_the_lane(_store: ConversationStore) -> None:
-        started.set()
-        assert release.wait(timeout=5)
-
-    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        messages: list[OwnedMessage] = []
-        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
-        _seed(store, _completed("run-1", messages))
-        _register_notice_storage(store)
-        held = asyncio.create_task(run_session_storage_operation(lambda: store, hold_the_lane))
-        try:
-            assert await asyncio.to_thread(started.wait, 5)
-            finalization = asyncio.create_task(ai_runtime.finalize_queued_notice_response_turn_async(notice_context))
-            await asyncio.sleep(0.05)
-            assert not store.rewriting.is_set()
-        finally:
-            release.set()
-        await asyncio.wait_for(asyncio.gather(held, finalization), timeout=5)
-
-    assert store.saves == [["run-1"]]
-    assert len(rewrite_threads) == 1
-    assert rewrite_threads[0].startswith("conversation-store"), rewrite_threads
-
-
-@pytest.mark.asyncio
-async def test_response_turn_finalization_completes_when_cancelled_during_storage_io(tmp_path: Path) -> None:
-    """Cancellation during storage I/O must not leave a durable live imperative behind."""
-    release = threading.Event()
-    store = _recording_store(tmp_path, "general", held=release)
-
-    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        messages: list[OwnedMessage] = []
-        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
-        _seed(store, _completed("completed-run", messages))
-        _register_notice_storage(store)
-        finalization_task = asyncio.create_task(
-            ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
-        )
-        assert await asyncio.to_thread(store.rewriting.wait, 1)
-        finalization_task.cancel()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await finalization_task
-
-    # Cancellation is re-raised only after the stored run was finalized.
-    [stored] = _stored_runs(store)
-    assert _notice_count(stored.messages, marker=True) == 0
-    assert _notice_count(stored.messages, marker="persisted", response_turn_id=notice_context.response_turn_id) == 1
-
-
-@pytest.mark.asyncio
-async def test_a_cancelled_finalization_still_finalizes_every_target_before_it_propagates(tmp_path: Path) -> None:
-    """Cancellation during the first target's storage I/O lets that target and every later one finish first."""
-    release = threading.Event()
-    first = _recording_store(tmp_path / "first", "general", held=release)
-    second = _recording_store(tmp_path / "second", "helper")
-
-    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        messages: list[OwnedMessage] = []
-        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
-        for name, store in (("general", first), ("helper", second)):
-            _seed(store, _completed(f"{name}-run", messages, agent_id=name))
-            _register_notice_storage(store, entity_name=name)
-        finalization = asyncio.create_task(ai_runtime.finalize_queued_notice_response_turn_async(notice_context))
-        assert await asyncio.to_thread(first.rewriting.wait, 1)
-        finalization.cancel()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await finalization
-
-    assert (first.saves, second.saves) == ([["general-run"]], [["helper-run"]])
-
-
-@pytest.mark.asyncio
-async def test_a_target_that_fails_to_finalize_leaves_the_next_one_finalized(tmp_path: Path) -> None:
-    """A target whose store cannot open is logged and skipped, and the response's other targets still finalize."""
-    store = _recording_store(tmp_path, "helper")
-
-    def unavailable() -> ConversationStore:
-        msg = "store unavailable"
-        raise RuntimeError(msg)
-
-    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        messages: list[OwnedMessage] = []
-        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
-        _seed(store, _completed("helper-run", messages, agent_id="helper"))
-        _register_notice_storage(store, storage_factory=unavailable, entity_name="general")
-        _register_notice_storage(store, entity_name="helper")
-
-        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
-
-    assert store.saves == [["helper-run"]]
-
-
-@pytest.mark.asyncio
-async def test_response_turn_finalization_defers_repeated_cancellation_during_storage_io(tmp_path: Path) -> None:
-    """Repeated cancellation must not release the caller before durable finalization finishes."""
-    release = threading.Event()
-    store = _recording_store(tmp_path, "general", held=release)
-    first_cancel_observed = asyncio.Event()
-    original_shield = asyncio.shield
-
-    async def observed_shield(task: asyncio.Task[None]) -> None:
-        try:
-            await original_shield(task)
-        except asyncio.CancelledError:
-            first_cancel_observed.set()
-            raise
-
-    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        messages: list[OwnedMessage] = []
-        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
-        _seed(store, _completed("completed-run", messages))
-        _register_notice_storage(store)
-        with patch.object(asyncio, "shield", new=observed_shield):
-            finalization_task = asyncio.create_task(
-                ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
-            )
-            assert await asyncio.to_thread(store.rewriting.wait, 1)
-            finalization_task.cancel()
-            await asyncio.wait_for(first_cancel_observed.wait(), timeout=1)
-            finalization_task.cancel()
-            completed, _ = await asyncio.wait({finalization_task}, timeout=0.05)
-            try:
-                assert finalization_task not in completed
-            finally:
-                release.set()
-            with pytest.raises(asyncio.CancelledError):
-                await finalization_task
-
-    assert store.saves == [["completed-run"]]
-    [stored] = _stored_runs(store)
-    assert _notice_count(stored.messages, marker=True) == 0
-    assert _notice_count(stored.messages, marker="persisted", response_turn_id=notice_context.response_turn_id) == 1
-
-
-@pytest.mark.asyncio
-async def test_storage_registration_deduplicates_one_session_across_fresh_factories(tmp_path: Path) -> None:
-    """Fresh storage-factory closures for one session should cause one boundary open."""
-    store = _recording_store(tmp_path, "general")
-    factory_calls = 0
-
-    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        messages: list[OwnedMessage] = []
-        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
-        _seed(store, _completed("completed-run", messages))
-
-        def fresh_storage_factory() -> Callable[[], ConversationStore]:
-            def storage_factory() -> ConversationStore:
-                nonlocal factory_calls
-                factory_calls += 1
-                return store
-
-            return storage_factory
-
-        for _ in range(2):
-            _register_notice_storage(store, storage_factory=fresh_storage_factory())
-        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
-
-    assert factory_calls == 1
-
-
-@pytest.mark.asyncio
-async def test_error_responses_never_attach_notices_to_prior_completed_run(tmp_path: Path) -> None:
-    """Failed responses must not accumulate their notice facts on an earlier turn."""
-    store = _recording_store(tmp_path, "general")
-    session = _seed(
-        store,
-        _completed(
-            "prior-completed",
-            [
-                OwnedMessage(role="user", content="Prior request"),
-                OwnedMessage(role="assistant", content="Prior answer"),
-            ],
-        ),
-    )
-
-    for index in range(3):
-        with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-            messages: list[OwnedMessage] = []
-            await _after_batch(messages, OwnedMessage(role="tool", content=f"failed result {index}"))
-            error_run = _completed(f"error-run-{index}", messages)
-            error_run.status = OwnedRunStatus.error
-            store.save_run(session, error_run, record_usage=False)
-            _register_notice_storage(store)
-            await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
-
-    stored = _stored_runs(store)
-    assert [run.run_id for run in stored] == ["prior-completed", "error-run-0", "error-run-1", "error-run-2"]
-    assert sum(_notice_count(run.messages) for run in stored) == 0
-
-
-@pytest.mark.asyncio
-async def test_response_lifecycle_finalizes_notice_after_locked_operation(tmp_path: Path) -> None:
-    """The lifecycle boundary should persist the exact notice shown to the model."""
-    lifecycle = ResponseLifecycleCoordinator()
-    target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
-    envelope = _envelope(source_event_id="$event", target=target)
-    store = _recording_store(tmp_path, "general")
-    notice_text = "Custom queued notice."
-    observed_live_counts: list[int] = []
-
-    async def locked_operation(_target: MessageTarget) -> str:
-        lifecycle._get_or_create_queued_signal(target).add_waiting_human_message("$newer")
-        messages: list[OwnedMessage] = []
-        await _after_batch(messages, OwnedMessage(role="tool", content="result"), notice_text=notice_text)
-        _seed(store, _completed("completed-run", messages))
-        _register_notice_storage(store)
-        observed_live_counts.append(_notice_count(messages, marker=True))
-        return "$response"
-
-    result = await lifecycle.run_locked_response(
-        target=target,
-        response_envelope=envelope,
-        pipeline_timing=None,
-        locked_operation=locked_operation,
-    )
-
-    assert result == "$response"
-    assert observed_live_counts == [1]
-    [stored_run] = _stored_runs(store)
-    assert _notice_count(stored_run.messages, marker=True) == 0
-    persisted_notices = _notice_messages(stored_run.messages, marker="persisted")
-    assert [message.content for message in persisted_notices] == [notice_text]
-    assert len(store.saves) == 1
-
-
-@pytest.mark.asyncio
-async def test_response_lifecycle_finalizes_error_state_when_operation_raises(tmp_path: Path) -> None:
-    """The lifecycle finally block should remove live state when the operation raises."""
-    lifecycle = ResponseLifecycleCoordinator()
-    target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
-    envelope = _envelope(source_event_id="$event", target=target)
-    store = _recording_store(tmp_path, "general")
-
-    async def locked_operation(_target: MessageTarget) -> str:
-        lifecycle._get_or_create_queued_signal(target).add_waiting_human_message("$newer")
-        messages: list[OwnedMessage] = []
-        await _after_batch(messages, OwnedMessage(role="tool", content="failed result"))
-        error_run = _completed("error-run", messages)
-        error_run.status = OwnedRunStatus.error
-        _seed(store, error_run)
-        _register_notice_storage(store)
-        error_message = "provider failed"
-        raise RuntimeError(error_message)
-
-    with pytest.raises(RuntimeError, match="provider failed"):
-        await lifecycle.run_locked_response(
-            target=target,
-            response_envelope=envelope,
-            pipeline_timing=None,
-            locked_operation=locked_operation,
-        )
-
-    [stored_run] = _stored_runs(store)
-    assert _notice_count(stored_run.messages) == 0
-
-
-@pytest.mark.asyncio
-async def test_response_turn_finalization_is_idempotent_for_one_persisted_notice(tmp_path: Path) -> None:
-    """Repeated boundary finalization should not rewrite an already-normalized response."""
-    store = _recording_store(tmp_path, "general")
-
-    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
-        await _after_batch([], OwnedMessage(role="tool", content="result"))
-        persisted_notice = _owned_notice(notice_context.response_turn_id, marker="persisted")
-        _seed(store, _completed("completed-run", [persisted_notice]))
-        original_stored = _stored_runs(store)[0].messages[0].to_dict()
-        _register_notice_storage(store)
-        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
-        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
-
-    assert store.saves == []
-    assert _stored_runs(store)[0].messages[0].to_dict() == original_stored
-
-
-def test_pre_replay_crash_recovery_preserves_prior_persisted_and_active_live_notice(tmp_path: Path) -> None:
-    """Recovery should persist prior live state without touching prior records or the active response."""
-    store = _recording_store(tmp_path, "general")
-
-    with queued_message_signal_context(_StaticQueuedState(pending=False)) as notice_context:
-        prior_persisted = _owned_notice("already-persisted", marker="persisted")
-        prior_dump = prior_persisted.to_dict()
-        active_live = _owned_notice(notice_context.response_turn_id)
-        session = _seed(store, _completed("completed-run", [_owned_notice("crash-left"), prior_persisted, active_live]))
-        ai_runtime.scrub_queued_notice_session_context(
-            scope_context=ScopeSessionContext(
-                scope=HistoryScope(kind="agent", scope_id="general"),
-                storage=store,
-                session=session,
-                session_id=session.session_id,
-                storage_factory=lambda: store,
-            ),
-            entity_name="general",
-        )
-
-    stored_messages = _stored_runs(store)[0].messages
-    assert prior_persisted.to_dict() == prior_dump
-    assert _notice_count(stored_messages, marker="persisted", response_turn_id="already-persisted") == 1
-    assert _notice_count(stored_messages, marker="persisted", response_turn_id="crash-left") == 1
-    assert _notice_count(stored_messages, marker=True, response_turn_id="crash-left") == 0
-    assert _notice_count(stored_messages, marker=True, response_turn_id=notice_context.response_turn_id) == 1
-
-
 def test_notice_provider_data_survives_mindroom_sqlite_round_trip(tmp_path: Path) -> None:
     """MindRoom's prompt-sanitizing SQLite storage should preserve notice ownership metadata."""
     response_turn_id = "response-1"
@@ -3348,7 +2793,7 @@ async def _persist_notice_bearing_response(tmp_path: Path) -> str:
         lifecycle._get_or_create_queued_signal(target).add_waiting_human_message("$newer")
         messages = [OwnedMessage(role="user", content="First request")]
         await _after_batch(messages, OwnedMessage(role="tool", content="First tool result"))
-        notices = _notice_messages(messages, marker=True)
+        notices = _notice_messages(messages)
         assert len(notices) == 1
         provider_data = notices[0].provider_data
         assert isinstance(provider_data, dict)
@@ -3358,7 +2803,6 @@ async def _persist_notice_bearing_response(tmp_path: Path) -> str:
         messages.append(OwnedMessage(role="assistant", content="First response handoff"))
         store = _queued_notice_storage(tmp_path)
         _seed(store, _completed("run-1", messages))
-        _register_notice_storage(store, storage_factory=lambda: _queued_notice_storage(tmp_path))
         return "First response handoff"
 
     response_1 = await lifecycle.run_locked_response(
@@ -3410,7 +2854,7 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
         prior = next(message for message in seen if message.content == QUEUED_MESSAGE_NOTICE_TEXT)
         assert prior.from_history is True
         assert prior.provider_data == {
-            _QUEUED_NOTICE_MARKER_KEY: "persisted",
+            _QUEUED_NOTICE_MARKER_KEY: True,
             _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_1_id,
         }
         assert [
@@ -3427,7 +2871,7 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
         await _after_batch(seen, OwnedMessage(role="tool", content="Second tool result"))
 
         assert prior.to_dict() == original_prior
-        assert _notice_count(seen, marker="persisted", response_turn_id=response_1_id) == 1
+        assert _notice_count(seen, response_turn_id=response_1_id) == 1
         assert _notice_count(seen, response_turn_id=response_2_context.response_turn_id) == 0
 
     persisted = _queued_notice_storage(tmp_path).load_session("session-1")
@@ -3435,7 +2879,7 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
     response_1_run, response_2_run = persisted.runs
     assert response_2_run.content == "ok"
     assert all(message.content != QUEUED_MESSAGE_NOTICE_TEXT for message in response_2_run.messages)
-    persisted_notices = _notice_messages(response_1_run.messages, marker="persisted", response_turn_id=response_1_id)
+    persisted_notices = _notice_messages(response_1_run.messages, response_turn_id=response_1_id)
     assert [message.content for message in persisted_notices] == [QUEUED_MESSAGE_NOTICE_TEXT]
 
 

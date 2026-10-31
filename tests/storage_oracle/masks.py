@@ -24,7 +24,6 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, override
 
-from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_queued_notices
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, MINDROOM_HISTORY_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_STATE_KEY
 from mindroom.history.run_visibility import is_queued_notice_message
@@ -39,7 +38,7 @@ from mindroom.session_storage.legacy_scope_metadata import (
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.summary_rows import folded_tool_call_ids, history_event_ids, latest_row
-from tests.storage_oracle.backend import SESSION_ID
+from tests.storage_oracle.backend import NOTICE_TURN_KEY, SESSION_ID
 from tests.storage_oracle.store_backend import (
     StoreBackend,
     edit_cut,
@@ -92,6 +91,8 @@ MASKS: dict[str, str] = {
     "its request, as its run does",
     "resumes_leave_out_the_paused_reply_s_notice": "#3108: a paused run's resume request leaves out the queued-message "
     "notice the paused run holds, which the reply that paused was given",
+    "queued_notices_stored_once": "#3108: a reply stores each queued-message notice once, as its run held it; nothing "
+    "finalizes it after delivery or recovers it when a reply opens its scope",
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()
@@ -543,29 +544,41 @@ class MaskedBackend(StoreBackend):
         self.link_only.discard(run_id)
         return ["written"]
 
-    def _old_rewrite(self, changed: Sequence[AnyRunRecord]) -> object:
-        """Record the old store's whole-run saves of the loaded copies a notice edit changed; return its outcome."""
-        for run in changed:
-            self.old_messages[run.run_id] = _old_kept(_dicts(run), run.status.value)
-        return ["written"] * len(changed) if changed else "unchanged"
+    def _diverge_where_notices_were_rewritten(self, notices: list[Message], action: str) -> None:
+        """End the comparison where the old store rewrote ``notices``, which the v2 store keeps as their runs held them."""
+        if notices:
+            self._diverge("queued_notices_stored_once", f"the old store's {action} rewrote {len(notices)} notices")
 
     @override
     def finalize_notice(self, response_turn_id: str) -> object:
+        # The old finalization rewrote every run holding the response's notice, each still marked live.
         session = self.load()
-        if session is None:
-            return super().finalize_notice(response_turn_id)
-        old_runs = self._old_view_runs(session.runs)
-        with self.determinism.ids_repeated():
-            old_changed = _finalize_queued_notice_in_runs(old_runs, response_turn_id=response_turn_id)
-        super().finalize_notice(response_turn_id)
-        return self._old_rewrite(old_changed)
+        if session is not None:
+            self._diverge_where_notices_were_rewritten(
+                [
+                    message
+                    for run in self._old_view_runs(session.runs)
+                    for message in run.messages
+                    if is_queued_notice_message(message)
+                    and (message.provider_data or {}).get(NOTICE_TURN_KEY) == response_turn_id
+                ],
+                "finalization",
+            )
+        return super().finalize_notice(response_turn_id)
 
     @override
     def scrub_notices(self, session: ConversationSession) -> object:
-        with self.determinism.ids_repeated():
-            old_changed = _recover_prior_queued_notices(self._old_view_runs(session.runs), active_response_turn_id=None)
-        super().scrub_notices(session)
-        return self._old_rewrite(old_changed)
+        # The old recovery rewrote every loaded run holding a notice still marked live, as each one is here.
+        self._diverge_where_notices_were_rewritten(
+            [
+                message
+                for run in self._old_view_runs(session.runs)
+                for message in run.messages
+                if is_queued_notice_message(message)
+            ],
+            "recovery",
+        )
+        return super().scrub_notices(session)
 
     @override
     def persist_delegation(self, session: ConversationSession, record: AnyRunRecord, state: DelegationState) -> object:

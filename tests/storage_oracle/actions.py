@@ -15,6 +15,7 @@ from typing import Any, Literal
 type ScenarioKind = Literal["agent", "team"]
 
 # Each kind with its weight in generated sequences; a team session has no CLI turns, an agent session no members.
+# Recordings also hold ``notice`` and ``scrub``, the queued-notice rewrites #3108 retired, which no sequence draws now.
 _SHARED_WEIGHTS = {
     "add": 5,
     "pause": 2,
@@ -24,8 +25,6 @@ _SHARED_WEIGHTS = {
     "fold": 4,
     "end": 3,
     "crash_after_fold": 1,
-    "notice": 1,
-    "scrub": 1,
     "link": 2,
     "delegation_state": 1,
     "interrupted": 2,

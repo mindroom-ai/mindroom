@@ -9,7 +9,6 @@ from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from mindroom import ai_runtime
 from mindroom.agent_cli.cli_shell_agent import bind_standard_cli
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_calls
@@ -298,20 +297,12 @@ def _agent_turn_adapter(
             execution_identity=execution_identity,
         )
 
-    def _on_scope_loaded(scope_context: ScopeSessionContext | None) -> None:
-        ai_runtime.scrub_queued_notice_session_context(
-            scope_context=scope_context,
-            entity_name=agent_name,
-        )
-
     return TurnAdapter[AIStreamChunk](
         load_scope=_load_scope,
         run_attempt=run_attempt,
-        on_scope_loaded=_on_scope_loaded,
         make_text_chunk=TextDelta,
         user_message=user_message,
         unexpected_error_text=error_text,
-        entity_name=agent_name,
     )
 
 

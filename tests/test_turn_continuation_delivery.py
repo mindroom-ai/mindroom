@@ -97,7 +97,6 @@ def _stream_turn(
             make_text_chunk=lambda text: text,
             user_message=ctx.prompt,
             unexpected_error_text=str,
-            entity_name=ctx.entity_label,
         ),
         sinks,
         continuation=TurnContinuationRunState.initial(

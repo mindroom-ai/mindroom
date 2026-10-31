@@ -733,98 +733,6 @@ def test_a_metadata_patch_replaces_the_sessions_copy_in_a_new_list(store: Conver
     assert _as_stored(session.runs) == _as_stored(_loaded(store).runs)
 
 
-# --- P3 ---------------------------------------------------------------------------------------------------------
-
-
-def test_a_message_rewrite_edits_only_the_runs_a_load_returns_and_stores_only_their_messages(
-    store: ConversationStore,
-) -> None:
-    """A covered run is never handed to the edit; status, metadata, and content changes are not stored."""
-    _save(store, _run("covered"), _run("r1", metadata={"k": "v"}))
-    _summary(store, 1)
-    session = _loaded(store)
-    handed: list[str] = []
-
-    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-        handed.extend(run.run_id for run in runs)
-        [run] = runs
-        assert run is not session.runs[0]
-        run.messages[0].content = "finalized"
-        run.status, run.metadata, run.content = RunStatus.error, {"k": "lost"}, "lost"
-        return [*runs, _run("covered", messages=[Message(role="user", content="no", id="covered-user")])]
-
-    store.rewrite_run_messages("s1", edit, session=session)
-
-    assert handed == ["r1"]
-    stored = store.get_run("r1")
-    assert stored is not None
-    assert (stored.status, stored.metadata, stored.content) == (RunStatus.completed, {"k": "v"}, None)
-    assert [message.content for message in stored.messages] == ["finalized"]
-    assert [row[3]["content"] for row in _message_rows(store, "covered")] == ["covered"]
-    assert _as_stored(session.runs) == _as_stored(_loaded(store).runs)
-
-
-def test_a_message_rewrite_never_unfolds_a_message(store: ConversationStore) -> None:
-    """An edit that lists a folded message again leaves it folded and out of the replay view."""
-    messages = [Message(role="user", content=f"m{index}", id=f"m{index}", created_at=1) for index in range(2)]
-    _save(store, _run("r1", RunStatus.paused, messages=messages))
-    summary_id = _fold(store, _run("r1", RunStatus.running), messages[:1])
-
-    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-        runs[0].messages = [*copy.deepcopy(messages)]
-        return runs
-
-    store.rewrite_run_messages("s1", edit)
-
-    assert [(row[0], row[2]) for row in _message_rows(store, "r1")] == [("m0", summary_id), ("m1", None)]
-
-
-def test_a_message_rewrite_keeps_a_paused_runs_system_message(store: ConversationStore) -> None:
-    """The stored status decides, not what the edit did to its copy: a paused run's prompt stays for its continuation."""
-    _save(store, _run("r1", RunStatus.paused))
-
-    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-        runs[0].status = RunStatus.completed
-        return runs
-
-    store.rewrite_run_messages("s1", edit)
-
-    assert [row[0] for row in _message_rows(store, "r1")] == ["r1-system", "r1-user"]
-
-
-def test_a_message_rewrite_holds_the_write_lock_while_it_edits(store: ConversationStore) -> None:
-    """No other writer lands between the read the edit sees and the write it makes."""
-    _save(store, _run("r1"))
-    errors: list[str] = []
-
-    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-        _write_now(store, "UPDATE code_sessions_log_runs SET status = 'ERROR'", errors)
-        return runs
-
-    store.rewrite_run_messages("s1", edit)
-
-    assert errors == ["database is locked"]
-
-
-def test_a_message_rewrite_that_stores_no_run_leaves_the_session_the_load_its_edit_was_handed(
-    store: ConversationStore,
-) -> None:
-    """Nothing changed, so the load the edit saw is what a load returns, without a second read."""
-    _save(store, _run("r1"), _run("r2"))
-    session = _loaded(store)
-    handed: list[AnyRunRecord] = []
-
-    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-        handed.extend(runs)
-        return [_run("unknown")]
-
-    store.rewrite_run_messages("s1", edit, session=session)
-
-    assert [id(run) for run in session.runs] == [id(run) for run in handed]
-    assert _as_stored(session.runs) == _as_stored(_loaded(store).runs)
-    assert _row(store, "unknown") is None
-
-
 # --- deletes ----------------------------------------------------------------------------------------------------
 
 
@@ -1795,7 +1703,6 @@ def test_news_in_the_log_moves_the_sessions_update_time_and_rewrites_do_not(stor
     _execute(store, "UPDATE code_sessions SET updated_at = 5")
     _save(store, _run("r1", RunStatus.paused))
     store.patch_run_metadata("s1", "r1", {"matrix_response_event_id": "$reply"})
-    store.rewrite_run_messages("s1", lambda runs: runs)
     assert updated_at() == 5
 
     _save(store, _run("r1"))
