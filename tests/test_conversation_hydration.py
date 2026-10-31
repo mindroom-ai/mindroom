@@ -2027,13 +2027,14 @@ class DeepestEventDepthPages(FakeClient):
 
 
 @dataclass
-class FailsAfterTheWalk(FakeClient):
-    """A homeserver that answers the thread walk and then fails every recursive request.
+class FailingRecursiveRelations(FakeClient):
+    """A homeserver that answers the first ``answered`` recursive relations requests and fails every later one.
 
     nio reports a relations request that comes back as an error response by
     raising a plain ``RemoteProtocolError`` from the iterator.
     """
 
+    answered: int = 1
     recursive_requests: int = 0
 
     async def room_get_event_relations(
@@ -2046,10 +2047,10 @@ class FailsAfterTheWalk(FakeClient):
         recurse: bool = False,
         minimum_recursion_depth: int | None = None,
     ) -> AsyncIterator[nio.Event]:
-        """Yield the first recursive walk, and fail the ones after it."""
+        """Yield the answered recursive walks, and fail the ones after them."""
         if recurse:
             self.recursive_requests += 1
-            if self.recursive_requests > 1:
+            if self.recursive_requests > self.answered:
                 msg = "M_UNKNOWN: the homeserver could not answer"
                 raise nio.RemoteProtocolError(msg)
         async for event in super().room_get_event_relations(
@@ -2110,16 +2111,29 @@ class TestAWalkThatStoppedAboveTheReplyEdits:
         Any other failure of the request is a failure to answer, which fails
         the read and leaves the thread for the next read, like a failed walk.
         """
-        client = FailsAfterTheWalk(
+        client = FailingRecursiveRelations(
             events={"$root": raw("$root", "the question")},
             relations={"$root": [raw("$reply", "a reply", sender=BOB, ts=2_000, thread_id="$root")]},
         )
 
-        with pytest.raises(nio.RemoteProtocolError) as failure:
+        with pytest.raises(ConversationReadError, match=r"Could not fetch the relations of '\$root'.*M_UNKNOWN"):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
-        assert type(failure.value) is nio.RemoteProtocolError
         assert client.recursive_requests == 2
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+
+    async def test_a_thread_walk_the_server_fails_fails_the_read(self, alice: PrincipalStore) -> None:
+        """A failed relations request fails the read with the conversation layer's own error, naming the reason."""
+        client = FailingRecursiveRelations(
+            events={"$root": raw("$root", "the question")},
+            relations={"$root": [raw("$reply", "a reply", sender=BOB, ts=2_000, thread_id="$root")]},
+            answered=0,
+        )
+
+        with pytest.raises(ConversationReadError, match=r"Could not fetch the relations of '\$root'.*M_UNKNOWN"):
+            await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert client.recursive_requests == 1
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
     async def test_pages_reporting_varying_depths_hydrate_normally(self, alice: PrincipalStore) -> None:

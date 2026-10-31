@@ -1233,6 +1233,10 @@ class ConversationHydrator:
                 await anext(relations, None)
         except nio.InsufficientRecursionDepthError:
             return False
+        except nio.RemoteProtocolError as error:
+            # nio raises an error response to a relations request from its iterator.
+            msg = f"Could not fetch the relations of {thread_id!r} in {room_id!r}: {error}"
+            raise ConversationReadError(msg) from error
         return True
 
     async def _fetch_relations(
@@ -1356,6 +1360,10 @@ class ConversationHydrator:
                 f"({error.reported!r}), so it did not honor the recursive request and the "
                 f"conversation would be missing indirectly related events"
             )
+            raise ConversationReadError(msg) from error
+        except nio.RemoteProtocolError as error:
+            # nio raises an error response to a relations request from its iterator.
+            msg = f"Could not fetch the relations of {event_id!r} in {room_id!r}: {error}"
             raise ConversationReadError(msg) from error
         return _Walk(
             events=tuple(events),
