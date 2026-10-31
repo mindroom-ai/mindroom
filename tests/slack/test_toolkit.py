@@ -893,6 +893,22 @@ async def test_recent_refuses_a_window_it_cannot_read(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, 101])
+async def test_listings_refuse_a_limit_outside_one_to_a_hundred(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    limit: int,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack().install(monkeypatch)
+    tools = _tools(paths)
+
+    for result in (await tools.slack_search("launch", limit=limit), await tools.slack_recent(limit=limit)):
+        assert json.loads(result)["message"] == "limit must be an integer from 1 to 100"
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("name", "arguments"),
     [
