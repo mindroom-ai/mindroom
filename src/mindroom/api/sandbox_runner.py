@@ -94,6 +94,7 @@ from mindroom.tool_system.progress import report_tool_progress, tool_progress_re
 from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
+from mindroom.tool_system.tool_schema import ArgumentsRefusedError
 from mindroom.tool_system.worker_media import serialize_worker_tool_result
 from mindroom.tool_system.worker_proxy_client import EXECUTE_KEEPALIVE_SECONDS
 from mindroom.tool_system.worker_routing import (
@@ -1072,9 +1073,11 @@ async def _execute_prepared_request_inprocess(
                 function_name=prepared.function_name,
                 exc_info=True,
             )
+            # A refusal of the call's arguments is reported as pydantic's own error.
+            failure = exc.error if isinstance(exc, ArgumentsRefusedError) else exc
             return ExecuteResponse(
                 ok=False,
-                error=f"Sandbox tool execution failed: {type(exc).__name__}: {exc}",
+                error=f"Sandbox tool execution failed: {type(failure).__name__}: {failure}",
                 failure_kind="tool",
             )
 

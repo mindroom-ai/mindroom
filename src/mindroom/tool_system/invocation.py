@@ -26,8 +26,6 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import ValidationError
-
 from mindroom.failure_text import failure_text
 from mindroom.oauth.providers import is_oauth_connection_required_result
 from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, read_tool_value
@@ -35,6 +33,7 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import tool_runtime_model_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
+from mindroom.tool_system.tool_schema import ArgumentsRefusedError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -389,8 +388,10 @@ def _link(step: ToolMiddleware, call: ToolCall, call_next: ToolNext) -> ToolNext
 async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], context: ToolCallContext) -> object:
     """Call the entrypoint with the framework's and the model's arguments; drain and close an iterator it returns.
 
-    What it returned or yielded comes back with an Agno ``ToolResult`` read as its ``ToolValue``. A call whose
-    arguments validation refused for their names raises a ``TypeError`` whose text is ``_argument_names_error``'s.
+    What it returned or yielded comes back with an Agno ``ToolResult`` read as its ``ToolValue``. When the function's
+    own validation refuses the call's argument names, the call raises a ``TypeError`` whose text is
+    ``_argument_names_error``'s; any other refusal, such as one of a validated function the body called, raises
+    pydantic's own error.
     """
     # Arguments skip ``parse_tool_arguments`` when a paused call resumes from its stored arguments or middleware
     # rewrites them, so values for injected names are dropped here as well.
@@ -398,56 +399,52 @@ async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], con
     kwargs = {**framework_arguments(function, context), **model_arguments(arguments, function)}
     try:
         return await _call_entrypoint(function.entrypoint, kwargs)
-    except ValidationError as error:
-        # Validation refuses a call's names before its body runs, and exactly when they do not bind the signature it
-        # validates against. A call whose names bind ran its body, so an error with names in it came from inside, as
-        # from a tool the body called, and keeps its text; so does a refusal of values alone.
-        if _names_bind(function, kwargs) or (text := _argument_names_error(function, error)) is None:
-            raise
-        raise TypeError(text) from error
+    except ArgumentsRefusedError as refusal:
+        refused = refusal.entrypoint
+        # The refusal is this call's when the function's entrypoint is, or wraps, the validated function that refused.
+        own = inspect.unwrap(function.entrypoint, stop=lambda wrapper: wrapper is refused) is refused
+        if not own or (text := _argument_names_error(function, refusal)) is None:
+            raise refusal.error from None
+        raise TypeError(text) from refusal.error
 
 
-def _names_bind(function: ToolFunction, kwargs: Mapping[str, Any]) -> bool:
-    """Return whether ``kwargs`` name parameters of the signature ``function``'s entrypoint validates against.
-
-    A name the schema offers but the signature does not take is left out: a wrapper takes it out of the call, as the
-    output-file wrapper does its argument, or the tool authored its schema apart from its signature.
-    """
-    signature = inspect.signature(function.entrypoint)
-    properties = function.parameters.get("properties")
-    offered = properties if isinstance(properties, dict) else {}
-    names = {name: None for name in kwargs if name in signature.parameters or name not in offered}
-    try:
-        signature.bind(**names)
-    except TypeError:
-        return False
-    return True
-
-
-def _argument_names_error(function: ToolFunction, error: ValidationError) -> str | None:
-    """Return what the model reads for a call ``error`` refused for its argument names, or None for any other refusal.
+def _argument_names_error(function: ToolFunction, refusal: ArgumentsRefusedError) -> str | None:
+    """Return what the model reads for a call ``refusal`` refused for its argument names, or None for any other refusal.
 
     It names the function, the unexpected and the missing arguments, any other refusal as one sentence each, then
-    each parameter the schema offers with its type and whether it is required.
+    each parameter the schema offers with its type and whether it is required. Pydantic names a missing
+    positional-only parameter by its position, which is turned into its name, saying that a call by name cannot fill
+    it.
     """
     properties = function.parameters.get("properties")
     properties = properties if isinstance(properties, dict) else {}
     required = _items(function.parameters.get("required"))
+    positional = [
+        name
+        for name, parameter in inspect.signature(refusal.entrypoint).parameters.items()
+        if parameter.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+    ]
     unexpected: list[str] = []
     missing: list[str] = []
+    positional_only: list[str] = []
     invalid: list[str] = []
-    for detail in error.errors(include_url=False, include_input=False):
+    for detail in refusal.error.errors(include_url=False, include_input=False):
         location = detail["loc"]
         if detail["type"] == _UNEXPECTED_ARGUMENT:
             unexpected.append(str(location[0]))
+        elif detail["type"] in _MISSING_ARGUMENT and isinstance(location[0], int):
+            positional_only.append(positional[location[0]])
         elif detail["type"] in _MISSING_ARGUMENT:
             missing.append(str(location[0]))
         else:
             invalid.append(f"Invalid argument '{'.'.join(map(str, location))}': {detail['msg'].rstrip('.')}.")
+    unexpected = [f"'{name}'" for name in unexpected if name not in positional_only]
+    missing = [f"'{name}'" for name in missing]
+    missing += [f"'{name}' (positional-only, which a call by name cannot fill)" for name in positional_only]
     if not unexpected and not missing:
         return None
     problems = [
-        f"{label}{'s' if len(names) > 1 else ''} {', '.join(f"'{name}'" for name in names)}"
+        f"{label}{'s' if len(names) > 1 else ''} {', '.join(names)}"
         for label, names in (("got unexpected argument", unexpected), ("is missing required argument", missing))
         if names
     ]

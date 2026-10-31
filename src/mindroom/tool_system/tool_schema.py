@@ -19,7 +19,7 @@ from types import NoneType, SimpleNamespace, UnionType
 from typing import TYPE_CHECKING, Any, Literal, Union, cast, get_args, get_origin, get_type_hints
 
 from docstring_parser import parse
-from pydantic import BaseModel, ConfigDict, validate_call
+from pydantic import BaseModel, ConfigDict, ValidationError, validate_call
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Collection, Mapping
@@ -97,27 +97,74 @@ def closed_parameters(entrypoint: Callable[..., Any], parameters: Mapping[str, A
     return {**parameters, "required": required, "additionalProperties": False}
 
 
+class ArgumentsRefusedError(ValueError):
+    """Validation refused a call's arguments before the body of ``entrypoint``, a ``validated_entrypoint``, ran.
+
+    ``error`` is pydantic's refusal, whose text this error has, as it is a ``ValueError`` as that refusal is.
+    """
+
+    def __init__(self, error: ValidationError, entrypoint: Callable[..., Any]) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.entrypoint = entrypoint
+
+
 def validated_entrypoint[F: Callable[..., Any]](entrypoint: F) -> F:
     """Return ``entrypoint`` validating each call's arguments against its annotations, coercing what pydantic can.
 
-    An argument that does not validate raises pydantic's ``ValidationError``, whose text the model reads, except that
-    ``run_tool_call`` rewrites one that refuses the argument names to list the tool's parameters. A streaming tool
-    stays an async generator function, so callers still recognize it as one.
+    The arguments are validated before the body runs, and the body receives the validated ones. Arguments that do not
+    validate raise ``ArgumentsRefusedError`` naming the returned function, so a caller can tell this call's refusal
+    from an error its body raised. A streaming tool stays an async generator function, so callers still recognize it
+    as one.
     """
-    validated = _validate_call(entrypoint)
-    if not inspect.isasyncgenfunction(entrypoint):
-        return validated
+    validate = _validate_call(_arguments_of(entrypoint))
+
+    def validated(args: tuple[object, ...], kwargs: dict[str, object]) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        try:
+            return validate(*args, **kwargs)
+        except ValidationError as error:
+            raise ArgumentsRefusedError(error, call) from None
+
+    if inspect.isasyncgenfunction(entrypoint):
+
+        @functools.wraps(entrypoint)
+        async def call(*args: object, **kwargs: object) -> AsyncIterator[object]:
+            valid_args, valid_kwargs = validated(args, kwargs)
+            inner = entrypoint(*valid_args, **valid_kwargs)
+            try:
+                async for item in inner:
+                    yield item
+            finally:
+                await inner.aclose()
+
+    elif inspect.iscoroutinefunction(entrypoint):
+
+        @functools.wraps(entrypoint)
+        async def call(*args: object, **kwargs: object) -> object:
+            valid_args, valid_kwargs = validated(args, kwargs)
+            return await entrypoint(*valid_args, **valid_kwargs)
+
+    else:
+
+        @functools.wraps(entrypoint)
+        def call(*args: object, **kwargs: object) -> object:
+            valid_args, valid_kwargs = validated(args, kwargs)
+            return entrypoint(*valid_args, **valid_kwargs)
+
+    return cast("F", call)
+
+
+def _arguments_of(entrypoint: Callable[..., Any]) -> Callable[..., tuple[tuple[Any, ...], dict[str, Any]]]:
+    """Return a function with ``entrypoint``'s signature, annotations, and name that returns the arguments it gets.
+
+    Validated by pydantic, it gives a call's validated arguments without running ``entrypoint``.
+    """
 
     @functools.wraps(entrypoint)
-    async def stream(*args: object, **kwargs: object) -> AsyncIterator[object]:
-        inner = validated(*args, **kwargs)
-        try:
-            async for item in inner:
-                yield item
-        finally:
-            await inner.aclose()
+    def arguments(*args: Any, **kwargs: Any) -> tuple[tuple[Any, ...], dict[str, Any]]:  # noqa: ANN401
+        return args, kwargs
 
-    return cast("F", stream)
+    return arguments
 
 
 def _resolved_annotations(entrypoint: Callable[..., Any], names: Collection[str]) -> dict[str, Any]:
@@ -226,4 +273,10 @@ def _inlined(node: Any, definitions: dict[str, Any], active: frozenset[str]) -> 
     return _inlined(definitions[name], definitions, active | {name})
 
 
-__all__ = ["closed_parameters", "tool_description", "tool_parameters", "validated_entrypoint"]
+__all__ = [
+    "ArgumentsRefusedError",
+    "closed_parameters",
+    "tool_description",
+    "tool_parameters",
+    "validated_entrypoint",
+]
