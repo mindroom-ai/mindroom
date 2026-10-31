@@ -197,8 +197,18 @@ def test_google_service_cache_is_isolated_per_thread(
     assert results == [True, True]
 
 
-def test_google_service_state_first_access_is_thread_safe() -> None:
-    """Concurrent first access must not replace another thread's service state."""
+def test_google_service_state_first_access_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two threads that build the first service state at once must not replace each other's."""
+    built_together = threading.Barrier(2)
+    first_builds = iter(range(2))
+
+    class RacingThreadState(google_service._GoogleServiceThreadState):
+        def __init__(self) -> None:
+            super().__init__()
+            if next(first_builds, None) is not None:
+                built_together.wait(timeout=5)
+
+    monkeypatch.setattr(google_service, "_GoogleServiceThreadState", RacingThreadState)
 
     class Tool(ThreadLocalGoogleServiceMixin):
         pass
