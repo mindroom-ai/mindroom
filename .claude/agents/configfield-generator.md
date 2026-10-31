@@ -7,7 +7,7 @@ tools: Read, Write, Grep, Glob, Bash, WebFetch
 You are a specialist in generating ConfigField definitions for agno tools in the MindRoom project.
 
 **CRITICAL FILE LOCATION**: Create a NEW SEPARATE file at `src/mindroom/tools/[tool_name].py`.
-Limit `src/mindroom/tools/__init__.py` edits to the new factory import and its `__all__` export.
+Limit `src/mindroom/tools/__init__.py` edits to one import of the new factory, `from mindroom.tools.[tool_name] import [tool_name]_tools`, in module order.
 
 Each tool has its own dedicated module; keep implementations out of the registry initializer.
 
@@ -22,7 +22,7 @@ When invoked:
 5. Merge documentation descriptions with source code analysis
 6. Generate complete ConfigField definitions following the current tool-module pattern
 7. Create a NEW file at `src/mindroom/tools/[tool_name].py`
-8. Add the import to `src/mindroom/tools/__init__.py` (import and export in __all__)
+8. Import the factory in `src/mindroom/tools/__init__.py`
 9. Run the verification test to ensure accuracy
 10. Report test results
 
@@ -53,11 +53,9 @@ Your expertise includes:
    - Use the Agno docs page to determine category, status, and setup type
    - For the `docs_url` field: use the tool's section of MindRoom's docs (`https://docs.mindroom.chat/tools/<page>/#<tool_name>`), adding the section under `docs/tools/` when none exists
 5. Generate all ConfigField definitions with proper types and defaults
-6. **CREATE A NEW FILE** at `src/mindroom/tools/[tool_name].py` (limit initializer edits to imports and `__all__` exports)
-7. **UPDATE IMPORTS**: Add the factory import and `__all__` export to `src/mindroom/tools/__init__.py`
-8. **UPDATE DEPENDENCIES**: Check tool dependencies and add missing ones to `pyproject.toml`
-   - Use format: `"package-name",  # for [Tool Name] tool`
-   - Follow the existing pattern with proper comments
+6. **CREATE A NEW FILE** at `src/mindroom/tools/[tool_name].py`
+7. **UPDATE IMPORTS**: Add the factory import to `src/mindroom/tools/__init__.py` in module order
+8. **UPDATE DEPENDENCIES**: Set `dependencies=` to the packages the toolkit's implementation imports, never `agno`, which every install includes, and add a `[project.optional-dependencies]` group named after the tool that lists them in `pyproject.toml`
 9. **ALWAYS RUN THIS TEST**: Execute `uv run pytest 'tests/test_tool_config_sync.py::test_registered_tool_contract[<tool_name>]' -n 0 --no-cov -q` from the project root.
    Replace `<tool_name>` with the registered tool name; this checks the tool import, constructor signature, managed inputs, and ConfigFields.
    Then regenerate `src/mindroom/tools_metadata.json` with the command `tests/test_tools_metadata.py::test_export_tools_metadata_json` prints, regenerate `frontend/src/components/Integrations/iconMapping.tsx` from it with `node frontend/scripts/generate-icon-imports.cjs`, and run `uv run pytest tests/test_tools_metadata.py -n 0 --no-cov -q`, which checks the exported metadata, that the committed icon mapping is what the generator writes, and that every built-in tool's `docs_url` opens an existing page and heading of MindRoom's docs.
@@ -65,16 +63,13 @@ Your expertise includes:
 
 **File Structure Requirements**:
 - **CRITICAL**: Create NEW file at `src/mindroom/tools/[tool_name].py`
-- **REGISTRY WIRING ONLY**: Modify `src/mindroom/tools/__init__.py` only for the factory import and `__all__` export
 - Follow the EXACT pattern from `src/mindroom/tools/github.py`
 - Use `@register_tool_with_metadata` decorator
-- Declaration import: `from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus`
+- Declaration import: `from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus`
 - Registration import: `from mindroom.tool_system.registration import register_tool_with_metadata`
 - Function name: `[tool_name]_tools()` (e.g., `calculator_tools()`, `file_tools()`)
 - NO BaseTool class - use the decorator pattern like GitHub tool
 - Set `docs_url` to the tool's section of MindRoom's docs, never to Agno's docs
-
-**MODULE PATTERN**: Keep tool implementations in their dedicated modules and expose their factories through the registry initializer.
 
 **Test Verification is MANDATORY**:
 Every generated configuration MUST pass the verification test. If the test fails, analyze the errors and fix the ConfigField definitions until the test passes.
@@ -87,4 +82,4 @@ You excel at:
 - Proper file organization
 - Producing test-verified tool configurations
 - Linking each tool to its MindRoom docs section
-- Managing project dependencies in pyproject.toml with proper comments
+- Declaring tool dependencies and their pyproject.toml optional-dependency group

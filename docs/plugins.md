@@ -811,7 +811,6 @@ from mindroom.plugin_api import (
         "google-cloud-storage",
         "google-api-python-client",
         "google-auth-httplib2",
-        "google-auth-oauthlib",
     ],
 )
 def cloud_storage_browser_tools() -> type[CloudStorageBrowserTools]:
@@ -826,7 +825,7 @@ The base class provides three helpers:
 | `self._google_cloud_client(name, factory)` | Returns a client built by `factory(credentials)` and reuses it only for the same requester's current connection |
 | `self._google_cloud_error_result(service_name, operation, exc)` | Returns a JSON error that exposes only the HTTP status, and turns an HTTP 401 into a reconnect prompt |
 
-The plugin must list and install its own client library, such as `google-cloud-storage`, and also the Google packages the base class relies on: `google-api-python-client`, `google-auth-httplib2`, and `google-auth-oauthlib`.
+The plugin must list and install its own client library, such as `google-cloud-storage`, and also the Google packages the base class relies on: `google-api-python-client` and `google-auth-httplib2`.
 MindRoom installs them only as extras of its built-in Google tools, so a clean install without them fails to load the tool; see [Dependencies](#dependencies).
 Build clients only from the credentials the helpers return, without copies such as `with_quota_project`, and call them from the tool function itself rather than background threads or transfer managers; otherwise an expired or revoked connection returns a generic error instead of a connect prompt.
 

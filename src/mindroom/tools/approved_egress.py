@@ -164,9 +164,6 @@ def _policy_token(runtime_paths: RuntimePaths) -> str:
 
 
 def _normalize_reason(value: str) -> str:
-    if not isinstance(value, str):
-        msg = "reason must be a string"
-        raise TypeError(msg)
     cleaned = "".join(" " if char.isspace() or unicodedata.category(char)[0] == "C" else char for char in value)
     normalized = " ".join(cleaned.split())
     if not normalized:
@@ -177,9 +174,6 @@ def _normalize_reason(value: str) -> str:
 
 def _canonical_hostnames(hostnames: list[str]) -> list[str]:
     """Canonicalize and dedupe the requested hostnames, rejecting the whole batch on any bad entry."""
-    if isinstance(hostnames, str) or not isinstance(hostnames, list):
-        msg = "hostnames must be a list of hostnames"
-        raise TypeError(msg)
     if not hostnames:
         msg = "hostnames must not be empty"
         raise ValueError(msg)

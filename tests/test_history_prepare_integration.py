@@ -22,14 +22,14 @@ from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
+from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.conversation_text import utterances
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.request_messages import TurnMessages
-from mindroom.history.session_context import load_scope_session
+from mindroom.history.session_context import ScopeSessionContext, load_scope_session
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
-    update_scope_seen_event_ids,
     with_force_compaction,
 )
 from mindroom.history.summary_input import build_summary_input
@@ -114,6 +114,17 @@ def _planned(prepared: PreparedHistoryState) -> Iterator[AsyncMock]:
         yield prepare
 
 
+def _scope_context(config: Config, runtime_paths: RuntimePaths) -> ScopeSessionContext:
+    """Load the session context a reply in the test agent's ``session-1`` reads."""
+    return load_scope_session(
+        scope=_SCOPE,
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+
+
 def _after_prompt(messages: Sequence[Message]) -> list[Message]:
     """Return a request's messages after its system prompt."""
     return [message for message in messages if message.role != "system"]
@@ -172,17 +183,12 @@ def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path:
 
 
 def test_create_agent_uses_active_model_override(tmp_path: Path, provider: _Provider) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
-            defaults=DefaultsConfig(tools=[]),
-            models={
-                "default": ModelConfig(provider="openai", id="default-model"),
-                "large": ModelConfig(provider="openai", id="large-model"),
-            },
-        ),
-        runtime_paths,
+    config, runtime_paths = _make_config(
+        tmp_path,
+        models={
+            "default": ModelConfig(provider="openai", id="default-model"),
+            "large": ModelConfig(provider="openai", id="large-model"),
+        },
     )
 
     create_agent(
@@ -492,13 +498,7 @@ async def test_prepare_agent_and_prompt_skips_thread_fallback_for_summary_only_r
         make_visible_message(sender="@bot:localhost", body="Prior answer", event_id="$agent-reply"),
     ]
 
-    scope_context = load_scope_session(
-        scope=_SCOPE,
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    )
+    scope_context = _scope_context(config, runtime_paths)
     with _no_memory():
         prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", session_id="session-1"),
@@ -611,14 +611,7 @@ async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_pa
         reading_threads.append(threading.get_ident())
         return read_scope_seen_event_ids(*args)  # type: ignore[arg-type]
 
-    scope_context = load_scope_session(
-        scope=_SCOPE,
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    )
-    assert scope_context is not None
+    scope_context = _scope_context(config, runtime_paths)
     with _no_memory(), patch("mindroom.execution_preparation.read_scope_seen_event_ids", new=recording_read):
         await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", reply_to_event_id="event-2"),
@@ -643,19 +636,13 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
 ) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=1)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
+    reading_run = _completed_run("run-2")
+    reading_run.metadata = {MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["event-1"]}
+    session = _session("session-1", runs=[_completed_run("run-1"), reading_run])
     seed_session(storage, session)
-    update_scope_seen_event_ids(storage, session, ["event-1"])
     seed_summary(storage, session, _SCOPE, "stored summary")
 
-    scope_context = load_scope_session(
-        scope=_SCOPE,
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    )
-    assert scope_context is not None
+    scope_context = _scope_context(config, runtime_paths)
     with _no_memory():
         prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", reply_to_event_id="event-3"),
@@ -774,9 +761,11 @@ async def _three_turns(
         for prompt in transient_by_prompt:
             await ai_response(
                 replace(
-                    make_turn_context("test_agent", session_id="session-1", requester_id="@alice:localhost")
-                    if timestamps is not None
-                    else make_turn_context("test_agent", session_id="session-1"),
+                    make_turn_context(
+                        "test_agent",
+                        session_id="session-1",
+                        requester_id="@alice:localhost" if timestamps is not None else None,
+                    ),
                     prompt=prompt,
                     model_prompt=(model_prompts or {}).get(prompt),
                     current_timestamp_ms=(timestamps or {}).get(prompt),

@@ -110,14 +110,14 @@ def _messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
     return [message.to_dict() for message in messages]
 
 
-def _probe_request(session: ConversationSession | None, scope: HistoryScope) -> list[dict[str, Any]]:
+def probe_request(session: ConversationSession | None, scope: HistoryScope) -> list[dict[str, Any]]:
     """Return the request a reply's probe prompt sends after its system message, replaying the whole history."""
     history, summary = replayed_history(session, scope, _SETTINGS, _PLAN)
     turn = TurnMessages(prompt=Message(role="user", content="probe", id=_PROBE_ID, created_at=0))
     return _messages(build_request(summary=summary, history=history, turn=turn, media=MediaInputs()))
 
 
-def _resume_requests(session: ConversationSession | None, scope: HistoryScope) -> dict[str, object]:
+def resume_requests(session: ConversationSession | None, scope: HistoryScope) -> dict[str, object]:
     """Return the request that resumes each paused run, and for a team run each embedded member's own."""
     if session is None:
         return {}
@@ -158,8 +158,8 @@ def observe(
         "session": load_error or _session(session),
         "row": _safely(lambda: _row(store, session_id)),
         "loaded_runs": load_error or ([run.to_dict() for run in session.runs] if session is not None else []),
-        "request": _safely(lambda: _probe_request(session, scope)),
-        "resume_requests": _safely(lambda: _resume_requests(session, scope)),
+        "request": _safely(lambda: probe_request(session, scope)),
+        "resume_requests": _safely(lambda: resume_requests(session, scope)),
         "seen_event_ids": _safely(
             lambda: sorted(read_scope_seen_event_ids(store, session)) if session is not None else [],
         ),

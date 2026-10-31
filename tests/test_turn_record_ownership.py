@@ -123,7 +123,6 @@ def _adapter(
         make_text_chunk=lambda text: f"notice:{text}",
         user_message="hello",
         unexpected_error_text=str,
-        entity_name="helper",
     )
 
 

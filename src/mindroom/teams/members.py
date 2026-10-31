@@ -139,7 +139,7 @@ def requested_team_agent_names(agent_names: Sequence[str]) -> list[str]:
 
 
 def resolve_team_members(
-    agent_names: list[str],
+    agent_names: Sequence[str],
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     *,

@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
@@ -20,6 +20,7 @@ from mindroom.thread_summary.state import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -316,19 +317,17 @@ async def test_set_thread_summary_rejects_blank_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_thread_summary_rejects_non_string_summary() -> None:
-    """Malformed tool args should return the normal error payload instead of crashing."""
-    tool = ThreadSummaryTools()
+@pytest.mark.parametrize(
+    "arguments",
+    [{"summary": 123}, {"summary": "done", "room_id": 123}, {"summary": "done", "thread_id": ["$t"]}],
+)
+async def test_set_thread_summary_rejects_malformed_arguments(arguments: dict[str, object]) -> None:
+    """Arguments that disagree with the signature fail call validation before the tool body runs."""
+    entrypoint = toolkit_offers(ThreadSummaryTools(), "set_thread_summary").entrypoint
     context = _make_context()
-    invalid_summary: Any = 123
 
-    with tool_runtime_context(context):
-        payload = json.loads(await tool.set_thread_summary(invalid_summary))
-
-    assert payload["status"] == "error"
-    assert payload["action"] == "set"
-    assert payload["room_id"] == context.room_id
-    assert "summary must be a non-empty string" in payload["message"]
+    with tool_runtime_context(context), pytest.raises(ValidationError):
+        await entrypoint(**arguments)
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import _finalize_prepared_history
 from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
 from mindroom.history.runtime import (
@@ -53,12 +54,11 @@ if TYPE_CHECKING:
 def _agent_inputs(config: Config) -> HistoryPreparationInputs:
     """Resolve the configured test agent's history inputs for a 100-token static prompt."""
     return resolve_entity_preparation_inputs(
-        entity_name="test_agent",
         history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
         runtime_paths=runtime_paths_for(config),
         static_prompt_tokens=100,
-        active_model_name=None,
+        active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
     )
 

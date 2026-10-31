@@ -777,7 +777,6 @@ depends_on = ["mindroom.durable_write", "mindroom.path_confinement"]
 [[modules]]
 path = "mindroom.ai"
 depends_on = [
-    "mindroom.ai_runtime",
     "mindroom.agent_loop",
     "mindroom.agent_loop.build",
     "mindroom.agent_run_context",
@@ -1253,20 +1252,12 @@ path = "mindroom.ai_runtime"
 depends_on = [
     "mindroom.history.run_visibility",
     "mindroom.llm",
-    "mindroom.background_tasks",
-    "mindroom.session_storage.lanes",
 ]
 visibility = [
     "mindroom.tool_jobs.runtime",
-    "mindroom.ai",
-    "mindroom.api.openai_compat",
-    "mindroom.approval.execution",
-    "mindroom.execution_preparation",
-    "mindroom.history.runtime",
     "mindroom.loop_hooks",
     "mindroom.response_lifecycle",
     "mindroom.response_turn",
-    "mindroom.teams",
     "mindroom.reply_turn.locked_turn",
 ]
 
@@ -1389,7 +1380,6 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_run_metadata",
-    "mindroom.ai_runtime",
     "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
@@ -1767,10 +1757,8 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.authorization",
     "mindroom.background_tasks",
-    "mindroom.credentials.manager",
     "mindroom.custom_tools.dynamic_workflow_context",
     "mindroom.custom_tools.tool_payloads",
-    "mindroom.custom_tools.json_schemas",
     "mindroom.delegation.direct",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.personas",
@@ -1786,6 +1774,7 @@ depends_on = [
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.skills",
     "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.metadata",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.turn_model",
     "mindroom.config.resolution",
@@ -2806,7 +2795,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.execution_preparation"
 depends_on = [
-    "mindroom.ai_runtime",
     "mindroom.agent_loop",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -3662,11 +3650,9 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_run_metadata",
-    "mindroom.ai_runtime",
     "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
-    "mindroom.authorization",
     "mindroom.constants",
     "mindroom.delegation.execution",
     "mindroom.delegation.state",
@@ -3680,7 +3666,6 @@ depends_on = [
     "mindroom.history.request_messages",
     "mindroom.history.runtime",
     "mindroom.history.session_context",
-    "mindroom.history.storage",
     "mindroom.hooks",
     "mindroom.knowledge.utils",
     "mindroom.llm",
@@ -3693,7 +3678,6 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.response_turn",
     "mindroom.run_storage",
-    "mindroom.session_storage.lanes",
     "mindroom.system_prompt",
     "mindroom.timing",
     "mindroom.tool_jobs.consumption",
@@ -6153,7 +6137,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.helper_usage",
     "mindroom.authorization",
-    "mindroom.constants",
     "mindroom.requester_identity",
     "mindroom.entity_resolution",
     "mindroom.matrix.conversation_reads",
@@ -8353,7 +8336,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.ai",
-    "mindroom.ai_runtime",
     "mindroom.api.openai_compat",
     "mindroom.approval.execution",
     "mindroom.conversation_state_writer",

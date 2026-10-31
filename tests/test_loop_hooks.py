@@ -102,7 +102,7 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         participation=ParticipationGate(),
         skill_review_capture=SkillReviewCapture(),
     )
-    leader = leader_loop_hooks(_built_team(model), turn, entity_name=None)
+    leader = leader_loop_hooks(_built_team(model), turn)
 
     assert _stages(agent.before_request) == [
         "job_definitions_hook",
@@ -152,7 +152,7 @@ def test_each_run_compacts_as_its_history_scope(tmp_path: Path, monkeypatch: pyt
     team = _built_team(model)
 
     agent_loop_hooks(_agent_build(model), turn)
-    leader_loop_hooks(team, turn, entity_name=None)
+    leader_loop_hooks(team, turn)
 
     assert scopes == [
         HistoryScope(kind="agent", scope_id="general"),

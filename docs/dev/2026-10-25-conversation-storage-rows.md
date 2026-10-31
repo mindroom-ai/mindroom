@@ -107,4 +107,4 @@ The oracle exists because each review round of the earlier storage designs found
 
 ## Follow-ups
 
-- Team seen ids in session metadata stay, because removing them changes what a discarded empty team turn marks as seen.
+- Team-turn seen ids live only in the stored team run, which carries every id the session-metadata copy held once a discarded empty team turn stopped writing it; ids earlier releases kept in session metadata stay readable until a redaction drops them ([History compaction](../architecture/compaction.md)).

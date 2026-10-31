@@ -20,7 +20,7 @@ from mindroom.history.storage import (
     append_fold,
     read_chunk_basis,
     record_summary_usage,
-    update_scope_state_on_latest,
+    set_force_compaction,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
 from mindroom.history.summary_input import (
@@ -249,26 +249,16 @@ async def clear_manual_compaction_request(
     storage: ConversationStore,
     session: ConversationSession,
     state: HistoryScopeState,
-    keep_concurrent_request: bool = True,
 ) -> None:
     """Clear the manual compaction request this run read in ``state``, if it read one.
 
-    By default the request clears only while the durable row still matches ``state``, so a concurrent write, such as a
-    fresh manual request, wins. A failed compaction clears it regardless, so a failing manual compaction cannot retry
-    on every reply.
+    The request is one flag, so a request written after this run read it clears with it.
     """
-    if not state.force_compact_before_next_run:
-        return
-
-    def update(latest: HistoryScopeState) -> HistoryScopeState:
-        if keep_concurrent_request and latest != state:
-            return latest
-        return replace(latest, force_compact_before_next_run=False)
-
-    await run_session_storage_operation(
-        lambda: storage,
-        partial(update_scope_state_on_latest, session=session, update=update),
-    )
+    if state.force_compact_before_next_run:
+        await run_session_storage_operation(
+            lambda: storage,
+            partial(set_force_compaction, session=session, forced=False),
+        )
 
 
 def _transcript(runs: Sequence[AnyRunRecord]) -> tuple[TranscriptLine, ...]:
@@ -407,12 +397,11 @@ async def compact_scope_history(
         # The reply replays what the conversation holds now; a manual request stays for the next reply.
         await run_session_storage_operation(lambda: storage, lambda opened: opened.reload_log(session))
         raise
+    await clear_manual_compaction_request(storage=storage, session=session, state=state)
     if rewrite_result is None:
-        await clear_manual_compaction_request(storage=storage, session=session, state=state)
         return None
 
     compacted_at = _iso_utc_now()
-    await clear_manual_compaction_request(storage=storage, session=session, state=state)
     logger.info(
         "Compaction summary generated",
         session_id=session.session_id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import partial
 from html import escape
 from typing import TYPE_CHECKING, Any
 
@@ -11,13 +12,14 @@ from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contr
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
-    graph_error_payload,
+    graph_call,
     graph_int,
+    graph_records,
     graph_session,
-    graph_tool_result,
     html_to_text,
     page_offset,
     path_segment,
+    required_text,
     text_to_html,
 )
 from mindroom.oauth.microsoft import microsoft_oauth_provider
@@ -104,12 +106,12 @@ class _Request:
         )
 
 
-def _root(container: object) -> str:
+def _root(container: str | None) -> str:
     """Return the OneNote root of the notebooks a container names, or of the requester's own without one."""
     if container is None:
         return "/me/onenote"
     for shape, collection in _CONTAINERS:
-        if isinstance(container, str) and shape.fullmatch(container):
+        if shape.fullmatch(container):
             return f"/{collection}/{path_segment(container, 'container')}/onenote"
     raise MicrosoftGraphError(code="invalid_argument", message=_INVALID_CONTAINER)
 
@@ -118,11 +120,11 @@ def _notebook_path(root: str, notebook_id: object) -> str:
     return f"{root}/notebooks/{path_segment(notebook_id, 'notebook_id')}"
 
 
-def _section_path(root: str, section_id: object) -> str:
+def _section_path(root: str, section_id: str) -> str:
     return f"{root}/sections/{path_segment(section_id, 'section_id')}"
 
 
-def _page_path(root: str, page_id: object) -> str:
+def _page_path(root: str, page_id: str) -> str:
     return f"{root}/pages/{path_segment(page_id, 'page_id')}"
 
 
@@ -131,7 +133,7 @@ def _web_url(notebook: Mapping[str, Any]) -> object:
     return ((notebook.get("links") or {}).get("oneNoteWebUrl") or {}).get("href")
 
 
-def _listing(path: str, select: str, limit: int, page_token: object) -> _Request:
+def _listing(path: str, select: str, limit: int, page_token: str | None) -> _Request:
     """Return the request for one listing page.
 
     Graph sends no next link for a OneNote listing that sets $top, so a page token is the $skip offset, and the
@@ -147,24 +149,13 @@ def _paragraph(text: str) -> str:
     return f"<p>{text_to_html(text).replace('<br>', '<br />')}</p>"
 
 
-def _text(value: object, field_name: str, *, required: bool) -> str:
-    if not isinstance(value, str) or (required and not value.strip()):
-        msg = f"{field_name} must not be empty." if required else f"{field_name} must be text."
-        raise MicrosoftGraphError(code="invalid_argument", message=msg)
-    return value
-
-
-def _records(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [record for record in payload.get("value") or [] if isinstance(record, dict)]
-
-
 def _listed(
     key: str,
     request: _Request,
     payload: Mapping[str, Any],
     summary: Callable[[Mapping[str, Any]], dict[str, Any]],
 ) -> dict[str, object]:
-    records = _records(payload)
+    records = graph_records(payload)
     more = len(records) > request.limit
     return {
         key: [summary(record) for record in records[: request.limit]],
@@ -223,11 +214,14 @@ class MicrosoftOneNoteTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftOneNoteTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         functions: dict[str, Callable[..., str]] = {
             "microsoft_onenote_list_notebooks": self.microsoft_onenote_list_notebooks,
             "microsoft_onenote_list_sections": self.microsoft_onenote_list_sections,
@@ -251,22 +245,12 @@ class MicrosoftOneNoteTools(Toolkit):
 
         The result names the container, so that calls on the notebooks it lists pass it back.
         """
-        try:
-            request = build()
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-
-        def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                return {"container": container, **operation(session, request)}
-
-        return graph_tool_result(_TOOL_NAME, run)
+        return graph_call(
+            _TOOL_NAME,
+            self._session,
+            build,
+            lambda session, request: {"container": container, **operation(session, request)},
+        )
 
     def _send(
         self,
@@ -410,10 +394,10 @@ class MicrosoftOneNoteTools(Toolkit):
             root = _root(container)
             section = _section_path(root, section_id)
             html = (
-                f"<!DOCTYPE html><html><head><title>{escape(_text(title, 'title', required=True))}</title></head>"
-                f"<body>{_paragraph(_text(content, 'content', required=False))}</body></html>"
+                f"<!DOCTYPE html><html><head><title>{escape(required_text(title, 'title'))}</title></head>"
+                f"<body>{_paragraph(content)}</body></html>"
             )
-            target = _Target(root, section, _text(expected_web_url, "expected_web_url", required=True))
+            target = _Target(root, section, required_text(expected_web_url, "expected_web_url"))
             return _Request(
                 "POST",
                 f"{section}/pages",
@@ -451,9 +435,9 @@ class MicrosoftOneNoteTools(Toolkit):
             change = {
                 "target": "body",
                 "action": "append",
-                "content": _paragraph(_text(content, "content", required=True)),
+                "content": _paragraph(required_text(content, "content")),
             }
-            target = _Target(root, page, _text(expected_web_url, "expected_web_url", required=True))
+            target = _Target(root, page, required_text(expected_web_url, "expected_web_url"))
             return _Request("PATCH", f"{page}/content", body=[change], target=target)
 
         return self._send(container, build, lambda _request, _payload: {"appended": {"page_id": page_id}})

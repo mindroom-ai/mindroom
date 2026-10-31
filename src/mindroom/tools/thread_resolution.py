@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     icon="CircleCheckBig",
     icon_color="text-emerald-500",
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_resolution",
     function_names=("reopen_thread", "resolve_thread"),
     requires_room_context=True,

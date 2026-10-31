@@ -20,8 +20,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
 
-_MODEL_SWITCH_WHENS = ("after-toolcall", "next-turn")
-
 
 class ThreadModelTools(Toolkit):
     """Tools for switching the model used by the requester's agents and teams in the current Matrix thread."""
@@ -121,13 +119,6 @@ class ThreadModelTools(Toolkit):
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved
-        if when not in _MODEL_SWITCH_WHENS:
-            return self._payload(
-                "error",
-                action="switch",
-                message=f"Unknown switch timing '{when}'.",
-                available_when=list(_MODEL_SWITCH_WHENS),
-            )
         if model_name not in context.config.models:
             return self._payload(
                 "error",
