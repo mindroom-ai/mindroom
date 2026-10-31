@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import os
 import tempfile
+from collections import Counter
 from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
@@ -182,7 +183,11 @@ def _check_config_exists(config_path: Path) -> tuple[int, int, int]:
 
 
 def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int, int, int]:
-    """Validate config file. Returns (config_or_none, passed, failed, warnings)."""
+    """Validate the config file. Returns (config, passed, failed, warnings).
+
+    The config is None when it does not load. A config with bad automation references still comes back, with one
+    failure, so the remaining checks run against it.
+    """
     try:
         config = load_config_quiet(runtime_paths=runtime_paths)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
@@ -517,28 +522,21 @@ def _check_ollama_models(config: Config, runtime_paths: RuntimePaths) -> tuple[i
 
 def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Print the providers by route and validate their API keys. Returns (passed, failed, warnings)."""
-    provider_models: dict[str, list[str]] = {}
-    for name, model in config.models.items():
-        provider_models.setdefault(provider_route(model.provider), []).append(name)
-
+    provider_models = Counter(provider_route(model.provider) for model in config.models.values())
     if not provider_models:
         return 0, 0, 0
 
-    # Print provider summary
-    parts = []
-    for provider in sorted(provider_models):
-        n = len(provider_models[provider])
-        parts.append(f"{provider} ({n} model{'s' if n != 1 else ''})")
+    parts = [f"{provider} ({n} model{'s' if n != 1 else ''})" for provider, n in sorted(provider_models.items())]
     console.print(f"  Providers: {', '.join(parts)}")
+
+    # A variable a model reads but nothing sets is reported once, as `config validate` reports it.
+    missing = find_missing_env_variables(config, runtime_paths)
+    for variable in missing:
+        console.print(f"[yellow]![/yellow] {variable.message}")
 
     passed = 0
     failed = 0
-    warnings = 0
-    # A variable a model reads but nothing sets is reported once, as `config validate` reports it.
-    for variable in find_missing_env_variables(config, runtime_paths):
-        console.print(f"[yellow]![/yellow] {variable.message}")
-        warnings += 1
-
+    warnings = len(missing)
     for provider in sorted(provider_models):
         p, f, w = _check_single_provider(provider, config, runtime_paths)
         passed += p
@@ -615,13 +613,13 @@ def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths
     shared_key_models = _models_reading_shared_key(config, env_key, runtime_paths)
     if _report_key_not_checked(provider, provider, key_name, _endpoint_variables(env_key, runtime_paths)):
         return 0, 0, 1
-    skipped: list[str] = []
+    skipped = 0
     for name, model in shared_key_models.items():
         settings = _endpoint_settings({"host": model.host, "extra_kwargs": model.extra_kwargs}, f"models.{name}")
         if _report_key_not_checked(provider, provider, key_name, settings):
-            skipped.append(name)
-    if shared_key_models and len(skipped) == len(shared_key_models):
-        return 0, 0, len(skipped)
+            skipped += 1
+    if shared_key_models and skipped == len(shared_key_models):
+        return 0, 0, skipped
     valid, detail = _validate_provider_key(provider, api_key)
     passed, failed, warnings = _print_validation(
         valid,
@@ -630,7 +628,7 @@ def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths
         f"{provider}: {key_name} invalid",
         f"{provider}: could not validate {key_name}",
     )
-    return passed, failed, warnings + len(skipped)
+    return passed, failed, warnings + skipped
 
 
 def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:

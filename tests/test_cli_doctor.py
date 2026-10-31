@@ -905,6 +905,26 @@ def test_doctor_checks_a_shared_key_at_the_provider_s_own_api_beside_a_custom_en
     assert "OPENAI_API_KEY not checked: models.gateway.extra_kwargs.client_params.base_url may send" in output
 
 
+def test_doctor_warns_once_per_model_when_no_model_reading_the_shared_key_is_checked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each model that reads the shared key and sets an endpoint gets its own warning, and the key is never sent."""
+    runtime_paths = _runtime_with_env(tmp_path, {"OPENAI_API_KEY": "shared"})
+    sent = _record_key_checks(monkeypatch)
+    gateway = {"client_params": {"base_url": _GATEWAY}}
+    config = Config(
+        models={
+            "first": ModelConfig(provider="openai", id="m", extra_kwargs=gateway),
+            "second": ModelConfig(provider="openai", id="m", extra_kwargs=gateway),
+        },
+        router=RouterConfig(model="first"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (0, 0, 2)
+    assert sent == []
+
+
 def test_doctor_names_a_setting_it_did_not_check_as_written(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
