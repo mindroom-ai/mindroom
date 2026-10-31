@@ -169,23 +169,20 @@ def render(presentation: Presentation, *, state: str) -> RenderedReply:
     )
 
 
-def with_trailing_note(presentation: Presentation, note: Segment | None) -> Presentation:
+def with_trailing_note(presentation: Presentation, note: Segment) -> Presentation:
     """Return the presentation with its trailing note replaced.
 
     A note other than the approval wait ends the reply's work, so its running calls stop showing as running.
     """
-    if note is not None and note.note is not NoteKind.APPROVAL_WAIT:
-        segments = tuple(
-            _cut_short(segment) if segment.kind == "answer" else segment for segment in presentation.segments
-        )
-        presentation = replace(presentation, segments=segments)
+    if note.note is not NoteKind.APPROVAL_WAIT:
+        presentation = replace(presentation, segments=tuple(_cut_short(segment) for segment in presentation.segments))
     return replace(presentation, trailing_note=note)
 
 
 def _cut_short(work: Segment) -> Segment:
-    """Return work whose running calls no longer show as running, since the span that ran them ended.
+    """Return a segment whose running calls no longer show as running, since the span that ran them ended.
 
-    The reply's tool-call records keep them as started, which is what a later attempt is told.
+    A later attempt is told about them only from the reply's tool-call records, which keep a recorded call as started.
     """
     text = work.text
     for index, entry in enumerate(work.tool_trace, start=1):

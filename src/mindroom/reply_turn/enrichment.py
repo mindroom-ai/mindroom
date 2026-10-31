@@ -217,8 +217,8 @@ def interrupted_attempt_model_prompt(
     """Return the model prompt telling a new attempt what its stopped attempts showed and which tool calls they made.
 
     ``unfinished`` is the stopped attempt a replay resumes in place, and ``recorded`` the tool calls the reply's
-    records hold; only the records say which calls finished, since a stopped attempt's running calls no longer show
-    as running. Returns None when there is nothing to tell.
+    records hold, the only account of its calls, since a stopped attempt's running calls no longer show as running;
+    an inline delegation leaves no record of its own. Returns None when there is nothing to tell.
     """
     completed_tools, interrupted_tools = _split_delivery_tool_trace(recorded)
     if unfinished is not None:
