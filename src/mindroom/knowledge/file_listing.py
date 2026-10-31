@@ -15,6 +15,7 @@ import os
 import stat
 import subprocess
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -93,10 +94,27 @@ _TEXT_LIKE_EXTENSIONS = {
 
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class OversizedKnowledgeFile:
+    """A file a listing skipped because it is above the read cap."""
+
+    base_id: str
+    path: str
+    size: int
+
+
 # Every refresh lists the same files again, so each file above the read cap warns once per process for its base.
 # Worker code can create sparse files without limit, so once the set is full, files outside it warn on every listing.
 _MAX_WARNED_OVERSIZED_FILES = 4096
-_WARNED_OVERSIZED_FILES: set[tuple[str, Path]] = set()
+_WARNED_OVERSIZED_FILES: set[tuple[str, str]] = set()
+# The oversized files a refresh child skipped, which it reports to the runtime that started it. Each refresh runs in a
+# new child, so only the long-lived runtime can warn once. Listings run in worker threads, which inherit this context.
+_collected_oversized_files: ContextVar[dict[tuple[str, str], OversizedKnowledgeFile] | None] = ContextVar(
+    "collected_oversized_knowledge_files",
+    default=None,
+)
 
 
 @dataclass(frozen=True)
@@ -248,15 +266,38 @@ def pinned_directories(root: Path) -> Iterator[Callable[[Path], int]]:
             os.close(descriptor)
 
 
-def _log_oversized_file(base_id: str, path: Path, size: int) -> None:
-    """Warn once per base and file that it is above the read cap, and log later listings at debug level."""
-    warning_key = (base_id, path)
-    log = logger.debug
-    if warning_key not in _WARNED_OVERSIZED_FILES:
-        if len(_WARNED_OVERSIZED_FILES) < _MAX_WARNED_OVERSIZED_FILES:
-            _WARNED_OVERSIZED_FILES.add(warning_key)
-        log = logger.warning
-    log("Skipping a knowledge file above the read cap", base_id=base_id, path=str(path), size=size)
+@contextmanager
+def collected_oversized_files() -> Iterator[dict[tuple[str, str], OversizedKnowledgeFile]]:
+    """Collect the oversized files the listings run inside skip, instead of warning about them here."""
+    collected: dict[tuple[str, str], OversizedKnowledgeFile] = {}
+    token = _collected_oversized_files.set(collected)
+    try:
+        yield collected
+    finally:
+        _collected_oversized_files.reset(token)
+
+
+def _log_oversized_file(file: OversizedKnowledgeFile, *, warn: bool) -> None:
+    log = logger.warning if warn else logger.debug
+    log("Skipping a knowledge file above the read cap", base_id=file.base_id, path=file.path, size=file.size)
+
+
+def warn_oversized_knowledge_file(file: OversizedKnowledgeFile) -> None:
+    """Warn once per process for each base and file above the read cap, and log later sightings at debug level."""
+    key = (file.base_id, file.path)
+    first = key not in _WARNED_OVERSIZED_FILES
+    if first and len(_WARNED_OVERSIZED_FILES) < _MAX_WARNED_OVERSIZED_FILES:
+        _WARNED_OVERSIZED_FILES.add(key)
+    _log_oversized_file(file, warn=first)
+
+
+def _skip_oversized_file(file: OversizedKnowledgeFile) -> None:
+    collected = _collected_oversized_files.get()
+    if collected is None:
+        warn_oversized_knowledge_file(file)
+        return
+    collected[(file.base_id, file.path)] = file
+    _log_oversized_file(file, warn=False)
 
 
 def _is_regular_file_at(root_fd: int, root: Path, relative_path: Path, base_id: str) -> bool:
@@ -266,7 +307,7 @@ def _is_regular_file_at(root_fd: int, root: Path, relative_path: Path, base_id: 
     except (OSError, ValueError):
         return False
     if stat.S_ISREG(status.st_mode) and status.st_size > MAX_READ_BYTES:
-        _log_oversized_file(base_id, root / relative_path, status.st_size)
+        _skip_oversized_file(OversizedKnowledgeFile(base_id, str(root / relative_path), status.st_size))
         return False
     return stat.S_ISREG(status.st_mode)
 

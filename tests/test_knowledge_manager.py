@@ -9671,6 +9671,41 @@ async def test_refresh_subprocess_returns_exact_result(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("real_refresh_child")
+async def test_an_oversized_file_warns_once_across_refresh_children(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Each refresh runs in a new child, so the children report a file above the read cap and the runtime warns once."""
+    monkeypatch.setattr(knowledge_file_listing_module, "_WARNED_OVERSIZED_FILES", set())
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "one.md").write_text("one", encoding="utf-8")
+    with (docs / "huge.md").open("wb") as huge:
+        huge.truncate(65 << 20)
+    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"])
+    config.knowledge_bases["docs"].mode = "files"
+    runtime_paths = runtime_paths_for(config)
+
+    with capture_logs() as logs:
+        for _ in range(2):
+            result = await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+                "docs",
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+            assert result.last_error is None
+
+    skipped = [entry for entry in logs if entry["event"] == "Skipping a knowledge file above the read cap"]
+    assert [(entry["log_level"], entry["base_id"], entry["path"]) for entry in skipped] == [
+        ("warning", "docs", str(docs.resolve() / "huge.md")),
+        ("debug", "docs", str(docs.resolve() / "huge.md")),
+    ]
+    assert "above the read cap" not in capfd.readouterr().err
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_refresh_child")
 async def test_manual_refresh_returns_failed_candidate_result_and_tracks_parent_activity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

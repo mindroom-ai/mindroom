@@ -42,6 +42,11 @@ from mindroom.embeddings.embedder_health import (
     get_embedder_failure,
 )
 from mindroom.embeddings.errors import extract_classified_embedder_detail
+from mindroom.knowledge.file_listing import (
+    OversizedKnowledgeFile,
+    collected_oversized_files,
+    warn_oversized_knowledge_file,
+)
 from mindroom.knowledge.github_app_auth import (
     GitHubAppTokenBinding,
     get_runtime_github_app_token_provider,
@@ -113,6 +118,8 @@ class _RefreshChildResult:
     deferred: bool = False
     #: Why other bases over the same source must refresh too, when this refresh found the source changed.
     source_changed: str | None = None
+    #: The files above the read cap this refresh skipped, for the runtime to warn about once.
+    oversized_files: tuple[OversizedKnowledgeFile, ...] = ()
 
 
 _child_result_adapter = TypeAdapter(_RefreshChildResult)
@@ -280,6 +287,8 @@ async def refresh_knowledge_binding_in_subprocess(
         _schedule_refresh_health_check(key, config, runtime_paths, recorder, error=error)
         raise
     await run_blocking_until_complete(_record_child_result, key, result, reason_generation)
+    for oversized_file in result.oversized_files:
+        warn_oversized_knowledge_file(oversized_file)
     if result.source_changed is not None:
         await mark_knowledge_source_changed_async(
             base_id,
@@ -932,13 +941,15 @@ async def _run_subprocess_refresh_request(payload: bytes) -> _RefreshChildResult
             error_prefix="Knowledge refresh execution_identity",
         )
     )
-    return await _refresh_knowledge_binding(
-        request.base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        force_reindex=request.force_reindex,
-    )
+    with collected_oversized_files() as oversized_files:
+        result = await _refresh_knowledge_binding(
+            request.base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            force_reindex=request.force_reindex,
+        )
+    return replace(result, oversized_files=tuple(oversized_files.values()))
 
 
 def _failed_child_result(error: Exception) -> _RefreshChildResult:

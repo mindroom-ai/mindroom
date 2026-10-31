@@ -213,8 +213,12 @@ def test_knowledge_files_above_the_read_cap_are_skipped(tmp_path: Path) -> None:
         pytest.fail("an oversized knowledge file was copied")
 
 
-def test_a_knowledge_file_above_the_read_cap_warns_once_per_base(tmp_path: Path) -> None:
-    """Refreshes that list the same oversized file again do not repeat the warning, which names the base."""
+def test_a_knowledge_file_above_the_read_cap_warns_once_per_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listings that find the same oversized file again do not repeat the warning, which names the base."""
+    monkeypatch.setattr(file_listing, "_WARNED_OVERSIZED_FILES", set())
     root = (tmp_path / "kb").resolve()
     root.mkdir()
     for name in ("a.md", "b.md"):
