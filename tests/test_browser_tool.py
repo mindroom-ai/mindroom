@@ -730,16 +730,16 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
                 result={"action": "snapshot", "provider": "playwright_mcp_extension", "result": "plain-tree"},
             ),
             DesktopResponse(
-                request_id="navigate",
+                request_id="open",
                 session_id="session",
                 ok=True,
-                result={"action": "navigate", "provider": "playwright_mcp_extension", "result": "navigated"},
+                result={"action": "open", "provider": "playwright_mcp_extension", "result": "opened"},
             ),
             DesktopResponse(
-                request_id="click",
+                request_id="tabs",
                 session_id="session",
                 ok=True,
-                result={"action": "act", "provider": "playwright_mcp_extension", "result": "clicked"},
+                result={"action": "tabs", "provider": "playwright_mcp_extension", "result": "tab list"},
             ),
         ],
     )
@@ -757,32 +757,71 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
     )
 
     plain_snapshot = await tool.browser(action="snapshot", maxChars=1000)
-    navigate = await tool.browser(action="navigate", targetUrl="https://example.com")
-    click = await tool.browser(action="act", request={"kind": "click", "ref": "e3"})
+    opened = await tool.browser(action="open", targetUrl="https://example.com")
+    tabs = await tool.browser(action="tabs")
 
     assert isinstance(plain_snapshot, str)
-    assert isinstance(navigate, str)
-    assert json.loads(navigate)["provider"] == "playwright_mcp_extension"
-    assert isinstance(click, str)
+    assert isinstance(opened, str)
+    assert json.loads(opened)["provider"] == "playwright_mcp_extension"
+    assert json.loads(tabs)["result"] == "tab list"
     observe_command = request.await_args_list[0].args[1]
-    navigate_command = request.await_args_list[1].args[1]
-    click_command = request.await_args_list[2].args[1]
+    open_command = request.await_args_list[1].args[1]
+    tabs_command = request.await_args_list[2].args[1]
     assert observe_command.action == "browser_observe"
     assert observe_command.parameters == {
         "browser_action": "snapshot",
         "browser_parameters": {"maxChars": 1000},
     }
-    assert navigate_command.action == "browser_control"
-    assert navigate_command.parameters == {
-        "browser_action": "navigate",
+    assert open_command.action == "browser_control"
+    assert open_command.parameters == {
+        "browser_action": "open",
         "browser_parameters": {"targetUrl": "https://example.com"},
     }
-    assert click_command.action == "browser_control"
-    assert click_command.parameters == {
-        "browser_action": "act",
-        "browser_parameters": {"request": {"kind": "click", "ref": "e3"}},
-    }
-    assert (observe_command.sequence, navigate_command.sequence, click_command.sequence) == (0, 1, 2)
+    assert tabs_command.action == "browser_observe"
+    assert tabs_command.parameters == {"browser_action": "tabs", "browser_parameters": {}}
+    assert (observe_command.sequence, open_command.sequence, tabs_command.sequence) == (0, 1, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "arguments"),
+    [
+        ("navigate", {"targetUrl": "file:///etc/passwd"}),
+        ("focus", {"targetId": "1"}),
+        ("close", {}),
+        ("pdf", {}),
+        ("upload", {"paths": ["invoice.pdf"]}),
+        ("dialog", {"accept": True}),
+        ("act", {"request": {"kind": "click", "ref": "e1"}}),
+    ],
+)
+async def test_desktop_target_rejects_page_control_before_any_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    arguments: dict[str, object],
+) -> None:
+    """Page control the extension cannot bind to a stable page fails before URL checks or a Matrix send."""
+    request = AsyncMock()
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    with pytest.raises(ValueError, match=f"does not support action={action}") as exc_info:
+        await tool.browser(action=action, **arguments)
+
+    assert (
+        "Supported desktop actions: console, open, profiles, screenshot, snapshot, start, status, stop, tabs."
+        in str(exc_info.value)
+    )
+    request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -790,18 +829,11 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
     ("action", "arguments", "expected"),
     [
         ("snapshot", {"targetId": "1"}, "does not support targetId"),
-        (
-            "act",
-            {"request": {"kind": "click", "ref": "e1", "targetId": "1"}},
-            "does not support request.targetId",
-        ),
         ("snapshot", {"snapshotFormat": "aria"}, "does not support: snapshotFormat"),
         ("status", {"profile": "chrome"}, "does not support: profile"),
-        ("upload", {"paths": ["invoice.pdf"], "inputRef": "e1"}, "does not support: inputRef"),
-        ("upload", {"paths": ["invoice.pdf"], "ref": "e1"}, "does not support ref or element"),
-        ("upload", {"paths": ["invoice.pdf"], "element": "File input"}, "does not support ref or element"),
-        ("dialog", {"timeoutMs": 1000}, "does not support: timeoutMs"),
-        ("focus", {}, "does not support focus"),
+        ("tabs", {"inputRef": "e1"}, "does not support: inputRef"),
+        ("console", {"timeoutMs": 1000}, "does not support: timeoutMs"),
+        ("open", {}, "targetUrl required for action=open"),
     ],
 )
 async def test_desktop_target_rejects_unsupported_host_arguments(
@@ -810,7 +842,7 @@ async def test_desktop_target_rejects_unsupported_host_arguments(
     arguments: dict[str, object],
     expected: str,
 ) -> None:
-    """Desktop routing fails closed instead of pretending host-only arguments were honored."""
+    """Desktop routing fails closed, before a Matrix send, on arguments it cannot honor."""
     context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
     request = AsyncMock()
     monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)

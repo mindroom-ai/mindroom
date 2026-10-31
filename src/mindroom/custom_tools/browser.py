@@ -34,7 +34,7 @@ from mindroom.custom_tools.desktop_attachment import (
 )
 from mindroom.desktop.client import desktop_response_router
 from mindroom.desktop.media import download_encrypted_screenshot
-from mindroom.desktop.playwright_mcp import browser_action_requires_control
+from mindroom.desktop.playwright_mcp import SUPPORTED_BROWSER_ACTIONS, browser_action_requires_control
 from mindroom.desktop.protocol import MAX_COMMAND_TTL_MS, DesktopCommand
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.logging_config import get_logger
@@ -397,7 +397,7 @@ def _unknown_browser_action_message(action: str) -> str:
     )
 
 
-def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
+def _desktop_browser_parameters(  # noqa: C901
     action: str,
     *,
     target_url: str | None,
@@ -410,33 +410,21 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
     element: str | None,
     image_type: str | None,
     level: str | None,
-    paths: list[str] | None,
-    accept: bool | None,
-    prompt_text: str | None,
-    request: dict[str, Any] | None,
     allow_private_networks: bool,
 ) -> dict[str, object]:
+    """Return the extension's parameters for one action it serves; status, start, stop, profiles, and tabs take none."""
     if target_id is not None:
         msg = (
             "Browser target=desktop does not support targetId because Playwright MCP tab indices can change; "
             "existing-page control requires upstream stable targeting. Observation, start, stop, and open remain available."
         )
         raise ValueError(msg)
-    if action in {"status", "start", "stop", "profiles", "tabs"}:
-        return {}
-    if action in {"open", "navigate"}:
+    if action == "open":
         normalized_url = _clean_str(target_url)
         if normalized_url is None:
-            msg = f"targetUrl required for action={action}"
+            msg = "targetUrl required for action=open"
             raise ValueError(msg)
-        normalized_url = validate_server_fetch_url(normalized_url, allow_private_networks=allow_private_networks)
-        parameters: dict[str, object] = {"targetUrl": normalized_url}
-        return parameters
-    if action == "focus":
-        msg = "Browser target=desktop does not support focus because Playwright MCP exposes only mutable tab indices."
-        raise ValueError(msg)
-    if action == "close":
-        return {}
+        return {"targetUrl": validate_server_fetch_url(normalized_url, allow_private_networks=allow_private_networks)}
     if action == "snapshot":
         parameters: dict[str, object] = {}
         normalized_selector = _clean_str(selector)
@@ -463,36 +451,7 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if normalized_level is not None:
             parameters["level"] = normalized_level
         return parameters
-    if action == "pdf":
-        return {}
-    if action == "upload":
-        if not paths:
-            msg = "paths required for action=upload"
-            raise ValueError(msg)
-        if ref is not None or element is not None:
-            msg = "Browser target=desktop upload does not support ref or element; page control requires upstream stable targeting."
-            raise ValueError(msg)
-        parameters: dict[str, object] = {"paths": paths}
-        return parameters
-    if action == "dialog":
-        parameters: dict[str, object] = {"accept": bool(accept)}
-        normalized_prompt = _clean_str(prompt_text)
-        if normalized_prompt is not None:
-            parameters["promptText"] = normalized_prompt
-        return parameters
-    if action == "act":
-        if request is None:
-            msg = "request required for action=act"
-            raise ValueError(msg)
-        if request.get("targetId") is not None:
-            msg = (
-                "Browser target=desktop does not support request.targetId because Playwright MCP tab indices can "
-                "change; page control requires upstream stable targeting."
-            )
-            raise ValueError(msg)
-        return {"request": request}
-    msg = f"Unsupported desktop browser action: {action}"
-    raise ValueError(msg)
+    return {}
 
 
 def _playwright_cache_root(expected_executable_path: Path | None) -> Path | None:
@@ -923,6 +882,13 @@ class BrowserTools(Toolkit):
             msg = "Opening a file requires target=host."
             raise ValueError(msg)
         if resolved_target == "desktop":
+            if normalized_action not in SUPPORTED_BROWSER_ACTIONS:
+                msg = (
+                    f"Browser target=desktop does not support action={normalized_action}: existing-page control "
+                    "requires upstream stable targeting. Supported desktop actions: "
+                    f"{', '.join(sorted(SUPPORTED_BROWSER_ACTIONS))}."
+                )
+                raise ValueError(msg)
             unsupported = {
                 "compact": compact,
                 "frame": frame,
@@ -955,10 +921,6 @@ class BrowserTools(Toolkit):
                 image_type=type,
                 return_attachment=returnAttachment,
                 level=level,
-                paths=paths,
-                accept=accept,
-                prompt_text=promptText,
-                request=request,
             )
         profile_name = _clean_str(profile) or _DEFAULT_PROFILE
 
@@ -1168,10 +1130,6 @@ class BrowserTools(Toolkit):
         image_type: str | None,
         return_attachment: bool,
         level: str | None,
-        paths: list[str] | None,
-        accept: bool | None,
-        prompt_text: str | None,
-        request: dict[str, Any] | None,
     ) -> str | ToolValue:
         target = self._desktop_target
         if target is None:
@@ -1195,10 +1153,6 @@ class BrowserTools(Toolkit):
             element=element,
             image_type=image_type,
             level=level,
-            paths=paths,
-            accept=accept,
-            prompt_text=prompt_text,
-            request=request,
             allow_private_networks=self._allow_private_networks,
         )
         now_ms = round(time.time() * 1000)

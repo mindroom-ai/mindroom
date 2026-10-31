@@ -21,7 +21,7 @@ from mindroom.desktop.playwright_mcp import (
     PlaywrightActionOutcomeUnknownError,
     PlaywrightBrowserError,
     PlaywrightMCPBrowserProvider,
-    _mcp_calls,
+    _mcp_call,
     _provider_result,
     browser_action_requires_control,
 )
@@ -90,17 +90,17 @@ def test_provider_launches_pinned_extension_server_for_existing_profile(
 
 def test_browser_actions_map_to_high_level_playwright_mcp_tools() -> None:
     """Tab, navigation, snapshot, and screenshot actions avoid raw CDP calls."""
-    assert _mcp_calls("tabs", {})[0].tool_name == "browser_tabs"
-    assert _mcp_calls("open", {"targetUrl": "https://example.com"})[0].arguments == {
+    assert _mcp_call("tabs", {}).tool_name == "browser_tabs"
+    assert _mcp_call("open", {"targetUrl": "https://example.com"}).arguments == {
         "action": "new",
         "url": "https://example.com",
     }
-    snapshot = _mcp_calls("snapshot", {"selector": "main", "depth": 8, "maxChars": 4000})
-    assert snapshot[-1].tool_name == "browser_snapshot"
-    assert snapshot[-1].arguments == {"target": "main", "depth": 8}
-    screenshot = _mcp_calls("screenshot", {"ref": "e7", "type": "jpeg", "fullPage": False})
-    assert screenshot[-1].tool_name == "browser_take_screenshot"
-    assert screenshot[-1].arguments == {
+    snapshot = _mcp_call("snapshot", {"selector": "main", "depth": 8, "maxChars": 4000})
+    assert snapshot.tool_name == "browser_snapshot"
+    assert snapshot.arguments == {"target": "main", "depth": 8}
+    screenshot = _mcp_call("screenshot", {"ref": "e7", "type": "jpeg", "fullPage": False})
+    assert screenshot.tool_name == "browser_take_screenshot"
+    assert screenshot.arguments == {
         "element": "e7",
         "target": "e7",
         "type": "jpeg",
@@ -417,7 +417,7 @@ def test_mutable_playwright_tab_indices_are_rejected(action: str) -> None:
         parameters["targetUrl"] = "https://example.com/checkout"
 
     with pytest.raises(PlaywrightBrowserError, match="tab indices can change"):
-        _mcp_calls(action, parameters)
+        _mcp_call(action, parameters)
 
 
 def test_mutable_playwright_tab_index_inside_act_request_is_rejected() -> None:
@@ -427,7 +427,7 @@ def test_mutable_playwright_tab_index_inside_act_request_is_rejected() -> None:
     }
 
     with pytest.raises(PlaywrightBrowserError, match="stable page identity"):
-        _mcp_calls("act", parameters)
+        _mcp_call("act", parameters)
 
 
 @pytest.mark.asyncio
