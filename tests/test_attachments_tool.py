@@ -354,9 +354,9 @@ async def test_get_attachment_view_uses_source_filename_when_none_is_given(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["non_image", "oversized", "missing", "save_and_view"])
+@pytest.mark.parametrize("case", ["non_image", "oversized", "missing", "missing_save", "save_and_view"])
 async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case: str) -> None:
-    """Viewing must fail explicitly rather than forward unusable media or silently save."""
+    """Viewing or saving must fail explicitly rather than forward unusable media or silently save."""
     image_path = tmp_path / "plot.png"
     image_path.write_bytes(b"not an image")
     tool = AttachmentTools(tool_output_workspace_root=tmp_path)
@@ -365,12 +365,12 @@ async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case:
         retained_path = Path(registered["attachment"]["local_path"])
         if case == "oversized":
             os.truncate(retained_path, 20 * 1024 * 1024 + 1)
-        elif case == "missing":
+        elif case in {"missing", "missing_save"}:
             retained_path.unlink()
         result = await tool.get_attachment(
             registered["attachment_id"],
-            view=True,
-            mindroom_output_path="copy.png" if case == "save_and_view" else None,
+            view=case != "missing_save",
+            mindroom_output_path="copy.png" if case in {"missing_save", "save_and_view"} else None,
         )
 
     assert isinstance(result, str)
@@ -380,6 +380,7 @@ async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case:
         "non_image": "PNG, JPEG, GIF or WebP",
         "oversized": "size limit",
         "missing": "missing on disk",
+        "missing_save": "missing on disk",
         "save_and_view": "cannot be combined",
     }
     assert expected[case] in payload["message"]
@@ -453,15 +454,22 @@ def test_attachments_tool_get_attachment_schema_describes_output_path() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("save_target", ["local", "worker", "no_workspace"])
 @pytest.mark.parametrize("unsafe_path", ["", "  ", "..", "../escape.txt", "/abs/path", "foo\x00bar", "$HOME/x", "~/x"])
 async def test_attachments_tool_get_attachment_mindroom_output_path_rejects_unsafe_paths(
     tmp_path: Path,
     unsafe_path: str,
+    save_target: str,
 ) -> None:
-    """Attachment save paths should reuse the normal workspace output path policy."""
+    """Attachment save paths should be rejected by the output path policy before any attachment bytes are read."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    if save_target == "local":
+        tool = AttachmentTools(tool_output_workspace_root=workspace)
+    elif save_target == "worker":
+        tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
+    else:
+        tool = AttachmentTools()
     sample_file = tmp_path / "sample.txt"
     sample_file.write_bytes(b"hello")
     attachment = register_local_attachment(
@@ -474,7 +482,10 @@ async def test_attachments_tool_get_attachment_mindroom_output_path_rejects_unsa
 
     with (
         tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))),
-        patch.object(type(sample_file), "read_bytes", side_effect=AssertionError("attachment bytes were read")),
+        patch(
+            "mindroom.custom_tools.attachments._read_attachment_bytes",
+            side_effect=AssertionError("attachment bytes were read"),
+        ),
         patch("mindroom.custom_tools.attachments.save_attachment_to_worker") as mocked_save,
     ):
         payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path=unsafe_path))
@@ -1555,10 +1566,19 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_attachments_tool_register_attachment_infers_file_metadata(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("filename", "kind", "mime_prefix"),
+    [("clip.wav", "audio", "audio/"), ("README", "file", None)],
+)
+async def test_attachments_tool_register_attachment_infers_file_metadata(
+    tmp_path: Path,
+    filename: str,
+    kind: str,
+    mime_prefix: str | None,
+) -> None:
     """Registering a local path should preserve filename, MIME type, and media kind."""
     tool = AttachmentTools(tool_output_workspace_root=tmp_path)
-    generated_file = tmp_path / "clip.wav"
+    generated_file = tmp_path / filename
     generated_file.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
     ctx = _tool_context(tmp_path)
 
@@ -1566,16 +1586,18 @@ async def test_attachments_tool_register_attachment_infers_file_metadata(tmp_pat
         payload = json.loads(await tool.register_attachment(str(generated_file)))
 
     assert payload["status"] == "ok"
-    assert payload["attachment"]["filename"] == "clip.wav"
-    assert payload["attachment"]["mime_type"].startswith("audio/")
-    assert payload["attachment"]["kind"] == "audio"
+    assert payload["attachment"]["filename"] == filename
+    assert payload["attachment"]["kind"] == kind
 
     attachment = load_attachment(tmp_path, payload["attachment_id"])
     assert attachment is not None
-    assert attachment.filename == "clip.wav"
-    assert attachment.mime_type is not None
-    assert attachment.mime_type.startswith("audio/")
-    assert attachment.kind == "audio"
+    assert attachment.filename == filename
+    assert attachment.kind == kind
+    if mime_prefix is None:
+        assert attachment.mime_type is None
+    else:
+        assert attachment.mime_type is not None
+        assert attachment.mime_type.startswith(mime_prefix)
 
 
 @pytest.mark.asyncio
