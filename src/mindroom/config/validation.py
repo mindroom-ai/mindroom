@@ -39,6 +39,14 @@ def non_empty_stripped(value: str, *, field_name: str) -> str:
     return stripped
 
 
+def _blank_as_none(value: str | None) -> str | None:
+    """Trim an optional string and treat blank input as unset."""
+    return None if value is None else value.strip() or None
+
+
+OptionalNonBlankStr = Annotated[str | None, AfterValidator(_blank_as_none)]
+
+
 def _validate_timezone_name(value: str) -> str:
     """Return ``value`` when it names an IANA timezone, such as ``Europe/Amsterdam``."""
     try:

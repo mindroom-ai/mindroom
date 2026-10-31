@@ -66,6 +66,14 @@ def test_room_without_metadata_inherits_all_defaults() -> None:
     assert policy.admins == ("@admin:example.com",)
 
 
+@pytest.mark.parametrize(("display_name", "expected"), [(" Project ", "Project"), ("   ", None), (None, None)])
+def test_room_display_name_is_trimmed_and_blank_means_unset(display_name: str | None, expected: str | None) -> None:
+    """A blank room display name, such as a cleared dashboard field, leaves the name unset."""
+    config = Config.model_validate({"rooms": {"project": {"display_name": display_name}}})
+
+    assert config.rooms["project"].display_name == expected
+
+
 def test_omitted_agent_access_uses_configured_rooms() -> None:
     """An agent without an access block must inherit its assigned rooms as grants."""
     config = Config.model_validate(

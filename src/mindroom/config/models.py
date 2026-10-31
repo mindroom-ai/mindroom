@@ -15,7 +15,12 @@ from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.schema_hints import dashboard_hint
-from mindroom.config.validation import duplicate_items, non_empty_stripped, validate_history_limit_choice
+from mindroom.config.validation import (
+    OptionalNonBlankStr,
+    duplicate_items,
+    non_empty_stripped,
+    validate_history_limit_choice,
+)
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
@@ -669,7 +674,10 @@ class EmbedderConfig(BaseModel):
         ),
         json_schema_extra=dashboard_hint(secret=True),
     )
-    host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
+    host: OptionalNonBlankStr = Field(
+        default=None,
+        description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)",
+    )
     dimensions: int | None = Field(
         default=None,
         ge=1,
@@ -695,14 +703,6 @@ class EmbedderConfig(BaseModel):
     def _validate_credentials_service(cls, value: str | None) -> str | None:
         """Normalize an optional named credential reference."""
         return None if value is None else validate_service_name(value)
-
-    @field_validator("host")
-    @classmethod
-    def _normalize_blank_host(cls, value: str | None) -> str | None:
-        """Treat a blank host (e.g. a cleared dashboard field) as unset so provider defaults apply."""
-        if value is None:
-            return None
-        return value.strip() or None
 
 
 def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict[str, Any]:
@@ -763,14 +763,14 @@ class ModelConfig(BaseModel):
         description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
     )
     id: str = Field(description="Model ID specific to the provider")
-    display_name: str | None = Field(default=None, description="Friendly model name shown in clients")
+    display_name: OptionalNonBlankStr = Field(default=None, description="Friendly model name shown in clients")
     icon: str | None = Field(default=None, description="Config-relative image path or Matrix mxc URI")
     api: Literal["responses", "chat_completions"] | None = Field(
         default=None,
         description="OpenAI API transport; unset keeps automatic model/endpoint selection",
     )
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
-    api_key: str | None = Field(
+    api_key: OptionalNonBlankStr = Field(
         default=None,
         description="Optional model-specific API key used instead of the provider's shared key",
         json_schema_extra=dashboard_hint(secret=True),
@@ -814,22 +814,6 @@ class ModelConfig(BaseModel):
             msg = f"Unknown provider '{value}': use one of {', '.join(sorted(PROVIDER_ROUTES))}"
             raise ValueError(msg)
         return value
-
-    @field_validator("display_name")
-    @classmethod
-    def _normalize_display_name(cls, value: str | None) -> str | None:
-        """Trim an optional display name and treat blank input as unset."""
-        if value is None:
-            return None
-        return value.strip() or None
-
-    @field_validator("api_key")
-    @classmethod
-    def _normalize_api_key(cls, value: str | None) -> str | None:
-        """Trim the key and treat blank input as unset so the provider's shared key applies."""
-        if value is None:
-            return None
-        return value.strip() or None
 
     @field_validator("extra_kwargs")
     @classmethod

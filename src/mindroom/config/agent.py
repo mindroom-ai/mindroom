@@ -38,6 +38,7 @@ from mindroom.config.participation import ParticipationConfig  # noqa: TC001
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.skill_learning import SkillLearningConfig
 from mindroom.config.validation import (
+    OptionalNonBlankStr,
     TimezoneName,
     duplicate_items,
     non_empty_stripped,
@@ -586,7 +587,7 @@ class RoomConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    display_name: str | None = Field(default=None, description="Human-readable Matrix room name")
+    display_name: OptionalNonBlankStr = Field(default=None, description="Human-readable Matrix room name")
     description: str = Field(
         default="",
         description="Room purpose shown in the dashboard and used as the topic of a new room or a room without one",
@@ -609,13 +610,6 @@ class RoomConfig(BaseModel):
         default=None,
         description="Room-specific Matrix administrator override",
     )
-
-    @field_validator("display_name")
-    @classmethod
-    def normalize_display_name(cls, value: str | None) -> str | None:
-        """Keep room display names absent or trimmed non-empty strings."""
-        stripped = value.strip() if value is not None else ""
-        return stripped or None
 
     @model_serializer(mode="wrap")
     def serialize_model(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
