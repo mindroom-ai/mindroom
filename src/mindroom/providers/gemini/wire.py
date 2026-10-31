@@ -27,7 +27,7 @@ from google.genai.types import (
 )
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
-from mindroom.llm.media import canonical_mime_type, image_mime_type
+from mindroom.llm.media import canonical_mime_type, image_mime_type, rendered_label
 from mindroom.llm.messages import system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
@@ -354,7 +354,8 @@ def _sent_file_type(mime_type: str) -> str | None:
 
 
 def _omitted_file(file: File, mime_type: str) -> dict[str, Any]:
-    return {"text": f"[Attachment omitted: {file.filename or 'file'} ({mime_type}) is a file type Gemini cannot read]"}
+    name = rendered_label(file.filename or "") or "file"
+    return {"text": f"[Attachment omitted: {name} ({rendered_label(mime_type)}) is a file type Gemini cannot read]"}
 
 
 def _file_source(file: File) -> tuple[str, Callable[[str], dict[str, Any]] | str] | None:
