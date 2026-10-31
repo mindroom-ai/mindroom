@@ -114,7 +114,7 @@ def test_list_schedules_success(test_client: TestClient) -> None:
         ),
         (
             aiohttp.ClientPayloadError("Response payload is not completed"),
-            "ClientPayloadError('Response payload is not completed')",
+            "ClientPayloadError: Response payload is not completed",
         ),
     ],
     ids=["error response", "broken-off response"],

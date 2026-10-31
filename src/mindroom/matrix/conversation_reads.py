@@ -193,7 +193,9 @@ def _homeserver_failure_fails_the_read(room_id: str, thread_id: str | None) -> I
     try:
         yield
     except aiohttp.ClientError as error:
-        msg = f"Conversation {room_id}/{thread_id} could not be read from the homeserver: {error!r}"
+        msg = (
+            f"Conversation {room_id}/{thread_id} could not be read from the homeserver: {type(error).__name__}: {error}"
+        )
         raise ConversationReadError(msg) from error
 
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import nio
 import pytest
 
@@ -177,17 +178,28 @@ async def test_schedule_mentioning_an_unavailable_agent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_schedule_whose_room_state_cannot_be_read(tmp_path: Path) -> None:
-    """A schedule that cannot choose its runner reports the failed room read."""
+@pytest.mark.parametrize(
+    ("read", "reason"),
+    [
+        (AsyncMock(return_value=_STATE_ERROR), str(_STATE_ERROR)),
+        (
+            AsyncMock(side_effect=aiohttp.ClientPayloadError("Response payload is not completed")),
+            "ClientPayloadError: Response payload is not completed",
+        ),
+    ],
+    ids=["error response", "broken-off response"],
+)
+async def test_schedule_whose_room_state_cannot_be_read(tmp_path: Path, read: AsyncMock, reason: str) -> None:
+    """A schedule that cannot choose its runner reports the failed room read, and nothing is saved."""
     client = make_matrix_client_mock()
-    client.room_get_state = AsyncMock(return_value=_STATE_ERROR)
+    client.room_get_state = read
     with patch("mindroom.scheduling.tasks.complete_prompt", new=_parse_returning(_workflow())):
         reply = await _reply(tmp_path, "!schedule in 5 minutes check logs", client=client)
 
     assert reply == (
-        f"❌ Failed to schedule: Could not read the state of room {ROOM_ID} to choose which bot runs the task: "
-        f"{_STATE_ERROR}"
+        f"❌ Failed to schedule: Could not read the state of room {ROOM_ID} to choose which bot runs the task: {reason}"
     )
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
