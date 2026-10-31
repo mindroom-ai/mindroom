@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
+from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV
 from mindroom.script_runs.launch_contract import (
     MAX_SOURCE_BYTES,
     MAX_TOKEN_BYTES,
@@ -20,8 +21,6 @@ from mindroom.script_runs.launch_contract import (
     TOKEN_PATH_ENV,
     WORKSPACE_ROOT_ENV,
 )
-
-_CONTROL_STATE_PATH_ENV = "MINDROOM_CONTROL_STATE_PATH"
 
 
 def _validated_file(
@@ -114,7 +113,7 @@ def _main(argv: list[str]) -> int:
             msg = "Script capability path does not match the launch environment."
             raise ValueError(msg)
         _validate_source_digest(source_path)
-        os.environ.pop(_CONTROL_STATE_PATH_ENV, None)
+        os.environ.pop(CONTROL_STATE_PATH_ENV, None)
         signal.signal(signal.SIGTERM, _handle_sigterm)
         # Launched with `-P`: the script may import workspace modules, after installed ones.
         sys.path.append(str(workspace_root))

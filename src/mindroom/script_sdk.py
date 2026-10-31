@@ -87,7 +87,7 @@ class MindRoomTools:
         self._gateway_url = _required_env(GATEWAY_URL_ENV).rstrip("/")
         parsed_gateway = urllib.parse.urlsplit(self._gateway_url)
         if parsed_gateway.scheme not in {"http", "https"} or not parsed_gateway.netloc:
-            msg = "MINDROOM_SCRIPT_GATEWAY_URL must be an HTTP(S) URL."
+            msg = f"{GATEWAY_URL_ENV} must be an HTTP(S) URL."
             raise RuntimeError(msg)
         self._run_id = _required_env(RUN_ID_ENV)
         self._token = _read_token(Path(_required_env(TOKEN_PATH_ENV)))

@@ -34,7 +34,6 @@ from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.script_runs.supervised import signal_supervised_script, supervised_script_status, worker_script_namespace
 from mindroom.shell.supervisor import (
     _ShellSupervisorManager,
-    check_command_via_supervisor,
     kill_command_via_supervisor,
     run_command_via_supervisor,
 )
@@ -215,18 +214,17 @@ async def _read_progress(path: Path, *, greater_than: int = -1) -> int:
     raise AssertionError(message)
 
 
-async def _wait_for_finished(socket_path: str, *, worker_key: str) -> str:
+async def _wait_for_finished(socket_path: str, *, worker_key: str) -> WorkerScriptStatus:
     for _ in range(120):
-        message = await asyncio.to_thread(
-            check_command_via_supervisor,
+        status = await supervised_script_status(
             socket_path,
             namespace=worker_script_namespace(worker_key, _RUN_ID),
-            handle=supervisor_handle_for_run(_RUN_ID),
+            run_id=_RUN_ID,
         )
-        if "Status: FINISHED" in message:
-            return message
+        if status.state == "exited":
+            return status
         await asyncio.sleep(0.05)
-    error = f"Script process did not reach its supervisor deadline: {message}"
+    error = f"Script process did not reach its supervisor deadline: {status}"
     raise AssertionError(error)
 
 
@@ -396,7 +394,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         assert response.json()["state"] == ScriptCallState.INDETERMINATE
 
         finished = await _wait_for_finished(socket_path, worker_key=worker_key)
-        assert "exit code -9" in finished
+        assert finished.exit_code == -9
         await _wait_for_pid_exit(script_pid)
         terminal = await second_lifecycle.manager.reconcile_durable(run_id=_RUN_ID)
         assert terminal.state is ScriptRunState.INTERRUPTED

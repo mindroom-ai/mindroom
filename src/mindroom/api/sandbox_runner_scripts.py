@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import secrets
 import stat
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -50,6 +49,7 @@ from mindroom.shell.supervisor import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
+    from pathlib import Path
 
     from starlette.responses import Response
     from starlette.types import Message
@@ -182,12 +182,11 @@ def _prepare_worker(
 
 def _workspace_file(
     workspace: Path,
-    raw_relative_path: str,
+    relative_path: Path,
     *,
     label: str,
     byte_limit: int,
 ) -> Path:
-    relative_path = Path(raw_relative_path)
     candidate = workspace / relative_path
     if candidate.is_symlink():
         raise HTTPException(status_code=400, detail=f"{label} must not be a symbolic link.")
@@ -216,13 +215,13 @@ def _script_snapshot(workspace: Path, run_id: str) -> ScriptSnapshot:
         root=workspace,
         source=_workspace_file(
             workspace,
-            str(relative_root / launch_contract.SOURCE_FILE_NAME),
+            relative_root / launch_contract.SOURCE_FILE_NAME,
             label="Script source",
             byte_limit=launch_contract.MAX_SOURCE_BYTES,
         ),
         capability=_workspace_file(
             workspace,
-            str(relative_root / launch_contract.CAPABILITY_FILE_NAME),
+            relative_root / launch_contract.CAPABILITY_FILE_NAME,
             label="Script capability file",
             byte_limit=launch_contract.MAX_TOKEN_BYTES,
         ),

@@ -61,11 +61,10 @@ def test_supervisor_status_parser_is_canonical(
     state: str,
     exit_code: int | None,
 ) -> None:
-    """Local and worker adapters share one fail-closed status interpretation."""
+    """Every status reply has one interpretation, and anything unrecognized fails closed."""
     status = parse_shell_supervisor_status(message)
 
     assert status.state == state
-    assert status.output == message
     assert status.exit_code == exit_code
 
 

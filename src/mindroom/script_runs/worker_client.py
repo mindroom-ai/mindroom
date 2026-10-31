@@ -25,7 +25,7 @@ from mindroom.script_runs.wire import (
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
 _TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
-_DEFAULT_TIMEOUT_SECONDS = 15.0
+_REQUEST_TIMEOUT_SECONDS = 15.0
 
 __all__ = ["ScriptWorkerClient"]
 
@@ -34,7 +34,6 @@ __all__ = ["ScriptWorkerClient"]
 class ScriptWorkerClient:
     """Send script process-control requests to an already-selected worker."""
 
-    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS
     transport: httpx.AsyncBaseTransport | None = None
 
     async def launch(
@@ -116,7 +115,7 @@ class ScriptWorkerClient:
             message = "Worker authentication token is unavailable."
             raise ScriptWorkerError(message)
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
+            async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS, transport=self.transport) as client:
                 # The body carries the worker key, which names the requester, because access logs record URLs.
                 response = await client.post(url, headers={_TOKEN_HEADER: token}, json=request.model_dump(mode="json"))
         except httpx.HTTPError as exc:

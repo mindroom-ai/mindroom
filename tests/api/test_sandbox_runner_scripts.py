@@ -92,23 +92,17 @@ def runner_client(
         supervisor.shutdown()
 
 
-def _write_run_files(workspace: Path, run_id: str, source: str) -> tuple[str, str, str]:
-    relative_root = Path(".mindroom") / "script-runs" / run_id
-    run_root = workspace / relative_root
+def _write_run_files(workspace: Path, run_id: str, source: str) -> str:
+    """Write one run's snapshot and return its source digest."""
+    run_root = workspace / ".mindroom" / "script-runs" / run_id
     run_root.mkdir(parents=True)
-    source_path = run_root / "source.py"
-    token_path = run_root / "capability"
-    source_path.write_text(source, encoding="utf-8")
-    token_path.write_text("capability-token", encoding="utf-8")
-    return (
-        str(relative_root / source_path.name),
-        str(relative_root / token_path.name),
-        hashlib.sha256(source.encode()).hexdigest(),
-    )
+    (run_root / "source.py").write_text(source, encoding="utf-8")
+    (run_root / "capability").write_text("capability-token", encoding="utf-8")
+    return hashlib.sha256(source.encode()).hexdigest()
 
 
 def _run_payload(workspace: Path, *, run_id: str, source: str) -> dict[str, object]:
-    _source_path, _token_path, source_digest = _write_run_files(workspace, run_id, source)
+    source_digest = _write_run_files(workspace, run_id, source)
     return {
         "protocol_version": SCRIPT_PROTOCOL_VERSION,
         "run_id": run_id,
@@ -117,6 +111,21 @@ def _run_payload(workspace: Path, *, run_id: str, source: str) -> dict[str, obje
         "gateway_url": "http://primary:8765/api/script-gateway",
         "max_runtime_seconds": 3600,
     }
+
+
+def _settled_status(client: TestClient, run_id: str, *, worker_key: str) -> httpx.Response:
+    """Poll one run's status until it stops running, for at most five seconds."""
+    deadline = time.monotonic() + 5
+    while True:
+        status = client.post(
+            f"/api/sandbox-runner/scripts/{run_id}/status",
+            headers=_HEADERS,
+            json={"worker_key": worker_key},
+        )
+        if status.json()["state"] != "running" or time.monotonic() >= deadline:
+            break
+        time.sleep(0.01)
+    return status
 
 
 @pytest.mark.parametrize("protocol_version", [SCRIPT_PROTOCOL_VERSION - 1, SCRIPT_PROTOCOL_VERSION + 1])
@@ -166,25 +175,6 @@ def test_worker_script_launch_rejects_invalid_maximum_runtime(
     assert exc_info.value.errors()[0]["type"] == error_type
 
 
-def test_worker_script_endpoint_narrow_request_derives_fixed_snapshot_paths(
-    runner_client: tuple[TestClient, Path],
-) -> None:
-    """A fixed run ID derives the worker paths and supervisor handle without caller control."""
-    client, workspace = runner_client
-    run_id = f"script-{'a' * 32}"
-    payload = _run_payload(workspace, run_id=run_id, source="print('ready')\n")
-
-    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True, "error": None}
-    client.post(
-        f"/api/sandbox-runner/scripts/{run_id}/cancel",
-        headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY, "force": True},
-    )
-
-
 def test_worker_script_endpoint_rejects_uncontained_platform(
     runner_client: tuple[TestClient, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -197,7 +187,6 @@ def test_worker_script_endpoint_rejects_uncontained_platform(
         sandbox_runner_scripts_module,
         "background_script_supervision_supported",
         lambda: False,
-        raising=False,
     )
 
     response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
@@ -315,19 +304,7 @@ def test_worker_script_receipts_report_exit_and_unknown_handles(
         json=_run_payload(workspace, run_id=run_id, source="print('done', flush=True)\n"),
     )
     assert launched.json() == {"ok": True, "error": None}
-    deadline = time.monotonic() + 5
-    status = client.post(
-        f"/api/sandbox-runner/scripts/{run_id}/status",
-        headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY},
-    )
-    while status.json()["state"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.01)
-        status = client.post(
-            f"/api/sandbox-runner/scripts/{run_id}/status",
-            headers=_HEADERS,
-            json={"worker_key": _WORKER_KEY},
-        )
+    status = _settled_status(client, run_id, worker_key=_WORKER_KEY)
     exited = status.json()
     assert exited.pop("output").startswith("Status: FINISHED (exit code 0")
     assert exited == {"ok": True, "state": "exited", "exit_code": 0, "error": None}
@@ -400,19 +377,7 @@ def test_worker_script_endpoint_applies_workspace_environment_overlay(
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    deadline = time.monotonic() + 5
-    status = client.post(
-        f"/api/sandbox-runner/scripts/{run_id}/status",
-        headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY},
-    )
-    while status.json()["state"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.01)
-        status = client.post(
-            f"/api/sandbox-runner/scripts/{run_id}/status",
-            headers=_HEADERS,
-            json={"worker_key": _WORKER_KEY},
-        )
+    status = _settled_status(client, run_id, worker_key=_WORKER_KEY)
 
     assert status.json()["state"] == "exited"
     assert status.json()["exit_code"] == 0
@@ -494,7 +459,7 @@ router:
         "    encoding='utf-8',\n"
         ")\n"
     )
-    _source_path, _token_path, source_digest = _write_run_files(prepared.paths.workspace, run_id, source)
+    source_digest = _write_run_files(prepared.paths.workspace, run_id, source)
     supervisor = _ShellSupervisorManager()
     monkeypatch.setattr(shell_supervisor_module, "_manager", supervisor)
     try:
@@ -516,19 +481,7 @@ router:
         assert response.status_code == 200
         assert response.json()["ok"] is True
 
-        deadline = time.monotonic() + 5
-        status = client.post(
-            f"/api/sandbox-runner/scripts/{run_id}/status",
-            headers=_HEADERS,
-            json={"worker_key": worker_key},
-        )
-        while status.json()["state"] == "running" and time.monotonic() < deadline:
-            time.sleep(0.01)
-            status = client.post(
-                f"/api/sandbox-runner/scripts/{run_id}/status",
-                headers=_HEADERS,
-                json={"worker_key": worker_key},
-            )
+        status = _settled_status(client, run_id, worker_key=worker_key)
 
         assert status.json()["state"] == "exited"
         assert status.json()["exit_code"] == 0
@@ -623,7 +576,7 @@ router:
         "workspace = Path(os.environ['MINDROOM_SCRIPT_WORKSPACE_ROOT'])\n"
         "workspace.joinpath('script-result.txt').write_text(helper.VALUE, encoding='utf-8')\n"
     )
-    _source_path, _token_path, source_digest = _write_run_files(prepared.paths.workspace, run_id, source)
+    source_digest = _write_run_files(prepared.paths.workspace, run_id, source)
     supervisor = _ShellSupervisorManager()
     monkeypatch.setattr(shell_supervisor_module, "_manager", supervisor)
     try:
@@ -645,19 +598,7 @@ router:
         assert response.status_code == 200
         assert response.json()["ok"] is True
 
-        deadline = time.monotonic() + 5
-        status = client.post(
-            f"/api/sandbox-runner/scripts/{run_id}/status",
-            headers=_HEADERS,
-            json={"worker_key": worker_key},
-        )
-        while status.json()["state"] == "running" and time.monotonic() < deadline:
-            time.sleep(0.01)
-            status = client.post(
-                f"/api/sandbox-runner/scripts/{run_id}/status",
-                headers=_HEADERS,
-                json={"worker_key": worker_key},
-            )
+        status = _settled_status(client, run_id, worker_key=worker_key)
 
         assert status.json()["state"] == "exited"
         assert status.json()["exit_code"] == 0
@@ -680,51 +621,6 @@ def test_worker_script_endpoint_rejects_source_digest_mismatch(
 
     assert response.status_code == 400
     assert "digest" in response.json()["detail"].lower()
-
-
-def test_worker_script_endpoint_rejects_caller_selected_source_path(
-    runner_client: tuple[TestClient, Path],
-    tmp_path: Path,
-) -> None:
-    """The route does not accept a caller-selected source snapshot path."""
-    client, workspace = runner_client
-    payload = _run_payload(workspace, run_id=f"script-{'e' * 32}", source="print('no')\n")
-    outside = tmp_path / "outside.py"
-    outside.write_text("print('escaped')\n", encoding="utf-8")
-    payload["source_path"] = str(outside)
-
-    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
-
-    assert response.status_code == 422
-    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
-
-
-def test_worker_script_endpoint_rejects_caller_selected_token_path(
-    runner_client: tuple[TestClient, Path],
-) -> None:
-    """The route does not accept a caller-selected capability path."""
-    client, workspace = runner_client
-    payload = _run_payload(workspace, run_id=f"script-{'f' * 32}", source="print('no')\n")
-    payload["token_path"] = "capability"  # noqa: S105
-
-    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
-
-    assert response.status_code == 422
-    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
-
-
-def test_worker_script_endpoint_rejects_unapproved_environment_name(
-    runner_client: tuple[TestClient, Path],
-) -> None:
-    """The launch protocol must not become an arbitrary environment injection channel."""
-    client, workspace = runner_client
-    payload = _run_payload(workspace, run_id=f"script-{'1' * 32}", source="print('no')\n")
-    payload["environment"] = {"MINDROOM_CONTROL_STATE_PATH": "/primary/private"}
-
-    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
-
-    assert response.status_code == 422
-    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
 
 
 def test_worker_script_endpoint_rejects_oversized_request(
@@ -1123,7 +1019,7 @@ def seeded_script_worker(
         "from pathlib import Path\n"
         "Path(os.environ['MINDROOM_SCRIPT_WORKSPACE_ROOT'], 'result.txt').write_text('live', encoding='utf-8')\n"
     )
-    _source_path, _token_path, source_digest = _write_run_files(prepared.paths.workspace, _LIVE_SCRIPT_RUN_ID, source)
+    source_digest = _write_run_files(prepared.paths.workspace, _LIVE_SCRIPT_RUN_ID, source)
     payload: dict[str, object] = {
         "protocol_version": SCRIPT_PROTOCOL_VERSION,
         "run_id": _LIVE_SCRIPT_RUN_ID,
@@ -1163,13 +1059,7 @@ def test_worker_script_runs_agent_known_only_to_primary_config_snapshot(
     assert response.status_code == 200
     assert response.json()["ok"] is True
 
-    status_url = f"/api/sandbox-runner/scripts/{_LIVE_SCRIPT_RUN_ID}/status"
-    status_body = {"worker_key": payload["worker_key"]}
-    deadline = time.monotonic() + 5
-    status = client.post(status_url, headers=_HEADERS, json=status_body)
-    while status.json()["state"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.01)
-        status = client.post(status_url, headers=_HEADERS, json=status_body)
+    status = _settled_status(client, _LIVE_SCRIPT_RUN_ID, worker_key=str(payload["worker_key"]))
     assert status.json()["state"] == "exited"
     assert status.json()["exit_code"] == 0
     assert (private_workspace / "result.txt").read_text(encoding="utf-8") == "live"

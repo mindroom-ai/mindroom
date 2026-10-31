@@ -96,7 +96,7 @@ class SandboxScriptStatusRequest(BaseModel):
 
 
 class SandboxScriptControlRequest(BaseModel):
-    """Worker identity and supervisor handle for status-changing operations."""
+    """Worker identity and signal strength for a cancellation; the run's handle is derived, never sent."""
 
     model_config = ConfigDict(extra="forbid")
 

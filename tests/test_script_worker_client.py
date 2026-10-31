@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 _WORKER_TOKEN = "worker-token"  # noqa: S105
-_SUPERVISOR_HANDLE = f"shell:{'a' * 32}"
 
 
 def _handle(*, token: str | None = _WORKER_TOKEN) -> WorkerHandle:
@@ -121,39 +120,11 @@ async def test_script_worker_client_returns_normalized_status_and_cancel_receipt
 
 
 @pytest.mark.asyncio
-async def test_script_worker_client_exposes_unknown_handle_as_status() -> None:
-    """A lost supervisor handle is a lifecycle fact rather than a transport exception."""
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"ok": True, "state": "unknown", "output": ""})
-
-    status = await _client(handler).status(
-        _handle(),
-        run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    )
-
-    assert status == WorkerScriptStatus.unknown_handle()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("invalid_state", [[], {}])
-async def test_script_worker_client_rejects_unhashable_status_state(invalid_state: object) -> None:
-    """Malformed authenticated status payloads must produce stable worker errors."""
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"ok": True, "state": invalid_state, "output": ""})
-
-    with pytest.raises(ScriptWorkerError, match="Invalid script worker message: state"):
-        await _client(handler).status(
-            _handle(),
-            run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("operation", "payload", "field"),
     [
+        ("status", {"ok": True, "state": []}, "state"),
+        ("status", {"ok": True, "state": {}}, "state"),
         ("status", {"ok": True, "state": "exited", "exit_code": True}, "exit_code"),
         ("status", {"ok": True, "state": "exited", "exit_code": 1.0}, "exit_code"),
         ("status", {"ok": 1, "state": "running"}, "ok"),

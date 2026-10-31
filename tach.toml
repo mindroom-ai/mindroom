@@ -2452,7 +2452,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.script_runs.shim"
-depends_on = ["mindroom.path_confinement", "mindroom.script_runs.launch_contract"]
+depends_on = ["mindroom.path_confinement", "mindroom.runtime_env_policy", "mindroom.script_runs.launch_contract"]
 
 # The shim and the script SDK import it inside script processes, so it stays standard-library only.
 [[modules]]

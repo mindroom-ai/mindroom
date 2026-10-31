@@ -86,27 +86,26 @@ def background_script_supervision_supported() -> bool:
 
 @dataclass(frozen=True, slots=True)
 class _ShellSupervisorStatus:
-    """Canonical interpretation of one shell-supervisor status reply."""
+    """Interpretation of one shell-supervisor status reply."""
 
     state: Literal["running", "exited", "unknown", "error"]
-    output: str
     exit_code: int | None = None
 
 
 def parse_shell_supervisor_status(message: str) -> _ShellSupervisorStatus:
-    """Parse one supervisor status reply identically in every adapter."""
+    """Classify one supervisor status reply, failing closed on anything unrecognized."""
     if message.startswith("Status: RUNNING"):
-        return _ShellSupervisorStatus(state="running", output=message)
+        return _ShellSupervisorStatus(state="running")
     finished = _FINISHED_STATUS_RE.match(message)
     if finished is not None:
-        return _ShellSupervisorStatus(state="exited", output=message, exit_code=int(finished.group(1)))
+        return _ShellSupervisorStatus(state="exited", exit_code=int(finished.group(1)))
     if message.startswith("Error: Unknown handle"):
-        return _ShellSupervisorStatus(state="unknown", output=message)
-    return _ShellSupervisorStatus(state="error", output=message)
+        return _ShellSupervisorStatus(state="unknown")
+    return _ShellSupervisorStatus(state="error")
 
 
 def parse_shell_supervisor_kill(message: str) -> Literal["signalled", "finished", "unknown", "error"]:
-    """Classify one supervisor kill reply identically in every adapter."""
+    """Classify one supervisor kill reply, failing closed on anything unrecognized."""
     if message.startswith(("Terminated process", "Force-killed process")):
         return "signalled"
     # Both "Process already finished (exit code N)" and "Process N already exited".
