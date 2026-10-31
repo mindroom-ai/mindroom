@@ -14,7 +14,7 @@ from mindroom.ai import (
     ai_response,
 )
 from mindroom.config.main import Config
-from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.runs import RunRecord, RunRequirement, ToolExecution
 from mindroom.response_turn import (
     PausedAttempt,
@@ -360,7 +360,7 @@ async def test_text_after_a_whole_document_replaces_it_in_a_document_stream() ->
 async def test_reasoning_reaches_the_stream_only_when_the_turn_shows_it(show_reasoning: bool) -> None:
     """`show_reasoning: false` keeps the model's reasoning out of the reply stream entirely."""
 
-    async def stream() -> AsyncGenerator[object, None]:
+    async def stream() -> AsyncGenerator[object]:
         yield ReasoningDelta("Checking the cache")
         yield TextDelta("Answer")
 
@@ -383,7 +383,7 @@ async def test_reasoning_reaches_the_stream_only_when_the_turn_shows_it(show_rea
 async def test_a_collected_reply_drops_reasoning() -> None:
     """A reply that is not streamed keeps its answer and drops the reasoning its stream carried."""
 
-    async def stream() -> AsyncGenerator[object, None]:
+    async def stream() -> AsyncGenerator[object]:
         yield ReasoningDelta("Checking the cache")
         yield TextDelta("Answer")
 
@@ -394,3 +394,49 @@ async def test_a_collected_reply_drops_reasoning() -> None:
 
     assert body == "Answer"
     assert trace == []
+
+
+@pytest.mark.asyncio
+async def test_a_running_tools_output_reaches_the_reply_stream() -> None:
+    """The progress a running call reports passes through to the reply stream unchanged."""
+
+    async def stream() -> AsyncGenerator[object]:
+        yield ToolProgress("call-1", "step 1")
+        yield TextDelta("Answer")
+
+    chunks = [
+        chunk
+        async for chunk in _process_stream_events(
+            stream(),
+            state=_StreamingAttemptState(),
+            show_tool_calls=True,
+            show_reasoning=True,
+            agent_name="a",
+        )
+    ]
+
+    assert chunks == [ToolProgress("call-1", "step 1"), TextDelta("Answer")]
+
+
+@pytest.mark.asyncio
+async def test_a_collected_reply_ignores_tool_output_without_publishing_it() -> None:
+    """A reply that is not streamed neither shows a running call's output nor publishes an update for it."""
+    updates: list[None] = []
+
+    async def stream() -> AsyncGenerator[object]:
+        yield TextDelta("A")
+        yield ToolProgress("call-1", "step 1")
+        yield TextDelta("nswer")
+
+    async def on_update() -> None:
+        updates.append(None)
+
+    body, trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+        on_update=on_update,
+    )
+
+    assert body == "Answer"
+    assert trace == []
+    assert len(updates) == 2

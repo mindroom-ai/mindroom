@@ -27,7 +27,7 @@ from mindroom.legacy_streaming import has_legacy_terminal_suffix, strip_legacy_t
 from mindroom.live_frames.frames import LIVE_CHECKPOINT_KEY, LiveDocs
 from mindroom.live_frames.publisher import LivePublisher
 from mindroom.live_frames.transport import homeserver_relays_live_frames
-from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result
 from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
@@ -142,8 +142,18 @@ RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 
 StreamInputChunk = (
-    str | StructuredStreamChunk | TextDelta | ReasoningDelta | FailedReply | RunFinished | ToolStarted | ToolCompleted
+    str
+    | StructuredStreamChunk
+    | TextDelta
+    | ReasoningDelta
+    | FailedReply
+    | RunFinished
+    | ToolStarted
+    | ToolProgress
+    | ToolCompleted
 )
+# How much of a running tool call's latest output a live frame shows.
+_LIVE_TOOL_PROGRESS_CHARS = 1000
 # How long queued and in-flight progress edits get to land before stopping the stream cancels them.
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
 
@@ -610,6 +620,8 @@ class StreamingResponse:
     reasoning_text: str = field(default="", init=False)
     _reasoning_segment_started_at: float | None = field(default=None, init=False, repr=False)
     _reasoning_seconds: float = field(default=0.0, init=False, repr=False)
+    # The latest output each running tool call reported, by call ID; only live frames show it.
+    tool_progress: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     # This reply's live frames, once the homeserver relays them; durable edits are then checkpoints.
     live: LivePublisher | None = field(default=None, init=False, repr=False)
     # Frames start once the reply's event shows this stream: its adopted placeholder or its first progress write.
@@ -672,10 +684,18 @@ class StreamingResponse:
             else visible_markdown(self.config, self.runtime_paths, display_text)
         )
         warmup_lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
+        tools = serialize_tool_trace(self.tool_trace) if self.show_tool_calls else ()
+        if tools and self.tool_progress:
+            tools = tuple(
+                {**entry, "progress": self.tool_progress[trace.tool_call_id][-_LIVE_TOOL_PROGRESS_CHARS:]}
+                if trace.tool_call_id in self.tool_progress
+                else entry
+                for trace, entry in zip(self.tool_trace, tools, strict=True)
+            )
         return self.event_id, LiveDocs(
             md=md,
             reasoning=self.reasoning_text,
-            tools=serialize_tool_trace(self.tool_trace) if self.show_tool_calls else (),
+            tools=tools,
             status=self._resolve_stream_status(is_final=False),
             activity="\n".join(line.text for line in warmup_lines),
         )
@@ -1548,6 +1568,10 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 # Reasoning is shown live and kept by the terminal update; no progress edit carries it.
                 streaming.add_reasoning(chunk.text, started_at=chunk.started_at)
                 continue
+            if isinstance(chunk, ToolProgress):
+                # Only live frames show a running call's output; no write carries it.
+                streaming.tool_progress[chunk.tool_call_id] = chunk.text
+                continue
             streaming.end_reasoning_segment()
             if isinstance(chunk, str):
                 text_chunk = chunk
@@ -1602,6 +1626,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 )
                 continue
             elif isinstance(chunk, ToolCompleted):
+                streaming.tool_progress.pop(chunk.call.tool_call_id, None)
                 tool_name = chunk.call.tool_name
                 pending_tool, completed_trace = tool_tracker.complete(chunk.call, origin=chunk.origin)
                 if not streaming.show_tool_calls:

@@ -43,7 +43,7 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput, persist_interrupted_replay_snapshot
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import RunRequirement, RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
@@ -590,6 +590,9 @@ async def collect_streamed_response_content(
     try:
         async with closing_async_stream(response_stream):
             async for chunk in response_stream:
+                if isinstance(chunk, ToolProgress):
+                    # Only a streamed reply's live frames show a running call's output.
+                    continue
                 _apply_collected_chunk(presentation, chunk)
                 if on_update is not None:
                     await on_update()
