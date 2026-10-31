@@ -22,7 +22,7 @@ When invoked:
 5. Merge documentation descriptions with source code analysis
 6. Generate complete ConfigField definitions following the current tool-module pattern
 7. Create a NEW file at `src/mindroom/tools/[tool_name].py`
-8. Import the factory in `src/mindroom/tools/__init__.py`, which imports every registration only so it registers its tool
+8. Import the factory in `src/mindroom/tools/__init__.py`
 9. Run the verification test to ensure accuracy
 10. Report test results
 
@@ -63,16 +63,13 @@ Your expertise includes:
 
 **File Structure Requirements**:
 - **CRITICAL**: Create NEW file at `src/mindroom/tools/[tool_name].py`
-- **REGISTRY WIRING ONLY**: Modify `src/mindroom/tools/__init__.py` only to add the factory import
 - Follow the EXACT pattern from `src/mindroom/tools/github.py`
 - Use `@register_tool_with_metadata` decorator
-- Declaration import: `from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus`
+- Declaration import: `from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus`
 - Registration import: `from mindroom.tool_system.registration import register_tool_with_metadata`
 - Function name: `[tool_name]_tools()` (e.g., `calculator_tools()`, `file_tools()`)
 - NO BaseTool class - use the decorator pattern like GitHub tool
 - Set `docs_url` to the tool's section of MindRoom's docs, never to Agno's docs
-
-**MODULE PATTERN**: Keep tool implementations in their dedicated modules; the registry initializer imports each factory only so its module registers the tool.
 
 **Test Verification is MANDATORY**:
 Every generated configuration MUST pass the verification test. If the test fails, analyze the errors and fix the ConfigField definitions until the test passes.

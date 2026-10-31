@@ -74,10 +74,7 @@ def _tach_interface_exposes(
     for interface in config["interfaces"]:
         if tuple(interface["from"]) != from_modules:
             continue
-        interface_visibility = set(interface.get("visibility", []))
-        if visibility is None and interface_visibility:
-            continue
-        if visibility is not None and interface_visibility != visibility:
+        if set(interface.get("visibility", [])) != (visibility or set()):
             continue
         matching_interfaces.append(list(interface["expose"]))
     assert len(matching_interfaces) == 1
@@ -217,31 +214,20 @@ def _function_local_imports(py_path: Path) -> set[str]:
 def _builtin_tool_forbidden_importers() -> dict[str, set[str]]:
     importers: dict[str, set[str]] = {}
     for py_path in (SOURCE_ROOT / "tools").glob("*.py"):
-        importer_module = f"mindroom.tools.{py_path.stem}"
-        imported_modules = {
-            module_name
-            for node in ast.walk(ast.parse(py_path.read_text()))
-            for module_name in _imported_module_names(node)
-            if module_name in FORBIDDEN_BUILTIN_TOOL_DEPENDENCIES
-        }
-        if imported_modules:
-            importers[importer_module] = imported_modules
+        if (
+            imported_modules := _collect_nested_imports(ast.parse(py_path.read_text()))
+            & FORBIDDEN_BUILTIN_TOOL_DEPENDENCIES
+        ):
+            importers[f"mindroom.tools.{py_path.stem}"] = imported_modules
     return importers
 
 
 def _builtin_registration_modules() -> list[str]:
-    modules: list[str] = []
-    for py_path in (SOURCE_ROOT / "tools").glob("*.py"):
-        if py_path.name == "__init__.py":
-            continue
-        imported_modules = {
-            module_name
-            for node in ast.walk(ast.parse(py_path.read_text()))
-            for module_name in _imported_module_names(node)
-        }
-        if "mindroom.tool_system.registration" in imported_modules:
-            modules.append(f"mindroom.tools.{py_path.stem}")
-    return sorted(modules)
+    return sorted(
+        f"mindroom.tools.{py_path.stem}"
+        for py_path in (SOURCE_ROOT / "tools").glob("*.py")
+        if "mindroom.tool_system.registration" in _collect_nested_imports(ast.parse(py_path.read_text()))
+    )
 
 
 def test_tool_system_runtime_and_extensions_modules_are_removed() -> None:
@@ -308,7 +294,6 @@ def test_builtin_tool_manifest_only_imports_every_registration_module_once() -> 
         for node in statements
         for alias in node.names
     ]
-    assert len(manifest) == len(set(manifest))
     assert sorted(manifest) == _builtin_registration_modules()
 
 

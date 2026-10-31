@@ -20,7 +20,7 @@ def _whitelist_names() -> set[str]:
 
 def _names_vulture_reports_without_whitelist() -> set[str]:
     settings = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["tool"]["vulture"]
-    vulture = Vulture()
+    vulture = Vulture(ignore_decorators=settings.get("ignore_decorators"))
     vulture.scavenge([REPO_ROOT / path for path in settings["paths"] if path != WHITELIST.name])
     return {item.name for item in vulture.get_unused_code(min_confidence=settings["min_confidence"])}
 
