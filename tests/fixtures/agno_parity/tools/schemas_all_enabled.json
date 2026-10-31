@@ -37,9 +37,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -70,9 +68,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -119,9 +115,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -152,9 +146,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -200,9 +192,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -240,9 +230,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -278,9 +266,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -315,9 +301,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -365,9 +349,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -416,9 +398,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -460,9 +440,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -493,9 +471,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -539,9 +515,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -572,9 +546,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -621,9 +593,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -663,9 +633,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -713,9 +681,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -754,9 +720,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -785,9 +749,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -812,9 +774,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -864,9 +824,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -907,9 +865,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -938,9 +894,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -981,9 +935,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1019,9 +971,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -1083,9 +1033,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1120,9 +1068,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1147,9 +1093,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -1184,9 +1128,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1223,9 +1165,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1258,9 +1198,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1333,9 +1271,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1366,9 +1302,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -1428,9 +1362,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -1478,9 +1410,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1505,9 +1435,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1538,9 +1466,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1576,9 +1502,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -1686,9 +1610,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -1738,9 +1660,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1775,9 +1695,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1808,9 +1726,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1841,9 +1757,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1879,9 +1793,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -1926,9 +1838,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -1963,9 +1873,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -2002,9 +1910,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2039,9 +1945,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2072,9 +1976,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -2120,9 +2022,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -2175,9 +2075,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2211,9 +2109,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2248,9 +2144,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2285,9 +2179,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2326,9 +2218,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -2370,9 +2260,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2414,9 +2302,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -2473,9 +2359,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2508,9 +2392,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2538,9 +2420,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2570,9 +2450,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2602,9 +2480,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2645,9 +2521,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2692,9 +2566,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2737,9 +2609,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -2809,9 +2679,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2878,9 +2746,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2919,9 +2785,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2960,9 +2824,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -2997,9 +2859,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3034,9 +2894,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3075,9 +2933,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -3121,9 +2977,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3158,9 +3012,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3191,9 +3043,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3228,9 +3078,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -3271,9 +3119,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3304,9 +3150,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -3347,9 +3191,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -3383,9 +3225,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3416,9 +3256,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3449,9 +3287,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -3497,9 +3333,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3536,9 +3370,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3568,9 +3400,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3610,9 +3440,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3672,9 +3500,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3718,9 +3544,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3760,9 +3584,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3806,9 +3628,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3838,9 +3658,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -3885,9 +3703,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -3922,9 +3738,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -3967,9 +3781,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4000,9 +3812,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4033,9 +3843,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -4075,9 +3883,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4108,9 +3914,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -4151,9 +3955,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4183,9 +3985,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -4230,9 +4030,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4277,9 +4075,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4314,9 +4110,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4352,9 +4146,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4394,9 +4186,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -4445,9 +4235,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -4518,9 +4306,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4577,9 +4363,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -4636,9 +4420,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4668,9 +4450,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4695,9 +4475,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4722,9 +4500,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -4772,9 +4548,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4810,9 +4584,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4875,9 +4647,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -4915,9 +4685,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4942,9 +4710,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -4969,9 +4735,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5002,9 +4766,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -5045,9 +4807,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -5100,9 +4860,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5138,9 +4896,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5171,9 +4927,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -5216,9 +4970,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5249,9 +5001,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5282,9 +5032,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -5329,9 +5077,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5362,9 +5108,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5399,9 +5143,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5432,9 +5174,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5465,9 +5205,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -5511,9 +5249,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5548,9 +5284,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5581,9 +5315,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5618,9 +5350,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -5676,9 +5406,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5723,9 +5451,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -5775,9 +5501,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -5832,9 +5556,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -5883,9 +5605,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -5926,9 +5646,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -5976,9 +5694,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -6028,9 +5744,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6061,9 +5775,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6094,9 +5806,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6149,9 +5859,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6182,9 +5890,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -6230,9 +5936,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6263,9 +5967,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -6313,9 +6015,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6350,9 +6050,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6387,9 +6085,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6424,9 +6120,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -6493,9 +6187,7 @@
           "additionalProperties": false
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -6535,9 +6227,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -6584,9 +6274,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6617,9 +6305,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6654,9 +6340,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -6693,9 +6377,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6726,9 +6408,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6763,9 +6443,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -6808,9 +6486,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6841,9 +6517,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -6896,9 +6570,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6935,9 +6607,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -6979,9 +6649,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7018,9 +6686,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7061,9 +6727,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7100,9 +6764,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7135,9 +6797,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7173,9 +6833,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7206,9 +6864,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7244,9 +6900,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7281,9 +6935,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7308,9 +6960,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7341,9 +6991,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -7392,9 +7040,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7429,9 +7075,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7466,9 +7110,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7502,9 +7144,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7539,9 +7179,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -7594,9 +7232,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7627,9 +7263,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7658,9 +7292,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -7720,9 +7352,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7753,9 +7383,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7792,9 +7420,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7825,9 +7451,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -7865,9 +7489,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7896,9 +7518,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -7927,9 +7547,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -8020,9 +7638,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8099,9 +7715,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8170,9 +7784,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8310,9 +7922,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8373,9 +7983,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -8420,9 +8028,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -8469,9 +8075,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8496,9 +8100,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -8554,9 +8156,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8606,9 +8206,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8677,9 +8275,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8787,9 +8383,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8830,9 +8424,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8877,9 +8469,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8941,9 +8531,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -8983,9 +8571,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -9025,9 +8611,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -9076,9 +8660,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9109,9 +8691,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9142,9 +8722,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9175,9 +8753,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9208,9 +8784,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9241,9 +8815,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9278,9 +8850,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9315,9 +8885,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9356,9 +8924,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -9401,9 +8967,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9434,9 +8998,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9467,9 +9029,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -9509,9 +9069,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -9559,9 +9117,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9590,9 +9146,7 @@
           "required": []
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       },
       {
@@ -9627,9 +9181,7 @@
           ]
         },
         "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
+        "gate": null,
         "stop_after_tool_call": false
       }
     ]

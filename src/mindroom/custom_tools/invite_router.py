@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
-from typing import TYPE_CHECKING
 
 import nio
 
@@ -13,11 +11,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.invited_rooms_store import is_inviter_allowed
 from mindroom.matrix.personal_room_store import personal_room_excludes_router
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-
-if TYPE_CHECKING:
-    from mindroom.tool_system.tool_function import ToolFunction
 
 _ROUTER_JOIN_POLL_SECONDS = 0.25
 _ROUTER_JOIN_TIMEOUT_SECONDS = 5.0
@@ -55,10 +49,6 @@ class InviteRouterTools(Toolkit):
 
     def __init__(self) -> None:
         super().__init__(name="invite_router", tools=[self.invite_router])
-
-    def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Approve the invite as a Matrix room runtime action."""
-        return replace(function, approval_type=MATRIX_ROOM_RUNTIME_APPROVAL_TYPE)
 
     async def invite_router(self) -> str:
         """Invite router to current Matrix room."""

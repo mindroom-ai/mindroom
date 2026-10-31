@@ -22,7 +22,6 @@ from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
 from mindroom.ai import TurnResult
-from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.budgets import BudgetsConfig
@@ -62,12 +61,13 @@ from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import ToolCall, ToolCallContext, run_tool_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
 )
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_tool_helpers import offered_agno_function
@@ -87,7 +87,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.session_storage.types import ConversationSession
-    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
+    from mindroom.tool_system.invocation import ToolMiddleware, ToolNext
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -357,12 +357,12 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     assert system_text(prompt_for_turn(call_build)) == system_text(
         prompt_for_turn(replace(chat_build, prompt=replace(chat_build.prompt, markdown=False))),
     )
-    assert chat_functions["add"].approval_type == (JOB_APPROVAL_TYPE if jobs else POLICY_CONFIRMATION_APPROVAL_TYPE)
+    assert chat_functions["add"].gate is (ToolGate.JOB if jobs else ToolGate.POLICY)
     add = call_functions["add"]
-    assert (add.requires_confirmation, add.external_execution, add.approval_type) == (False, False, None)
+    assert add.gate is None
     # Delegation runs the child turn directly in calls instead of pausing for chat's driver.
-    run_subagent = call_functions["run_subagent"]
-    assert (run_subagent.external_execution, run_subagent.external_execution_silent) == (False, False)
+    assert chat_functions["run_subagent"].gate is ToolGate.DELEGATION
+    assert call_functions["run_subagent"].gate is None
 
     started: list[str] = []
 
@@ -391,6 +391,14 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     assert refused.value == _TEXT_CHAT_REQUIRED_MESSAGE
     assert '"result": 2' in str(subtracted.value)
     assert started == ["subtract"]
+    # The call refuses only what needs text chat; its delegation goes on to run the child turn.
+    refuse = call_build.tool_policy[0]
+
+    async def delegate(_arguments: dict[str, object]) -> str:
+        return "delegated"
+
+    delegation = ToolCall(function=call_functions["run_subagent"], arguments={}, context=_CALL_CONTEXT)
+    assert await refuse(delegation, delegate) == "delegated"
 
 
 @pytest.mark.asyncio
@@ -979,7 +987,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     assert safe.value == "safe"
     for name in ("confirm", "policy_approval", "run_workflow"):
         refused = used[name]
-        assert refused.requires_confirmation is False
+        assert refused.gate is None
         assert refused.parameters == cached[name].parameters
         result = await run_tool_call(refused, {}, _CALL_CONTEXT, middleware=agent_tool_middleware(used_build))
         assert result.value == _TEXT_CHAT_REQUIRED_MESSAGE
@@ -1060,13 +1068,12 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     assert persisted_interruptions[-1]["original_status"] is RunStatus.error
 
     # Delegated children and script runs still hide these functions through the turn's runtime context.
-    tool_filter = cast("Callable[[Function], bool]", turn_contexts[0].tool_function_filter)
-    confirm_again = _function(lambda: "confirm", _EMPTY_SCHEMA, name="confirm")
-    confirm_again.requires_confirmation = True
-    assert tool_filter(_function(lambda: "safe", _EMPTY_SCHEMA, name="safe")) is True
-    assert tool_filter(confirm_again) is False
-    assert tool_filter(_function(lambda: "policy", _EMPTY_SCHEMA, name="policy_approval")) is False
-    assert tool_filter(_function(lambda: "workflow", _EMPTY_SCHEMA, name="run_workflow")) is False
+    tool_filter = turn_contexts[0].tool_function_filter
+    assert tool_filter is not None
+    assert tool_filter(cached["safe"]) is True
+    assert tool_filter(cached["confirm"]) is False
+    assert tool_filter(cached["policy_approval"]) is False
+    assert tool_filter(cached["run_workflow"]) is False
     assert contexts[0].tool_function_filter is None
     assert tooling.close is not None
     await tooling.close()
@@ -2081,11 +2088,9 @@ async def test_build_call_tools_hides_offered_functions_needing_text_chat(
     """Functions a build offers beside its filtered toolkits never enter the voice schema when they need text chat."""
     functions = {
         name: _function(lambda name=name: name, _EMPTY_SCHEMA, name=name)
-        for name in ("safe", "confirm", "external", "agno_approval", "policy_approval", "run_workflow")
+        for name in ("safe", "confirm", "policy_approval", "run_workflow")
     }
     functions["confirm"].requires_confirmation = True
-    functions["external"].external_execution = True
-    functions["agno_approval"].approval_type = "required"
     config = _config()
     config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="policy_approval", action="require_approval")],
