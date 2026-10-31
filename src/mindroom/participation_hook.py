@@ -73,7 +73,9 @@ def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMe
     conversation = [
         message
         for message in messages
-        if message.role in {"user", "assistant"} and not is_transient_context(message.content)
+        if message.role in {"user", "assistant"}
+        and message.add_to_agent_memory
+        and not is_transient_context(message.content)
     ][-8:]
     for message in conversation:
         if (

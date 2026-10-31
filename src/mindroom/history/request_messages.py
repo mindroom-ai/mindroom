@@ -31,9 +31,9 @@ class TurnMessages:
 
     ``context`` holds the Matrix messages the scope has not stored yet, sent before the prompt and stored with the run.
     ``transient`` holds turn context (``add_to_agent_memory=False``), such as memory results, that follows the prompt
-    and is stored with the run where it was sent. Later turns replay it there, so each request extends the previous
-    one whole: Codex's prompt cache reuses only a prompt an earlier request sent whole, and dropping a finished turn's
-    context capped every later turn's cache hit at the first message it had followed.
+    and is stored with the run where it was sent. Later turns replay it there outside a message limit, so each request
+    extends the previous one whole: Codex's prompt cache reuses only a prompt an earlier request sent whole, and
+    dropping a finished turn's context capped every later turn's cache hit at the first message it had followed.
     """
 
     prompt: Message

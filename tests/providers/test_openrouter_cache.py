@@ -200,8 +200,8 @@ async def test_the_stable_prompt_is_independent_of_the_turn_context(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_transient_context_after_the_prompt_takes_no_marker(tmp_path: Path) -> None:
-    """Per-request context must not take the breakpoint that later turns replay."""
+async def test_turn_context_after_the_prompt_takes_the_newest_marker(tmp_path: Path) -> None:
+    """Turn context replays where it was sent, so it takes the breakpoint the next turn's request reads."""
     transient = render_transient_context(["Current memory."])
     messages = [
         Message(role="system", content=_SHARED),
@@ -213,7 +213,7 @@ async def test_transient_context_after_the_prompt_takes_no_marker(tmp_path: Path
 
     assert payload["messages"][1:] == [
         {"role": "user", "content": [{"type": "text", "text": "Durable prompt.", "cache_control": _ONE_HOUR}]},
-        {"role": "user", "content": transient},
+        {"role": "user", "content": [{"type": "text", "text": transient, "cache_control": _ONE_HOUR}]},
     ]
 
 

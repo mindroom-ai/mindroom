@@ -418,7 +418,8 @@ def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, stat
 
     Replayed history never stores. The turn context the run's requests sent (``add_to_agent_memory=False``), such as
     memory results and the approval receipt, stores in place: a resume then sends the paused request unchanged, and
-    the next turn's request extends this run's last one whole, which append-only prompt caches such as Codex's need.
+    outside a message limit the next turn's request extends this run's last one whole, which append-only prompt caches
+    such as Codex's need.
     """
     record.messages = [message for message in messages if not message.from_history]
     record.status = status

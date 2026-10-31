@@ -38,6 +38,7 @@ With `none`, the agent gets no memories in its prompt, stores none after its tur
 Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript sent to `mem0`; the transcript file itself is kept as spoken.
 What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written.
 Conversation history is separate and stays in the session; see [History & Compaction](https://docs.mindroom.chat/configuration/history/).
+Memories retrieved for a reply stay in that conversation's history, so its later replies still see them, even after the memory is deleted, until the history is compacted.
 OpenClaw-compatible agents use this same backend selection.
 
 ## Memory Scopes

@@ -86,7 +86,8 @@ async def approval_receipt_hook(state: LoopState) -> RequestDecision:
     ids it names their calls, each as the request sends it. The receipt follows what the run's messages end with:
     a resumed run's answers to its decided calls, or a fresh run's input. It stays there for the run's later
     requests, so the system prompt and every message before it are what earlier requests sent. Like the turn's
-    memory results, it is turn context: the run stores it there, so its resume and later turns send it unchanged.
+    memory results, it is turn context: the run stores it there, so its resume and, outside a message limit, later
+    turns send it unchanged.
     """
     calls = take_unsent_receipt(state.run.run_id, partial(_sent_call_id, state.messages))
     if calls is not None:

@@ -108,8 +108,8 @@ class Message:
     A ``system`` message is a prompt, which history never replays and only a paused run stores. ``from_history``
     marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks turn context
     MindRoom sent to the model rather than conversation, such as memory results and the approval receipt: every run
-    stores it where it was sent, so a resume and every later turn send it again unchanged, while summaries and the
-    readers of what was said leave it out.
+    stores it where it was sent, so a resume and later turns send it again unchanged, except under a message limit,
+    while text summaries and the readers of what was said leave it out.
     """
 
     role: Literal["system", "user", "assistant", "tool"]

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from mindroom.hooks.enrichment import is_transient_context
 from mindroom.providers.claude_wire_blocks import TOOL_SEARCH_TOOL_TYPE, RebuiltBlock, as_dict
 
 __all__ = [
@@ -61,7 +60,7 @@ def _is_markable_block(block: object) -> bool:
     if block_type not in _MARKABLE_BLOCK_TYPES:
         return False
     if block_type == "text":
-        return bool(block_dict.get("text")) and not is_transient_context(block_dict.get("text"))
+        return bool(block_dict.get("text"))
     if block_type == "tool_result":
         return bool(block_dict.get("content"))
     return True

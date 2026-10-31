@@ -295,6 +295,27 @@ async def test_an_external_decider_answers_plain_text_conversations_without_a_mo
 
 
 @pytest.mark.asyncio
+async def test_an_external_decider_never_reads_a_turns_stored_context() -> None:
+    """An earlier turn's stored context, such as an approval receipt cut off from its call, is not room text."""
+    decider = AsyncMock(return_value=ParticipationDecision(action="respond", reason="Open question."))
+    model = ScriptedModel([answer("Useful answer")])
+    messages = [
+        Message(role="user", content="Approval receipt: operate was approved.", add_to_agent_memory=False),
+        Message(role="assistant", content="Done."),
+        Message(role="user", content="Can anyone explain this?"),
+    ]
+
+    await _reply(model, ParticipationGate(decider=decider), messages)
+
+    decider.assert_awaited_once_with(
+        (
+            JudgmentMessage(sender="assistant", text="Done."),
+            JudgmentMessage(sender="user", text="Can anyone explain this?"),
+        ),
+    )
+
+
+@pytest.mark.asyncio
 async def test_an_abstaining_decider_falls_back_to_the_model_decision() -> None:
     """When the backend abstains, the reply's own model decides as it would without a backend."""
     decider = AsyncMock(return_value=None)
