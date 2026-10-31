@@ -298,18 +298,29 @@ class TestInstanceStatusSync:
 
         assert db.row("instances", instance_id="7") == {"id": "1", "instance_id": "7", "status": "running"}
 
+    @pytest.mark.parametrize(
+        ("stored", "deployment", "written_meanwhile"),
+        [
+            # A provision claims a torn-down instance.
+            ("deprovisioned", None, "provisioning"),
+            # The owner stops an instance whose first boot just finished.
+            ("provisioning", _deployment(desired=1, ready=1), "stopped"),
+        ],
+    )
     @pytest.mark.parametrize("trigger", ["dashboard", "bulk"])
-    def test_claim_made_during_the_kubernetes_check_is_kept(self, trigger: str):
-        """A provision claiming a deprovisioned instance during the sync is not undone by the status the sync read."""
-        db = FakeSupabase({"instances": [{"id": "1", "instance_id": "7", "status": "deprovisioned"}]})
-        kubectl = _fake_kubectl({})
+    def test_status_written_during_the_kubernetes_check_is_kept(
+        self, trigger: str, stored: str, deployment: dict[str, Any] | None, written_meanwhile: str
+    ):
+        """A status another writer records while the sync waits on Kubernetes is neither undone nor reported."""
+        db = FakeSupabase({"instances": [{"id": "1", "instance_id": "7", "status": stored}]})
+        kubectl = _fake_kubectl({} if deployment is None else {"7": deployment})
 
-        async def claim_during_check(cmd: list[str], **kwargs: Any) -> tuple[int, str, str]:  # noqa: ANN401
-            db.row("instances", instance_id="7")["status"] = "provisioning"
+        async def write_during_check(cmd: list[str], **kwargs: Any) -> tuple[int, str, str]:  # noqa: ANN401
+            db.row("instances", instance_id="7")["status"] = written_meanwhile
             return await kubectl(cmd, **kwargs)
 
         with (
-            patch("backend.k8s.run_cmd", claim_during_check),
+            patch("backend.k8s.run_cmd", write_during_check),
             patch("backend.routes.instances.ensure_supabase", return_value=db),
         ):
             if trigger == "dashboard":
@@ -318,7 +329,7 @@ class TestInstanceStatusSync:
                 result = asyncio.run(provisioner_service.sync_instances(db))
                 assert result == {"total": 1, "synced": 0, "errors": 0, "updates": []}
 
-        assert db.row("instances", instance_id="7")["status"] == "provisioning"
+        assert db.row("instances", instance_id="7")["status"] == written_meanwhile
 
     def test_bulk_sync_reports_each_recorded_change(self):
         """The admin and system sync report the changes they recorded and count the instances they could not check."""
