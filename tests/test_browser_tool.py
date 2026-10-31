@@ -3532,6 +3532,67 @@ async def test_a_toolkit_with_other_launch_settings_restarts_the_shared_profile(
 
 
 @pytest.mark.asyncio
+async def test_a_toolkit_reads_its_launch_settings_once_however_many_calls_it_makes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ignored proxy variable is reported once for the toolkit, not again on every browser call."""
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("auto_proxy", "http://proxy.example/wpad.dat")
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    tool = BrowserTools(paths)
+
+    with capture_logs() as logs:
+        await tool.browser("start")
+        await tool.browser("tabs")
+        await tool.browser("tabs")
+
+    assert [entry["variable"] for entry in logs if entry["event"] == "browser_proxy_variable_ignored"] == [
+        "auto_proxy",
+    ]
+    assert len(adapters) == 1
+    await tool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_waits_for_another_toolkits_call_on_the_shared_browser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolkit that must restart the shared profile waits until a call another toolkit is making with it ends."""
+    _clear_proxy_env(monkeypatch)
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    current = BrowserTools(paths)
+    changed = BrowserTools(paths, allow_private_networks=True)
+    await current.browser("start")
+    entered, release = asyncio.Event(), asyncio.Event()
+    list_tabs = current._tabs_payload
+
+    async def slow_tabs(profile_name: str, state: object) -> dict[str, object]:
+        entered.set()
+        await release.wait()
+        return await list_tabs(profile_name, state)
+
+    # Stands in for a page operation still running when another reply's call needs a restart.
+    monkeypatch.setattr(current, "_tabs_payload", slow_tabs)
+    in_flight = asyncio.create_task(current.browser("tabs"))
+    await entered.wait()
+    restarting = asyncio.create_task(changed.browser("tabs"))
+    await asyncio.wait({restarting}, timeout=0.2)
+
+    assert not restarting.done()
+    assert adapters[0].live_resources == {"driver", "context"}
+    release.set()
+    assert json.loads(await in_flight)["action"] == "tabs"
+    await restarting
+    assert len(adapters) == 2
+    assert not adapters[0].live_resources
+    await changed.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("headed", [False, True])
 async def test_worker_bound_toolkits_keep_their_own_browser_beside_the_shared_primary_one(
     tmp_path: Path,

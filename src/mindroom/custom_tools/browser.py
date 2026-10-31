@@ -318,10 +318,15 @@ class _BrowserProfileState:
 
 @dataclass
 class _BrowserSession:
-    """The running profiles of one profile root and the locks every toolkit using them shares."""
+    """The running profiles of one profile root and the locks every toolkit using them shares.
+
+    Host calls take turns through ``call_lock``, as a worker's calls do, so a restart or stop never closes a page
+    another call is still using.
+    """
 
     profiles: dict[str, _BrowserProfileState] = field(default_factory=dict)
     startup_cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    call_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -613,6 +618,7 @@ class BrowserTools(Toolkit):
         self._worker_workspace: Path | None = None
         self._worker_process_env: dict[str, str] | None = None
         self._worker_session = _BrowserSession()
+        self._launch_settings_by_profile: dict[str, tuple[dict[str, Any], BrowserEgress, bool]] = {}
         self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
         # Keep the caller's spelling: uploads open from it without following links, so a root swapped for a link is refused.
         self._workspace_root = tool_output_workspace_root
@@ -879,149 +885,151 @@ class BrowserTools(Toolkit):
         if returnAttachment:
             msg = "returnAttachment requires target=desktop."
             raise ValueError(msg)
-        profile_name = _clean_str(profile) or _DEFAULT_PROFILE
+        # Host calls take turns on the shared browser, as a worker's do, so none closes a page another is using.
+        async with self._session.call_lock:
+            profile_name = _clean_str(profile) or _DEFAULT_PROFILE
 
-        if action == "status":
-            return json.dumps(await self._status_payload(profile_name), sort_keys=True)
-        if action == "start":
-            state = await self._ensure_profile(profile_name)
-            payload = await self._profile_status(profile_name, state)
-            payload["action"] = "start"
-            return json.dumps(payload, sort_keys=True)
-        if action == "stop":
-            await self._stop_profile(profile_name)
-            return json.dumps({"action": "stop", "profile": profile_name, "status": "ok"}, sort_keys=True)
-        if action == "profiles":
-            return json.dumps(await self._profiles_payload(profile_name), sort_keys=True)
-        if action == "tabs":
-            state = await self._ensure_profile(profile_name)
-            return json.dumps(await self._tabs_payload(profile_name, state), sort_keys=True)
-        if action == "open":
-            target_url = _clean_str(targetUrl)
-            if paths:
-                if target_url is not None or len(paths) != 1:
-                    msg = "action=open takes targetUrl or one HTML file in paths."
+            if action == "status":
+                return json.dumps(await self._status_payload(profile_name), sort_keys=True)
+            if action == "start":
+                state = await self._ensure_profile(profile_name)
+                payload = await self._profile_status(profile_name, state)
+                payload["action"] = "start"
+                return json.dumps(payload, sort_keys=True)
+            if action == "stop":
+                await self._stop_profile(profile_name)
+                return json.dumps({"action": "stop", "profile": profile_name, "status": "ok"}, sort_keys=True)
+            if action == "profiles":
+                return json.dumps(await self._profiles_payload(profile_name), sort_keys=True)
+            if action == "tabs":
+                state = await self._ensure_profile(profile_name)
+                return json.dumps(await self._tabs_payload(profile_name, state), sort_keys=True)
+            if action == "open":
+                target_url = _clean_str(targetUrl)
+                if paths:
+                    if target_url is not None or len(paths) != 1:
+                        msg = "action=open takes targetUrl or one HTML file in paths."
+                        raise ValueError(msg)
+                    page_html = await asyncio.to_thread(self._read_page_file, paths[0])
+                    # The page shows as about:blank, so the result names the file it holds.
+                    opened = await self._open_tab(profile_name, html=page_html)
+                    return json.dumps({**opened, "path": paths[0]}, sort_keys=True)
+                if target_url is None:
+                    msg = "targetUrl required for action=open"
                     raise ValueError(msg)
-                page_html = await asyncio.to_thread(self._read_page_file, paths[0])
-                # The page shows as about:blank, so the result names the file it holds.
-                opened = await self._open_tab(profile_name, html=page_html)
-                return json.dumps({**opened, "path": paths[0]}, sort_keys=True)
-            if target_url is None:
-                msg = "targetUrl required for action=open"
-                raise ValueError(msg)
-            target_url = await run_browser_tool_url_check(
-                validate_server_fetch_url,
-                target_url,
-                allow_private_networks=self._allow_private_networks,
-                allow_loopback=self._worker_display is not None,
-            )
-            return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
-        if action == "focus":
-            target_id = _clean_str(targetId)
-            if target_id is None:
-                msg = "targetId required for action=focus"
-                raise ValueError(msg)
-            return json.dumps(await self._focus_tab(profile_name, target_id), sort_keys=True)
-        if action == "close":
-            return json.dumps(await self._close_tab(profile_name, _clean_str(targetId)), sort_keys=True)
-        if action == "snapshot":
-            return json.dumps(
-                await self._snapshot(
+                target_url = await run_browser_tool_url_check(
+                    validate_server_fetch_url,
+                    target_url,
+                    allow_private_networks=self._allow_private_networks,
+                    allow_loopback=self._worker_display is not None,
+                )
+                return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
+            if action == "focus":
+                target_id = _clean_str(targetId)
+                if target_id is None:
+                    msg = "targetId required for action=focus"
+                    raise ValueError(msg)
+                return json.dumps(await self._focus_tab(profile_name, target_id), sort_keys=True)
+            if action == "close":
+                return json.dumps(await self._close_tab(profile_name, _clean_str(targetId)), sort_keys=True)
+            if action == "snapshot":
+                return json.dumps(
+                    await self._snapshot(
+                        profile_name=profile_name,
+                        target_id=_clean_str(targetId),
+                        snapshot_format=_clean_str(snapshotFormat),
+                        limit=limit,
+                        max_chars=maxChars,
+                        mode=_clean_str(mode),
+                        refs_mode=_clean_str(refs),
+                        interactive=interactive,
+                        compact=compact,
+                        depth=depth,
+                        selector=_clean_str(selector),
+                    ),
+                    sort_keys=True,
+                )
+            if action == "screenshot":
+                screenshot, image_bytes = await self._screenshot(
                     profile_name=profile_name,
                     target_id=_clean_str(targetId),
-                    snapshot_format=_clean_str(snapshotFormat),
-                    limit=limit,
-                    max_chars=maxChars,
-                    mode=_clean_str(mode),
-                    refs_mode=_clean_str(refs),
-                    interactive=interactive,
-                    compact=compact,
-                    depth=depth,
-                    selector=_clean_str(selector),
-                ),
-                sort_keys=True,
-            )
-        if action == "screenshot":
-            screenshot, image_bytes = await self._screenshot(
-                profile_name=profile_name,
-                target_id=_clean_str(targetId),
-                full_page=bool(fullPage),
-                ref=_clean_str(ref),
-                element=_clean_str(element),
-                image_type=_clean_str(type),
-            )
-            if saveOnly:
-                return json.dumps(screenshot, sort_keys=True)
-            result = await asyncio.to_thread(image_result, image_bytes, metadata=screenshot)
-            return await asyncio.to_thread(finalize_tool_media, result)
-        if action == "navigate":
-            target_url = _clean_str(targetUrl)
-            if target_url is None:
-                msg = "targetUrl required for action=navigate"
-                raise ValueError(msg)
-            target_url = await run_browser_tool_url_check(
-                validate_server_fetch_url,
-                target_url,
-                allow_private_networks=self._allow_private_networks,
-                allow_loopback=self._worker_display is not None,
-            )
-            return json.dumps(
-                await self._navigate(profile_name, target_url, _clean_str(targetId)),
-                sort_keys=True,
-            )
-        if action == "console":
-            return json.dumps(
-                await self._console(
-                    profile_name=profile_name,
-                    target_id=_clean_str(targetId),
-                    level=_clean_str(level),
-                ),
-                sort_keys=True,
-            )
-        if action == "pdf":
-            return json.dumps(await self._pdf(profile_name, _clean_str(targetId)), sort_keys=True)
-        if action == "upload":
-            if not paths:
-                msg = "paths required for action=upload"
-                raise ValueError(msg)
-            return json.dumps(
-                await self._upload(
-                    profile_name=profile_name,
-                    target_id=_clean_str(targetId),
-                    paths=paths,
+                    full_page=bool(fullPage),
                     ref=_clean_str(ref),
-                    input_ref=_clean_str(inputRef),
                     element=_clean_str(element),
-                    timeout_ms=timeoutMs,
-                ),
-                sort_keys=True,
-            )
-        if action == "dialog":
-            return json.dumps(
-                await self._dialog(
-                    profile_name=profile_name,
-                    target_id=_clean_str(targetId),
-                    accept=bool(accept),
-                    prompt_text=_clean_str(promptText),
-                    timeout_ms=timeoutMs,
-                ),
-                sort_keys=True,
-            )
-        if action == "act":
-            if request is None:
-                msg = "request required for action=act"
-                raise ValueError(msg)
-            return json.dumps(
-                await self._act(
-                    profile_name=profile_name,
-                    request=request,
-                    fallback_target_id=_clean_str(targetId),
-                ),
-                sort_keys=True,
-            )
+                    image_type=_clean_str(type),
+                )
+                if saveOnly:
+                    return json.dumps(screenshot, sort_keys=True)
+                result = await asyncio.to_thread(image_result, image_bytes, metadata=screenshot)
+                return await asyncio.to_thread(finalize_tool_media, result)
+            if action == "navigate":
+                target_url = _clean_str(targetUrl)
+                if target_url is None:
+                    msg = "targetUrl required for action=navigate"
+                    raise ValueError(msg)
+                target_url = await run_browser_tool_url_check(
+                    validate_server_fetch_url,
+                    target_url,
+                    allow_private_networks=self._allow_private_networks,
+                    allow_loopback=self._worker_display is not None,
+                )
+                return json.dumps(
+                    await self._navigate(profile_name, target_url, _clean_str(targetId)),
+                    sort_keys=True,
+                )
+            if action == "console":
+                return json.dumps(
+                    await self._console(
+                        profile_name=profile_name,
+                        target_id=_clean_str(targetId),
+                        level=_clean_str(level),
+                    ),
+                    sort_keys=True,
+                )
+            if action == "pdf":
+                return json.dumps(await self._pdf(profile_name, _clean_str(targetId)), sort_keys=True)
+            if action == "upload":
+                if not paths:
+                    msg = "paths required for action=upload"
+                    raise ValueError(msg)
+                return json.dumps(
+                    await self._upload(
+                        profile_name=profile_name,
+                        target_id=_clean_str(targetId),
+                        paths=paths,
+                        ref=_clean_str(ref),
+                        input_ref=_clean_str(inputRef),
+                        element=_clean_str(element),
+                        timeout_ms=timeoutMs,
+                    ),
+                    sort_keys=True,
+                )
+            if action == "dialog":
+                return json.dumps(
+                    await self._dialog(
+                        profile_name=profile_name,
+                        target_id=_clean_str(targetId),
+                        accept=bool(accept),
+                        prompt_text=_clean_str(promptText),
+                        timeout_ms=timeoutMs,
+                    ),
+                    sort_keys=True,
+                )
+            if action == "act":
+                if request is None:
+                    msg = "request required for action=act"
+                    raise ValueError(msg)
+                return json.dumps(
+                    await self._act(
+                        profile_name=profile_name,
+                        request=request,
+                        fallback_target_id=_clean_str(targetId),
+                    ),
+                    sort_keys=True,
+                )
 
-        msg = f"Unhandled action: {action}"
-        raise ValueError(msg)
+            msg = f"Unhandled action: {action}"
+            raise ValueError(msg)
 
     def _resolve_target(self, *, target: str | None, node: str | None) -> str:
         if node is not None:
@@ -1664,15 +1672,18 @@ class BrowserTools(Toolkit):
         payload.update(extra)
         return payload
 
-    async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:  # noqa: C901, PLR0915 - one startup ownership boundary
-        session = self._session
-        async with session.lock:
-            allow_private_networks = self._allow_private_networks
-            allow_loopback = self._worker_display is not None
-            user_data_dir = _profile_dir(self._profiles_root, profile_name)
+    def _launch_settings(self, profile_name: str) -> tuple[dict[str, Any], BrowserEgress, bool]:
+        """Return the Chromium launch options, relay egress, and private-network policy that start ``profile_name``.
+
+        A worker binds the toolkit before it starts any profile, so these are fixed from the first start on and worked
+        out once per profile, which also logs an ignored proxy setting once rather than on every call. The options carry
+        no environment yet, which a worker runtime owns and the primary inherits.
+        """
+        settings = self._launch_settings_by_profile.get(profile_name)
+        if settings is None:
             launch_kwargs = _persistent_launch_kwargs(
                 self._runtime_paths,
-                user_data_dir,
+                _profile_dir(self._profiles_root, profile_name),
                 headless=self._worker_display is None,
                 executable_override=(
                     self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") or COMPUTER_BROWSER_EXECUTABLE
@@ -1687,14 +1698,23 @@ class BrowserTools(Toolkit):
                 egress_control=self._worker_workspace is not None
                 or self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
             )
-            # Taken before the options gain an environment, which a worker runtime owns and the primary inherits.
-            launch_settings = (dict(launch_kwargs), egress, allow_private_networks)
+            settings = (launch_kwargs, egress, self._allow_private_networks)
+            self._launch_settings_by_profile[profile_name] = settings
+        return settings
+
+    async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:  # noqa: C901, PLR0915 - one startup ownership boundary
+        session = self._session
+        async with session.lock:
+            launch_settings = self._launch_settings(profile_name)
+            base_launch_kwargs, egress, allow_private_networks = launch_settings
+            allow_loopback = self._worker_display is not None
             state = session.profiles.get(profile_name)
             if state is not None:
                 # A toolkit sharing this session may have launched it under settings the operator has since changed.
                 if not state.cleanup_required and state.launch_settings == launch_settings:
                     return state
                 await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
+            launch_kwargs = dict(base_launch_kwargs)
             if self._worker_process_env is not None:
                 launch_kwargs["env"] = self._worker_process_env
             if self._worker_display is not None:
@@ -1725,7 +1745,7 @@ class BrowserTools(Toolkit):
                 await destination_proxy.start()
                 launch_kwargs["proxy"] = {"server": destination_proxy.endpoint, "bypass": RELAY_ONLY_PROXY_BYPASS}
                 _give_chromium_a_short_tmpdir(launch_kwargs)
-                clear_stale_singleton_locks(user_data_dir)
+                clear_stale_singleton_locks(Path(base_launch_kwargs["user_data_dir"]))
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
                 await context.route(
                     "**/*",
