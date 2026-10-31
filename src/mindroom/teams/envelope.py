@@ -65,7 +65,6 @@ from mindroom.teams.members import (
     ResolvedExactTeamMembers,
     build_team_spec,
     materialized_team_label,
-    requested_team_agent_names,
     resolve_team_members,
 )
 from mindroom.teams.presentation import (
@@ -716,11 +715,10 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | Fail
         msg = "team response turns require ResponseTurnContext.session_id"
         raise ValueError(msg)
     config = orchestrator.config
-    requested_agent_names = requested_team_agent_names(spec.agent_names)
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
         team_members = resolve_team_members(
-            requested_agent_names,
+            spec.agent_names,
             orchestrator,
             ctx.execution_identity,
             config=config,
