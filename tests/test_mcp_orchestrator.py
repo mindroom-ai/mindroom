@@ -404,7 +404,6 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
     )
 
     with (
-        patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
         patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
@@ -735,7 +734,7 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         call_order.append("bind")
 
     with (
-        patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+        patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
         patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
@@ -953,7 +952,6 @@ async def test_update_config_removes_and_stops_entities_before_publishing_and_sy
         _runtime_paths(tmp_path),
     )
     persist_entity_accounts(current_config, orchestrator.runtime_paths)
-    persist_entity_accounts(updated_config, orchestrator.runtime_paths)
     events: list[str] = []
 
     def record(event: str) -> None:

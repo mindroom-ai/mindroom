@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ScheduledApprovalArmState
-    from mindroom.hooks import HookMatrixAdmin, HookRegistryLifetime
+    from mindroom.hooks import HookRegistryLifetime
     from mindroom.scheduling.recurring_schedule import RecurringOccurrence
     from mindroom.scheduling.tasks import ScheduledTaskRecord, ScheduledWorkflow
 
@@ -76,8 +76,6 @@ class ScheduledTaskRuntime:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config]
     bots: Callable[[], Mapping[str, AgentBot]]
-    # The router-backed admin helper that schedule hooks receive.
-    matrix_admin: Callable[[], HookMatrixAdmin | None]
     # The hook registry schedule:fired hooks run under; runners outlive their owners' restarts, so it ends with this
     # runtime's stop rather than with any bot generation.
     hooks: HookRegistryLifetime
@@ -482,7 +480,7 @@ class _TaskRunner:
                 bot.conversation_reader,
                 self.runtime.hooks,
                 self.task_id,
-                self.runtime.matrix_admin(),
+                bot.hook_context.matrix_admin(),
                 occurrence=occurrence,
             )
 

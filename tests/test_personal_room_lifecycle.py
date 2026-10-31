@@ -15,6 +15,7 @@ from structlog.testing import capture_logs
 from mindroom import personal_room_lifecycle
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
+from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.personal_rooms import (
     PersonalRoomRosterMismatchError,
@@ -77,7 +78,7 @@ def coordination(tmp_path: Path) -> Coordination:
     owner = Mock(spec=PersonalRoomService)
     local = Mock(spec=PersonalRoomService)
     lookup = Mock(return_value=PersonalRoomTarget(owner, first_sync_complete=True))
-    lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup)
+    lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup, Mock())
     return Coordination(lifecycle, owner, local, lookup)
 
 
@@ -89,11 +90,24 @@ class TemplateCoordination:
     target: Mock
     lookup: Mock
     provision: AsyncMock
+    config_reload: Mock
+
+    def provisioned(self) -> list[tuple[str, str, str, str]]:
+        """Return each provisioning request as (template, owner, joining account, source room)."""
+        return [
+            (
+                awaited.kwargs["template"],
+                awaited.kwargs["user_id"],
+                awaited.kwargs["source_user_id"],
+                awaited.kwargs["source_room_id"],
+            )
+            for awaited in self.provision.await_args_list
+        ]
 
 
 @pytest.fixture
-def template_coordination(tmp_path: Path) -> TemplateCoordination:
-    """Wire a real coordinator to a provisioning callback and alice's own agent, once it exists."""
+def template_coordination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TemplateCoordination:
+    """Wire a real coordinator to stub personal-agent registration and alice's own agent, once it exists."""
     paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
@@ -106,22 +120,24 @@ def template_coordination(tmp_path: Path) -> TemplateCoordination:
                 "!lobby:localhost",
             ),
         ),
+        get_displayname=AsyncMock(return_value=nio.ProfileGetDisplayNameResponse("Alice")),
     )
     runtime = SimpleNamespace(config=Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths), client=client)
     target = Mock(spec=PersonalRoomService)
     lookup = Mock(
         side_effect=lambda name: PersonalRoomTarget(target, first_sync_complete=True) if name == "mind_alice" else None,
     )
-    provision = AsyncMock()
+    provision = AsyncMock(return_value=("mind_alice", True))
+    monkeypatch.setattr(personal_room_lifecycle, "provision_personal_agent", provision)
     lifecycle = PersonalRoomLifecycle(
         "router",
         runtime,
         paths,
         Mock(spec=PersonalRoomService),
         lookup,
-        provision,
+        config_reload := Mock(status=ConfigReloadStatus(status="applied")),
     )
-    return TemplateCoordination(lifecycle, target, lookup, provision)
+    return TemplateCoordination(lifecycle, target, lookup, provision, config_reload)
 
 
 def add_alices_agent(lifecycle: PersonalRoomLifecycle, source_room_id: str = "!lobby:localhost") -> None:
@@ -192,6 +208,7 @@ def lobby_rejoin() -> nio.RoomMemberEvent:
 
 
 LOBBY = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
+_ALICE_JOIN = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
 
 
 @pytest.mark.asyncio
@@ -476,8 +493,7 @@ async def test_live_triggers_ignore_reconciliation_backoff(coordination: Coordin
     await lifecycle._reconcile()
     assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
     await lifecycle.member_event(LOBBY, lobby_rejoin())
-    join = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
-    await lifecycle.baseline_join(join)
+    await lifecycle.baseline_join(_ALICE_JOIN)
     assert coordination.owner.ensure.await_count == 4
     clock.now += 1
     await lifecycle._reconcile()
@@ -967,18 +983,12 @@ async def test_template_join_provisions_and_settles_without_holding_the_lane(
 ) -> None:
     """A lobby join creates the user's own agent and settles, so the lobby keeps answering while it starts."""
     lifecycle = template_coordination.lifecycle
-    join = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
     with capture_logs() as logs:
         if trigger == "first_join":
-            await lifecycle.baseline_join(join)
+            await lifecycle.baseline_join(_ALICE_JOIN)
         else:
             await lifecycle.member_event(LOBBY, lobby_rejoin())
-    template_coordination.provision.assert_awaited_once_with(
-        "mind",
-        "@alice:localhost",
-        "@alice:localhost",
-        "!lobby:localhost",
-    )
+    assert template_coordination.provisioned() == [("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost")]
     assert call("mind") not in template_coordination.lookup.call_args_list
     assert lifecycle._retry_candidates == {("@alice:localhost", "!lobby:localhost"): trigger == "rejoin"}
     assert [(entry["event"], entry["log_level"]) for entry in logs] == [("Personal agent is starting", "info")]
@@ -1122,7 +1132,7 @@ async def test_template_bridge_alias_onboards_onto_its_persons_agent(
     lifecycle.runtime.config = Config.validate_with_runtime(data, paths)
     alias = "@bridge_alice:localhost"
     await lifecycle.baseline_join(RoomMemberJoin(LOBBY.room_id, "$join", alias, alias, None, None, "join", None))
-    template_coordination.provision.assert_awaited_once_with("mind", "@alice:localhost", alias, "!lobby:localhost")
+    assert template_coordination.provisioned() == [("mind", "@alice:localhost", alias, "!lobby:localhost")]
 
     _append_personal_agent_roster_entry(
         paths,
@@ -1173,12 +1183,7 @@ async def test_one_users_provisioning_failure_does_not_stop_another_in_the_same_
     lifecycle._queue_retry(("@aaron:localhost", "!lobby:localhost"), reinvite_departed_owner=False)
     template_coordination.provision.side_effect = RuntimeError("Failed to register personal agent account")
     await lifecycle._reconcile()
-    template_coordination.provision.assert_awaited_once_with(
-        "mind",
-        "@aaron:localhost",
-        "@aaron:localhost",
-        "!lobby:localhost",
-    )
+    assert template_coordination.provisioned() == [("mind", "@aaron:localhost", "@aaron:localhost", "!lobby:localhost")]
     template_coordination.target.ensure.assert_awaited_once_with(
         "@alice:localhost",
         "!lobby:localhost",
@@ -1215,3 +1220,130 @@ async def test_target_ready_during_a_pass_starts_the_next_pass_at_once(
     assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
     assert clock.now == 1000.0
     target.ensure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "display_name"),
+    [
+        (nio.ProfileGetDisplayNameResponse("Alice A."), "Alice A."),
+        (nio.ProfileGetDisplayNameError("missing", "M_NOT_FOUND"), None),
+    ],
+)
+async def test_a_joining_users_agent_is_provisioned_under_their_display_name_and_reloaded(
+    template_coordination: TemplateCoordination,
+    profile: object,
+    display_name: str | None,
+) -> None:
+    """A lobby join with a template target creates that user's agent under their display name, then reloads."""
+    lifecycle = template_coordination.lifecycle
+    lifecycle.runtime.client.get_displayname = AsyncMock(return_value=profile)
+
+    await lifecycle.baseline_join(_ALICE_JOIN)
+
+    lifecycle.runtime.client.get_displayname.assert_awaited_once_with("@alice:localhost")
+    template_coordination.provision.assert_awaited_once_with(
+        lifecycle.runtime.config,
+        lifecycle.runtime_paths,
+        template="mind",
+        user_id="@alice:localhost",
+        user_display_name=display_name,
+        source_user_id="@alice:localhost",
+        source_room_id="!lobby:localhost",
+    )
+    template_coordination.config_reload.request_reload.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changed", "status", "reloads"),
+    [(True, "pending", True), (False, "pending", False), (False, "applied", True), (False, "failed", True)],
+)
+async def test_reprovisioning_never_supersedes_a_queued_reload(
+    template_coordination: TemplateCoordination,
+    changed: bool,
+    status: str,
+    reloads: bool,
+) -> None:
+    """An agent whose roster entry already existed asks for a reload only when none is queued, so retries cannot restart its wait."""
+    template_coordination.provision.return_value = ("mind_alice", changed)
+    template_coordination.config_reload.status = ConfigReloadStatus(status=status)
+
+    await template_coordination.lifecycle.baseline_join(_ALICE_JOIN)
+
+    assert template_coordination.config_reload.request_reload.called is reloads
+
+
+@pytest.mark.asyncio
+async def test_one_users_agent_is_provisioned_one_call_at_a_time(template_coordination: TemplateCoordination) -> None:
+    """A second call for a user being provisioned returns at once instead of registering again; other users proceed."""
+    lifecycle = template_coordination.lifecycle
+    release = asyncio.Event()
+    users: list[str] = []
+
+    async def provision(*_args: object, user_id: str, **_kwargs: object) -> tuple[str, bool]:
+        users.append(user_id)
+        await release.wait()
+        return "mind_x", True
+
+    template_coordination.provision.side_effect = provision
+    first = asyncio.create_task(
+        lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@alice:localhost",
+            source_user_id="@alice:localhost",
+            source_room_id="!lobby:localhost",
+        ),
+    )
+    await asyncio.sleep(0)
+    await asyncio.wait_for(
+        lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@alice:localhost",
+            source_user_id="@bridge_alice:localhost",
+            source_room_id="!other:localhost",
+        ),
+        timeout=1,
+    )
+    other = asyncio.create_task(
+        lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@bob:localhost",
+            source_user_id="@bob:localhost",
+            source_room_id="!lobby:localhost",
+        ),
+    )
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(first, other)
+
+    assert users == ["@alice:localhost", "@bob:localhost"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", [RuntimeError("registration failed"), asyncio.CancelledError()])
+async def test_an_interrupted_provisioning_lets_the_next_request_for_that_user_run(
+    template_coordination: TemplateCoordination,
+    interruption: BaseException,
+) -> None:
+    """A provisioning call that fails or is cancelled requests no reload and no longer blocks that user's next request."""
+    lifecycle = template_coordination.lifecycle
+    template_coordination.provision.side_effect = [interruption, ("mind_alice", True)]
+
+    with pytest.raises(type(interruption)):
+        await lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@alice:localhost",
+            source_user_id="@alice:localhost",
+            source_room_id="!lobby:localhost",
+        )
+    template_coordination.config_reload.request_reload.assert_not_called()
+    await lifecycle._provision_personal_agent(
+        "mind",
+        user_id="@alice:localhost",
+        source_user_id="@alice:localhost",
+        source_room_id="!lobby:localhost",
+    )
+
+    assert template_coordination.provision.await_count == 2
+    template_coordination.config_reload.request_reload.assert_called_once_with()

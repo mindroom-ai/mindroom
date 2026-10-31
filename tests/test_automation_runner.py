@@ -34,7 +34,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.hooks.sender import send_hook_message
+from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import ThreadTagsError
@@ -69,7 +69,12 @@ class _Bot:
     sent: list[dict[str, Any]] = field(default_factory=list)
     client: Any = field(default_factory=lambda: MagicMock(user_id="@mindroom_mind:example.test"))
 
-    async def hook_send_message(
+    @property
+    def hook_context(self) -> _Bot:
+        """The bot's hook support, whose sender is this recorder."""
+        return self
+
+    async def send_message(
         self,
         room_id: str,
         body: str,
@@ -506,30 +511,12 @@ async def test_a_notice_echoing_an_agent_mention_is_posted_with_mentions_ignored
         msg = "ask @mind about MEMORY.md"
         raise ValueError(msg)
 
-    async def post(
-        room_id: str,
-        body: str,
-        thread_id: str | None,
-        source_hook: str,
-        extra_content: dict[str, Any] | None = None,
-    ) -> str | None:
-        """Post through the real hook sender, as the agent bot does."""
-        reader = AsyncMock()
-        return await send_hook_message(
-            bot.client,
-            config,
-            paths,
-            room_id,
-            body,
-            thread_id,
-            source_hook,
-            extra_content,
-            conversation_reader=reader,
-        )
+    # Post through the real hook sender, as the agent bot does.
+    post = build_hook_message_sender(bot.client, config, paths, conversation_reader=AsyncMock())
 
     _use_check(runner, unreadable)
     with (
-        patch.object(bot, "hook_send_message", new=post),
+        patch.object(bot, "send_message", new=post),
         patch(
             "mindroom.hooks.sender.send_matrix_message",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),

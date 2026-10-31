@@ -199,7 +199,6 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 @patch("mindroom.response_attempt.is_user_online")
 @patch("mindroom.bot.login_agent_owned_session")
-@patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock())
 async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     mock_login: AsyncMock,
     mock_is_user_online: AsyncMock,
@@ -306,7 +305,6 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     # Patch create_bot_for_entity to create bots with proper user_ids
     with (
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
-        patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
     ):
 
         def create_bot_side_effect(

@@ -12,6 +12,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import SemanticConsumer
+from mindroom.hooks import EVENT_REACTION_RECEIVED, ReactionReceivedContext, emit
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -19,10 +20,11 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.commands.config_confirmation import ConfigConfirmationContext
     from mindroom.constants import RuntimePaths
+    from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.hooks import HookContextSupport
     from mindroom.ingress_validation import IngressValidator
     from mindroom.journal_dispatch import JournalDispatcher
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
@@ -39,12 +41,12 @@ class ReactionDispatcherDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     journal_dispatcher: JournalDispatcher
-    agent_reply_memberships: AgentReplyMembershipIndex
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., IngressTicket]
     enqueue_interactive_selection: Callable[..., Awaitable[None]]
-    emit_reaction_received_hooks: Callable[..., Awaitable[None]]
+    hook_context: HookContextSupport
+    resolver: ConversationResolver
     config_confirmation: ConfigConfirmationContext
 
 
@@ -60,6 +62,39 @@ class ReactionDispatcher:
             msg = "Matrix client is not ready for reaction dispatch"
             raise RuntimeError(msg)
         return client
+
+    async def _emit_reaction_hooks(self, room_id: str, event: nio.ReactionEvent) -> None:
+        """Emit reaction:received for a reaction no built-in consumer took, with its target's thread when known."""
+        if not self.deps.hook_context.registry.has_hooks(EVENT_REACTION_RECEIVED):
+            return
+
+        target_event_id = event.reacts_to.strip()
+        thread_id: str | None = None
+        if target_event_id:
+            try:
+                thread_id = await self.deps.resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort(
+                    room_id,
+                    target_event_id,
+                )
+            except Exception as exc:
+                self.deps.logger.debug(
+                    "Failed to resolve reaction target thread for hook context",
+                    room_id=room_id,
+                    target_event_id=target_event_id,
+                    error=str(exc),
+                )
+
+        context = ReactionReceivedContext(
+            **self.deps.hook_context.base_kwargs(EVENT_REACTION_RECEIVED, event.event_id),
+            room_id=room_id,
+            event_id=event.event_id,
+            sender_id=event.sender,
+            reaction_key=event.key,
+            target_event_id=event.reacts_to,
+            thread_id=thread_id,
+        )
+        # The registry live after the lookup: a plugin reload during it replaces the hooks that run.
+        await emit(self.deps.hook_context.registry, EVENT_REACTION_RECEIVED, context)
 
     async def _maybe_handle_approval_reaction(
         self,
@@ -90,7 +125,7 @@ class ReactionDispatcher:
             status="approved",
             reason=None,
             before_consume=None if approval_claimed else claim_approval_reaction,
-            membership_index=self.deps.agent_reply_memberships,
+            membership_index=self.deps.runtime.agent_reply_memberships,
         )
         return approval_claimed or approval_handled
 
@@ -200,11 +235,7 @@ class ReactionDispatcher:
                 await self.deps.journal_dispatcher.claim_semantic_consumer(
                     SemanticConsumer.REACTION_HOOKS,
                 )
-                await self.deps.emit_reaction_received_hooks(
-                    room_id=room.room_id,
-                    event=event,
-                    correlation_id=event.event_id,
-                )
+                await self._emit_reaction_hooks(room.room_id, event)
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if await self._maybe_handle_stop_reaction(room, event, consumer, requester_user_id):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
@@ -313,11 +344,7 @@ class ReactionDispatcher:
                     sender=event.sender,
                 )
                 return
-            await self.deps.emit_reaction_received_hooks(
-                room_id=room.room_id,
-                event=event,
-                correlation_id=event.event_id,
-            )
+            await self._emit_reaction_hooks(room.room_id, event)
 
     async def dispatch(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:
         """Route one reaction to its sole durable semantic consumer."""

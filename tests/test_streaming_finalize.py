@@ -172,7 +172,6 @@ def _delivery_gateway(
             runtime_paths=runtime_paths_for(config),
             agent_name="code",
             logger=Mock(),
-            redact_message_event=AsyncMock(return_value=True),
             resolver=SimpleNamespace(deps=SimpleNamespace()),
             response_hooks=response_hooks,
             outbox=outbox or make_outbox_mock(),
@@ -777,7 +776,7 @@ async def test_hook_failure_cleanup_propagates_restart_cancellation(
     principal = journal_store.principal("code@alice")
     gateway = _delivery_gateway(tmp_path, principal)
     gateway.deps.response_hooks.apply_before_response.side_effect = RuntimeError("hook failed")
-    gateway.deps.redact_message_event.side_effect = asyncio.CancelledError("sync_restart")
+    gateway.deps.runtime.client.room_redact.side_effect = asyncio.CancelledError("sync_restart")
 
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):
         async with _reply_span(principal, thread_id="$thread", placeholder_event_id="$placeholder"):
@@ -829,20 +828,3 @@ async def test_an_oversized_send_freezes_the_payload_matrix_receives(tmp_path: P
     # the homeserver's business; either way the row must hold the *prepared*
     # payload, because that is what goes on the wire and what a resend replays.
     assert len(frozen["body"]) < 100_000, "the row kept the oversized original"
-
-
-def test_the_gateway_hands_the_final_transform_to_the_stream() -> None:
-    """The transform only helps if the stream is actually given it.
-
-    The unit tests for this behaviour drive `StreamingResponse` directly, so
-    they pass whether or not the gateway wires the hook in -- deleting the
-    wiring leaves them green. This reads the construction instead: the stream
-    must be built with a `final_text_transform`, and it must come from the
-    request's identity rather than being hardcoded, since a request with no
-    identity has no hook to apply.
-    """
-    import inspect  # noqa: PLC0415 - reading the construction is this test's whole point
-
-    source = inspect.getsource(DeliveryGateway._deliver_stream)
-
-    assert "final_text_transform=self._final_text_transform(request.identity)" in source

@@ -1522,45 +1522,16 @@ space_room_id: null
             },
             runtime_paths,
         )
-        created_accounts: list[str] = []
-
-        async def recording_create_agent_user(
-            _homeserver: str,
-            agent_name: str,
-            agent_display_name: str,
-            runtime_paths: constants_mod.RuntimePaths,
-            username: str | None = None,
-        ) -> AgentMatrixUser:
-            matrix_username = username or agent_username_localpart(agent_name, runtime_paths=runtime_paths)
-            state = MatrixState.load(runtime_paths=runtime_paths)
-            if any(account.username == matrix_username for account in state.accounts.values()):
-                msg = "collision"
-                raise PermanentMatrixStartupError(msg)
-            state.add_account(
-                f"agent_{agent_name}",
-                matrix_username,
-                TEST_PASSWORD,
-                requested_username=matrix_username,
-                domain="localhost",
-            )
-            save_matrix_state(state, runtime_paths)
-            created_accounts.append(agent_name)
-            return AgentMatrixUser(
-                agent_name=agent_name,
-                user_id=f"@{matrix_username}:localhost",
-                display_name=agent_display_name,
-                password=TEST_PASSWORD,
-            )
-
         orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
+        create = AsyncMock()
 
         with (
-            patch("mindroom.orchestrator.create_agent_user", new=recording_create_agent_user),
+            patch("mindroom.orchestration.accounts.create_agent_user", new=create),
             pytest.raises(PermanentMatrixStartupError, match="localpart collision"),
         ):
             await orchestrator.initialize()
 
-        assert created_accounts == []
+        create.assert_not_awaited()
         assert MatrixState.load(runtime_paths=runtime_paths).accounts == {}
 
 

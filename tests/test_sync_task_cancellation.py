@@ -1773,7 +1773,6 @@ async def test_delivery_recovery_asks_the_outbox_on_every_sync_response(
 
     with (
         patch.object(bot, "_delivery_gateway", new=SimpleNamespace(recover_deliveries=recover)),
-        patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
         patch("mindroom.bot._DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS", 0.0),
         patch("mindroom.bot._DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS", 0.0),
     ):
@@ -2028,7 +2027,6 @@ async def test_prepare_then_stop_reuses_one_total_shutdown_budget() -> None:
     bot._coalescing_gate = MagicMock(
         drain_all=AsyncMock(side_effect=drain_coalescing),
     )
-    bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
     bot._journal_dispatcher = MagicMock(stop=AsyncMock())
     bot._ingestion_session = None
@@ -2067,7 +2065,6 @@ async def test_stop_does_not_close_runtime_resources_under_live_response_owner()
     bot._last_sync_monotonic = None
     bot._first_sync_done = True
     bot._orchestrator_ready_handled = True
-    bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
     bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=1))
     bot.prepare_for_sync_shutdown = AsyncMock(side_effect=shutdown_failure)
@@ -2108,7 +2105,6 @@ async def test_orderly_stop_defers_saturated_response_timeouts_without_traceback
         bot._last_sync_monotonic = None
         bot._first_sync_done = True
         bot._orchestrator_ready_handled = True
-        bot._emit_agent_lifecycle_event = AsyncMock()
         bot._call_manager = None
         bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=index % 3 + 1))
         bot.prepare_for_sync_shutdown = AsyncMock(side_effect=failure)
@@ -2253,8 +2249,6 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot.storage_path = Path("/nonexistent/storage")
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock()
-    bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=0))
-    bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
     bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=0))
     bot._response_runner.inbox.drain_inbox_responses = AsyncMock(return_value=True)
@@ -2262,7 +2256,6 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
 
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
-    bot._emit_agent_lifecycle_event.assert_awaited_once_with("agent:stopped", stop_reason="restart")
     assert bot.hook_registry is not active_hook_registry
     bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
     bot._response_runner.inbox.wait_for_source_owned_inbox_responses.assert_awaited_once_with()
@@ -2285,7 +2278,6 @@ async def test_restart_stop_reports_failed_release_over_reply_drain_timeout() ->
     bot._ingestion_session = None
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock(side_effect=ResponseShutdownTimeoutError("reply outlived the drain"))
-    bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
     bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=1))
     bot._response_runner.inbox.wait_for_source_owned_inbox_responses = AsyncMock()
@@ -2300,8 +2292,23 @@ async def test_restart_stop_reports_failed_release_over_reply_drain_timeout() ->
 @pytest.mark.asyncio
 async def test_orchestrator_initialize_registers_router_and_agents_with_the_fleet(tmp_path: Path) -> None:
     """Initialization builds one fleet bot for the router and each configured agent."""
+    accounts = {
+        "router": AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="RouterAgent",
+            password=TEST_PASSWORD,
+        ),
+        "test_agent": AgentMatrixUser(
+            agent_name="test_agent",
+            user_id="@mindroom_test_agent:localhost",
+            display_name="Test Agent",
+            password=TEST_PASSWORD,
+        ),
+    }
     with (
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
+        patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock(return_value=accounts)),
     ):
         # Create mock bot
         mock_bot = AsyncMock()
@@ -2324,23 +2331,6 @@ async def test_orchestrator_initialize_registers_router_and_agents_with_the_flee
 
         # Create orchestrator
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
-        orchestrator._prepare_entity_accounts = AsyncMock(
-            return_value={
-                "router": AgentMatrixUser(
-                    agent_name="router",
-                    user_id="@mindroom_router:localhost",
-                    display_name="RouterAgent",
-                    password=TEST_PASSWORD,
-                ),
-                "test_agent": AgentMatrixUser(
-                    agent_name="test_agent",
-                    user_id="@mindroom_test_agent:localhost",
-                    display_name="Test Agent",
-                    password=TEST_PASSWORD,
-                ),
-            },
-        )
-
         assert orchestrator.runtime_paths.config_path == (tmp_path / "config.yaml").resolve()
 
         await orchestrator.initialize()
@@ -2813,9 +2803,8 @@ async def test_new_agent_not_started_twice(tmp_path: Path, fleet_sync: _FleetSyn
     """
     with (
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
-        patch.object(
-            _MultiAgentOrchestrator,
-            "_prepare_entity_accounts",
+        patch(
+            "mindroom.orchestrator.prepare_managed_accounts",
             new=AsyncMock(
                 return_value={
                     "router": AgentMatrixUser(
@@ -2972,7 +2961,7 @@ async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_dr
                 return_value={"general", "coach"},
             ),
             patch("mindroom.orchestrator.create_bot_for_entity", side_effect=make_bot),
-            patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(return_value=accounts)),
+            patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock(return_value=accounts)),
             patch.object(orchestrator._rooms, "setup", new=AsyncMock()),
         ):
             await orchestrator.config_reload._apply_queued_config_reload()

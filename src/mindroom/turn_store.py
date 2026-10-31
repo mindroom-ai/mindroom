@@ -112,7 +112,7 @@ class _DeferredSource:
 class _ClaimRegistry:
     """The live claims of one agent's turns, shared by every ``TurnStore`` of that agent in this process.
 
-    A runtime replacement or re-login builds a second store for the same agent
+    A runtime replacement builds a second store for the same agent
     while the first may still own turns; a registry per store would let both
     run one turn. Claims are touched only on the event loop, so each operation
     below is atomic.

@@ -141,7 +141,7 @@ A voice message's batching scope and its echo thread are distinct: a root audio 
 ## Turn State
 
 - One runtime process owns each agent's turn state and its semantic ordering, so nothing defines cross-process precedence; a second runtime against the same event journal refuses to start.
-- Every turn fact is a row with one writer, read by query, so there is no in-memory copy to publish or reconcile; what a sibling store of the same agent (a hot replacement, a re-login rebuild) could not see is an in-flight turn, and the claim registry every store of the agent shares covers that.
+- Every turn fact is a row with one writer, read by query, so there is no in-memory copy to publish or reconcile; what a sibling store of the same agent (a hot replacement) could not see is an in-flight turn, and the claim registry every store of the agent shares covers that.
 - A turn is one immutable ordered tuple of physical sources; a different tuple is a new turn that absorbs the unfinished owners of its sources, while an alias only indexes, so an original and the relay answering it stay two live turns.
 - A write refused because an answered or delivery-bound turn owns a source writes nothing and hands each source back to the journal once the claim releases, so a conflicting source settles as handled at precheck and an unrelated one in the same batch is answered.
 - A non-AI FINAL binds its turn in the transaction that makes the row durable and settles the turn's sources there, so a reshape before the acknowledgement cannot redirect which turn the acknowledgement completes.

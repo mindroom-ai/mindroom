@@ -136,12 +136,12 @@ async def test_preparation_outcomes_reach_dispatch_and_journal_owners(  # noqa: 
         visible[INITIAL] = body
         return nio.RoomSendResponse("$final" if "m.new_content" in content else INITIAL, room_id)
 
-    async def redact(*, event_id: str, **_kwargs: object) -> bool:
+    async def redact(_room_id: str, event_id: str, **_kwargs: object) -> nio.RoomRedactResponse:
         visible.pop(event_id, None)
-        return True
+        return nio.RoomRedactResponse("$redaction", room_id)
 
     gateway.deps.runtime.client.room_send.side_effect = transport
-    gateway.deps.redact_message_event.side_effect = redact
+    gateway.deps.runtime.client.room_redact.side_effect = redact
     captured, release = asyncio.Event(), asyncio.Event()
     reads = 0
 
