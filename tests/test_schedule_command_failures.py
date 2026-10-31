@@ -99,6 +99,7 @@ async def _reply(
     *,
     client: AsyncMock,
     responders: list[MatrixID] | None = None,
+    acts_for_requester: bool = False,
 ) -> str:
     """Run one chat command through the command handler and return the reply it posts."""
     runtime_paths = schedule_runtime_paths(tmp_path)
@@ -132,6 +133,7 @@ async def _reply(
             event=SimpleNamespace(sender=USER_ID, event_id="$event", body=body, source={"content": {"body": body}}),
             command=command,
             requester_user_id=USER_ID,
+            acts_for_requester=acts_for_requester,
         )
     return context.send_response.await_args.args[0]
 
@@ -324,3 +326,25 @@ async def test_cancel_all_when_some_cancellations_fail(tmp_path: Path) -> None:
     reply = await _reply(tmp_path, "!cancel_schedule all", client=client)
 
     assert reply == "✅ Cancelled 1 scheduled task(s)\n⚠️ Failed to cancel 1 task(s)"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("!schedule in 5 minutes check logs", "❌ No agents or teams in this room are allowed to reply to you."),
+        ("!list_schedules", "No scheduled tasks found."),
+        (f"!edit_schedule {TASK_ID} in 10 minutes check logs", f"❌ Task `{TASK_ID}` not found."),
+        (f"!cancel_schedule {TASK_ID}", f"❌ Task `{TASK_ID}` not found."),
+        ("!cancel_schedule all", "No scheduled tasks to cancel."),
+    ],
+)
+async def test_an_agent_may_run_every_schedule_command_for_a_human(tmp_path: Path, body: str, expected: str) -> None:
+    """Schedule commands an agent posts for a human run as that human's own, unlike admin and pairing commands."""
+    client = make_matrix_client_mock()
+    _serve_task(client, None)
+    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict([], room_id=ROOM_ID))
+
+    reply = await _reply(tmp_path, body, client=client, responders=[], acts_for_requester=True)
+
+    assert reply == expected

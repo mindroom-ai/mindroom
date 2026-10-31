@@ -87,26 +87,25 @@ def _conversation_reader(*, latest_thread_event_id: str | None = None) -> AsyncM
     return reader
 
 
-def test_silent_new_thread_confirmation_describes_actual_visible_placement() -> None:
+@pytest.mark.parametrize(
+    ("new_thread", "delivery"),
+    [(True, "Room-level roots for findings/failures"), (False, "Current room/thread scope")],
+)
+def test_silent_confirmation_describes_actual_visible_placement(new_thread: bool, delivery: str) -> None:
     """The confirmation must not promise a thread beneath a hidden trigger."""
     workflow = ScheduledWorkflow(
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="check the queue",
         description="queue check",
-        new_thread=True,
+        new_thread=new_thread,
         silent=True,
     )
 
-    response = scheduling._scheduled_task_response_text(
-        workflow,
-        task_id="task1234",
-        new_thread=True,
-        config=Config(),
-    )
+    response = scheduling._scheduled_task_response_text(workflow, task_id="task1234", config=Config())
 
     assert "**Mode:** Silent (hidden trigger; no-report final omitted)" in response
-    assert "**Delivery:** Room-level roots for findings/failures" in response
+    assert f"**Delivery:** {delivery}\n" in response
     assert "New thread per fire" not in response
 
 
@@ -123,7 +122,6 @@ def test_recurring_confirmation_names_the_tasks_timezone() -> None:
     response = scheduling._scheduled_task_response_text(
         workflow,
         task_id="task1234",
-        new_thread=False,
         config=Config(timezone="UTC"),
     )
 
@@ -951,6 +949,17 @@ async def test_list_scheduled_tasks_invalid_task_data(tmp_path: Path) -> None:
                 "state_key": "task2",
                 "content": {
                     "workflow": "invalid-json",  # Invalid JSON
+                    "status": "pending",
+                },
+                "event_id": "$state_task2",
+                "sender": SCHEDULE_WRITER_ID,
+                "origin_server_ts": 1234567891,
+            },
+            {
+                "type": "com.mindroom.scheduled.task",
+                "state_key": "task4",
+                "content": {
+                    "workflow": {"schedule_type": "once"},  # A workflow object, not its JSON text
                     "status": "pending",
                 },
                 "event_id": "$state_task2",

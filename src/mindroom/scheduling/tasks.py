@@ -432,13 +432,12 @@ def _parse_scheduled_task_record(
     """Parse a Matrix state event content payload into a scheduled task record."""
     status = str(content.get("status", "pending"))
     workflow_data_raw = content.get("workflow")
-    if isinstance(workflow_data_raw, str):
-        try:
-            workflow = ScheduledWorkflow(**json.loads(workflow_data_raw))
-        except (ValueError, json.JSONDecodeError):
-            logger.exception("Failed to parse scheduled task workflow", room_id=room_id, task_id=task_id)
-            return None
-    else:
+    if not isinstance(workflow_data_raw, str):
+        return None
+    try:
+        workflow = ScheduledWorkflow(**json.loads(workflow_data_raw))
+    except ValueError:
+        logger.exception("Failed to parse scheduled task workflow", room_id=room_id, task_id=task_id)
         return None
     if not workflow.created_by:
         return None
@@ -498,12 +497,12 @@ def _validate_parsed_workflow(workflow: ScheduledWorkflow) -> None:
             "Could not determine when to run the one-time task.",
             'Include an explicit time like "today at 11:45 PM" or "in 10 minutes".',
         )
-    if workflow.schedule_type == "cron" and not workflow.cron_schedule:
-        _raise_parse_failure(
-            "Could not determine the recurring schedule.",
-            'Include an explicit cadence like "daily at 9am".',
-        )
-    if workflow.schedule_type == "cron" and workflow.cron_schedule:
+    if workflow.schedule_type == "cron":
+        if workflow.cron_schedule is None:
+            _raise_parse_failure(
+                "Could not determine the recurring schedule.",
+                'Include an explicit cadence like "daily at 9am".',
+            )
         cron_error = _cron_validation_error(workflow.cron_schedule.to_cron_string())
         if cron_error is not None:
             _raise_parse_failure(cron_error, 'Use a schedule that maps to real dates, like "daily at 9am".')
@@ -695,15 +694,6 @@ async def require_scheduled_task(
     return task
 
 
-def _serialize_scheduled_task_created_at(created_at: datetime | str | None) -> str:
-    """Normalize persisted scheduled-task timestamps."""
-    if isinstance(created_at, datetime):
-        return created_at.isoformat()
-    if isinstance(created_at, str) and created_at:
-        return created_at
-    return datetime.now(UTC).isoformat()
-
-
 def _scheduled_task_permission_hint(
     client: nio.AsyncClient,
     room_id: str,
@@ -784,7 +774,7 @@ async def persist_scheduled_task_state(
     config: Config,
     owner_id: str | None,
     status: str = "pending",
-    created_at: datetime | str | None = None,
+    created_at: datetime | None = None,
     writers: ScheduledTaskRuntime | None = None,
 ) -> str:
     """Persist scheduled task state to Matrix and return its unique revision.
@@ -805,7 +795,7 @@ async def persist_scheduled_task_state(
             else None
         ),
         "status": status,
-        "created_at": _serialize_scheduled_task_created_at(created_at),
+        "created_at": (created_at or datetime.now(UTC)).isoformat(),
         "updated_at": datetime.now(UTC).isoformat(),
     }
     if owner_id is not None:
@@ -827,7 +817,6 @@ async def _save_pending_scheduled_task(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    created_at: datetime | str | None = None,
     task_runtime: ScheduledTaskRuntime | None = None,
 ) -> None:
     """Decide a new task's owner, persist the task with it, and start the task's runner."""
@@ -839,8 +828,6 @@ async def _save_pending_scheduled_task(
         workflow=workflow,
         config=config,
         owner_id=owner_id,
-        status="pending",
-        created_at=created_at,
         writers=task_runtime,
     )
     if task_runtime is not None:
@@ -1052,7 +1039,6 @@ def _scheduled_task_response_text(
     workflow: ScheduledWorkflow,
     *,
     task_id: str,
-    new_thread: bool,
     config: Config,
 ) -> str:
     """Render the stable response persisted with one command-owned mutation."""
@@ -1075,10 +1061,10 @@ def _scheduled_task_response_text(
         response_text += f"**History:** {_history_limit_display(workflow.history_limit)}\n"
     mode = "Silent (hidden trigger; no-report final omitted)" if workflow.silent else "Visible"
     response_text += f"**Mode:** {mode}\n"
-    if new_thread and workflow.silent:
+    if workflow.new_thread and workflow.silent:
         delivery = "Room-level roots for findings/failures"
     else:
-        delivery = "New thread per fire" if new_thread else "Current room/thread scope"
+        delivery = "New thread per fire" if workflow.new_thread else "Current room/thread scope"
     response_text += f"**Delivery:** {delivery}\n"
     return response_text + f"\n**Task ID:** `{task_id}`"
 
@@ -1121,13 +1107,11 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     client = runtime.client
     config = runtime.config
     runtime_paths = runtime.runtime_paths
-    room = runtime.room
-    conversation_reader = runtime.conversation_reader
 
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
 
-    sender_visible_room_responders = await runtime.responder_candidates_for_room(room, scheduled_by)
+    sender_visible_room_responders = await runtime.responder_candidates_for_room(runtime.room, scheduled_by)
 
     available_responders: list[MatrixID] = []
     if new_thread:
@@ -1135,7 +1119,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     else:
         if thread_id:
             thread_history = list(
-                await complete_thread_history(conversation_reader, room_id, thread_id),
+                await complete_thread_history(runtime.conversation_reader, room_id, thread_id),
             )
             available_responders = filter_thread_agents_for_sender(
                 get_agents_in_thread(thread_history, config, runtime_paths),
@@ -1215,12 +1199,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         workflow_result.silent = silent
 
     task_id = existing_task.task_id if existing_task else str(uuid.uuid4())[:8]
-    response_text = _scheduled_task_response_text(
-        workflow_result,
-        task_id=task_id,
-        new_thread=new_thread,
-        config=config,
-    )
+    response_text = _scheduled_task_response_text(workflow_result, task_id=task_id, config=config)
 
     logger.info(
         "Storing workflow task in Matrix state",
@@ -1249,7 +1228,6 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 workflow=workflow_result,
                 config=config,
                 runtime_paths=runtime_paths,
-                created_at=datetime.now(UTC).isoformat(),
                 task_runtime=runtime.task_runtime,
             )
     except SchedulingError as e:
@@ -1454,16 +1432,14 @@ async def schedule_approved_tool_call(
             msg = "Could not post an approvable approval card for this call; nothing was scheduled."
             raise SchedulingError(msg)
         try:
-            owner_id = await decide_task_owner(runtime.client, room_id, workflow, runtime.runtime_paths)
-            await persist_scheduled_task_state(
-                client=runtime.client,
-                room_id=room_id,
-                task_id=task_id,
-                workflow=workflow,
-                config=config,
-                owner_id=owner_id,
-                created_at=datetime.now(UTC).isoformat(),
-                writers=runtime.task_runtime,
+            await _save_pending_scheduled_task(
+                runtime.client,
+                room_id,
+                task_id,
+                workflow,
+                config,
+                runtime.runtime_paths,
+                task_runtime=runtime.task_runtime,
             )
         except SchedulingError as e:
             msg = f"Failed to schedule: {e}"
@@ -1473,8 +1449,6 @@ async def schedule_approved_tool_call(
         if not task_published and card_reserved is not False:
             await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
     scheduled_for = _format_scheduled_time(send_at, timezone)
-    if runtime.task_runtime is not None:
-        runtime.task_runtime.start_new_task(task_id, workflow, owner_id=owner_id)
     return (
         f"✅ Scheduled `{tool_name}` for {scheduled_for} (task `{task_id}`).\n"
         "Approve the card in this thread now to let it run then without asking again; "
@@ -1502,17 +1476,14 @@ async def edit_scheduled_task(
     # Refused before the request is parsed, which costs a model call.
     _raise_unless_editable(existing_task)
 
-    target_new_thread = existing_task.workflow.new_thread
-    target_thread_id = None if target_new_thread else existing_task.workflow.thread_id
-
     try:
         response_text = await schedule_task(
             runtime=runtime,
             room_id=room_id,
-            thread_id=target_thread_id,
+            thread_id=existing_task.workflow.thread_id,
             scheduled_by=scheduled_by,
             full_text=full_text,
-            new_thread=target_new_thread,
+            new_thread=existing_task.workflow.new_thread,
             existing_task=existing_task,
             history_limit=history_limit,
             silent=silent,

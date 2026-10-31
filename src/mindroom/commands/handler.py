@@ -94,18 +94,12 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.ENCRYPT,
     },
 )
+_SCHEDULE_COMMAND_TYPES = frozenset(
+    {CommandType.SCHEDULE, CommandType.LIST_SCHEDULES, CommandType.EDIT_SCHEDULE, CommandType.CANCEL_SCHEDULE},
+)
 # Commands an agent may post for a human; Desktop pairing, confirmations, and admin changes need the human in person.
 _COMMAND_TYPES_AN_ENTITY_MAY_RUN_FOR_A_HUMAN = frozenset(
-    {
-        CommandType.HELP,
-        CommandType.MODE,
-        CommandType.MODEL,
-        CommandType.SCHEDULE,
-        CommandType.LIST_SCHEDULES,
-        CommandType.CANCEL_SCHEDULE,
-        CommandType.EDIT_SCHEDULE,
-        CommandType.UNKNOWN,
-    },
+    {CommandType.HELP, CommandType.MODE, CommandType.MODEL, CommandType.UNKNOWN, *_SCHEDULE_COMMAND_TYPES},
 )
 
 
@@ -403,11 +397,6 @@ async def _desktop_agent_for_room(
     if not _room_has_only(context.config, room, {requester_user_id, room.own_user_id, agent_user_id}):
         return None
     return agent_name
-
-
-_SCHEDULE_COMMAND_TYPES = frozenset(
-    {CommandType.SCHEDULE, CommandType.LIST_SCHEDULES, CommandType.EDIT_SCHEDULE, CommandType.CANCEL_SCHEDULE},
-)
 
 
 async def _run_schedule_command(
