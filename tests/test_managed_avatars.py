@@ -417,6 +417,30 @@ async def test_no_avatar_is_set_when_none_is_available(
 
 
 @pytest.mark.asyncio
+async def test_a_team_gets_its_avatar_from_the_teams_avatars(
+    runtime_paths: constants_mod.RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    set_user_avatar: AsyncMock,
+) -> None:
+    """A team's avatar is resolved among team avatars, an agent's among agent avatars."""
+    resolve = AsyncMock(return_value=None)
+    monkeypatch.setattr(managed_avatars, "_entity_avatar_path", resolve)
+    config = _config(
+        runtime_paths,
+        agents={"code": {"display_name": "Code"}},
+        teams={"ops": {"display_name": "Ops", "role": "Operations", "agents": ["code"]}},
+    )
+    client = _profile_client(avatar_url=None)
+    logger = get_logger("tests.avatar")
+
+    await managed_avatars.ensure_entity_avatar(client, "ops", config, runtime_paths, logger=logger)
+    await managed_avatars.ensure_entity_avatar(client, "code", config, runtime_paths, logger=logger)
+
+    assert [call.args[:2] for call in resolve.await_args_list] == [("teams", "ops"), ("agents", "code")]
+    set_user_avatar.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_avatar_resolution_errors_never_escape(
     runtime_paths: constants_mod.RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,

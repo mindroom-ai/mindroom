@@ -538,10 +538,13 @@ async def test_a_redaction_that_cannot_reach_matrix_stays_owed(tmp_path: Path, f
     if failure == "no client":
         bot.client = None
 
-    await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
+    with capture_logs() as logs:
+        await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
 
     assert (await _reply(bot)).redaction_pending == ("$owed",)
     assert client.room_redact.called is (failure == "transport error")
+    # Only a redaction that reached Matrix and failed is worth a warning; no client yet is an expected state.
+    assert any(log["event"] == "Owed reply redaction failed" for log in logs) is (failure == "transport error")
 
 
 @dataclass

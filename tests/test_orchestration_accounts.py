@@ -243,3 +243,56 @@ async def test_account_preparation_validates_again_after_a_transient_validation_
     assert validations == ["validated", "validated"]
     assert users["general"].display_name == "GeneralAgent"
     assert users[ROUTER_AGENT_NAME].display_name == "RouterAgent"
+
+
+@pytest.mark.asyncio
+async def test_entity_preparation_leaves_a_configured_internal_user_alone(tmp_path: Path) -> None:
+    """Building bots prepares only their accounts, even when the config has an internal user."""
+    config = _general_config(tmp_path, mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"})
+
+    async def existing_user(
+        _homeserver: str,
+        entity_name: str,
+        display_name: str,
+        **_kwargs: object,
+    ) -> AgentMatrixUser:
+        return _matrix_user(entity_name, f"mindroom_{entity_name}", display_name)
+
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=AsyncMock(side_effect=existing_user)) as create:
+        await _prepare(config, ["general"])
+
+    assert [call.args[1] for call in create.await_args_list] == ["general"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("update_runtime_state", [True, False])
+async def test_a_transient_internal_user_failure_reports_retries_only_when_asked(
+    tmp_path: Path,
+    update_runtime_state: bool,
+) -> None:
+    """The internal user's retry step reports its retries in the runtime state only during startup, as entities do."""
+    config = _general_config(tmp_path, mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"})
+    attempts: list[str] = []
+
+    async def flaky_user(_homeserver: str, entity_name: str, display_name: str, **_kwargs: object) -> AgentMatrixUser:
+        attempts.append(entity_name)
+        if attempts == ["user"]:
+            msg = "temporary Matrix provisioning failure"
+            raise RuntimeError(msg)
+        return _matrix_user(entity_name, f"mindroom_{entity_name}", display_name)
+
+    with (
+        patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0.0),
+        patch("mindroom.orchestration.runtime.set_runtime_starting") as report,
+        patch("mindroom.orchestration.accounts.create_agent_user", new=flaky_user),
+    ):
+        await prepare_managed_accounts(
+            config,
+            runtime_paths_for(config),
+            [],
+            include_internal_user=True,
+            update_runtime_state=update_runtime_state,
+        )
+
+    assert attempts == ["user", "user"]
+    assert report.called is update_runtime_state
