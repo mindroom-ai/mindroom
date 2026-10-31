@@ -125,8 +125,6 @@ class ConfiguredWorkerBackend:
 SANDBOX_RUNNER_API_ROOT = "/api/sandbox-runner"
 _API_ROUTES = {
     "script-run": "scripts/run",
-    "script-status": "scripts",
-    "script-cancel": "scripts",
     "execute-cancel": "execute/cancel",
 }
 
@@ -149,8 +147,7 @@ def worker_api_endpoint(
         "save-attachment",
         "view-file",
         "script-run",
-        "script-status",
-        "script-cancel",
+        "scripts",
         "execute-cancel",
     ],
 ) -> str:

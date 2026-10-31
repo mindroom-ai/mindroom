@@ -106,6 +106,7 @@ from mindroom.workers.protocol import (
     ExecuteResponse,
     WorkerRoute,
 )
+from tests.api.conftest import fake_local_worker_venv_create
 from tests.api.sandbox_runner_support import execute_call
 from tests.conftest import preserved_builtin_tools, requires_linux
 from tests.process_helpers import assert_linux_pid_not_running
@@ -121,13 +122,6 @@ SANDBOX_TOKEN = "secret-token"  # noqa: S105
 SANDBOX_HEADERS = {"x-mindroom-sandbox-token": SANDBOX_TOKEN}
 LINUX_LOCAL_WORKER_REASON = "local worker venv bootstrap is validated on Linux"
 LINUX_LOCAL_WORKER_TIMEOUT_SECONDS = 180
-
-
-def _fake_local_worker_venv_create(venv_dir: Path) -> None:
-    """Create the minimal worker venv layout needed for path-validation tests."""
-    bin_dir = venv_dir / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    (bin_dir / "python").symlink_to(Path(sys.executable))
 
 
 @pytest.fixture(autouse=True)
@@ -2870,7 +2864,7 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
     assert config.plugins == []
 
     with (
-        patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create),
+        patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create),
         TestClient(sandbox_runner_app) as client,
     ):
         response = client.post(
@@ -2923,7 +2917,7 @@ def test_sandbox_runner_defers_unavailable_authored_tools_for_worker_runtime(
     assert config.plugins == []
 
     with (
-        patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create),
+        patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create),
         TestClient(sandbox_runner_app) as client,
     ):
         response = client.post(
@@ -4225,7 +4219,7 @@ def test_sandbox_runner_rejects_worker_base_dir_outside_worker_root(
     """Worker requests should reject base_dir overrides that escape the worker root."""
     _set_sandbox_token(monkeypatch)
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -4255,7 +4249,7 @@ def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_workspace
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -4291,7 +4285,7 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -4380,7 +4374,7 @@ def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -4435,7 +4429,7 @@ def test_sandbox_runner_worker_request_rejects_invalid_base_dir_type_for_unknown
     """Worker base_dir validation should run before unknown-tool resolution."""
     _set_sandbox_token(monkeypatch)
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -4812,7 +4806,7 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -4854,7 +4848,7 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
     _refresh_runner_app_from_env()
 
     canonical_base_dir = agent_workspace_root_path(storage_root, "general") / "mind_data"
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -5056,7 +5050,7 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
 
     monkeypatch.setattr(sandbox_runner_module, "_execute_request_subprocess", _fake_execute_request_subprocess)
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -5144,7 +5138,7 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
 
     monkeypatch.setattr(sandbox_runner_module, "_execute_request_subprocess", _fake_execute_request_subprocess)
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -5817,7 +5811,7 @@ def test_prepare_worker_uses_explicit_runtime_storage_root_for_local_workers(
         process_env=dict(os.environ),
     )
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         worker = sandbox_worker_prep_module._prepare_worker("worker-a", runtime_paths)
 
     assert worker.debug_metadata["state_root"] == str(
@@ -6584,7 +6578,7 @@ def test_worker_routed_shell_uses_agent_workspace_as_home(
 
     worker_key = "v1:tenant-123:shared:general"
     worker_root = storage_root / "workers" / worker_dir_name(worker_key)
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -6652,7 +6646,7 @@ def test_worker_routed_shell_ignores_dotenv_for_workspace_home_contract(
 
     worker_key = "v1:tenant-123:shared:general"
     worker_root = storage_root / "workers" / worker_dir_name(worker_key)
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -6714,7 +6708,7 @@ def test_worker_routed_python_path_home_is_agent_workspace(
 
     worker_key = "v1:tenant-123:shared:general"
     worker_root = storage_root / "workers" / worker_dir_name(worker_key)
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -6771,7 +6765,7 @@ def test_worker_attachment_save_can_be_read_through_shell_home(
     worker_key = "v1:tenant-123:shared:general"
     payload_bytes = b"attachment payload"
     sha256 = hashlib.sha256(payload_bytes).hexdigest()
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         save_response = runner_client.post(
             "/api/sandbox-runner/save-attachment",
             headers=SANDBOX_HEADERS,
@@ -7185,7 +7179,7 @@ def test_workspace_env_hook_overlays_shell_execution(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -7223,7 +7217,7 @@ def test_workspace_env_hook_edits_take_effect_on_next_call(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         first = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -7286,7 +7280,7 @@ def test_workspace_env_hook_keeps_user_credentials_and_filters_runner_control(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -7341,7 +7335,7 @@ def test_workspace_env_hook_failure_returns_tool_failure(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -7433,7 +7427,7 @@ def test_workspace_env_hook_skips_worker_routed_coding_default_mode(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -7469,7 +7463,7 @@ def test_workspace_env_hook_failure_does_not_block_worker_routed_file_default_mo
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
@@ -7617,7 +7611,7 @@ def test_workspace_env_hook_rejects_symlink_escape(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=_fake_local_worker_venv_create):
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
         response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,

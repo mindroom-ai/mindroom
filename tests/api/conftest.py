@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -34,6 +35,13 @@ if TYPE_CHECKING:
 def _single_line_execute_responses(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a quick /execute call to its one result line, however slowly a loaded machine runs it."""
     monkeypatch.setattr("mindroom.api.sandbox_runner.EXECUTE_KEEPALIVE_SECONDS", 3600.0)
+
+
+def fake_local_worker_venv_create(venv_dir: Path) -> None:
+    """Create the minimal worker venv layout that local worker preparation checks, linked to this interpreter."""
+    bin_dir = venv_dir / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "python").symlink_to(Path(sys.executable))
 
 
 _TRUSTED_UPSTREAM_AUDIENCE = "mindroom-dashboard"

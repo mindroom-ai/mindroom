@@ -77,7 +77,7 @@ class ScriptWorkerClient:
         """Poll one worker-owned supervisor handle."""
         receipt = await self._post(
             worker,
-            f"{worker_api_endpoint(worker, 'script-status')}/{quote(run_id, safe='')}/status",
+            f"{worker_api_endpoint(worker, 'scripts')}/{quote(run_id, safe='')}/status",
             _parsed(SandboxScriptStatusRequest, {"worker_key": worker.worker_key}),
             SandboxScriptStatusResponse,
         )
@@ -93,7 +93,7 @@ class ScriptWorkerClient:
         """Request graceful or forced termination of one worker-owned handle."""
         receipt = await self._post(
             worker,
-            f"{worker_api_endpoint(worker, 'script-cancel')}/{quote(run_id, safe='')}/cancel",
+            f"{worker_api_endpoint(worker, 'scripts')}/{quote(run_id, safe='')}/cancel",
             _parsed(SandboxScriptControlRequest, {"worker_key": worker.worker_key, "force": force}),
             SandboxScriptCancelResponse,
         )

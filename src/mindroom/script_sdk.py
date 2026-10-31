@@ -62,11 +62,7 @@ class MindRoomToolCallError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _Receipt:
-    run_id: str
     call_id: str
-    toolkit_name: str
-    function_name: str
-    arguments_digest: str
     state: str
     result: object | None
     error: object | None
@@ -204,12 +200,7 @@ class MindRoomTools:
                 call_id=call_id,
             ) from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise MindRoomToolCallError(
-                _INVALID_RECEIPT_ERROR,
-                kind="invalid_response",
-                retryable=False,
-                call_id=call_id,
-            ) from exc
+            raise _invalid_receipt(call_id) from exc
         return _parse_receipt(
             payload,
             expected_run_id=self._run_id,
@@ -291,12 +282,7 @@ def _parse_receipt(
     expected_arguments_digest: str,
 ) -> _Receipt:
     if not isinstance(value, dict):
-        raise MindRoomToolCallError(
-            _INVALID_RECEIPT_ERROR,
-            kind="invalid_response",
-            retryable=False,
-            call_id=expected_call_id,
-        )
+        raise _invalid_receipt(expected_call_id)
     payload = cast("dict[str, object]", value)
     run_id = payload.get("run_id")
     call_id = payload.get("call_id")
@@ -316,12 +302,7 @@ def _parse_receipt(
             "indeterminate",
         }
     ):
-        raise MindRoomToolCallError(
-            _INVALID_RECEIPT_ERROR,
-            kind="invalid_response",
-            retryable=False,
-            call_id=expected_call_id,
-        )
+        raise _invalid_receipt(expected_call_id)
     if (
         toolkit_name != expected_toolkit_name
         or function_name != expected_function_name
@@ -334,14 +315,19 @@ def _parse_receipt(
             call_id=expected_call_id,
         )
     return _Receipt(
-        run_id=expected_run_id,
         call_id=expected_call_id,
-        toolkit_name=expected_toolkit_name,
-        function_name=expected_function_name,
-        arguments_digest=expected_arguments_digest,
         state=state,
         result=payload.get("result"),
         error=payload.get("error"),
+    )
+
+
+def _invalid_receipt(call_id: str) -> MindRoomToolCallError:
+    return MindRoomToolCallError(
+        _INVALID_RECEIPT_ERROR,
+        kind="invalid_response",
+        retryable=False,
+        call_id=call_id,
     )
 
 

@@ -138,22 +138,12 @@ router = APIRouter(
 )
 
 
-def _require_dedicated_runner(request: Request) -> str:
+def _require_dedicated_worker_key(request: Request, worker_key: str) -> None:
     dedicated_worker_key = sandbox_exec.runner_dedicated_worker_key(app_runtime_paths(request.app))
     if dedicated_worker_key is None:
         raise HTTPException(status_code=404, detail="Script runner routes require a dedicated worker.")
-    return dedicated_worker_key
-
-
-def _normalized_worker_key(request: Request, worker_key: str) -> str:
-    runtime_paths = app_runtime_paths(request.app)
-    normalized_worker_key = sandbox_worker_prep.normalize_request_worker_key(worker_key, runtime_paths)
-    if normalized_worker_key is None:
-        raise HTTPException(status_code=400, detail="Script worker key is required.")
-    dedicated_worker_key = _require_dedicated_runner(request)
-    if not secrets.compare_digest(normalized_worker_key, dedicated_worker_key):
+    if not secrets.compare_digest(worker_key, dedicated_worker_key):
         raise HTTPException(status_code=400, detail="Worker key does not match this dedicated worker.")
-    return normalized_worker_key
 
 
 def _prepare_worker(
@@ -163,13 +153,12 @@ def _prepare_worker(
     worker_key: str,
     private_agent_names: list[str] | None,
 ) -> sandbox_worker_prep.PreparedWorkerRequest:
-    runtime_paths = app_runtime_paths(request.app)
-    normalized_worker_key = _normalized_worker_key(request, worker_key)
+    _require_dedicated_worker_key(request, worker_key)
     try:
         prepared = sandbox_worker_prep.prepare_worker_request(
-            worker_key=normalized_worker_key,
+            worker_key=worker_key,
             base_dir=None,
-            runtime_paths=runtime_paths,
+            runtime_paths=app_runtime_paths(request.app),
             agent_policies=config.get_agent_policies(),
             private_agent_names=(frozenset(private_agent_names) if private_agent_names is not None else None),
             runner_token=app_runner_token(request.app),
@@ -328,12 +317,12 @@ async def status_script_in_worker(
     payload: SandboxScriptStatusRequest,
 ) -> SandboxScriptStatusResponse:
     """Poll one namespaced supervisor handle without owning lifecycle state."""
-    normalized_worker_key = _normalized_worker_key(request, payload.worker_key)
+    _require_dedicated_worker_key(request, payload.worker_key)
     try:
         socket_path = await asyncio.to_thread(ensure_shell_supervisor)
         status = await supervised_script_status(
             socket_path,
-            namespace=worker_script_namespace(normalized_worker_key, run_id),
+            namespace=worker_script_namespace(payload.worker_key, run_id),
             run_id=run_id,
         )
     except (ShellSupervisorStartupError, ScriptWorkerError) as exc:
@@ -348,12 +337,12 @@ async def cancel_script_in_worker(
     payload: SandboxScriptControlRequest,
 ) -> SandboxScriptCancelResponse:
     """Signal one namespaced supervisor handle without changing durable desired state."""
-    normalized_worker_key = _normalized_worker_key(request, payload.worker_key)
+    _require_dedicated_worker_key(request, payload.worker_key)
     try:
         socket_path = await asyncio.to_thread(ensure_shell_supervisor)
         receipt = await signal_supervised_script(
             socket_path,
-            namespace=worker_script_namespace(normalized_worker_key, run_id),
+            namespace=worker_script_namespace(payload.worker_key, run_id),
             run_id=run_id,
             force=payload.force,
         )

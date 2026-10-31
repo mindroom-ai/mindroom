@@ -48,11 +48,6 @@ class WorkerScriptStatus:
     output: str = ""
     exit_code: int | None = None
 
-    @classmethod
-    def unknown_handle(cls) -> WorkerScriptStatus:
-        """Return the lifecycle fact used when a supervisor lost its handle."""
-        return cls(state="unknown")
-
 
 @dataclass(frozen=True, slots=True)
 class WorkerScriptCancel:

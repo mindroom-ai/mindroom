@@ -7,7 +7,7 @@ import contextlib
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import httpx
@@ -32,12 +32,9 @@ from mindroom.script_runs.models import (
 from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.script_runs.supervised import signal_supervised_script, supervised_script_status, worker_script_namespace
-from mindroom.shell.supervisor import (
-    _ShellSupervisorManager,
-    kill_command_via_supervisor,
-    run_command_via_supervisor,
-)
+from mindroom.shell.supervisor import _ShellSupervisorManager, run_command_via_supervisor
 from mindroom.workers.models import WorkerHandle, WorkerSpec
+from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -52,10 +49,9 @@ _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
 @dataclass
 class _Lease:
     manager: _RecoveringWorkerBackend
-    released: bool = False
 
     def release(self) -> None:
-        self.released = True
+        pass
 
 
 @dataclass
@@ -69,7 +65,6 @@ class _RecoveringWorkerBackend:
     backend_name: str = "kubernetes"
     idle_timeout_seconds: float = 3600
     ensure_calls: int = 0
-    touched_worker_keys: list[str] = field(default_factory=list)
 
     def script_recovery_signature(self) -> str:
         return "stable-worker-authority"
@@ -95,29 +90,22 @@ class _RecoveringWorkerBackend:
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         del now
-        self.touched_worker_keys.append(worker_key)
         return self.handle if worker_key == self.handle.worker_key else None
 
     def retire_worker(self, worker_key: str) -> None:
         assert worker_key == self.handle.worker_key
 
 
-@dataclass
 class _AuthorizedResolver:
-    settled_runs: list[str] = field(default_factory=list)
-    settled_calls: list[str] = field(default_factory=list)
-
     def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool:
         del run, config
         return True
 
     async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
-        del reason
-        self.settled_runs.append(run_id)
+        del run_id, reason
 
     async def settle_approval(self, origin: object, *, reason: str) -> None:
-        del reason
-        self.settled_calls.append(str(origin))
+        del origin, reason
 
     async def prune_approvals(self, run_id: str) -> bool:
         del run_id
@@ -225,17 +213,6 @@ async def _wait_for_finished(socket_path: str, *, worker_key: str) -> WorkerScri
             return status
         await asyncio.sleep(0.05)
     error = f"Script process did not reach its supervisor deadline: {status}"
-    raise AssertionError(error)
-
-
-async def _wait_for_pid_exit(process_id: int) -> None:
-    for _ in range(100):
-        try:
-            os.kill(process_id, 0)
-        except ProcessLookupError:
-            return
-        await asyncio.sleep(0.05)
-    error = f"Script PID {process_id} survived its supervisor deadline."
     raise AssertionError(error)
 
 
@@ -395,7 +372,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
 
         finished = await _wait_for_finished(socket_path, worker_key=worker_key)
         assert finished.exit_code == -9
-        await _wait_for_pid_exit(script_pid)
+        await assert_linux_pid_not_running(script_pid)
         terminal = await second_lifecycle.manager.reconcile_durable(run_id=_RUN_ID)
         assert terminal.state is ScriptRunState.INTERRUPTED
         await second_lifecycle.shutdown()
@@ -408,11 +385,10 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             with contextlib.suppress(Exception):
                 await first_lifecycle.shutdown(timeout_seconds=1)
         with contextlib.suppress(Exception):
-            await asyncio.to_thread(
-                kill_command_via_supervisor,
+            await signal_supervised_script(
                 socket_path,
                 namespace=worker_script_namespace(worker_key, _RUN_ID),
-                handle=supervisor_handle_for_run(_RUN_ID),
+                run_id=_RUN_ID,
                 force=True,
             )
         supervisor.shutdown()

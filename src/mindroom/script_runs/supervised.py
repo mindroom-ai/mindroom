@@ -115,7 +115,7 @@ async def supervised_script_status(socket_path: str, *, namespace: str, run_id: 
     if status.state == "error":
         raise ScriptWorkerError(message)
     if status.state == "unknown":
-        return WorkerScriptStatus.unknown_handle()
+        return WorkerScriptStatus(state="unknown")
     return WorkerScriptStatus(state=status.state, output=message, exit_code=status.exit_code)
 
 
