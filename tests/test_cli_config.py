@@ -3311,7 +3311,7 @@ class TestRunErrorHandling:
         _write_minimal_runtime_config(cfg)
 
         with patch("mindroom.orchestrator.main", AsyncMock(side_effect=OSError("Connection refused"))):
-            refused = _invoke_with_runtime(["run"], cfg)
+            refused = _invoke_with_runtime(["run"], cfg, env={"MATRIX_HOMESERVER": "https://matrix.example.test"})
         with patch("mindroom.orchestrator.main", AsyncMock(side_effect=ConnectionResetError("peer hung up"))):
             reset = _invoke_with_runtime(["run"], cfg)
         with patch("mindroom.orchestrator.main", AsyncMock(side_effect=OSError("No space left on device"))):
@@ -3319,7 +3319,9 @@ class TestRunErrorHandling:
 
         for explained in (refused, reset):
             assert explained.exit_code == 1
+            assert isinstance(explained.exception, SystemExit)
             assert "Could not connect to the Matrix homeserver" in explained.output
+        assert "MATRIX_HOMESERVER is set correctly (current: https://matrix.example.test)" in refused.output
         assert isinstance(other.exception, OSError)
         assert "Could not connect to the Matrix homeserver" not in other.output
 

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import typer
 from rich.markup import escape
 
-from mindroom.constants import ensure_writable_config_path
+from mindroom.constants import ensure_writable_config_path, runtime_matrix_homeserver
 from mindroom.origins import with_api_port
 
 from .api import is_loopback_host
@@ -614,13 +614,6 @@ def _print_thread_export_stats(stats: ThreadExportStats) -> None:
         console.print(f"[red]Failed:[/red] {failure.room_key} {target}: {failure.error}")
 
 
-def _exit_if_connection_error(exc: OSError, runtime_paths: RuntimePaths) -> None:
-    """Explain an OS error that looks like a Matrix connection failure and exit; return for any other."""
-    if isinstance(exc, ConnectionError) or "connect" in str(exc).lower() or "refused" in str(exc).lower():
-        _print_connection_error(exc, runtime_paths)
-        raise typer.Exit(1) from None
-
-
 async def _threads_export(
     *,
     config_path: Path | None,
@@ -878,18 +871,19 @@ def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 
 
-def _print_connection_error(exc: OSError, runtime_paths: RuntimePaths) -> None:
-    from mindroom import constants  # noqa: PLC0415
-
+def _exit_if_connection_error(exc: OSError, runtime_paths: RuntimePaths) -> None:
+    """Explain an OS error that looks like a Matrix connection failure and exit; return for any other."""
+    if not (isinstance(exc, ConnectionError) or "connect" in str(exc).lower() or "refused" in str(exc).lower()):
+        return
     console.print("[red]Error:[/red] Could not connect to the Matrix homeserver.\n")
     console.print(f"  Details: {exc}\n")
     console.print("Check that:")
     console.print("  1. Your Matrix homeserver is running")
     console.print(
-        "  2. MATRIX_HOMESERVER is set correctly "
-        f"(current: {constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)})",
+        f"  2. MATRIX_HOMESERVER is set correctly (current: {runtime_matrix_homeserver(runtime_paths=runtime_paths)})",
     )
     console.print("  3. The server is reachable from this machine")
+    raise typer.Exit(1) from None
 
 
 def main() -> None:
