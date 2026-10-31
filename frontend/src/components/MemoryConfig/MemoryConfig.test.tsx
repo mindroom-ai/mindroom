@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import {
+  act,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryConfig } from "./MemoryConfig";
 import { useConfigStore } from "@/store/configStore";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
@@ -74,24 +80,16 @@ describe("MemoryConfig", () => {
     expect(providerSelect).toHaveTextContent("OpenAI");
   });
 
-  it("lists sentence-transformers as an embedder provider option", async () => {
-    render(<MemoryConfig />);
-
-    const providerSelect = document.getElementById("provider");
-    expect(providerSelect).toBeInTheDocument();
-    fireEvent.click(providerSelect!);
-
-    expect(
-      await screen.findByText("Sentence Transformers"),
-    ).toBeInTheDocument();
-  });
-
   it("shows model as free-text input", () => {
     render(<MemoryConfig />);
 
     const modelInput = document.getElementById("model") as HTMLInputElement;
     expect(modelInput).toBeInTheDocument();
     expect(modelInput).toHaveValue("text-embedding-3-small");
+    expect(modelInput).toHaveAttribute(
+      "placeholder",
+      "e.g. text-embedding-3-small",
+    );
     expect(modelInput.tagName).toBe("INPUT");
   });
 
@@ -207,6 +205,9 @@ describe("MemoryConfig", () => {
     const hostInput = document.getElementById("host") as HTMLInputElement;
     expect(hostInput).toBeInTheDocument();
     expect(hostInput).toHaveValue("http://localhost:11434");
+    expect(
+      screen.getByText("Local embeddings using Ollama"),
+    ).toBeInTheDocument();
   });
 
   it("leaves an unset Ollama host empty, so a save keeps OLLAMA_HOST in charge", async () => {
@@ -433,6 +434,84 @@ describe("MemoryConfig", () => {
     });
   });
 
+  it("falls back to the default when a numeric field is cleared", () => {
+    mockStore({
+      memory: {
+        backend: "file",
+        embedder: mockConfig.memory!.embedder,
+        file: { max_entrypoint_lines: 120 },
+      },
+    });
+    render(<MemoryConfig />);
+
+    fireEvent.change(document.getElementById("entrypoint-max-lines")!, {
+      target: { value: "" },
+    });
+
+    expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        file: { max_entrypoint_lines: 200, max_entrypoint_tokens: 50000 },
+      }),
+    );
+  });
+
+  it("lets a numeric field be cleared and retyped", async () => {
+    const actual = await vi.importActual<typeof import("@/store/configStore")>(
+      "@/store/configStore",
+    );
+    actual.useConfigStore.setState({
+      config: {
+        ...mockConfig,
+        memory: {
+          ...mockConfig.memory!,
+          backend: "file",
+          file: { max_entrypoint_lines: 120 },
+        },
+      } as Config,
+    });
+    (useConfigStore as any).mockImplementation(() => actual.useConfigStore());
+    render(<MemoryConfig />);
+
+    const input = document.getElementById(
+      "entrypoint-max-lines",
+    ) as HTMLInputElement;
+    for (const value of ["", "5", "50"]) {
+      fireEvent.change(input, { target: { value } });
+      expect(input).toHaveDisplayValue(value);
+    }
+    expect(
+      actual.useConfigStore.getState().config?.memory.file
+        ?.max_entrypoint_lines,
+    ).toBe(50);
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.blur(input);
+    expect(input).toHaveDisplayValue("200");
+  });
+
+  it("enables auto flush and entrypoint search from their selects", async () => {
+    mockStore({
+      memory: { backend: "file", embedder: mockConfig.memory!.embedder },
+    });
+    render(<MemoryConfig />);
+
+    fireEvent.click(document.getElementById("auto-flush-enabled")!);
+    fireEvent.click(await screen.findByRole("option", { name: "Enabled" }));
+    expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        auto_flush: expect.objectContaining({ enabled: true }),
+      }),
+    );
+
+    fireEvent.click(document.getElementById("memory-search-entrypoint")!);
+    fireEvent.click(await screen.findByRole("option", { name: "Enabled" }));
+    expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        search: expect.objectContaining({ include_entrypoint: true }),
+      }),
+    );
+  });
+
   it("updates search include patterns without touching other search settings", async () => {
     mockStore({
       memory: {
@@ -462,6 +541,39 @@ describe("MemoryConfig", () => {
         }),
       );
     });
+  });
+
+  it("keeps a trailing comma typed into the include patterns", async () => {
+    const actual = await vi.importActual<typeof import("@/store/configStore")>(
+      "@/store/configStore",
+    );
+    actual.useConfigStore.setState({
+      config: {
+        ...mockConfig,
+        memory: { ...mockConfig.memory!, backend: "file" },
+      } as Config,
+    });
+    (useConfigStore as any).mockImplementation(() => actual.useConfigStore());
+    render(<MemoryConfig />);
+
+    const input = document.getElementById(
+      "memory-search-include",
+    ) as HTMLInputElement;
+    for (const value of ["a", "a,", "a, ", "a, b"]) {
+      fireEvent.change(input, { target: { value } });
+      expect(input).toHaveValue(value);
+    }
+    expect(
+      actual.useConfigStore.getState().config?.memory.search?.include,
+    ).toEqual(["a", "b"]);
+
+    act(() => {
+      actual.useConfigStore.getState().updateMemoryConfig({
+        ...actual.useConfigStore.getState().config!.memory,
+        search: { include: ["z/*.md"] },
+      });
+    });
+    expect(input).toHaveValue("z/*.md");
   });
 
   it("calls saveConfig when save button is clicked", async () => {
@@ -514,40 +626,6 @@ describe("MemoryConfig", () => {
         "OpenAI or any OpenAI-compatible API (set Base URL below)",
       ),
     ).toBeInTheDocument();
-  });
-
-  it("shows provider description for ollama", async () => {
-    render(<MemoryConfig />);
-
-    const providerSelect = document.getElementById("provider");
-    fireEvent.click(providerSelect!);
-    const ollamaOption = await screen.findByText("Ollama");
-    fireEvent.click(ollamaOption);
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("Local embeddings using Ollama"),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("shows provider description for sentence-transformers", async () => {
-    render(<MemoryConfig />);
-
-    const providerSelect = document.getElementById("provider");
-    fireEvent.click(providerSelect!);
-    const sentenceTransformersOption = await screen.findByText(
-      "Sentence Transformers",
-    );
-    fireEvent.click(sentenceTransformersOption);
-
-    await waitFor(() => {
-      expect(
-        screen.getByText(
-          "Fully local embeddings using the sentence-transformers Python runtime",
-        ),
-      ).toBeInTheDocument();
-    });
   });
 
   it("shows base URL in config display when set", () => {

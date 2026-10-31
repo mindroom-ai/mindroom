@@ -12,11 +12,6 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { builtInProviderCards, oauthIntegrationProvider } from "./index";
 
-vi.mock("@/lib/api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/api")>()),
-  API_BASE_URL: "",
-}));
-
 const fetchMock = vi.fn();
 global.fetch = fetchMock as typeof fetch;
 const openMock = vi.fn();

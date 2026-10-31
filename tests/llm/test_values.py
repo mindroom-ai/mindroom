@@ -178,12 +178,15 @@ def test_run_requirement_rejects_decisions_it_does_not_need() -> None:
         confirmation.reject("twice")
 
 
-def test_run_requirement_positional_tool_execution_and_defaults() -> None:
+def test_two_requirements_of_one_call_are_the_same_requirement() -> None:
+    """A requirement is a view of its call, so every read of a run's requirements gives equal ones."""
     execution = ToolExecution(tool_call_id="call-t", tool_name="t", requires_confirmation=True)
     first, second = RunRequirement(execution), RunRequirement(execution)
 
-    assert first.id != second.id
+    assert first == second
     assert first.needs_confirmation is True
+    first.confirm()
+    assert second.confirmation is True
 
 
 def test_run_record_defaults_and_status() -> None:
@@ -191,7 +194,7 @@ def test_run_record_defaults_and_status() -> None:
 
     assert record.status is RunStatus.running
     assert record.messages == []
-    assert (record.tools, record.requirements, record.metrics) == (None, None, None)
+    assert (record.tools, record.requirements, record.metrics) == (None, [], None)
     assert RunStatus("PAUSED") is RunStatus.paused
     assert RunStatus.cancelled.name == "cancelled"
 

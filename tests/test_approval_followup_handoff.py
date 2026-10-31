@@ -21,7 +21,7 @@ from mindroom.event_journal import (
     InboundEvent,
     ProjectedEvent,
 )
-from mindroom.llm.runs import ToolExecution
+from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import Owned
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
@@ -79,7 +79,7 @@ def _pause(call_id: str) -> PausedAttempt:
     return PausedAttempt(
         session_id="session-1",
         run_id="run-1",
-        tools=(ToolExecution(tool_call_id=call_id, tool_name="read_report", tool_args={}),),
+        requirements=(RunRequirement(ToolExecution(tool_call_id=call_id, tool_name="read_report", tool_args={})),),
         toolkit_owners={("general", "read_report"): "reports"},
         response_text="The first report is read; another remains.",
     )
@@ -302,12 +302,14 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
         await release_batch.wait()
         return replace(
             _pause("call-needs-human"),
-            tools=(
-                ToolExecution(
-                    tool_call_id="call-needs-human",
-                    tool_name="read_report",
-                    tool_args={},
-                    requires_confirmation=True,
+            requirements=(
+                RunRequirement(
+                    ToolExecution(
+                        tool_call_id="call-needs-human",
+                        tool_name="read_report",
+                        tool_args={},
+                        requires_confirmation=True,
+                    ),
                 ),
             ),
         )

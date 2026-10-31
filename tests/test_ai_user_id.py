@@ -64,7 +64,7 @@ from mindroom.llm.events import ToolStarted
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
-from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
@@ -2312,7 +2312,7 @@ class TestUserIdPassthrough:
             PausedAttempt(
                 session_id="session-1",
                 run_id="run-paused",
-                tools=(tool,),
+                requirements=(RunRequirement(tool),),
                 toolkit_owners={("general", "inspect"): "test_toolkit"},
             ),
         )

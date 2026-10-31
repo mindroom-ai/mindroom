@@ -253,8 +253,10 @@ async def test_stored_hook_record_never_skips_gated_subagent_plugin_gate(
     assert stored.status is RunStatus.paused
     state = DelegationState.from_metadata(stored.metadata)
     planted = DelegationState.from_metadata(stored.metadata)
-    assert stored.requirements
-    planted.hooks[stored.requirements[0].id] = DelegationHookState(
+    # The delegation call's hooks are kept under the id the driver gave the call.
+    pause_id = stored.requirements[0].tool_execution.pause_id
+    assert pause_id is not None
+    planted.hooks[pause_id] = DelegationHookState(
         execution_identity=serialize_tool_execution_identity(identity),
         arguments={"agent_name": "child", "task": "Do task"},
         started_at=0.0,

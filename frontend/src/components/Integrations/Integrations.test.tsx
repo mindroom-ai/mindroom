@@ -289,11 +289,6 @@ vi.mock("./iconMapping", () => ({
   getIconForTool: (icon: string | null) => <span>{icon}</span>,
 }));
 
-vi.mock("@/lib/api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/api")>()),
-  API_BASE_URL: "http://localhost:8080",
-}));
-
 vi.mock("./EnhancedConfigDialog", () => ({
   EnhancedConfigDialog: ({
     configFields,
@@ -876,8 +871,7 @@ describe("Integrations", () => {
           expect.objectContaining({ name: "client_secret", required: true }),
           expect.objectContaining({
             name: "redirect_uri",
-            placeholder:
-              "http://localhost:8080/api/oauth/google_drive/callback",
+            placeholder: `${window.location.origin}/api/oauth/google_drive/callback`,
           }),
         ],
       });
@@ -1620,7 +1614,7 @@ describe("Integrations", () => {
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
-        "http://localhost:8080/api/credentials/github?agent_name=code&execution_scope=shared",
+        "/api/credentials/github?agent_name=code&execution_scope=shared",
         { method: "DELETE" },
       );
     });
@@ -1657,12 +1651,9 @@ describe("Integrations", () => {
     );
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
-        "http://localhost:8080/api/credentials/github",
-        {
-          method: "DELETE",
-        },
-      );
+      expect(global.fetch).toHaveBeenCalledWith("/api/credentials/github", {
+        method: "DELETE",
+      });
       expect(refetch).toHaveBeenCalledTimes(1);
     });
     expect(mockOAuthDisconnect).not.toHaveBeenCalled();

@@ -14,11 +14,7 @@ import {
   SiGoogletasks,
   SiHomeassistant,
 } from "react-icons/si";
-import {
-  API_BASE_URL,
-  apiErrorMessageFromPayload,
-  withAgentExecutionScope,
-} from "@/lib/api";
+import { apiErrorMessageFromPayload, withAgentExecutionScope } from "@/lib/api";
 import { watchOAuthCompletion } from "@/lib/oauthCompletion";
 import {
   IntegrationProvider,
@@ -28,18 +24,11 @@ import {
 } from "./types";
 
 export const scopedApiUrl = (path: string, scope?: IntegrationScope) =>
-  withAgentExecutionScope(
-    `${API_BASE_URL}${path}`,
-    scope?.agentName,
-    scope?.executionScope,
-  );
+  withAgentExecutionScope(path, scope?.agentName, scope?.executionScope);
 
 function oauthCompletionOrigin(rawOrigin: unknown): string {
   if (typeof rawOrigin === "string" && rawOrigin.length > 0) {
     return new URL(rawOrigin).origin;
-  }
-  if (API_BASE_URL && /^https?:\/\//.test(API_BASE_URL)) {
-    return new URL(API_BASE_URL).origin;
   }
   return window.location.origin;
 }
