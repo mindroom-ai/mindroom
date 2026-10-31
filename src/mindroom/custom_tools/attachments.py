@@ -237,39 +237,6 @@ def _view_attachment(  # noqa: PLR0911
     )
 
 
-def _resolve_attachment_ids(
-    context: ToolRuntimeContext,
-    attachment_ids: list[str],
-) -> tuple[list[_ResolvedSendAttachment], list[str], str | None]:
-    """Resolve context attachment IDs into retained records or encrypted in-memory handles."""
-    if not attachment_ids:
-        return [], [], None
-
-    resolved_attachments: list[_ResolvedSendAttachment] = []
-    resolved_attachment_ids: list[str] = []
-    for attachment_id in attachment_ids:
-        if not attachment_id.startswith("att_"):
-            return [], [], "attachment_ids entries must be context attachment IDs (att_*)."
-
-        if not attachment_id_available_in_tool_runtime_context(context, attachment_id):
-            return [], [], f"Attachment ID is not available in this context: {attachment_id}"
-        runtime_media = get_tool_runtime_media_attachment(context, attachment_id)
-        if runtime_media is not None:
-            resolved_attachments.append(runtime_media)
-            resolved_attachment_ids.append(attachment_id)
-            continue
-
-        attachment, error = _resolve_context_attachment_record(context, attachment_id)
-        if error is not None:
-            return [], [], error
-        if attachment is None:
-            continue
-
-        resolved_attachments.append(attachment)
-        resolved_attachment_ids.append(attachment_id)
-    return resolved_attachments, resolved_attachment_ids, None
-
-
 def _register_attachment_file_path(
     context: ToolRuntimeContext,
     file_path: str,
@@ -334,64 +301,36 @@ def _resolve_attachment_file_path(
     return authorized, None
 
 
-def _resolve_attachment_file_paths(
+def resolve_send_attachment(
     context: ToolRuntimeContext,
-    attachment_file_paths: list[str],
+    reference: str,
     *,
     workspace_root: Path | None,
     file_access: FileAccess,
-) -> tuple[list[AttachmentRecord], list[str], str | None]:
-    """Register file paths and return retained records plus generated attachment IDs."""
-    if not attachment_file_paths:
-        return [], [], None
+) -> tuple[_ResolvedSendAttachment, bool] | str:
+    """Resolve one send reference to a sendable attachment and whether this call registered it, or an error.
 
-    resolved_records: list[AttachmentRecord] = []
-    newly_registered_attachment_ids: list[str] = []
-    for attachment_file_path in attachment_file_paths:
-        attachment_record, register_error = _register_attachment_file_path(
+    An ``att_*`` reference is a context attachment ID; any other reference is a file path to register,
+    so a workspace file named ``att_*`` is sent as ``./att_*``.
+    """
+    if reference.startswith("att_"):
+        runtime_media = get_tool_runtime_media_attachment(context, reference)
+        if runtime_media is not None:
+            return runtime_media, False
+        record, error = _resolve_context_attachment_record(context, reference)
+        newly_registered = False
+    else:
+        record, error = _register_attachment_file_path(
             context,
-            attachment_file_path,
+            reference,
             workspace_root=workspace_root,
             file_access=file_access,
         )
-        if register_error is not None:
-            return [], [], register_error
-        if attachment_record is None:
-            continue
-        resolved_records.append(attachment_record)
-        newly_registered_attachment_ids.append(attachment_record.attachment_id)
-
-    return resolved_records, newly_registered_attachment_ids, None
-
-
-def resolve_send_attachments(
-    context: ToolRuntimeContext,
-    *,
-    attachment_ids: list[str],
-    attachment_file_paths: list[str],
-    workspace_root: Path | None = None,
-    file_access: FileAccess = "workspace",
-) -> tuple[list[_ResolvedSendAttachment], list[str], list[str], str | None]:
-    """Resolve context IDs and/or local paths to ordered sendable attachments."""
-    attachments, resolved_attachment_ids, attachment_error = _resolve_attachment_ids(
-        context,
-        attachment_ids,
-    )
-    if attachment_error is not None:
-        return [], [], [], attachment_error
-    file_records, newly_registered_attachment_ids, file_path_error = _resolve_attachment_file_paths(
-        context,
-        attachment_file_paths,
-        workspace_root=workspace_root,
-        file_access=file_access,
-    )
-    if file_path_error is not None:
-        return [], [], [], file_path_error
-    attachments.extend(file_records)
-    resolved_attachment_ids.extend(newly_registered_attachment_ids)
-    if not attachments:
-        return [], [], [], "At least one of attachment_ids or attachment_file_paths must be provided."
-    return attachments, resolved_attachment_ids, newly_registered_attachment_ids, None
+        newly_registered = True
+    if error is not None:
+        return error
+    assert record is not None
+    return record, newly_registered
 
 
 async def send_resolved_attachments(

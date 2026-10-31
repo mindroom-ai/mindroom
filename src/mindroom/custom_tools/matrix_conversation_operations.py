@@ -17,7 +17,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.custom_tools.attachments import (
-    resolve_send_attachments,
+    resolve_send_attachment,
     send_resolved_attachments,
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -248,19 +248,19 @@ class MatrixMessageOperations:
         state = _MessageSendState(room_id=room_id, thread_id=thread_id)
         resolved: list[AttachmentRecord | RuntimeEncryptedMediaAttachment] = []
         for reference in attachments:
-            is_id = reference.startswith("att_")
-            files, ids, registered_ids, error = resolve_send_attachments(
+            resolution = resolve_send_attachment(
                 context,
-                attachment_ids=[reference] if is_id else [],
-                attachment_file_paths=[] if is_id else [reference],
+                reference,
                 workspace_root=self._tool_output_workspace_root,
                 file_access=self._file_access,
             )
-            if error is not None:
-                return self._result("error", action="send", message=error, **asdict(state))
-            resolved.extend(files)
-            state.resolved_attachment_ids.extend(ids)
-            state.newly_registered_attachment_ids.extend(registered_ids)
+            if isinstance(resolution, str):
+                return self._result("error", action="send", message=resolution, **asdict(state))
+            attachment, newly_registered = resolution
+            resolved.append(attachment)
+            state.resolved_attachment_ids.append(attachment.attachment_id)
+            if newly_registered:
+                state.newly_registered_attachment_ids.append(attachment.attachment_id)
 
         if (
             recipient_user_id is not None
