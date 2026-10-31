@@ -1391,11 +1391,10 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
+        bot.client.room_redact = AsyncMock(return_value=nio.RoomRedactResponse("$redaction", "!test:localhost"))
         response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        redact_message_event = AsyncMock(return_value=True)
         gateway = replace_delivery_gateway_deps(
             bot,
-            redact_message_event=redact_message_event,
             response_hooks=SimpleNamespace(
                 apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
@@ -1440,11 +1439,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert delivery.ending == Suppressed(Suppression.HOOK)
         assert delivery.event_id is None
-        redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$placeholder",
-            reason="Reply removed",
-        )
+        bot.client.room_redact.assert_awaited_once_with("!test:localhost", "$placeholder", reason="Reply removed")
         assert _handled_response_event_id(delivery) is None
 
     @pytest.mark.asyncio
@@ -1457,11 +1452,10 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
+        bot.client.room_redact = AsyncMock()
         response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        redact_message_event = AsyncMock()
         gateway = replace_delivery_gateway_deps(
             bot,
-            redact_message_event=redact_message_event,
             response_hooks=SimpleNamespace(
                 apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
@@ -1506,7 +1500,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert delivery.ending == Suppressed(Suppression.HOOK)
         assert delivery.event_id == "$existing"
-        redact_message_event.assert_not_awaited()
+        bot.client.room_redact.assert_not_awaited()
         assert _handled_response_event_id(delivery) is None
 
     @pytest.mark.asyncio
@@ -1533,8 +1527,8 @@ class TestAgentBot(AgentBotTestBase):
             [_hook_plugin("hooked", [before_hook])],
         )
         response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        redact_message_event = AsyncMock(return_value=True)
-        gateway = replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
+        bot.client.room_redact = AsyncMock()
+        gateway = replace_delivery_gateway_deps(bot)
         mock_deliver_final = AsyncMock(
             return_value=FinalDeliveryOutcome(
                 ending=Completed(),
@@ -1566,7 +1560,7 @@ class TestAgentBot(AgentBotTestBase):
         assert outcome.final_visible_event_id == "$streaming"
         assert outcome.final_visible_body == "chunk"
         mock_deliver_final.assert_not_awaited()
-        redact_message_event.assert_not_awaited()
+        bot.client.room_redact.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_streamed_regeneration_against_an_existing_visible_reply_preserves_linkage_when_no_new_body_lands(
@@ -2087,8 +2081,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        redact_message_event = AsyncMock(return_value=True)
-        replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
         mock_ai_response = AsyncMock(return_value=response_text)
 
         with (
@@ -2144,7 +2136,7 @@ class TestAgentBot(AgentBotTestBase):
         if expected_event_id is not None:
             assert send_text.await_args.args[-1].response_text == "Finding"
         edit_text.assert_not_awaited()
-        redact_message_event.assert_not_awaited()
+        bot.client.room_redact.assert_not_awaited()
         add_stop_button.assert_not_awaited()
         bot.client.room_send.assert_not_awaited()
         receipt_path = (

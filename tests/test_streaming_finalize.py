@@ -172,7 +172,6 @@ def _delivery_gateway(
             runtime_paths=runtime_paths_for(config),
             agent_name="code",
             logger=Mock(),
-            redact_message_event=AsyncMock(return_value=True),
             resolver=SimpleNamespace(deps=SimpleNamespace()),
             response_hooks=response_hooks,
             outbox=outbox or make_outbox_mock(),
@@ -777,7 +776,7 @@ async def test_hook_failure_cleanup_propagates_restart_cancellation(
     principal = journal_store.principal("code@alice")
     gateway = _delivery_gateway(tmp_path, principal)
     gateway.deps.response_hooks.apply_before_response.side_effect = RuntimeError("hook failed")
-    gateway.deps.redact_message_event.side_effect = asyncio.CancelledError("sync_restart")
+    gateway.deps.runtime.client.room_redact.side_effect = asyncio.CancelledError("sync_restart")
 
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):
         async with _reply_span(principal, thread_id="$thread", placeholder_event_id="$placeholder"):

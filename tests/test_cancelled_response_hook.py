@@ -158,8 +158,6 @@ def _gateway(
     config: Config,
     response_hooks: ResponseHookService,
     principal: PrincipalStore,
-    *,
-    redact: AsyncMock | None = None,
 ) -> DeliveryGateway:
     """Return a delivery gateway that runs these hooks and writes through the principal's outbox."""
     return DeliveryGateway(
@@ -168,7 +166,6 @@ def _gateway(
             runtime_paths=runtime_paths_for(config),
             agent_name="code",
             logger=get_logger("tests.delivery"),
-            redact_message_event=redact if redact is not None else AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=response_hooks,
             outbox=principal,
@@ -1051,7 +1048,7 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("redaction_raises", [False, True], ids=["redaction_returns_false", "redaction_raises"])
+@pytest.mark.parametrize("redaction_raises", [False, True], ids=["redaction_refused", "redaction_raises"])
 async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_after_cleanup_attempt(
     tmp_path: Path,
     journal_store: EventJournalStore,
@@ -1074,15 +1071,17 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
     config, response_hooks = _response_hook_service(tmp_path, registry)
     principal = journal_store.principal("code@alice")
 
-    async def redact_message_event(*, room_id: str, event_id: str, reason: str) -> bool:
+    async def room_redact(room_id: str, event_id: str, *, reason: str) -> nio.RoomRedactError:
         del room_id, event_id, reason
         assert cancelled_seen == []
         if redaction_raises:
             message = "redaction transport failed"
             raise RuntimeError(message)
-        return False
+        return nio.RoomRedactError("refused", "M_FORBIDDEN")
 
-    gateway = _gateway(config, response_hooks, principal, redact=AsyncMock(side_effect=redact_message_event))
+    response_hooks.hook_context.runtime.client = make_matrix_client_mock()
+    response_hooks.hook_context.runtime.client.room_redact.side_effect = room_redact
+    gateway = _gateway(config, response_hooks, principal)
     envelope = _envelope()
 
     async with _code_span(principal, placeholder_event_id="$placeholder") as handle:

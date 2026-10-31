@@ -327,7 +327,6 @@ def _build_response_runner(
             runtime_paths=runtime_paths,
             agent_name=bot.agent_name,
             logger=bot.logger,
-            redact_message_event=AsyncMock(return_value=True),
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
             outbox=principal,

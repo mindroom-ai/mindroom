@@ -554,7 +554,6 @@ class AgentBot:
                 agent_name=self.agent_name,
                 logger=self.logger,
                 resolver=self._conversation_resolver,
-                redact_message_event=self._redact_message_event,
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
                     # Reads the live config, which a reload replaces.
@@ -2265,22 +2264,3 @@ class AgentBot:
             thread_id=thread_id,
             sender=sender,
         )
-
-    async def _redact_message_event(
-        self,
-        *,
-        room_id: str,
-        event_id: str,
-        reason: str,
-    ) -> bool:
-        """Redact one visible event when a provisional response should disappear entirely."""
-        if self.client is None:
-            return False
-        response = await self.client.room_redact(room_id, event_id, reason=reason)
-        if isinstance(response, nio.RoomRedactError):
-            if response.status_code == "M_NOT_FOUND":
-                # Gone already, which is what the redaction was for.
-                return True
-            self.logger.error("Failed to redact message", event_id=event_id, error=str(response))
-            return False
-        return True

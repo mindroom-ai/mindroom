@@ -66,7 +66,6 @@ from tests.conftest import (
     make_visible_message,
     message_origin,
     patch_response_runner_module,
-    replace_delivery_gateway_deps,
     replace_response_runner_deps,
     request_envelope,
     runtime_paths_for,
@@ -1544,11 +1543,9 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        redact_message_event = AsyncMock(return_value=True)
         bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
             [_hook_plugin("hooked", [before_hook])],
         )
-        replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
 
         with (
             patch_response_runner_module(
@@ -1583,7 +1580,7 @@ class TestAgentBot(AgentBotTestBase):
         assert reply.state is rl.ReplyState.GONE
         # Nothing was shown, so nothing is left to redact.
         assert reply.event_id is None
-        redact_message_event.assert_not_awaited()
+        bot.client.room_redact.assert_not_awaited()
 
 
 def _team_regeneration_request(

@@ -203,7 +203,6 @@ def _gateway(
             runtime_paths=runtime_paths_for(config),
             agent_name="agent",
             logger=MagicMock(),
-            redact_message_event=AsyncMock(return_value=True),
             resolver=SimpleNamespace(
                 build_message_target=MagicMock(),
                 deps=SimpleNamespace(

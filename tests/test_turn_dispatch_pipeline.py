@@ -2749,10 +2749,10 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
+        bot.client.room_redact = AsyncMock(return_value=nio.RoomRedactResponse("$redaction", "!test:localhost"))
         response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
         gateway = replace_delivery_gateway_deps(
             bot,
-            redact_message_event=AsyncMock(return_value=True),
             response_hooks=SimpleNamespace(apply_before_response=AsyncMock(side_effect=RuntimeError("hook boom"))),
         )
 
@@ -2776,11 +2776,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert outcome.ending == Failed(FailureCause.HOOK_FAILED)
         assert outcome.event_id is None
-        gateway.deps.redact_message_event.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$thinking",
-            reason="Reply removed",
-        )
+        bot.client.room_redact.assert_awaited_once_with("!test:localhost", "$thinking", reason="Reply removed")
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_generation_returns_no_final_event(

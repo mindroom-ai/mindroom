@@ -734,7 +734,6 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
             runtime_paths=loaded_workloop.runtime_paths,
             agent_name="code",
             logger=get_logger("tests.workloop.delivery"),
-            redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=ResponseHookService(hook_context=hook_context),
             outbox=make_outbox_mock(),
