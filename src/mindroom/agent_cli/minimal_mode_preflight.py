@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.agent_cli.shell_access import minimal_shell_problems
-from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -63,8 +63,8 @@ def _shell_problems(
         )
     except (ImportError, ValueError):
         return [f"Fix the `shell` tool configuration of `{agent_name}` so it loads."]
-    if not set(SHELL_OPERATION_NAMES).issubset(toolkit_function_names(toolkit)):
-        return [f"Allow the `run_shell_command` shell function for `{agent_name}`."]
+    if SHELL_FUNCTION not in toolkit_function_names(toolkit):
+        return [f"Allow the `{SHELL_FUNCTION}` shell function for `{agent_name}`."]
     return []
 
 
@@ -94,8 +94,9 @@ def minimal_subagent_candidates(
     caller_identity: ToolExecutionIdentity | None,
 ) -> list[str]:
     """List agents to advertise as minimal subagents; a child that still cannot run fails with a recovery hint."""
-    if (caller_identity is not None and caller_identity.channel != "matrix") or any(
-        tool_may_require_approval(config, name) for name in SHELL_OPERATION_NAMES
+    if (caller_identity is not None and caller_identity.channel != "matrix") or tool_may_require_approval(
+        config,
+        SHELL_FUNCTION,
     ):
         return []
     tools = config_plugins(config, runtime_paths).tools

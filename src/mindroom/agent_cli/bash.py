@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_access import ToolKey
@@ -56,7 +57,7 @@ def minimal_bash_toolkit(
         if execute is None or not call_id:
             msg = "Bash requires an active response owner"
             raise RuntimeError(msg)
-        return await execute(ToolKey("shell", "run_shell_command"), arguments, call_id)
+        return await execute(ToolKey("shell", SHELL_FUNCTION), arguments, call_id)
 
     # TODO(simplify): the schema derived from the signature and docstring is closed to other properties as Agno closed
     # a schema it derived ahead of processing.

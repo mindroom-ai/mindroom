@@ -14,7 +14,7 @@ from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner, tool_catalog
-from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.prompt import join_sections
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
@@ -182,10 +182,9 @@ async def prepare_minimal_catalog(
             if deferred.name not in loaded:
                 catalog.add_deferred(_checked(deferred))
         try:
-            for name in SHELL_OPERATION_NAMES:
-                await catalog.bind(ToolKey("shell", name))
+            await catalog.bind(ToolKey("shell", SHELL_FUNCTION))
         except ValueError as exc:
-            msg = "Minimal mode requires the agent's `run_shell_command` shell permission."
+            msg = f"Minimal mode requires the agent's `{SHELL_FUNCTION}` shell permission."
             raise RuntimeError(msg) from exc
     except BaseException as exc:
         await catalog.close()
