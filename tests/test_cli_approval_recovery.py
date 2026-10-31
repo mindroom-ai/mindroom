@@ -817,6 +817,101 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
 
 
 @pytest.mark.asyncio
+async def test_a_recovered_approval_keeps_the_thread_messages_its_paused_turn_read(tmp_path: Path) -> None:
+    """The saved record keeps what others posted before the agent was addressed, which the paused run marked seen.
+
+    It keeps them before the prompt, as the paused run sent them, and no other message the paused request held.
+    """
+    runtime = _helper_runtime(tmp_path, tools=["shell"])
+    persist_entity_accounts(runtime.config, runtime.runtime_paths)
+    build = _minimal_build(runtime)
+    store = create_agent_state_storage("helper", tmp_path)
+    arguments = {"command": "touch never"}
+    requirement = _outer_bash_approval(arguments)
+    earlier = Message(
+        role="user",
+        content='<msg event_id="$alice" from="@alice:localhost"><![CDATA[The deploy key is in vault slot 7.]]></msg>',
+    )
+    bash_call = {"id": "bash", "type": "function", "function": {"name": "bash", "arguments": json.dumps(arguments)}}
+    persisted, session = _saved(
+        store,
+        "session",
+        RunRecord(
+            run_id="run",
+            session_id="session",
+            agent_id="helper",
+            status=RunStatus.cancelled,
+            metadata={
+                "requester_id": runtime.requester_id,
+                "matrix_event_id": "$source",
+                "matrix_seen_event_ids": ["$source", "$alice"],
+            },
+            messages=[
+                earlier,
+                Message(role="user", content="Current message:\nHello"),
+                Message(role="user", content="Jobs: none.", add_to_agent_memory=False),
+                Message(role="assistant", tool_calls=[bash_call]),
+            ],
+        ),
+    )
+    presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
+    presentation.start_tool(requirement.tool_execution.call, origin=ToolCallOrigin("bash", "shell"))
+    continuation = approval_continuation(
+        run_id="run",
+        session_id="session",
+        entity_name="helper",
+        room_id=runtime.room_id,
+        requester_id=runtime.requester_id,
+        response_event_id="$response",
+        state="claimed",
+        request_body="Hello",
+        calls=(
+            ApprovalCall(
+                "bash",
+                "run_shell_command",
+                "helper",
+                100,
+                decision=ApprovalDecision.DENIED,
+                reason="Denied",
+                toolkit_name="shell",
+                arguments_digest=approval_arguments_digest(arguments),
+            ),
+        ),
+        cli_call=CliApprovalCall(
+            toolkit="shell",
+            function="run_shell_command",
+            arguments=arguments,
+            call_id="bash",
+            parent_bash_call_id="bash",
+            requirements=(requirement,),
+            delegation_depth=0,
+        ).to_dict(),
+    )
+
+    with tool_runtime_context(runtime):
+        await cli_approval_recovery.continue_cli_approval(
+            build,
+            continuation,
+            CliApprovalCall.from_dict(continuation.cli_call),
+            persisted,
+            RunStorage(store, session, None),
+            paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
+            runtime_context=runtime,
+            tool_trace_collector=[],
+            refresh_scheduler=None,
+            authorize=AsyncMock(),
+            progress=None,
+        )
+
+    saved = store.get_run("run")
+    assert saved is not None
+    context, prompt, answer = [(message.id, message.get_content_string()) for message in saved.messages]
+    assert context == (earlier.id, earlier.content)
+    assert prompt[1] == f'<msg event_id="$source" from="{runtime.requester_id}"><![CDATA[Hello]]></msg>'
+    assert "turn stopped before completion" in answer[1]
+
+
+@pytest.mark.asyncio
 async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summarized(tmp_path: Path) -> None:
     """The paused reply's trace still lists the folded shell call and its nested tool; the saved record does not."""
     runtime = _helper_runtime(tmp_path, tools=["shell"])

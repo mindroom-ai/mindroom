@@ -14,7 +14,7 @@ from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.matrix.state import get_room_alias_from_id, resolve_room_aliases, resolve_room_id
 from mindroom.matrix.users import create_agent_http_client
-from mindroom.scheduling.errors import ScheduledTaskNotFoundError, SchedulingError
+from mindroom.scheduling.errors import ScheduledTaskNotFoundError, ScheduledTaskStorageError, SchedulingError
 from mindroom.scheduling.tasks import (
     ScheduledTaskReadModel,
     ScheduledTaskRecord,
@@ -93,6 +93,17 @@ def _configured_room_ids(runtime_config: Config, runtime_paths: RuntimePaths) ->
     resolved_rooms = resolve_room_aliases(configured_rooms, runtime_paths=runtime_paths)
     # Keep order while de-duplicating
     return list(dict.fromkeys(resolved_rooms))
+
+
+def _http_error(error: SchedulingError) -> HTTPException:
+    """Answer a missing task with 404, failed task storage with 500, and any other refused request with 400."""
+    if isinstance(error, ScheduledTaskNotFoundError):
+        status_code = 404
+    elif isinstance(error, ScheduledTaskStorageError):
+        status_code = 500
+    else:
+        status_code = 400
+    return HTTPException(status_code=status_code, detail=str(error))
 
 
 def _to_response_task(task: ScheduledTaskReadModel, runtime_paths: RuntimePaths) -> ScheduledTaskResponse:
@@ -174,10 +185,8 @@ async def update_schedule(
             config=runtime_config,
             writers=config_lifecycle.app_state(api_request.app).runtime.scheduled_tasks,
         )
-    except ScheduledTaskNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
     except SchedulingError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise _http_error(e) from e
     finally:
         await client.close()
 
@@ -209,10 +218,8 @@ async def cancel_schedule(
             runtime_paths=runtime_paths,
             task_runtime=config_lifecycle.app_state(request.app).runtime.scheduled_tasks,
         )
-    except ScheduledTaskNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
     except SchedulingError as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise _http_error(e) from e
     finally:
         await client.close()
 

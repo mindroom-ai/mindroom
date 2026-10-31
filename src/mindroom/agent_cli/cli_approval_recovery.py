@@ -20,6 +20,7 @@ from mindroom.history.interrupted_replay import (
     build_interrupted_replay_snapshot,
     persist_interrupted_replay_snapshot,
     split_interrupted_tool_trace,
+    stored_turn_input,
 )
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
@@ -307,6 +308,8 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         interrupted_tools=interrupted_trace,
         run_metadata=persisted.metadata,
         response_event_id=continuation.response_event_id,
+        # The paused run's metadata marks the thread messages its turn read seen, so the replay run keeps its input.
+        turn_input=stored_turn_input(persisted.messages),
     )
     # The replay run and the state the recovered call left commit together.
     await write_with_session_state(

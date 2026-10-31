@@ -14,3 +14,11 @@ class ScheduledTaskNotFoundError(SchedulingError):
 
     def __init__(self, task_id: str) -> None:
         super().__init__(f"Task `{task_id}` not found.")
+
+
+class ScheduledTaskStorageError(SchedulingError):
+    """Reading or writing a task's room state, or withdrawing its call approval, failed; a retry may succeed."""
+
+
+class ScheduledTaskStateReadError(ScheduledTaskStorageError):
+    """A scheduled-task state read failed without proving the task absent."""
