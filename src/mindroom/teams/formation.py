@@ -419,7 +419,7 @@ def _resolve_team_request(
     An explicit request names at least two members, so with none rejected it always forms a team.
     """
     rejected_members = [member for member in member_statuses if member.status is not TeamMemberStatus.ELIGIBLE]
-    eligible_count = sum(member.status is TeamMemberStatus.ELIGIBLE for member in member_statuses)
+    eligible_count = len(member_statuses) - len(rejected_members)
 
     if intent in {TeamIntent.EXPLICIT_MEMBERS, TeamIntent.CONFIGURED_TEAM}:
         if rejected_members:
