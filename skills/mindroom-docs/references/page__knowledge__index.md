@@ -506,7 +506,7 @@ Semantic knowledge and file-memory indexes support the `openai`, `ollama`, and `
 | Provider | Model example | Notes |
 |----------|---------------|-------|
 | `openai` | `text-embedding-3-small` | Also works with keyless OpenAI-compatible local endpoints |
-| `ollama` | `nomic-embed-text` | Self-hosted; set `host` or `OLLAMA_HOST` |
+| `ollama` | `nomic-embed-text` | Self-hosted; uses `http://localhost:11434` unless `OLLAMA_HOST` or `host` names another server |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Runs locally in MindRoom; the optional extra installs on first use |
 
 For multilingual text and code, use `google/embeddinggemma-2` with `sentence_transformers`; its first use downloads about 1.4 GB.
