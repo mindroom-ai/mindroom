@@ -374,7 +374,6 @@ def _prepared_team_turn() -> PreparedTeamExecution:
         history=(),
         summary=None,
         run_metadata=None,
-        unseen_event_ids=[],
         prepared_history=PreparedHistoryState(native_history=None),
         runtime_model_name="luna",
     )
