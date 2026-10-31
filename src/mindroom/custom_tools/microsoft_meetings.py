@@ -5,20 +5,23 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from functools import partial
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
-    graph_error_payload,
+    graph_call,
+    graph_object,
+    graph_records,
     graph_session,
-    graph_tool_result,
     next_page_token,
     page_offset,
     page_path,
     path_segment,
+    response_object,
 )
 from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.authoring import Toolkit
@@ -89,16 +92,15 @@ class _Request:
     reads_transcripts: bool = False
 
 
-def _join_url(value: object) -> str:
+def _join_url(value: str) -> str:
     """Return a Teams meeting join URL, refusing anything else before it goes into an OData filter."""
     try:
-        parts = urlsplit(value) if isinstance(value, str) else None
-        port = parts.port if parts is not None else None
+        parts = urlsplit(value)
+        port = parts.port
     except ValueError:
         parts, port = None, None
     if (
-        not isinstance(value, str)
-        or parts is None
+        parts is None
         or len(value) > _MAX_JOIN_URL_CHARACTERS
         or any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value)
         or parts.scheme != "https"
@@ -112,20 +114,12 @@ def _join_url(value: object) -> str:
     return value
 
 
-def _meeting_path(meeting_id: object) -> str:
+def _meeting_path(meeting_id: str) -> str:
     return f"/me/onlineMeetings/{path_segment(meeting_id, 'meeting_id')}"
 
 
-def _fields(value: object) -> Mapping[str, Any]:
-    return cast("Mapping[str, Any]", value) if isinstance(value, dict) else {}
-
-
-def _entries(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [entry for entry in payload.get("value") or [] if isinstance(entry, dict)]
-
-
 def _meeting(meeting: Mapping[str, Any]) -> dict[str, Any]:
-    organizer = _fields(_fields(meeting.get("participants")).get("organizer"))
+    organizer = graph_object(graph_object(meeting.get("participants")).get("organizer"))
     return {
         "id": meeting.get("id"),
         "subject": meeting.get("subject"),
@@ -133,7 +127,7 @@ def _meeting(meeting: Mapping[str, Any]) -> dict[str, Any]:
         "end": meeting.get("endDateTime"),
         "expires": meeting.get("expiryDateTime"),
         "organizer": {
-            "name": _fields(_fields(organizer.get("identity")).get("user")).get("displayName"),
+            "name": graph_object(graph_object(organizer.get("identity")).get("user")).get("displayName"),
             "upn": organizer.get("upn"),
         },
     }
@@ -144,8 +138,8 @@ def _inner_error_code(response: httpx.Response) -> str | None:
         payload = response.json()
     except ValueError:
         return None
-    error = _fields(_fields(payload).get("error"))
-    code = _fields(error.get("innerError") or error.get("innererror")).get("code")
+    error = graph_object(graph_object(payload).get("error"))
+    code = graph_object(error.get("innerError") or error.get("innererror")).get("code")
     return code if isinstance(code, str) else None
 
 
@@ -160,19 +154,6 @@ def _get(session: GraphSession, request: _Request) -> httpx.Response:
         inner_code = _inner_error_code(response) if response.status_code == 403 else None
         code, message = _ADMIN_REFUSALS.get(inner_code or "") or _TRANSCRIPT_REFUSALS[response.status_code]
         raise MicrosoftGraphError(code=code, message=message, **exc.details) from None
-
-
-def _json(response: httpx.Response) -> dict[str, Any]:
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    if not isinstance(payload, dict):
-        raise MicrosoftGraphError(
-            code="graph_invalid_response",
-            message="Microsoft Graph returned a response that is not JSON.",
-        )
-    return payload
 
 
 def _cue_start(match: re.Match[str]) -> str:
@@ -245,11 +226,14 @@ class MicrosoftMeetingsTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftMeetingsTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         super().__init__(
             name=_TOOL_NAME,
             tools=[
@@ -265,22 +249,7 @@ class MicrosoftMeetingsTools(Toolkit):
         result: Callable[[httpx.Response], Mapping[str, object]],
     ) -> str:
         """Refuse malformed arguments before any request, then send the request and render its result."""
-        try:
-            request = build()
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-
-        def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                return result(_get(session, request))
-
-        return graph_tool_result(_TOOL_NAME, run)
+        return graph_call(_TOOL_NAME, self._session, build, lambda session, request: result(_get(session, request)))
 
     def microsoft_meetings_find(self, join_url: str) -> str:
         """Find the Teams meeting behind a join link, with the meeting_id the transcript functions take.
@@ -302,7 +271,7 @@ class MicrosoftMeetingsTools(Toolkit):
             return _Request("/me/onlineMeetings", params={"$filter": f"JoinWebUrl eq '{escaped}'"})
 
         def result(response: httpx.Response) -> Mapping[str, object]:
-            meetings = _entries(_json(response))
+            meetings = graph_records(response_object(response))
             if not meetings:
                 raise MicrosoftGraphError(
                     code="meeting_not_found",
@@ -337,10 +306,10 @@ class MicrosoftMeetingsTools(Toolkit):
             return _Request(f"{_meeting_path(meeting_id)}/transcripts", reads_transcripts=True)
 
         def result(response: httpx.Response) -> Mapping[str, object]:
-            payload = _json(response)
+            payload = response_object(response)
             transcripts = [
                 {"id": entry.get("id"), "created": entry.get("createdDateTime"), "end": entry.get("endDateTime")}
-                for entry in _entries(payload)
+                for entry in graph_records(payload)
             ]
             token = next_page_token(payload)
             if not transcripts and token is None and page_token is None:

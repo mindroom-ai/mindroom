@@ -14,7 +14,12 @@ from mindroom.config.main import Config
 from mindroom.scheduling.runtime import _MISSED_TASK_MAX_AGE_SECONDS, _TaskRunner
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from tests.conftest import make_matrix_client_mock
-from tests.scheduling_helpers import schedule_runtime_paths, scheduled_task_runtime, scheduling_bot
+from tests.scheduling_helpers import (
+    schedule_runtime_paths,
+    scheduled_task_runtime,
+    scheduling_bot,
+    serve_room_schedule_state,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,9 +54,7 @@ def _once(execute_at: datetime, description: str = "Task") -> ScheduledWorkflow:
 def _router_client(*events: dict) -> AsyncMock:
     """Return the router's client, the account that wrote every task in the room."""
     client = make_matrix_client_mock(user_id=_SCHEDULE_WRITER_ID)
-    client.room_get_state = AsyncMock(
-        return_value=nio.RoomGetStateResponse.from_dict(list(events), room_id="!r:server"),
-    )
+    serve_room_schedule_state(client, "!r:server", list(events), sender=_SCHEDULE_WRITER_ID)
     client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
         {"event_id": "$failed"},
         room_id="!r:server",

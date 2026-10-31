@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import math
 import os
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -657,6 +657,78 @@ def _sandbox_settings_route_workspace_tools(runtime_paths: RuntimePaths, tools: 
     )
 
 
+@dataclass(frozen=True)
+class _ToolSettings:
+    """The settings one tool is built with for one agent, and the validated overrides they apply."""
+
+    # Each config field's constructor argument: stored settings, then authored, init, and runtime overrides, then the
+    # environment for a field still unset.
+    values: dict[str, object]
+    tool_config_overrides: dict[str, object]
+    tool_init_overrides: dict[str, object] | None
+    # The credentials manager the stored settings came from, which the toolkit and its worker calls also use.
+    credentials_manager: CredentialsManager | None
+
+
+def resolve_tool_settings(
+    tool_name: str,
+    runtime_paths: RuntimePaths,
+    *,
+    tools: ToolRegistry,
+    worker_target: ResolvedWorkerTarget | None,
+    credentials_manager: CredentialsManager | None = None,
+    allowed_shared_services: frozenset[str] | None = None,
+    credential_overrides: dict[str, object] | None = None,
+    tool_config_overrides: dict[str, object] | None = None,
+    tool_init_overrides: dict[str, object] | None = None,
+    runtime_overrides: dict[str, object] | None = None,
+) -> _ToolSettings:
+    """Resolve the settings ``tool_name`` in ``tools`` is built with for the agent ``worker_target`` names.
+
+    Stored settings come from the agent's scoped store over the shared layer ``allowed_shared_services`` grants, never
+    from a store worker code can write when this primary owns the tool's settings. Raises ``ToolConfigOverrideError``
+    or ``ToolInitOverrideError`` for an override the tool does not accept.
+    """
+    metadata = tools.entries[tool_name]
+    validated_tool_config_overrides = validate_authored_tool_entry_overrides(
+        tool_name,
+        tool_config_overrides,
+        tool_metadata=tools.entries,
+    )
+    resolved_credentials_manager = _resolve_tool_credentials_manager(metadata, runtime_paths, credentials_manager)
+    stored_credentials = (
+        load_scoped_credentials(
+            tool_name,
+            credentials_manager=resolved_credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
+            primary_built_tool=primary_owns_tool_settings(tool_name, tools, runtime_paths=runtime_paths),
+        )
+        if resolved_credentials_manager is not None
+        else None
+    )
+    credentials = {**(stored_credentials or {}), **(credential_overrides or {})}
+    safe_tool_init_overrides = sanitize_tool_init_overrides(
+        tool_name,
+        tool_init_overrides,
+        tool_metadata=tools.entries,
+    )
+    return _ToolSettings(
+        values=_build_tool_config_init_kwargs(
+            tool_name,
+            metadata,
+            runtime_paths=runtime_paths,
+            credentials=credentials,
+            tool_config_overrides=validated_tool_config_overrides,
+            tool_init_overrides=safe_tool_init_overrides,
+            runtime_overrides=runtime_overrides,
+        ),
+        tool_config_overrides=validated_tool_config_overrides,
+        tool_init_overrides=safe_tool_init_overrides,
+        credentials_manager=resolved_credentials_manager,
+    )
+
+
 def get_tool_by_name(
     tool_name: str,
     runtime_paths: RuntimePaths,
@@ -715,51 +787,27 @@ def get_tool_by_name(
         )
         from mindroom.tool_system.output_files import ToolOutputFilePolicy  # noqa: PLC0415
 
-        validated_tool_config_overrides = validate_authored_tool_entry_overrides(
+        settings = resolve_tool_settings(
             tool_name,
-            tool_config_overrides,
-            tool_metadata=tools.entries,
+            runtime_paths,
+            tools=tools,
+            worker_target=worker_target,
+            credentials_manager=credentials_manager,
+            allowed_shared_services=allowed_shared_services,
+            credential_overrides=credential_overrides,
+            tool_config_overrides=tool_config_overrides,
+            tool_init_overrides=tool_init_overrides,
+            runtime_overrides=runtime_overrides,
         )
         construction = ToolConstruction.from_factory(
             tool_name,
             factory,
-            tool_config_overrides=validated_tool_config_overrides,
+            tool_config_overrides=settings.tool_config_overrides,
         )
         tool_class = load_toolkit_class(tool_name, factory)
-        resolved_credentials_manager = _resolve_tool_credentials_manager(
-            metadata,
-            runtime_paths,
-            credentials_manager,
-        )
-        credentials = (
-            load_scoped_credentials(
-                tool_name,
-                credentials_manager=resolved_credentials_manager,
-                worker_target=worker_target,
-                allowed_shared_services=allowed_shared_services,
-                primary_built_tool=primary_owns_tool_settings(tool_name, tools, runtime_paths=runtime_paths),
-            )
-            if resolved_credentials_manager is not None
-            else {}
-        ) or {}
-        if credential_overrides:
-            credentials = {**credentials, **credential_overrides}
-        safe_tool_init_overrides = sanitize_tool_init_overrides(
-            tool_name,
-            tool_init_overrides,
-            tool_metadata=tools.entries,
-        )
-        init_kwargs = _build_tool_config_init_kwargs(
-            tool_name,
-            metadata,
-            runtime_paths=runtime_paths,
-            credentials=credentials,
-            tool_config_overrides=validated_tool_config_overrides,
-            tool_init_overrides=safe_tool_init_overrides,
-            runtime_overrides=runtime_overrides,
-        )
+        init_kwargs = dict(settings.values)
         extra_env_passthrough = init_kwargs.get("extra_env_passthrough")
-        proxy_tool_init_overrides = dict(safe_tool_init_overrides or {})
+        proxy_tool_init_overrides = dict(settings.tool_init_overrides or {})
         shell_path_prepend = init_kwargs.get("shell_path_prepend")
         if tool_name == "shell" and isinstance(shell_path_prepend, str):
             proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
@@ -768,7 +816,7 @@ def get_tool_by_name(
                 metadata,
                 runtime_paths=runtime_paths,
                 tools=tools,
-                credentials_manager=resolved_credentials_manager,
+                credentials_manager=settings.credentials_manager,
                 worker_target=worker_target,
                 runtime_config=runtime_config,
                 tool_output_workspace_root=tool_output_workspace_root,
@@ -802,9 +850,9 @@ def get_tool_by_name(
                 tool_name,
                 toolkit,
                 runtime_paths=runtime_paths,
-                credentials_manager=resolved_credentials_manager,
+                credentials_manager=settings.credentials_manager,
                 tool_init_overrides=proxy_tool_init_overrides or None,
-                tool_config_overrides=validated_tool_config_overrides,
+                tool_config_overrides=settings.tool_config_overrides,
                 extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
                 worker_target=worker_target,
                 runtime_config=runtime_config,

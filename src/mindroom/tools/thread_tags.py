@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     icon="Tags",
     icon_color="text-emerald-500",
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_tags",
     function_names=("list_thread_tags", "tag_thread", "untag_thread"),
     managed_init_args=(

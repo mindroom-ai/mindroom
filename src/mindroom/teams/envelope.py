@@ -19,7 +19,7 @@ from uuid import uuid4
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content, with_prior_usage
 from mindroom.config.resolution import entity_timezone
-from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
+from mindroom.constants import is_silent_schedule_no_report_response
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
@@ -31,7 +31,6 @@ from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import load_bound_scope_session
-from mindroom.history.storage import update_scope_seen_event_ids
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
@@ -60,14 +59,12 @@ from mindroom.response_turn import (
     stream_with_llm_request_log_context,
 )
 from mindroom.run_storage import bind_turn_session, scope_run_storage
-from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
 from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
     build_team_spec,
     materialized_team_label,
-    requested_team_agent_names,
     resolve_team_members,
 )
 from mindroom.teams.presentation import (
@@ -130,7 +127,6 @@ class PreparedTeamExecution:
     history: tuple[Message, ...]
     summary: ScopeSummary | None
     run_metadata: dict[str, Any] | None
-    unseen_event_ids: list[str]
     prepared_history: PreparedHistoryState
     # Configured model name resolved at preparation time. Run metadata must use
     # this snapshot instead of re-resolving, because the per-thread override
@@ -169,7 +165,6 @@ async def prepare_materialized_team_execution(
     """Prepare one built team's turn: its prompt and unseen context, the scope's history, and the run metadata."""
     spec = built.spec
     leader = spec.leader
-    # ``build_team_spec`` renders the leader prompt, which sizes the static part of every leader request.
     ctx = replace(
         ctx,
         transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items),
@@ -231,7 +226,6 @@ async def prepare_materialized_team_execution(
         history=tuple(history),
         summary=summary,
         run_metadata=run_metadata,
-        unseen_event_ids=prepared_execution.unseen_event_ids,
         prepared_history=prepared_history,
         runtime_model_name=runtime_model.model_name,
     )
@@ -307,29 +301,6 @@ def run_prepared_team(
     )
 
 
-async def _persist_bound_seen_event_ids(*, scope_context: ScopeSessionContext, event_ids: list[str]) -> None:
-    """Record the Matrix events this team turn consumed on the stored session row, creating the row if needed.
-
-    The ids merge into the metadata the row holds, so nothing the run or another writer stored is put back or lost.
-    The write runs in the database's lane, as the session's other writes do.
-    """
-    storage = scope_context.storage
-    # A new session names the row to merge into, so the run's loaded session never writes its stale state back.
-    record = partial(
-        update_scope_seen_event_ids,
-        session=scope_context.first_session(),
-        event_ids=event_ids,
-    )
-    await run_session_storage_operation(lambda: storage, record)
-
-
-def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[str]:
-    raw_event_ids = (run_metadata or {}).get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
-    if not isinstance(raw_event_ids, list):
-        return []
-    return [event_id for event_id in raw_event_ids if isinstance(event_id, str) and event_id]
-
-
 # ---------------------------------------------------------------------------
 # One team turn
 # ---------------------------------------------------------------------------
@@ -363,7 +334,6 @@ class _TeamTurn:
     ctx: ResponseTurnContext
     spec: TeamTurnSpec
     config: Config
-    requested_agent_names: list[str]
     members: ResolvedExactTeamMembers
     # The zone of the entity whose bot runs the turn, which dates all of it.
     timezone: str
@@ -424,7 +394,7 @@ class _TeamTurn:
         if continuation_state.active_model_name is not None:
             self.members = replace(
                 self.members,
-                model_names=dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name),
+                model_names=dict.fromkeys(self.members.requested_agent_names, continuation_state.active_model_name),
             )
         return self.members
 
@@ -601,7 +571,7 @@ class _TeamTurn:
         elif (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
             shown = chunk.content
             yield chunk
-        yield AttemptResolved(await self.resolve_completed(run, attempt, record, shown=shown is not None))
+        yield AttemptResolved(self.resolve_completed(attempt, record, run.prior_usage, shown=shown is not None))
 
     def silent_no_report(self, record: TeamRunRecord) -> bool:
         """Whether a quiet scheduled turn's leader answered with the no-report token while no member found anything."""
@@ -645,20 +615,18 @@ class _TeamTurn:
             team_member_model_names=tuple(sorted(attempt.members.model_names.items())),
         )
 
-    async def resolve_completed(
+    def resolve_completed(
         self,
-        run: TurnRunState,
         attempt: TeamAttempt,
         record: TeamRunRecord,
+        prior_usage: tuple[RunMetrics, ...],
         *,
         shown: bool,
     ) -> CompletedAttempt:
         """Return the completed attempt: what its reply still has to show, what replays, and the turn's metadata.
 
         ``shown`` says whether the attempt's chunks showed a document; one that showed nothing ends with the
-        no-response line. An attempt that produced anything, text or tool calls, records the Matrix events the turn
-        consumed as seen on the stored session row; an empty one, whose run is not stored, leaves them unseen, so the
-        next turn still reads them.
+        no-response line.
         """
         tool_executions = team_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
@@ -668,11 +636,6 @@ class _TeamTurn:
         body_text = attempt.presentation.text_without_tool_markers(finished=True)
         has_visible_output = bool(body_text)
         is_empty = is_empty_reply(record)
-        if not is_empty and self.ctx.reply_to_event_id:
-            await _persist_bound_seen_event_ids(
-                scope_context=run.scope,
-                event_ids=_run_metadata_seen_event_ids(run.run_metadata),
-            )
         rendered = header + (body_text or NO_TEAM_RESPONSE)
         replayable_text = rendered if has_visible_output else ""
         if self.silent_no_report(record):
@@ -694,7 +657,7 @@ class _TeamTurn:
             usage=team_usage(record),
             tool_executions=tuple(tool_executions),
             completed_tools=tuple(attempt.presentation.tool_tracker.completed_tools),
-            build_run_metadata=self.run_metadata_builder(attempt, record.status, run.prior_usage),
+            build_run_metadata=self.run_metadata_builder(attempt, record.status, prior_usage),
         )
 
     def replays(self, record: AnyRunRecord) -> bool:
@@ -710,7 +673,7 @@ class _TeamTurn:
 
     def load_scope(self) -> ScopeSessionContext:
         return load_bound_scope_session(
-            member_names=self.requested_agent_names,
+            member_names=self.members.requested_agent_names,
             session_id=self.session_id,
             runtime_paths=self.runtime_paths,
             config=self.config,
@@ -743,11 +706,10 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | Fail
         msg = "team response turns require ResponseTurnContext.session_id"
         raise ValueError(msg)
     config = orchestrator.config
-    requested_agent_names = requested_team_agent_names(spec.agent_names)
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
         team_members = resolve_team_members(
-            requested_agent_names,
+            spec.agent_names,
             orchestrator,
             ctx.execution_identity,
             config=config,
@@ -770,7 +732,6 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | Fail
         ),
         spec=spec,
         config=config,
-        requested_agent_names=requested_agent_names,
         members=team_members,
         # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
         timezone=entity_timezone(config, ctx.entity_label),

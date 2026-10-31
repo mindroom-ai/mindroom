@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     requires_room_context=True,
     icon="Calendar",
     icon_color="text-emerald-500",
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/scheduling/#scheduler",
     function_names=(
         "cancel_schedule",

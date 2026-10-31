@@ -537,12 +537,7 @@ async def _compact_before_reply(
         raise
     except Exception:
         # A failing manual compaction must not retry on every reply.
-        await clear_manual_compaction_request(
-            storage=storage,
-            session=session,
-            state=state,
-            keep_concurrent_request=False,
-        )
+        await clear_manual_compaction_request(storage=storage, session=session, state=state)
         raise
 
 
@@ -601,7 +596,7 @@ async def compact_scope_mid_turn(
             fold=fold,
             snapshots=snapshots,
             summarizer=load_summarizer(
-                resolved_inputs.execution_plan,
+                execution_plan,
                 resolved_inputs.history_settings,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -812,7 +807,8 @@ def _prepare_scope_state_for_run(
 ) -> HistoryScopeState:
     state = read_scope_state(session)
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
-        state = set_force_compaction(storage, session=session, forced=False)
+        set_force_compaction(storage, session=session, forced=False)
+        state = HistoryScopeState()
         logger.warning(
             "Forced compaction skipped because text compaction is unavailable",
             session_id=session.session_id,

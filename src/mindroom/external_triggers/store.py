@@ -508,7 +508,7 @@ class ExternalTriggerStore:
         return record
 
     def _validate_record_against_config(self, record: ExternalTriggerRecord, config: Config) -> None:
-        _validate_owner(record.owner_user_id, config, self._runtime_paths)
+        require_human_owner(record.owner_user_id, config, self._runtime_paths)
         _validate_target(record, config, self._runtime_paths)
 
     def _read_records(self) -> _SerializedTriggerRecords:
@@ -551,13 +551,12 @@ def _replay_scope(record: ExternalTriggerRecord) -> str:
     return f"{record.uid}:{record.auth_epoch}"
 
 
-def _validate_trigger_id(trigger_id: str) -> str:
+def _validate_trigger_id(trigger_id: str) -> None:
     """Validate one route-safe trigger id."""
     normalized = non_empty_stripped(trigger_id, field_name="trigger_id")
     if re.fullmatch(_TRIGGER_ID_PATTERN, normalized) is None:
         msg = "trigger_id must contain only ASCII letters, digits, underscore, or hyphen"
         raise ExternalTriggerStoreError(msg)
-    return normalized
 
 
 def _normalize_public_key(public_key: str) -> tuple[str, bytes]:
@@ -633,7 +632,7 @@ def _public_key_fingerprint_from_bytes(public_key_bytes: bytes) -> str:
     return f"sha256:{hashlib.sha256(public_key_bytes).hexdigest()}"
 
 
-def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePaths) -> None:
+def require_human_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePaths) -> None:
     """Require an external human owner, not a managed bot identity."""
     MatrixID.parse(owner_user_id)
     if not is_human_requester_id(owner_user_id, config, runtime_paths):

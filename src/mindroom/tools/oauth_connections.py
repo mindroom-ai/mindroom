@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     icon="Unplug",
     icon_color="text-amber-500",
     config_fields=[],
-    dependencies=["agno"],
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS, ToolManagedInitArg.WORKER_TARGET),
     function_names=("reset_oauth_connection",),
     requires_room_context=True,

@@ -58,6 +58,7 @@ from mindroom.config.judgment import TypeSafeJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import (
@@ -193,7 +194,6 @@ def _prepared_team_execution_context(
         summary=None,
         run_metadata=cast("dict[str, Any] | None", run_metadata)
         or build_prepared_history_metadata_content(prepared_history),
-        unseen_event_ids=[],
         prepared_history=prepared_history,
         runtime_model_name="default",
     )
@@ -4569,17 +4569,22 @@ class TestTeamCompletion:
             execution_identity=None,
         )
         assert scope_context is not None
-        prepared_team_execution = _prepared_team_execution_context(
+        team_execution = _prepared_team_execution_context(
             final_prompt="Previous team reply\n\nAnalyze this.",
             messages=[
                 Message(role="assistant", content="Previous team reply"),
                 Message(role="user", content="Analyze this."),
             ],
         )
+        prepared_execution = _PreparedExecutionContext(
+            turn=team_execution.turn,
+            unseen_event_ids=[],
+            prepared_history=team_execution.prepared_history,
+        )
 
         with patch(
             "mindroom.teams.envelope.prepare_bound_team_run_context",
-            new=AsyncMock(return_value=prepared_team_execution),
+            new=AsyncMock(return_value=prepared_execution),
         ):
             prepared = await openai_compat._prepare_openai_team_execution(
                 scope_context=scope_context,

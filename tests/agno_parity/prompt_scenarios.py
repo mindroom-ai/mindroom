@@ -1024,7 +1024,7 @@ async def _run_dynamic_workflow(root: Path) -> ScenarioOutput:
         context,
         RoomAgentParticipant.model_validate(participant),
         prompt,
-        run_scope="travel-report:run_1",
+        run_key="travel-report:run_1",
     )
     assert output == "ok", output
     return ScenarioOutput(
@@ -1032,7 +1032,7 @@ async def _run_dynamic_workflow(root: Path) -> ScenarioOutput:
             "config": authored,
             "participant": participant,
             "prompt": prompt,
-            "run_scope": "travel-report:run_1",
+            "run_key": "travel-report:run_1",
             "entry_point": "mindroom.custom_tools.dynamic_workflow._execute_room_agent_participant",
         },
     )
