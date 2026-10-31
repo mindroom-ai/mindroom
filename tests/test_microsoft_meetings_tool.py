@@ -5,19 +5,20 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
-from pydantic import ValidationError
 
 from mindroom.custom_tools.microsoft_meetings import MicrosoftMeetingsTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
 from mindroom.tool_system.registry import builtin_tool_registry
-from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
+    MALFORMED_GRAPH_IDS,
     FakeGraph,
+    assert_refused_by_call_validation,
+    model_description,
     publish_grant,
     runtime_paths,
     save_client_config,
@@ -142,15 +143,6 @@ def _tools(
     return tools, graph
 
 
-def _payload(result: str) -> dict[str, Any]:
-    return json.loads(result)
-
-
-def _description(tools: MicrosoftMeetingsTools, name: str) -> str:
-    """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join((toolkit_offers(tools, name).description or "").split())
-
-
 def test_registered_metadata_declares_a_read_only_primary_runtime_tool() -> None:
     metadata = builtin_tool_registry().entries["microsoft_meetings"]
 
@@ -177,15 +169,15 @@ def test_descriptions_explain_the_flow_and_mark_transcripts_untrusted(
 ) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
 
-    assert "outlook_calendar_list_events" in _description(tools, "microsoft_meetings_find")
-    assert "organizer" in _description(tools, "microsoft_meetings_list_transcripts")
-    assert UNTRUSTED in _description(tools, "microsoft_meetings_get_transcript")
+    assert "outlook_calendar_list_events" in model_description(tools, "microsoft_meetings_find")
+    assert "organizer" in model_description(tools, "microsoft_meetings_list_transcripts")
+    assert UNTRUSTED in model_description(tools, "microsoft_meetings_get_transcript")
 
 
 def test_find_filters_online_meetings_by_the_join_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": [_meeting()]}))
 
-    result = _payload(tools.microsoft_meetings_find(JOIN_URL))
+    result = json.loads(tools.microsoft_meetings_find(JOIN_URL))
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("GET", "/v1.0/me/onlineMeetings")
@@ -217,7 +209,7 @@ def test_find_doubles_single_quotes_inside_the_odata_string(tmp_path: Path, monk
 def test_find_reports_a_url_without_a_visible_meeting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    result = _payload(tools.microsoft_meetings_find(JOIN_URL))
+    result = json.loads(tools.microsoft_meetings_find(JOIN_URL))
 
     assert (result["status"], result["code"]) == ("error", "meeting_not_found")
     assert "invited" in result["message"]
@@ -229,13 +221,13 @@ def test_listings_refuse_an_empty_answer(tmp_path: Path, monkeypatch: pytest.Mon
 
     results = [tools.microsoft_meetings_find(JOIN_URL), tools.microsoft_meetings_list_transcripts(MEETING)]
 
-    assert [_payload(result)["code"] for result in results] == ["graph_invalid_response"] * 2
+    assert [json.loads(result)["code"] for result in results] == ["graph_invalid_response"] * 2
 
 
 def test_find_returns_missing_fields_as_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({"value": [{"id": MEETING, "subject": None}]}))
 
-    meeting = _payload(tools.microsoft_meetings_find(JOIN_URL))["meeting"]
+    meeting = json.loads(tools.microsoft_meetings_find(JOIN_URL))["meeting"]
 
     assert meeting == {
         "id": MEETING,
@@ -274,7 +266,7 @@ def test_find_refuses_anything_but_a_teams_meeting_link_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": [_meeting()]}))
 
-    result = _payload(tools.microsoft_meetings_find(join_url))
+    result = json.loads(tools.microsoft_meetings_find(join_url))
 
     assert result["code"] == "invalid_argument"
     assert graph.requests == []
@@ -283,7 +275,7 @@ def test_find_refuses_anything_but_a_teams_meeting_link_before_any_request(
 def test_find_accepts_the_short_join_link_format(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": [_meeting()]}))
 
-    result = _payload(tools.microsoft_meetings_find("https://teams.microsoft.com/meet/24681357902468?p=AbCdEfGh"))
+    result = json.loads(tools.microsoft_meetings_find("https://teams.microsoft.com/meet/24681357902468?p=AbCdEfGh"))
 
     assert result["status"] == "ok"
     assert len(graph.requests) == 1
@@ -293,7 +285,7 @@ def test_list_transcripts_reads_the_meeting_transcripts(tmp_path: Path, monkeypa
     second = _transcript("MSMjMCMjMzAxNjNhYTctNWRmZi00MjM3", created="2026-10-13T14:02:00Z")
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": [_transcript(), second]}))
 
-    result = _payload(tools.microsoft_meetings_list_transcripts(MEETING))
+    result = json.loads(tools.microsoft_meetings_list_transcripts(MEETING))
 
     [request] = graph.requests
     assert (request.method, request.url.path, request.url.query) == ("GET", TRANSCRIPTS_PATH, b"")
@@ -311,7 +303,7 @@ def test_list_transcripts_reports_a_meeting_without_transcripts(
 ) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    result = _payload(tools.microsoft_meetings_list_transcripts(MEETING))
+    result = json.loads(tools.microsoft_meetings_list_transcripts(MEETING))
 
     assert (result["status"], result["code"]) == ("error", "no_transcripts")
     assert "transcription" in result["message"]
@@ -324,7 +316,7 @@ def test_list_transcripts_returns_its_page_token(tmp_path: Path, monkeypatch: py
         _answer({"value": [_transcript()], "@odata.nextLink": f"{GRAPH}{NEXT_TRANSCRIPTS}"}),
     )
 
-    assert _payload(tools.microsoft_meetings_list_transcripts(MEETING))["next_page_token"] == NEXT_TRANSCRIPTS
+    assert json.loads(tools.microsoft_meetings_list_transcripts(MEETING))["next_page_token"] == NEXT_TRANSCRIPTS
 
 
 @pytest.mark.parametrize(
@@ -343,7 +335,7 @@ def test_list_transcripts_follows_its_page_token_without_other_parameters(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": [_transcript()]}))
 
-    result = _payload(tools.microsoft_meetings_list_transcripts("ignored-meeting", page_token=page_token))
+    result = json.loads(tools.microsoft_meetings_list_transcripts("ignored-meeting", page_token=page_token))
 
     assert (result["status"], result["next_page_token"]) == ("ok", None)
     [request] = graph.requests
@@ -355,7 +347,7 @@ def test_list_transcripts_follows_its_page_token_without_other_parameters(
 def test_a_later_empty_transcript_page_is_not_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    result = _payload(tools.microsoft_meetings_list_transcripts(MEETING, page_token=NEXT_TRANSCRIPTS))
+    result = json.loads(tools.microsoft_meetings_list_transcripts(MEETING, page_token=NEXT_TRANSCRIPTS))
 
     assert (result["status"], result["transcripts"], result["next_page_token"]) == ("ok", [], None)
 
@@ -379,7 +371,7 @@ def test_list_transcripts_refuses_a_foreign_page_token_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    result = _payload(tools.microsoft_meetings_list_transcripts(MEETING, page_token=page_token))
+    result = json.loads(tools.microsoft_meetings_list_transcripts(MEETING, page_token=page_token))
 
     assert result["code"] == "invalid_page_token"
     assert graph.requests == []
@@ -391,7 +383,7 @@ def test_get_transcript_reads_speakers_and_merges_their_consecutive_cues(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _vtt(VTT))
 
-    result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
+    result = json.loads(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
 
     [request] = graph.requests
     assert (request.method, request.url.path, request.url.query) == ("GET", CONTENT_PATH, b"")
@@ -411,7 +403,7 @@ def test_get_transcript_keeps_cues_without_a_speaker_apart(tmp_path: Path, monke
     )
     tools, _graph = _tools(tmp_path, monkeypatch, _vtt(content))
 
-    result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
+    result = json.loads(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
 
     assert result["transcript"].split("\n") == ["00:12:03 First line.", "-00:00:01 Earlier.", "100:00:00 Sam: Late."]
 
@@ -419,7 +411,7 @@ def test_get_transcript_keeps_cues_without_a_speaker_apart(tmp_path: Path, monke
 def test_get_transcript_of_an_empty_transcript_is_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _vtt("WEBVTT\n"))
 
-    result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
+    result = json.loads(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
 
     assert (result["transcript"], result["total_characters"], result["next_page_token"]) == ("", 0, None)
 
@@ -439,7 +431,7 @@ def test_get_transcript_splits_a_long_monologue_into_labeled_lines(
     chunks: list[str] = []
     token: str | None = None
     while True:
-        result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=token))
+        result = json.loads(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=token))
         chunks.append(result["transcript"])
         token = result["next_page_token"]
         if token is None:
@@ -474,7 +466,7 @@ def test_get_transcript_pages_a_long_transcript_at_line_boundaries(
     chunks: list[str] = []
     token: str | None = None
     while True:
-        result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=token))
+        result = json.loads(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=token))
         chunks.append(result["transcript"])
         token = result["next_page_token"]
         if token is None:
@@ -497,8 +489,10 @@ def test_get_transcript_cuts_a_line_longer_than_one_chunk(tmp_path: Path, monkey
     monologue = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<v Alex Doe>" + "x" * (CHUNK + 10) + "</v>\n"
     tools, _graph = _tools(tmp_path, monkeypatch, _vtt(monologue))
 
-    first = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
-    second = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=first["next_page_token"]))
+    first = json.loads(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
+    second = json.loads(
+        tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=first["next_page_token"]),
+    )
 
     assert len(first["transcript"]) == CHUNK
     assert first["next_page_token"] == str(CHUNK)
@@ -514,7 +508,7 @@ def test_get_transcript_refuses_a_malformed_page_token_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _vtt(VTT))
 
-    result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=page_token))
+    result = json.loads(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=page_token))
 
     assert result["code"] == "invalid_page_token"
     assert graph.requests == []
@@ -537,22 +531,19 @@ def test_malformed_arguments_fail_call_validation_before_any_request(
     """Arguments that disagree with a function's signature fail call validation before its body runs."""
     tools, graph = _tools(tmp_path, monkeypatch, _vtt(VTT))
 
-    with pytest.raises(ValidationError):
-        toolkit_offers(tools, name).entrypoint(**arguments)
-
-    assert graph.requests == []
+    assert_refused_by_call_validation(tools, graph, name, arguments)
 
 
 def test_get_transcript_refuses_an_offset_past_the_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _vtt(VTT))
     past_the_end = str(len("\n".join(VTT_LINES)) + 1)
 
-    result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=past_the_end))
+    result = json.loads(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=past_the_end))
 
     assert result["code"] == "invalid_page_token"
 
 
-@pytest.mark.parametrize("bad_id", ["", " ", "..", "a/b", "a\\b", "a?b", "a#b", "a\nb"])
+@pytest.mark.parametrize("bad_id", MALFORMED_GRAPH_IDS)
 def test_every_function_refuses_malformed_ids_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -566,7 +557,7 @@ def test_every_function_refuses_malformed_ids_before_any_request(
         tools.microsoft_meetings_get_transcript(MEETING, bad_id),
     ]
 
-    assert [_payload(result)["code"] for result in results] == ["invalid_argument"] * len(results)
+    assert [json.loads(result)["code"] for result in results] == ["invalid_argument"] * len(results)
     assert graph.requests == []
 
 
@@ -608,7 +599,7 @@ def test_transcript_refusals_explain_their_cause(
 ) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _refusal(status, graph_code, inner_code))
 
-    result = _payload(call(tools))
+    result = json.loads(call(tools))
 
     assert (result["status"], result["code"], result["graph_code"]) == ("error", code, graph_code)
     assert phrase in result["message"]
@@ -619,7 +610,7 @@ def test_transcript_refusals_explain_their_cause(
 def test_a_tenant_without_speaker_attribution_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _refusal(403, "Forbidden", "SpeakerAttributionNotAllowed"))
 
-    result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
+    result = json.loads(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
 
     assert result["code"] == "speaker_attribution_disabled"
     assert "administrator" in result["message"]
@@ -629,13 +620,13 @@ def test_a_lowercase_inner_error_is_read_too(tmp_path: Path, monkeypatch: pytest
     payload = {"error": {"code": "Forbidden", "innererror": {"code": "GraphAccessToTranscriptsDisabled"}}}
     tools, _graph = _tools(tmp_path, monkeypatch, _answer(payload, status=403))
 
-    assert _payload(tools.microsoft_meetings_list_transcripts(MEETING))["code"] == "transcripts_disabled"
+    assert json.loads(tools.microsoft_meetings_list_transcripts(MEETING))["code"] == "transcripts_disabled"
 
 
 def test_find_keeps_the_shared_refusal_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _refusal(403, "Forbidden"))
 
-    result = _payload(tools.microsoft_meetings_find(JOIN_URL))
+    result = json.loads(tools.microsoft_meetings_find(JOIN_URL))
 
     assert (result["code"], result["graph_code"]) == ("forbidden", "Forbidden")
 
@@ -647,6 +638,6 @@ def test_throttling_reports_the_retry_delay(tmp_path: Path, monkeypatch: pytest.
         lambda _request: httpx.Response(429, headers={"Retry-After": "7"}, json={"error": {"code": "TooManyRequests"}}),
     )
 
-    result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
+    result = json.loads(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
 
     assert (result["code"], result["retry_after_seconds"]) == ("throttled", 7)

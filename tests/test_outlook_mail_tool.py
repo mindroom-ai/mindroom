@@ -5,12 +5,11 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
 import httpx
 import pytest
-from pydantic import ValidationError
 
 from mindroom.custom_tools import outlook_mail
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
@@ -20,6 +19,8 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
+    assert_refused_by_call_validation,
+    model_description,
     publish_grant,
     runtime_paths,
     save_client_config,
@@ -173,23 +174,10 @@ def _tools(
     return tools, graph
 
 
-def _payload(result: str) -> dict[str, Any]:
-    return json.loads(result)
-
-
-def _body(request: httpx.Request) -> dict[str, Any]:
-    return json.loads(request.content)
-
-
 def _workspace_file(tmp_path: Path, relative: str, content: bytes) -> None:
     path = tmp_path / "workspace" / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
-
-
-def _description(tools: OutlookMailTools, name: str) -> str:
-    """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join((toolkit_offers(tools, name).description or "").split())
 
 
 def test_registered_metadata_declares_a_primary_runtime_path_tool() -> None:
@@ -219,7 +207,7 @@ def test_a_connection_without_the_new_scopes_asks_to_reconnect(
     )
     tools = OutlookMailTools(runtime_paths=paths, credentials_manager=manager, worker_target=worker_target())
 
-    result = _payload(tools.outlook_mail_search())
+    result = json.loads(tools.outlook_mail_search())
 
     assert result["oauth_connection_required"] is True
     assert graph.requests == []
@@ -241,9 +229,12 @@ def test_write_descriptions_ask_to_tell_the_requester_first(tmp_path: Path, monk
     tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
 
     for name in WRITE_FUNCTIONS:
-        assert "Before calling, tell the requester" in _description(tools, name), name
-    assert "untrusted" in _description(tools, "outlook_mail_get_message")
-    assert "goes to the original's reply_to addresses when it has them" in _description(tools, "outlook_mail_reply")
+        assert "Before calling, tell the requester" in model_description(tools, name), name
+    assert "untrusted" in model_description(tools, "outlook_mail_get_message")
+    assert "goes to the original's reply_to addresses when it has them" in model_description(
+        tools,
+        "outlook_mail_reply",
+    )
     for name in ("outlook_mail_send", "outlook_mail_create_draft"):
         to = toolkit_offers(tools, name).parameters["properties"]["to"]
         assert "Sam Example <sam@contoso.com>" in to["description"], name
@@ -252,7 +243,7 @@ def test_write_descriptions_ask_to_tell_the_requester_first(tmp_path: Path, monk
 def test_search_without_a_query_lists_the_newest_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.outlook_mail_search())
+    result = json.loads(tools.outlook_mail_search())
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("GET", "/v1.0/me/messages")
@@ -284,7 +275,7 @@ def test_search_follows_its_own_page_token(tmp_path: Path, monkeypatch: pytest.M
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
     page_token = f"{mailbox_path}/messages?$top=25&$skiptoken=page2"
 
-    result = _payload(tools.outlook_mail_search(query="ignored", folder="inbox", page_token=page_token))
+    result = json.loads(tools.outlook_mail_search(query="ignored", folder="inbox", page_token=page_token))
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("GET", f"/v1.0{mailbox_path}/messages")
@@ -311,7 +302,7 @@ def test_search_refuses_a_foreign_page_token_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert _payload(tools.outlook_mail_search(page_token=page_token))["code"] == "invalid_page_token"
+    assert json.loads(tools.outlook_mail_search(page_token=page_token))["code"] == "invalid_page_token"
     assert graph.requests == []
 
 
@@ -362,7 +353,7 @@ def test_search_refuses_malformed_arguments_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert _payload(tools.outlook_mail_search(**arguments))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert json.loads(tools.outlook_mail_search(**arguments))["code"] == "invalid_argument"  # type: ignore[arg-type]
     assert graph.requests == []
 
 
@@ -415,16 +406,13 @@ def test_malformed_arguments_fail_call_validation_before_any_request(
     """Arguments that disagree with a function's signature fail call validation before its body runs."""
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    with pytest.raises(ValidationError):
-        toolkit_offers(tools, name).entrypoint(**arguments)
-
-    assert graph.requests == []
+    assert_refused_by_call_validation(tools, graph, name, arguments)
 
 
 def test_get_message_reads_the_text_body_and_attachments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    message = _payload(tools.outlook_mail_get_message(MESSAGE_ID))["message"]
+    message = json.loads(tools.outlook_mail_get_message(MESSAGE_ID))["message"]
 
     get, attachments = graph.requests
     assert unquote(get.url.path) == MESSAGE_PATH
@@ -474,7 +462,7 @@ def test_get_message_follows_attachment_pages(tmp_path: Path, monkeypatch: pytes
     )
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    message = _payload(tools.outlook_mail_get_message(MESSAGE_ID))["message"]
+    message = json.loads(tools.outlook_mail_get_message(MESSAGE_ID))["message"]
 
     assert [attachment["id"] for attachment in message["attachments"]] == ["first", "second"]
     assert message["attachments_truncated"] is False
@@ -494,7 +482,7 @@ def test_get_message_stops_listing_attachments_at_the_cap(tmp_path: Path, monkey
     )
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    message = _payload(tools.outlook_mail_get_message(MESSAGE_ID))["message"]
+    message = json.loads(tools.outlook_mail_get_message(MESSAGE_ID))["message"]
 
     assert len(message["attachments"]) == outlook_mail._MAX_ATTACHMENTS
     assert message["attachments_truncated"] is True
@@ -506,7 +494,7 @@ def test_get_message_truncates_a_long_body(tmp_path: Path, monkeypatch: pytest.M
     mail.message = _message(body={"contentType": "text", "content": "x" * (outlook_mail._MAX_BODY_CHARS + 5)})
     tools, _graph = _tools(tmp_path, monkeypatch, mail)
 
-    message = _payload(tools.outlook_mail_get_message(MESSAGE_ID))["message"]
+    message = json.loads(tools.outlook_mail_get_message(MESSAGE_ID))["message"]
 
     assert len(message["body"]) == outlook_mail._MAX_BODY_CHARS
     assert message["truncated"] is True
@@ -533,14 +521,14 @@ def test_ids_that_would_change_the_path_are_refused_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert _payload(call(tools, message_id))["code"] == "invalid_argument"
+    assert json.loads(call(tools, message_id))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
 def test_download_saves_a_file_attachment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.outlook_mail_download_attachment(MESSAGE_ID, ATTACHMENT_ID))
+    result = json.loads(tools.outlook_mail_download_attachment(MESSAGE_ID, ATTACHMENT_ID))
 
     target = tmp_path / "workspace" / "outlook-mail-attachments" / "plan.pdf"
     assert target.read_bytes() == b"pdf content"
@@ -561,7 +549,7 @@ def test_download_refuses_attachments_that_are_not_files(
     mail.attachment = _attachment(kind)
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    result = _payload(tools.outlook_mail_download_attachment(MESSAGE_ID, ATTACHMENT_ID))
+    result = json.loads(tools.outlook_mail_download_attachment(MESSAGE_ID, ATTACHMENT_ID))
 
     assert result["code"] == "not_a_file_attachment"
     assert len(graph.requests) == 1
@@ -572,7 +560,7 @@ def test_download_checks_the_size_before_fetching_content(tmp_path: Path, monkey
     mail.attachment = _attachment(size=outlook_mail._MAX_DOWNLOAD_BYTES + 1)
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    assert _payload(tools.outlook_mail_download_attachment(MESSAGE_ID, ATTACHMENT_ID))["code"] == "too_large"
+    assert json.loads(tools.outlook_mail_download_attachment(MESSAGE_ID, ATTACHMENT_ID))["code"] == "too_large"
     assert len(graph.requests) == 1
 
 
@@ -599,7 +587,7 @@ def test_download_makes_the_attachment_name_a_safe_file_name(
     mail.attachment = _attachment(name=name)
     tools, _graph = _tools(tmp_path, monkeypatch, mail)
 
-    result = _payload(tools.outlook_mail_download_attachment(MESSAGE_ID, ATTACHMENT_ID))
+    result = json.loads(tools.outlook_mail_download_attachment(MESSAGE_ID, ATTACHMENT_ID))
 
     assert result["path"] == str(tmp_path / "workspace" / "outlook-mail-attachments" / saved)
 
@@ -613,7 +601,7 @@ def test_create_draft_posts_a_text_message_with_inline_attachments(
     mail.write = httpx.Response(201, json=_message(isDraft=True, isRead=True))
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    result = _payload(
+    result = json.loads(
         tools.outlook_mail_create_draft(
             ["sam@contoso.com"],
             "Quarterly plan",
@@ -625,7 +613,7 @@ def test_create_draft_posts_a_text_message_with_inline_attachments(
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("POST", "/v1.0/me/messages")
-    assert _body(request) == {
+    assert json.loads(request.content) == {
         "subject": "Quarterly plan",
         "body": {"contentType": "Text", "content": "Hi Sam,\nattached."},
         "toRecipients": [{"emailAddress": {"address": "sam@contoso.com"}}],
@@ -647,7 +635,7 @@ def test_an_attachment_over_the_inline_limit_is_refused(tmp_path: Path, monkeypa
     _workspace_file(tmp_path, "big.bin", b"x" * (outlook_mail._MAX_ATTACHMENT_BYTES + 1))
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.outlook_mail_create_draft(["sam@contoso.com"], "s", "b", attachments=["big.bin"]))
+    result = json.loads(tools.outlook_mail_create_draft(["sam@contoso.com"], "s", "b", attachments=["big.bin"]))
 
     assert result["code"] == "too_large"
     assert graph.requests == []
@@ -663,7 +651,7 @@ def test_attachments_over_the_request_limit_are_refused_before_encoding(
     encoded: list[int] = []
     monkeypatch.setattr(outlook_mail.base64, "b64encode", lambda content: encoded.append(len(content)) or b"")
 
-    result = _payload(tools.outlook_mail_send(["sam@contoso.com"], "s", "b", attachments=["a.bin", "b.bin"]))
+    result = json.loads(tools.outlook_mail_send(["sam@contoso.com"], "s", "b", attachments=["a.bin", "b.bin"]))
 
     assert result["code"] == "too_large"
     assert "OneDrive" in result["message"]
@@ -676,14 +664,14 @@ def test_a_non_ascii_body_is_measured_as_the_bytes_sent(tmp_path: Path, monkeypa
     body = "é" * ((outlook_mail._MAX_REQUEST_BYTES - 1000) // 2)
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.outlook_mail_send(["sam@contoso.com"], "Notes", body))
+    result = json.loads(tools.outlook_mail_send(["sam@contoso.com"], "Notes", body))
 
     assert result == {"sent": True, "status": "ok", "tool": "outlook_mail"}
     [request] = graph.requests
-    assert _body(request)["message"]["body"]["content"] == body
+    assert json.loads(request.content)["message"]["body"]["content"] == body
     assert int(request.headers["content-length"]) <= outlook_mail._MAX_REQUEST_BYTES
 
-    over = _payload(tools.outlook_mail_send(["sam@contoso.com"], "Notes", body + "é" * 1000))
+    over = json.loads(tools.outlook_mail_send(["sam@contoso.com"], "Notes", body + "é" * 1000))
 
     assert over["code"] == "too_large"
     assert len(graph.requests) == 1
@@ -693,7 +681,7 @@ def test_an_attachment_outside_the_workspace_is_refused(tmp_path: Path, monkeypa
     (tmp_path / "secret.txt").write_bytes(b"secret")
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.outlook_mail_send(["sam@contoso.com"], "s", "b", attachments=["../secret.txt"]))
+    result = json.loads(tools.outlook_mail_send(["sam@contoso.com"], "s", "b", attachments=["../secret.txt"]))
 
     assert result["code"] == "invalid_local_path"
     assert graph.requests == []
@@ -703,7 +691,7 @@ def test_more_attachments_than_one_message_holds_are_refused(tmp_path: Path, mon
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
     attachments = [f"file{index}.txt" for index in range(outlook_mail._MAX_ATTACHMENTS + 1)]
-    result = _payload(tools.outlook_mail_send(["sam@contoso.com"], "s", "b", attachments=attachments))
+    result = json.loads(tools.outlook_mail_send(["sam@contoso.com"], "s", "b", attachments=attachments))
 
     assert (result["code"], "at most" in result["message"]) == ("invalid_argument", True)
     assert graph.requests == []
@@ -739,7 +727,7 @@ def test_invalid_recipients_are_refused_before_any_request(
         tools.outlook_mail_send(to, "s", "b", cc=cc),
         tools.outlook_mail_create_draft(to, "s", "b", cc=cc),
     ):
-        assert _payload(result)["code"] == "invalid_argument"
+        assert json.loads(result)["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -763,10 +751,10 @@ def test_recipients_accept_bare_addresses_and_the_form_read_results_show(
     mail.write = httpx.Response(201, json=_message(isDraft=True))
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    assert _payload(tools.outlook_mail_send([recipient], "s", "b", cc=[recipient]))["status"] == "ok"
-    assert _payload(tools.outlook_mail_create_draft([recipient], "s", "b", cc=[recipient]))["status"] == "ok"
+    assert json.loads(tools.outlook_mail_send([recipient], "s", "b", cc=[recipient]))["status"] == "ok"
+    assert json.loads(tools.outlook_mail_create_draft([recipient], "s", "b", cc=[recipient]))["status"] == "ok"
 
-    sent, draft = (_body(request) for request in graph.requests)
+    sent, draft = (json.loads(request.content) for request in graph.requests)
     for message in (sent["message"], draft):
         assert message["toRecipients"] == [{"emailAddress": email_address}]
         assert message["ccRecipients"] == [{"emailAddress": email_address}]
@@ -775,11 +763,11 @@ def test_recipients_accept_bare_addresses_and_the_form_read_results_show(
 def test_send_posts_send_mail_and_keeps_a_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.outlook_mail_send(["sam@contoso.com"], "Lunch", "Noon?"))
+    result = json.loads(tools.outlook_mail_send(["sam@contoso.com"], "Lunch", "Noon?"))
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("POST", "/v1.0/me/sendMail")
-    assert _body(request) == {
+    assert json.loads(request.content) == {
         "message": {
             "subject": "Lunch",
             "body": {"contentType": "Text", "content": "Noon?"},
@@ -802,7 +790,7 @@ def test_reply_sends_the_body_as_an_escaped_comment(
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
     # Case does not matter, and naming an address the draft leaves out, such as the requester's own, still sends it.
-    result = _payload(
+    result = json.loads(
         tools.outlook_mail_reply(
             MESSAGE_ID,
             ["Sam Example <sam@contoso.com>", "TEAM@contoso.com", "alex@contoso.com"],
@@ -813,7 +801,7 @@ def test_reply_sends_the_body_as_an_escaped_comment(
 
     create, send = graph.requests
     assert (create.method, unquote(create.url.path)) == ("POST", f"{MESSAGE_PATH}/{action}")
-    assert _body(create) == {"comment": "Thanks &lt;team&gt; &amp; all<br>See you"}
+    assert json.loads(create.content) == {"comment": "Thanks &lt;team&gt; &amp; all<br>See you"}
     assert (send.method, unquote(send.url.path)) == ("POST", f"{DRAFT_PATH}/send")
     assert (result["sent"], result["recipients"]) == (True, ["Sam Example <sam@contoso.com>", "team@contoso.com"])
 
@@ -843,7 +831,7 @@ def test_reply_to_a_recipient_not_named_is_refused(
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
     named = ["alex@contoso.com", "desk@straße.example"]
-    refused = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients=named, body="Thanks"))
+    refused = json.loads(tools.outlook_mail_reply(MESSAGE_ID, recipients=named, body="Thanks"))
 
     assert (refused["code"], refused["recipients"]) == ("recipients_mismatch", [listed])
     assert [(request.method, unquote(request.url.path)) for request in graph.requests] == [
@@ -869,7 +857,7 @@ def test_reply_refuses_malformed_arguments(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients, body, reply_all=reply_all))
+    result = json.loads(tools.outlook_mail_reply(MESSAGE_ID, recipients, body, reply_all=reply_all))
 
     assert result["code"] == "invalid_argument"
     assert graph.requests == []
@@ -880,11 +868,11 @@ def test_mark_read_patches_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     mail.write = httpx.Response(200, json=_message(isRead=False))
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    result = _payload(tools.outlook_mail_mark_read(MESSAGE_ID, is_read=False))
+    result = json.loads(tools.outlook_mail_mark_read(MESSAGE_ID, is_read=False))
 
     [request] = graph.requests
     assert (request.method, unquote(request.url.path)) == ("PATCH", MESSAGE_PATH)
-    assert _body(request) == {"isRead": False}
+    assert json.loads(request.content) == {"isRead": False}
     assert (result["message_id"], result["is_read"]) == (MESSAGE_ID, False)
 
 
@@ -893,11 +881,11 @@ def test_move_posts_the_destination_and_returns_the_new_id(tmp_path: Path, monke
     mail.write = httpx.Response(201, json=_message(id="AAMk-moved="))
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    result = _payload(tools.outlook_mail_move(MESSAGE_ID, "archive"))
+    result = json.loads(tools.outlook_mail_move(MESSAGE_ID, "archive"))
 
     [request] = graph.requests
     assert (request.method, unquote(request.url.path)) == ("POST", f"{MESSAGE_PATH}/move")
-    assert _body(request) == {"destinationId": "archive"}
+    assert json.loads(request.content) == {"destinationId": "archive"}
     assert result["message"]["id"] == "AAMk-moved="
 
 
@@ -919,7 +907,7 @@ def test_graph_errors_keep_their_codes(
     mail.override = lambda _request: response
     tools, _graph = _tools(tmp_path, monkeypatch, mail)
 
-    result = _payload(tools.outlook_mail_get_message(MESSAGE_ID))
+    result = json.loads(tools.outlook_mail_get_message(MESSAGE_ID))
 
     assert result["status"] == "error"
     assert result["code"] == code
@@ -990,7 +978,7 @@ def test_every_mail_function_acts_in_the_mailbox_it_names(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _shared_reply_graph())
 
-    result = _payload(call(tools))
+    result = json.loads(call(tools))
 
     assert result["status"] == "ok"
     assert result["mailbox"] == SHARED
@@ -1002,8 +990,8 @@ def test_every_mail_function_acts_in_the_mailbox_it_names(
 def test_results_name_no_mailbox_for_the_requesters_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert "mailbox" not in _payload(tools.outlook_mail_send(["sam@contoso.com"], "s", "b"))
-    assert "mailbox" not in _payload(tools.outlook_mail_search())
+    assert "mailbox" not in json.loads(tools.outlook_mail_send(["sam@contoso.com"], "s", "b"))
+    assert "mailbox" not in json.loads(tools.outlook_mail_search())
 
 
 def test_a_guest_sign_in_name_is_escaped_as_one_path_segment(
@@ -1056,7 +1044,7 @@ def test_a_malformed_mailbox_is_refused_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(call(tools, mailbox))
+    result = json.loads(call(tools, mailbox))
 
     assert (result["code"], "mailbox" in result["message"]) == ("invalid_argument", True)
     assert "mailbox" not in result
@@ -1084,7 +1072,7 @@ def test_a_refused_call_with_a_mailbox_names_the_mailbox(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(call(tools))
+    result = json.loads(call(tools))
 
     assert result["code"] in {"invalid_argument", "invalid_page_token"}
     assert result["mailbox"] == SHARED
@@ -1094,7 +1082,7 @@ def test_a_refused_call_with_a_mailbox_names_the_mailbox(
 def test_a_graph_error_in_a_shared_mailbox_names_the_mailbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.outlook_mail_get_message("AAMk-missing=", mailbox=SHARED))
+    result = json.loads(tools.outlook_mail_get_message("AAMk-missing=", mailbox=SHARED))
 
     assert (result["code"], result["graph_code"], result["mailbox"]) == ("not_found", "ErrorItemNotFound", SHARED)
 
@@ -1107,7 +1095,7 @@ def test_a_shared_mailbox_reply_to_a_recipient_not_named_is_refused(
     mail.write = _reply_draft(toRecipients=[{"emailAddress": {"address": "desk@outside.example"}}], ccRecipients=[])
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    refused = _payload(tools.outlook_mail_reply(MESSAGE_ID, ["alex@contoso.com"], "Thanks", mailbox=SHARED))
+    refused = json.loads(tools.outlook_mail_reply(MESSAGE_ID, ["alex@contoso.com"], "Thanks", mailbox=SHARED))
 
     assert (refused["code"], refused["recipients"]) == ("recipients_mismatch", ["desk@outside.example"])
     assert refused["mailbox"] == SHARED
@@ -1141,7 +1129,7 @@ def test_a_shared_mailbox_page_token_names_that_mailbox_and_continues_there(
     )
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    token = _payload(tools.outlook_mail_search(folder="inbox", mailbox=SHARED))["next_page_token"]
+    token = json.loads(tools.outlook_mail_search(folder="inbox", mailbox=SHARED))["next_page_token"]
     tools.outlook_mail_search(mailbox=SHARED, page_token=token)
 
     assert token == f"/users/{SHARED}/mailFolders('inbox')/messages?$top=25&$skiptoken=page2"
@@ -1161,7 +1149,7 @@ def test_an_own_mailbox_page_token_that_graph_names_by_user_id_comes_back_as_me(
     )
     tools, _graph = _tools(tmp_path, monkeypatch, mail)
 
-    next_page = _payload(tools.outlook_mail_search())["next_page_token"]
+    next_page = json.loads(tools.outlook_mail_search())["next_page_token"]
 
     assert next_page == "/me/messages?$skip=25"
 
@@ -1186,7 +1174,7 @@ def test_a_page_token_of_another_mailbox_is_refused_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert _payload(tools.outlook_mail_search(mailbox=mailbox, page_token=page_token))["code"] == "invalid_page_token"
+    assert json.loads(tools.outlook_mail_search(mailbox=mailbox, page_token=page_token))["code"] == "invalid_page_token"
     assert graph.requests == []
 
 
@@ -1205,7 +1193,7 @@ def test_shared_mailbox_attachment_pages_stay_in_that_mailbox(
     )
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    message = _payload(tools.outlook_mail_get_message(MESSAGE_ID, mailbox=SHARED))["message"]
+    message = json.loads(tools.outlook_mail_get_message(MESSAGE_ID, mailbox=SHARED))["message"]
 
     assert [attachment["id"] for attachment in message["attachments"]] == ["first", "second"]
     assert unquote(graph.requests[-1].url.path) == f"{SHARED_PREFIX}messages('{MESSAGE_ID}')/attachments"
@@ -1231,7 +1219,7 @@ def test_get_automatic_replies_reads_the_requesters_own_setting_as_text(
     mail.override = lambda _request: httpx.Response(200, json=_automatic_replies())
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    result = _payload(tools.outlook_mail_get_automatic_replies())
+    result = json.loads(tools.outlook_mail_get_automatic_replies())
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("GET", "/v1.0/me/mailboxSettings/automaticRepliesSetting")
@@ -1268,7 +1256,7 @@ def test_get_automatic_replies_reports_values_the_setter_takes(
     mail.override = lambda _request: httpx.Response(200, json=setting)
     tools, _graph = _tools(tmp_path, monkeypatch, mail)
 
-    result = _payload(tools.outlook_mail_get_automatic_replies())["automatic_replies"]
+    result = json.loads(tools.outlook_mail_get_automatic_replies())["automatic_replies"]
 
     assert (result["status"], result["external_audience"]) == (status, audience)
 
@@ -1278,7 +1266,7 @@ def test_set_automatic_replies_schedules_plain_text_messages(tmp_path: Path, mon
     mail.write = httpx.Response(200, json={"automaticRepliesSetting": _automatic_replies()})
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    result = _payload(
+    result = json.loads(
         tools.outlook_mail_set_automatic_replies(
             "scheduled",
             internal_message="Out until Friday.\nAsk <Sam> & co.",
@@ -1292,7 +1280,7 @@ def test_set_automatic_replies_schedules_plain_text_messages(tmp_path: Path, mon
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("PATCH", "/v1.0/me/mailboxSettings")
-    assert _body(request) == {
+    assert json.loads(request.content) == {
         "automaticRepliesSetting": {
             "status": "scheduled",
             "internalReplyMessage": "Out until Friday.<br>Ask &lt;Sam&gt; &amp; co.",
@@ -1336,10 +1324,10 @@ def test_set_automatic_replies_sends_only_the_fields_given(
     mail.write = httpx.Response(200, json={"automaticRepliesSetting": _automatic_replies(status=arguments["status"])})
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    assert _payload(tools.outlook_mail_set_automatic_replies(**arguments))["status"] == "ok"  # type: ignore[arg-type]
+    assert json.loads(tools.outlook_mail_set_automatic_replies(**arguments))["status"] == "ok"  # type: ignore[arg-type]
 
     [request] = graph.requests
-    assert _body(request) == {"automaticRepliesSetting": setting}
+    assert json.loads(request.content) == {"automaticRepliesSetting": setting}
 
 
 # Arguments that turn automatic replies on and name everything senders get.
@@ -1374,5 +1362,5 @@ def test_set_automatic_replies_refuses_malformed_arguments_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert _payload(tools.outlook_mail_set_automatic_replies(**arguments))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert json.loads(tools.outlook_mail_set_automatic_replies(**arguments))["code"] == "invalid_argument"  # type: ignore[arg-type]
     assert graph.requests == []

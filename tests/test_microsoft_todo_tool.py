@@ -4,11 +4,10 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
-from pydantic import ValidationError
 
 from mindroom.custom_tools.microsoft_todo import MicrosoftTodoTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
@@ -16,7 +15,10 @@ from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileA
 from mindroom.tool_system.registry import builtin_tool_registry
 from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
+    MALFORMED_GRAPH_IDS,
     FakeGraph,
+    assert_refused_by_call_validation,
+    model_description,
     publish_grant,
     runtime_paths,
     save_client_config,
@@ -91,15 +93,6 @@ def _tools(
     return tools, graph
 
 
-def _payload(result: str) -> dict[str, Any]:
-    return json.loads(result)
-
-
-def _description(tools: MicrosoftTodoTools, name: str) -> str:
-    """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join((toolkit_offers(tools, name).description or "").split())
-
-
 def test_registered_metadata_declares_a_requester_scoped_tool_without_file_access() -> None:
     metadata = builtin_tool_registry().entries["microsoft_todo"]
 
@@ -135,9 +128,9 @@ def test_write_descriptions_ask_the_agent_to_name_the_change(tmp_path: Path, mon
     tools, _graph = _tools(tmp_path, monkeypatch, _ok({}))
 
     for name in WRITE_FUNCTIONS:
-        assert "Before calling, tell the requester" in _description(tools, name), name
+        assert "Before calling, tell the requester" in model_description(tools, name), name
     for name in ("microsoft_todo_create_task", "microsoft_todo_update_task"):
-        assert "convert it to the requester's zone before naming the day" in _description(tools, name), name
+        assert "convert it to the requester's zone before naming the day" in model_description(tools, name), name
     update = toolkit_offers(tools, "microsoft_todo_update_task").parameters["properties"]
     assert "an empty string removes the due date" in update["due_date"]["description"]
     assert update["importance"]["enum"] == ["low", "normal", "high"]
@@ -158,7 +151,7 @@ def test_list_lists_summarizes_each_list(tmp_path: Path, monkeypatch: pytest.Mon
     }
     tools, graph = _tools(tmp_path, monkeypatch, _ok(lists))
 
-    result = _payload(tools.microsoft_todo_list_lists())
+    result = json.loads(tools.microsoft_todo_list_lists())
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("GET", "/v1.0/me/todo/lists")
@@ -185,8 +178,8 @@ def test_list_lists_returns_and_follows_its_page_token(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": [], "@odata.nextLink": f"{GRAPH}{next_page}"}))
 
-    first = _payload(tools.microsoft_todo_list_lists())
-    second = _payload(tools.microsoft_todo_list_lists(page_token=first["next_page_token"]))
+    first = json.loads(tools.microsoft_todo_list_lists())
+    second = json.loads(tools.microsoft_todo_list_lists(page_token=first["next_page_token"]))
 
     assert first["next_page_token"] == next_page
     assert second["status"] == "ok"
@@ -206,14 +199,14 @@ def test_list_lists_refuses_a_foreign_page_token(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
 
-    assert _payload(tools.microsoft_todo_list_lists(page_token=page_token))["code"] == "invalid_page_token"
+    assert json.loads(tools.microsoft_todo_list_lists(page_token=page_token))["code"] == "invalid_page_token"
     assert graph.requests == []
 
 
 def test_list_tasks_returns_open_tasks_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task()], "@odata.nextLink": f"{GRAPH}{NEXT_TASKS}"}))
 
-    result = _payload(tools.microsoft_todo_list_tasks(LIST))
+    result = json.loads(tools.microsoft_todo_list_tasks(LIST))
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("GET", TASKS_PATH)
@@ -239,7 +232,7 @@ def test_list_tasks_returns_open_tasks_by_default(tmp_path: Path, monkeypatch: p
 def test_list_tasks_includes_completed_tasks_on_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task(status="completed")]}))
 
-    result = _payload(tools.microsoft_todo_list_tasks(LIST, include_completed=True, limit=5))
+    result = json.loads(tools.microsoft_todo_list_tasks(LIST, include_completed=True, limit=5))
 
     assert dict(graph.requests[0].url.params) == {"$top": "5"}
     assert result["tasks"][0]["status"] == "completed"
@@ -261,7 +254,7 @@ def test_list_tasks_follows_its_own_page_token(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task()]}))
 
-    result = _payload(tools.microsoft_todo_list_tasks(LIST, include_completed=True, limit=5, page_token=page_token))
+    result = json.loads(tools.microsoft_todo_list_tasks(LIST, include_completed=True, limit=5, page_token=page_token))
 
     assert result["next_page_token"] is None
     [request] = graph.requests
@@ -277,7 +270,7 @@ def test_list_tasks_refuses_a_foreign_page_token(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
 
-    assert _payload(tools.microsoft_todo_list_tasks(LIST, page_token=page_token))["code"] == "invalid_page_token"
+    assert json.loads(tools.microsoft_todo_list_tasks(LIST, page_token=page_token))["code"] == "invalid_page_token"
     assert graph.requests == []
 
 
@@ -307,11 +300,11 @@ def test_list_tasks_returns_the_due_date_time_and_zone_as_graph_reports_them(
 ) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task(dueDateTime=due)]}))
 
-    task = _payload(tools.microsoft_todo_list_tasks(LIST))["tasks"][0]
+    task = json.loads(tools.microsoft_todo_list_tasks(LIST))["tasks"][0]
 
     assert task["due"] == returned
     assert "due_date" not in task
-    assert "convert it to the requester's zone" in _description(tools, "microsoft_todo_list_tasks")
+    assert "convert it to the requester's zone" in model_description(tools, "microsoft_todo_list_tasks")
 
 
 def test_list_tasks_reads_html_notes_as_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -321,7 +314,9 @@ def test_list_tasks_reads_html_notes_as_text(tmp_path: Path, monkeypatch: pytest
     }
     tools, _graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task(body=body)]}))
 
-    assert _payload(tools.microsoft_todo_list_tasks(LIST))["tasks"][0]["notes"] == "Attach the figures & notes\nThanks"
+    assert (
+        json.loads(tools.microsoft_todo_list_tasks(LIST))["tasks"][0]["notes"] == "Attach the figures & notes\nThanks"
+    )
 
 
 def test_list_tasks_leaves_out_unset_dates_and_caps_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -330,7 +325,7 @@ def test_list_tasks_leaves_out_unset_dates_and_caps_notes(tmp_path: Path, monkey
     del task["dueDateTime"]
     tools, _graph = _tools(tmp_path, monkeypatch, _ok({"value": [task, _task(body={"content": ""})]}))
 
-    capped, empty = _payload(tools.microsoft_todo_list_tasks(LIST))["tasks"]
+    capped, empty = json.loads(tools.microsoft_todo_list_tasks(LIST))["tasks"]
 
     assert (capped["due"], capped["reminder"]) == (None, None)
     assert capped["notes"] == long_notes[:NOTES_CAP]
@@ -347,7 +342,7 @@ def test_list_tasks_refuses_a_limit_outside_one_to_fifty(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
 
-    assert _payload(tools.microsoft_todo_list_tasks(LIST, limit=limit))["code"] == "invalid_argument"
+    assert json.loads(tools.microsoft_todo_list_tasks(LIST, limit=limit))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -359,7 +354,7 @@ def test_ids_are_escaped_as_single_path_segments(tmp_path: Path, monkeypatch: py
     assert graph.requests[0].url.raw_path.split(b"?")[0] == b"/v1.0/me/todo/lists/AAMk%2Bx%20y=/tasks"
 
 
-@pytest.mark.parametrize("bad_id", ["", " ", "..", "a/b", "a\\b", "a?b", "a#b", "a\nb"])
+@pytest.mark.parametrize("bad_id", MALFORMED_GRAPH_IDS)
 @pytest.mark.parametrize("field", ["list_id", "task_id"])
 def test_every_function_refuses_malformed_ids_before_any_request(
     tmp_path: Path,
@@ -380,7 +375,7 @@ def test_every_function_refuses_malformed_ids_before_any_request(
             tools.microsoft_todo_create_task(bad_id, "New"),
         ]
 
-    assert [_payload(result)["code"] for result in results] == ["invalid_argument"] * len(results)
+    assert [json.loads(result)["code"] for result in results] == ["invalid_argument"] * len(results)
     assert graph.requests == []
 
 
@@ -390,7 +385,7 @@ def test_create_task_posts_only_the_title_and_importance_by_default(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok(_task(importance="normal"), status=201))
 
-    result = _payload(tools.microsoft_todo_create_task(LIST, "Send the quarterly report"))
+    result = json.loads(tools.microsoft_todo_create_task(LIST, "Send the quarterly report"))
 
     [request] = graph.requests
     assert (request.method, request.url.path, request.url.query) == ("POST", TASKS_PATH, b"")
@@ -440,7 +435,7 @@ def test_create_task_refuses_malformed_arguments_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok(_task(), status=201))
 
-    assert _payload(tools.microsoft_todo_create_task(LIST, **arguments))["code"] == "invalid_argument"
+    assert json.loads(tools.microsoft_todo_create_task(LIST, **arguments))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -471,7 +466,7 @@ def test_update_task_patches_only_the_given_fields(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok(_task()))
 
-    result = _payload(tools.microsoft_todo_update_task(LIST, TASK, **arguments))  # type: ignore[arg-type]
+    result = json.loads(tools.microsoft_todo_update_task(LIST, TASK, **arguments))  # type: ignore[arg-type]
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("PATCH", TASK_PATH)
@@ -495,7 +490,7 @@ def test_update_task_refuses_nothing_to_change_or_malformed_fields(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok(_task()))
 
-    assert _payload(tools.microsoft_todo_update_task(LIST, TASK, **arguments))["code"] == "invalid_argument"
+    assert json.loads(tools.microsoft_todo_update_task(LIST, TASK, **arguments))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -522,16 +517,13 @@ def test_malformed_arguments_fail_call_validation_before_any_request(
     """Arguments that disagree with a function's signature fail call validation before its body runs."""
     tools, graph = _tools(tmp_path, monkeypatch, _ok(_task()))
 
-    with pytest.raises(ValidationError):
-        toolkit_offers(tools, name).entrypoint(**arguments)
-
-    assert graph.requests == []
+    assert_refused_by_call_validation(tools, graph, name, arguments)
 
 
 def test_delete_task_deletes_the_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok(status=204))
 
-    result = _payload(tools.microsoft_todo_delete_task(LIST, TASK))
+    result = json.loads(tools.microsoft_todo_delete_task(LIST, TASK))
 
     assert [(request.method, request.url.path) for request in graph.requests] == [("DELETE", TASK_PATH)]
     assert result["deleted"] == {"list_id": LIST, "task_id": TASK}
@@ -541,6 +533,6 @@ def test_delete_task_deletes_the_task(tmp_path: Path, monkeypatch: pytest.Monkey
 def test_graph_errors_keep_their_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, code: str) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _ok({"error": {"code": "ErrorItemNotFound"}}, status=status))
 
-    result = _payload(tools.microsoft_todo_delete_task(LIST, TASK))
+    result = json.loads(tools.microsoft_todo_delete_task(LIST, TASK))
 
     assert (result["status"], result["code"], result["graph_code"]) == ("error", code, "ErrorItemNotFound")

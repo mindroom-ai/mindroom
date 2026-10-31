@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
-from pydantic import ValidationError
 
 from mindroom.custom_tools import microsoft_sharepoint
 from mindroom.custom_tools.microsoft_sharepoint import MicrosoftSharePointTools
@@ -19,7 +18,10 @@ from mindroom.tool_system.tool_access import validate_tool_arguments
 from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
+    assert_refused_by_call_validation,
+    model_description,
     publish_grant,
+    raw_path,
     runtime_paths,
     save_client_config,
     worker_target,
@@ -128,19 +130,6 @@ def _tools(
     return tools, graph
 
 
-def _payload(result: str) -> dict[str, Any]:
-    return json.loads(result)
-
-
-def _raw_path(request: httpx.Request) -> str:
-    return request.url.raw_path.split(b"?")[0].decode("ascii")
-
-
-def _description(tools: MicrosoftSharePointTools, name: str) -> str:
-    """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join((toolkit_offers(tools, name).description or "").split())
-
-
 def test_registered_metadata_declares_a_requester_scoped_tool_without_file_access() -> None:
     metadata = builtin_tool_registry().entries["microsoft_sharepoint"]
 
@@ -173,7 +162,7 @@ def test_write_descriptions_bind_the_list_and_point_to_its_columns(
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
 
     for name in WRITE_FUNCTIONS:
-        description = _description(tools, name)
+        description = model_description(tools, name)
         assert "fails with target_mismatch unless expected_web_url is the list's web_url" in description, name
         assert "microsoft_sharepoint_get_list" in description, name
 
@@ -182,16 +171,16 @@ def test_descriptions_send_files_to_microsoft_files(tmp_path: Path, monkeypatch:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
 
     for name in ("microsoft_sharepoint_list_lists", "microsoft_sharepoint_list_items", *WRITE_FUNCTIONS):
-        assert FILES_HINT in _description(tools, name), name
+        assert FILES_HINT in model_description(tools, name), name
     for name in ("microsoft_sharepoint_list_items", "microsoft_sharepoint_get_page"):
-        assert UNTRUSTED in _description(tools, name), name
+        assert UNTRUSTED in model_description(tools, name), name
 
 
 def test_search_sites_sends_the_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {"value": [_site(), _site(id="s2", displayName=None, name="hr", description="")]}
     tools, graph = _tools(tmp_path, monkeypatch, _answer(payload))
 
-    result = _payload(tools.microsoft_sharepoint_search_sites("marketing plans"))
+    result = json.loads(tools.microsoft_sharepoint_search_sites("marketing plans"))
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("GET", "/v1.0/sites")
@@ -217,7 +206,7 @@ def test_search_sites_refuses_an_empty_query(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    assert _payload(tools.microsoft_sharepoint_search_sites(query))["code"] == "invalid_argument"
+    assert json.loads(tools.microsoft_sharepoint_search_sites(query))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -244,10 +233,10 @@ def test_get_site_resolves_a_site_address(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer(_site()))
 
-    result = _payload(tools.microsoft_sharepoint_get_site(url))
+    result = json.loads(tools.microsoft_sharepoint_get_site(url))
 
     [request] = graph.requests
-    assert (request.method, _raw_path(request), request.url.query) == ("GET", path, b"")
+    assert (request.method, raw_path(request), request.url.query) == ("GET", path, b"")
     assert result["site"] == {
         "id": SITE,
         "name": "Team Site",
@@ -288,7 +277,7 @@ def test_get_site_refuses_anything_but_an_https_sharepoint_site_address(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer(_site()))
 
-    result = _payload(tools.microsoft_sharepoint_get_site(url))
+    result = json.loads(tools.microsoft_sharepoint_get_site(url))
 
     assert (result["status"], result["code"]) == ("error", "invalid_argument")
     assert "url" in result["message"]
@@ -317,10 +306,10 @@ def test_list_lists_leaves_out_hidden_lists(tmp_path: Path, monkeypatch: pytest.
     }
     tools, graph = _tools(tmp_path, monkeypatch, _answer(payload))
 
-    result = _payload(tools.microsoft_sharepoint_list_lists(SITE))
+    result = json.loads(tools.microsoft_sharepoint_list_lists(SITE))
 
     [request] = graph.requests
-    assert (request.method, _raw_path(request)) == ("GET", LISTS_PATH)
+    assert (request.method, raw_path(request)) == ("GET", LISTS_PATH)
     assert dict(request.url.params) == {"$select": "id,displayName,webUrl,list"}
     assert result["lists"] == [
         {
@@ -359,10 +348,10 @@ def test_get_list_returns_its_columns(tmp_path: Path, monkeypatch: pytest.Monkey
     }
     tools, graph = _tools(tmp_path, monkeypatch, _answer(payload))
 
-    result = _payload(tools.microsoft_sharepoint_get_list(SITE, LIST))
+    result = json.loads(tools.microsoft_sharepoint_get_list(SITE, LIST))
 
     [request] = graph.requests
-    assert (request.method, _raw_path(request)) == ("GET", LIST_PATH)
+    assert (request.method, raw_path(request)) == ("GET", LIST_PATH)
     assert dict(request.url.params) == {"$select": "id,displayName,description,webUrl,list", "$expand": "columns"}
     assert result["list"] == {
         "id": LIST,
@@ -400,10 +389,10 @@ def test_list_items_expands_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         _answer({"value": [_item()], "@odata.nextLink": f"{GRAPH}{NEXT_ITEMS}"}),
     )
 
-    result = _payload(tools.microsoft_sharepoint_list_items(SITE, LIST))
+    result = json.loads(tools.microsoft_sharepoint_list_items(SITE, LIST))
 
     [request] = graph.requests
-    assert (request.method, _raw_path(request)) == ("GET", ITEMS_PATH)
+    assert (request.method, raw_path(request)) == ("GET", ITEMS_PATH)
     assert dict(request.url.params) == {"$expand": "fields", "$top": "50"}
     assert result["items"] == [
         {
@@ -421,7 +410,7 @@ def test_list_items_cuts_long_text_values(tmp_path: Path, monkeypatch: pytest.Mo
     item = _item(fields={"Title": "Widget", "Notes": long_text, "Exact": "y" * VALUE_CAP})
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": [item, _item(fields=None)]}))
 
-    capped, empty = _payload(tools.microsoft_sharepoint_list_items(SITE, LIST, limit=5))["items"]
+    capped, empty = json.loads(tools.microsoft_sharepoint_list_items(SITE, LIST, limit=5))["items"]
 
     assert dict(graph.requests[0].url.params) == {"$expand": "fields", "$top": "5"}
     assert capped["fields"] == {"Title": "Widget", "Notes": long_text[:VALUE_CAP], "Exact": "y" * VALUE_CAP}
@@ -438,7 +427,7 @@ def test_list_items_refuses_a_limit_outside_one_to_fifty(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    assert _payload(tools.microsoft_sharepoint_list_items(SITE, LIST, limit=limit))["code"] == "invalid_argument"
+    assert json.loads(tools.microsoft_sharepoint_list_items(SITE, LIST, limit=limit))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -473,10 +462,7 @@ def test_malformed_arguments_fail_call_validation_before_any_request(
     """Arguments that disagree with a function's signature fail call validation before its body runs."""
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    with pytest.raises(ValidationError):
-        toolkit_offers(tools, name).entrypoint(**arguments)
-
-    assert graph.requests == []
+    assert_refused_by_call_validation(tools, graph, name, arguments)
 
 
 FIELDS = {
@@ -519,11 +505,11 @@ def test_write_schemas_accept_column_values(
 def test_create_item_posts_the_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _list_then(_item(), status=201))
 
-    result = _payload(tools.microsoft_sharepoint_create_item(SITE, LIST, FIELDS, LIST_URL))
+    result = json.loads(tools.microsoft_sharepoint_create_item(SITE, LIST, FIELDS, LIST_URL))
 
     read, request = graph.requests
-    assert (read.method, _raw_path(read), dict(read.url.params)) == ("GET", LIST_PATH, {"$select": "webUrl"})
-    assert (request.method, _raw_path(request), request.url.query) == ("POST", ITEMS_PATH, b"")
+    assert (read.method, raw_path(read), dict(read.url.params)) == ("GET", LIST_PATH, {"$select": "webUrl"})
+    assert (request.method, raw_path(request), request.url.query) == ("POST", ITEMS_PATH, b"")
     assert json.loads(request.content) == {"fields": FIELDS}
     assert result["status"] == "ok"
     assert result["item"]["id"] == ITEM
@@ -534,7 +520,7 @@ def test_a_refused_create_reports_graphs_reason(tmp_path: Path, monkeypatch: pyt
     refusal = {"error": {"code": "invalidRequest", "message": "Field 'Colour' is not recognized"}}
     tools, _graph = _tools(tmp_path, monkeypatch, _list_then(refusal, status=400))
 
-    result = _payload(tools.microsoft_sharepoint_create_item(SITE, LIST, FIELDS, LIST_URL))
+    result = json.loads(tools.microsoft_sharepoint_create_item(SITE, LIST, FIELDS, LIST_URL))
 
     assert (result["status"], result["code"], result["status_code"]) == ("error", "graph_error", 400)
     assert (result["graph_code"], result["graph_message"]) == ("invalidRequest", "Field 'Colour' is not recognized")
@@ -544,12 +530,12 @@ def test_update_item_patches_only_the_given_fields(tmp_path: Path, monkeypatch: 
     answer = {"@odata.etag": '"abc,4"', "Title": "Widget", "Color": "Fuchsia", "Quantity": 934}
     tools, graph = _tools(tmp_path, monkeypatch, _list_then(answer))
 
-    result = _payload(
+    result = json.loads(
         tools.microsoft_sharepoint_update_item(SITE, LIST, ITEM, {"Color": "Fuchsia", "Quantity": 934}, LIST_URL),
     )
 
     _read, request = graph.requests
-    assert (request.method, _raw_path(request), request.url.query) == ("PATCH", f"{ITEMS_PATH}/{ITEM}/fields", b"")
+    assert (request.method, raw_path(request), request.url.query) == ("PATCH", f"{ITEMS_PATH}/{ITEM}/fields", b"")
     assert json.loads(request.content) == {"Color": "Fuchsia", "Quantity": 934}
     assert result["status"] == "ok"
     assert result["item"] == {"id": ITEM, "fields": {"Title": "Widget", "Color": "Fuchsia", "Quantity": 934}}
@@ -583,7 +569,7 @@ def test_writes_refuse_malformed_fields_before_any_request(
         else (SITE, LIST, ITEM, fields, LIST_URL)
     )
 
-    result = _payload(getattr(tools, function)(*args))
+    result = json.loads(getattr(tools, function)(*args))
 
     assert (result["status"], result["code"]) == ("error", "invalid_argument")
     assert "fields" in result["message"]
@@ -605,12 +591,12 @@ def test_writes_run_only_on_the_list_whose_web_url_was_passed(
     tools, graph = _tools(tmp_path, monkeypatch, _list_then(_item()))
     call = _BOUND_WRITES[write]
 
-    assert _payload(call(tools, " "))["code"] == "invalid_argument"
+    assert json.loads(call(tools, " "))["code"] == "invalid_argument"
     assert graph.requests == []
-    refused = _payload(call(tools, "https://contoso.sharepoint.com/sites/hr/Lists/Inventory"))
+    refused = json.loads(call(tools, "https://contoso.sharepoint.com/sites/hr/Lists/Inventory"))
     assert (refused["code"], refused["web_url"]) == ("target_mismatch", LIST_URL)
     assert [request.method for request in graph.requests] == ["GET"]
-    assert _payload(call(tools, LIST_URL))["status"] == "ok"
+    assert json.loads(call(tools, LIST_URL))["status"] == "ok"
     assert graph.requests[-1].method in {"POST", "PATCH"}
 
 
@@ -629,10 +615,10 @@ def test_list_pages_lists_the_site_pages(tmp_path: Path, monkeypatch: pytest.Mon
     }
     tools, graph = _tools(tmp_path, monkeypatch, _answer(payload))
 
-    result = _payload(tools.microsoft_sharepoint_list_pages(SITE))
+    result = json.loads(tools.microsoft_sharepoint_list_pages(SITE))
 
     [request] = graph.requests
-    assert (request.method, _raw_path(request)) == ("GET", PAGES_PATH)
+    assert (request.method, raw_path(request)) == ("GET", PAGES_PATH)
     assert dict(request.url.params) == {"$select": "id,name,title,webUrl,lastModifiedDateTime"}
     assert result["pages"] == [
         {
@@ -697,10 +683,10 @@ def test_get_page_reads_the_title_and_text_web_parts_in_layout_order(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer(_page()))
 
-    result = _payload(tools.microsoft_sharepoint_get_page(SITE, PAGE))
+    result = json.loads(tools.microsoft_sharepoint_get_page(SITE, PAGE))
 
     [request] = graph.requests
-    assert (request.method, _raw_path(request)) == ("GET", PAGE_PATH)
+    assert (request.method, raw_path(request)) == ("GET", PAGE_PATH)
     assert dict(request.url.params) == {"$expand": "canvasLayout"}
     assert result["page"] == {
         "id": PAGE,
@@ -716,7 +702,7 @@ def test_get_page_reads_the_title_and_text_web_parts_in_layout_order(
 def test_get_page_without_a_layout_returns_its_title(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer(_page(canvasLayout=None)))
 
-    assert _payload(tools.microsoft_sharepoint_get_page(SITE, PAGE))["text"] == "Quarterly update"
+    assert json.loads(tools.microsoft_sharepoint_get_page(SITE, PAGE))["text"] == "Quarterly update"
 
 
 def test_get_page_returns_long_text_in_chunks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -729,9 +715,9 @@ def test_get_page_returns_long_text_in_chunks(tmp_path: Path, monkeypatch: pytes
         _answer({**_page(title="T"), "canvasLayout": {"horizontalSections": sections}}),
     )
 
-    first = _payload(tools.microsoft_sharepoint_get_page(SITE, PAGE))
-    second = _payload(tools.microsoft_sharepoint_get_page(SITE, PAGE, page_token=first["next_page_token"]))
-    third = _payload(tools.microsoft_sharepoint_get_page(SITE, PAGE, page_token=second["next_page_token"]))
+    first = json.loads(tools.microsoft_sharepoint_get_page(SITE, PAGE))
+    second = json.loads(tools.microsoft_sharepoint_get_page(SITE, PAGE, page_token=first["next_page_token"]))
+    third = json.loads(tools.microsoft_sharepoint_get_page(SITE, PAGE, page_token=second["next_page_token"]))
 
     assert (first["text"], first["next_page_token"]) == (text[:PAGE_CHUNK], str(PAGE_CHUNK))
     assert (second["text"], second["next_page_token"]) == (text[PAGE_CHUNK : PAGE_CHUNK * 2], str(PAGE_CHUNK * 2))
@@ -747,7 +733,7 @@ def test_get_page_refuses_a_malformed_page_token_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer(_page()))
 
-    result = _payload(tools.microsoft_sharepoint_get_page(SITE, PAGE, page_token=page_token))
+    result = json.loads(tools.microsoft_sharepoint_get_page(SITE, PAGE, page_token=page_token))
 
     assert result["code"] == "invalid_page_token"
     assert graph.requests == []
@@ -793,7 +779,7 @@ def test_listings_return_the_relative_next_link(
     del listing, foreign
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({"value": [], "@odata.nextLink": f"{GRAPH}{token}"}))
 
-    assert _payload(call(tools, None))["next_page_token"] == token
+    assert json.loads(call(tools, None))["next_page_token"] == token
 
 
 @pytest.mark.parametrize(("listing", "call", "token", "foreign"), _PAGED_CALLS)
@@ -808,7 +794,7 @@ def test_listings_follow_their_own_page_token_without_other_parameters(
     del listing, foreign
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    result = _payload(call(tools, token))
+    result = json.loads(call(tools, token))
 
     assert result["next_page_token"] is None
     [request] = graph.requests
@@ -841,7 +827,7 @@ def test_listings_refuse_a_foreign_page_token_before_any_request(
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
 
     for page_token in page_tokens:
-        assert _payload(call(tools, page_token))["code"] == "invalid_page_token", page_token
+        assert json.loads(call(tools, page_token))["code"] == "invalid_page_token", page_token
     assert graph.requests == []
 
 
@@ -873,7 +859,7 @@ def test_ids_that_change_the_path_are_refused_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
 
-    result = _payload(call(tools, value))
+    result = json.loads(call(tools, value))
 
     assert (result["status"], result["code"]) == ("error", "invalid_argument")
     assert field in result["message"]
@@ -885,13 +871,13 @@ def test_list_titles_are_escaped_as_one_path_segment(tmp_path: Path, monkeypatch
 
     tools.microsoft_sharepoint_list_items(SITE, "Team Tasks+")
 
-    assert _raw_path(graph.requests[0]) == f"{LISTS_PATH}/Team%20Tasks%2B/items"
+    assert raw_path(graph.requests[0]) == f"{LISTS_PATH}/Team%20Tasks%2B/items"
 
 
 def test_graph_refusals_keep_their_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({"error": {"code": "accessDenied"}}, status=403))
 
-    result = _payload(tools.microsoft_sharepoint_update_item(SITE, LIST, ITEM, {"Title": "x"}, LIST_URL))
+    result = json.loads(tools.microsoft_sharepoint_update_item(SITE, LIST, ITEM, {"Title": "x"}, LIST_URL))
 
     assert (result["status"], result["code"], result["graph_code"]) == ("error", "forbidden", "accessDenied")
 
@@ -903,6 +889,6 @@ def test_throttling_reports_the_retry_delay(tmp_path: Path, monkeypatch: pytest.
         lambda _request: httpx.Response(429, headers={"Retry-After": "7"}, json={"error": {"code": "TooManyRequests"}}),
     )
 
-    result = _payload(tools.microsoft_sharepoint_list_items(SITE, LIST))
+    result = json.loads(tools.microsoft_sharepoint_list_items(SITE, LIST))
 
     assert (result["code"], result["retry_after_seconds"]) == ("throttled", 7)

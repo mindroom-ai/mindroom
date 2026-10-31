@@ -7,24 +7,28 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import httpx
+import pytest
+from pydantic import ValidationError
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools import microsoft_graph
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    import pytest
-
     from mindroom.oauth.providers import OAuthProvider
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 ALICE = "@alice:example.org"
 TOKEN = "graph-access-token"  # noqa: S105
+# IDs that would change a Graph path: empty, blank, a parent segment, separators, a query, a fragment, a line break.
+MALFORMED_GRAPH_IDS = ("", " ", "..", "a/b", "a\\b", "a?b", "a#b", "a\nb")
 
 type Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -100,6 +104,16 @@ def bearer(request: httpx.Request) -> str | None:
     return authorization.removeprefix("Bearer ") if authorization else None
 
 
+def raw_path(request: httpx.Request) -> str:
+    """Return a request's path as sent, percent escapes kept, without its query."""
+    return request.url.raw_path.split(b"?")[0].decode("ascii")
+
+
+def model_description(tools: AnyToolkit, name: str) -> str:
+    """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
+    return " ".join((toolkit_offers(tools, name).description or "").split())
+
+
 @dataclass
 class FakeGraph:
     """Answer every Graph client request through one handler and record the requests."""
@@ -125,3 +139,15 @@ class FakeGraph:
     def calls(self) -> list[str]:
         """Return each request as `METHOD host/path`."""
         return [f"{request.method} {request.url.host}{request.url.path}" for request in self.requests]
+
+
+def assert_refused_by_call_validation(
+    tools: AnyToolkit,
+    graph: FakeGraph,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Assert that arguments disagreeing with a function's signature fail call validation before any request."""
+    with pytest.raises(ValidationError):
+        toolkit_offers(tools, name).entrypoint(**arguments)
+    assert graph.requests == []
