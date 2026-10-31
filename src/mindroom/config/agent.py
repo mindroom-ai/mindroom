@@ -37,7 +37,12 @@ from mindroom.config.models import (
 from mindroom.config.participation import ParticipationConfig  # noqa: TC001
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.skill_learning import SkillLearningConfig
-from mindroom.config.validation import TimezoneName, duplicate_items, validate_history_limit_choice
+from mindroom.config.validation import (
+    TimezoneName,
+    duplicate_items,
+    non_empty_stripped,
+    validate_history_limit_choice,
+)
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 _PrivateWorkerScope = Literal["user", "user_agent"]
@@ -82,11 +87,7 @@ def _validate_safe_relative_path(
     allow_current_dir: bool = False,
     reserved_first_parts: frozenset[str] = frozenset(),
 ) -> str:
-    stripped = value.strip()
-    if not stripped:
-        msg = f"{field_name} must not be empty"
-        raise ValueError(msg)
-
+    stripped = non_empty_stripped(value, field_name=field_name)
     path = Path(stripped)
     if path.is_absolute():
         msg = f"{field_name} must be a relative path"
@@ -206,11 +207,7 @@ class AgentPrivateConfig(BaseModel):
         """Normalize configured template directories."""
         if value is None:
             return None
-        stripped = value.strip()
-        if not stripped:
-            msg = "private.template_dir must not be empty"
-            raise ValueError(msg)
-        return stripped
+        return non_empty_stripped(value, field_name="private.template_dir")
 
     @field_validator("context_files")
     @classmethod

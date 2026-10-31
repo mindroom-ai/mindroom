@@ -15,7 +15,7 @@ from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.schema_hints import dashboard_hint
-from mindroom.config.validation import duplicate_items, validate_history_limit_choice
+from mindroom.config.validation import duplicate_items, non_empty_stripped, validate_history_limit_choice
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
@@ -255,11 +255,7 @@ class ToolConfigEntry(BaseModel):
     @classmethod
     def validate_name(cls, value: str) -> str:
         """Strip surrounding whitespace and reject empty tool names."""
-        stripped = value.strip()
-        if not stripped:
-            msg = "Tool name must not be empty"
-            raise ValueError(msg)
-        return stripped
+        return non_empty_stripped(value, field_name="Tool name")
 
     @model_validator(mode="after")
     def validate_lazy_flags(self) -> Self:

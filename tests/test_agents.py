@@ -4972,6 +4972,13 @@ def test_config_rejects_invalid_private_root_values(root: str, expected_message:
         )
 
 
+def test_private_template_dir_is_trimmed_and_must_not_be_blank() -> None:
+    """A private template directory keeps no surrounding whitespace and cannot be blank."""
+    assert AgentPrivateConfig(per="user", template_dir=" templates ").template_dir == "templates"
+    with pytest.raises(ValidationError, match=re.escape("private.template_dir must not be empty")):
+        AgentPrivateConfig(per="user", template_dir="   ")
+
+
 def test_config_rejects_removed_room_thread_private_scope() -> None:
     """Private requester scopes should no longer accept room-thread isolation."""
     with pytest.raises(ValidationError, match="Input should be 'user' or 'user_agent'"):
