@@ -1251,6 +1251,10 @@ async def test_matrix_api_search_room_scoping_uses_target_room_id() -> None:
             {"action": "search", "search_term": "needle", "next_batch": "  "},
             "next_batch must be omitted or a non-empty",
         ),
+        (
+            {"action": "search", "search_term": "needle", "next_batch": ""},
+            "next_batch must be omitted or a non-empty",
+        ),
     ],
 )
 async def test_matrix_api_search_validation_errors(kwargs: dict[str, object], expected_message: str) -> None:
@@ -1784,7 +1788,7 @@ async def test_matrix_api_redact_state_event_follows_put_state_policy(
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_dry_run() -> None:
-    """Redact dry runs should not call Matrix."""
+    """Redact dry runs should neither call Matrix nor spend rate-limit budget."""
     tool = MatrixApiTools()
     ctx = _make_context()
 
@@ -1812,6 +1816,7 @@ async def test_matrix_api_redact_dry_run() -> None:
         },
     }
     ctx.client.room_redact.assert_not_awaited()
+    assert not any(MatrixApiTools._recent_write_units.values())
 
 
 @pytest.mark.asyncio
@@ -2385,3 +2390,78 @@ async def test_matrix_api_audit_logs_real_writes(
     assert set(audit_payload).issuperset({"action", "agent", "user_id", "room_id", "status"})
     assert set(audit_payload).issuperset(expected_summary)
     assert "dont-log-me" not in repr(audit_payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "kwargs", "expected"),
+    [
+        (
+            "send_event",
+            {"event_type": "com.example.event", "content": {"safe": "value"}},
+            {"event_type": "com.example.event", "message": "Failed to send Matrix event."},
+        ),
+        (
+            "get_state",
+            {"event_type": "com.example.state"},
+            {"event_type": "com.example.state", "state_key": "", "message": "Failed to fetch Matrix state event."},
+        ),
+        (
+            "put_state",
+            {"event_type": "com.example.state", "content": {"enabled": True}},
+            {"event_type": "com.example.state", "state_key": "", "message": "Failed to write Matrix state event."},
+        ),
+        (
+            "redact",
+            {"event_id": "$target:localhost"},
+            {"target_event_id": "$target:localhost", "message": "Failed to redact Matrix event."},
+        ),
+        (
+            "get_event",
+            {"event_id": "$evt:localhost"},
+            {"event_id": "$evt:localhost", "message": "Failed to fetch Matrix event."},
+        ),
+        (
+            "search",
+            {"search_term": "hello"},
+            {"message": "Failed to search Matrix room events."},
+        ),
+    ],
+)
+async def test_matrix_api_reports_raising_client_call(
+    action: str,
+    kwargs: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    """A Matrix call that raises should yield the action's failure payload and, for a write, an error audit."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    failure = RuntimeError("boom")
+    ctx.client.room_get_state_event.side_effect = failure
+    ctx.client.room_put_state.side_effect = failure
+    ctx.client.room_redact.side_effect = failure
+    ctx.client._send.side_effect = failure
+    if action == "get_event":
+        ctx.client.room_get_event.side_effect = failure
+
+    with (
+        patch("mindroom.custom_tools.matrix_api.send_room_event_result", AsyncMock(side_effect=failure)),
+        patch("mindroom.custom_tools.matrix_api.logger.warning") as mock_warning,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_api(action=action, **kwargs))
+
+    assert payload == {
+        "action": action,
+        "room_id": ctx.room_id,
+        "response": "RuntimeError: boom",
+        "status": "error",
+        "tool": "matrix_api",
+        **expected,
+    }
+    if action in {"send_event", "put_state", "redact"}:
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.kwargs["status"] == "error"
+        assert mock_warning.call_args.kwargs["response"] == "RuntimeError: boom"
+    else:
+        mock_warning.assert_not_called()

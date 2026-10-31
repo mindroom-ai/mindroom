@@ -190,14 +190,14 @@ class MatrixApiTools(Toolkit):
     def _resolve_room_id(
         context: ToolRuntimeContext,
         room_id: str | None,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str, str | None]:
         if room_id is None:
             return context.room_id, None
         normalized_room_id = room_id.strip()
         if not normalized_room_id:
-            return None, "room_id must be omitted or a non-empty Matrix room ID string."
+            return normalized_room_id, "room_id must be omitted or a non-empty Matrix room ID string."
         if not normalized_room_id.startswith("!"):  # room version 12 IDs carry no ":server" part
-            return None, "room_id must be a Matrix room ID starting with !, not an alias."
+            return normalized_room_id, "room_id must be a Matrix room ID starting with !, not an alias."
         return normalized_room_id, None
 
     @staticmethod
@@ -343,19 +343,6 @@ class MatrixApiTools(Toolkit):
             raise ValueError(error_message)
         return limit
 
-    @staticmethod
-    def _validate_optional_string(
-        value: str | None,
-        *,
-        field_name: str,
-    ) -> str | None:
-        if value is None:
-            return None
-        if not value.strip():
-            error_message = f"{field_name} must be omitted or a non-empty string."
-            raise ValueError(error_message)
-        return value.strip()
-
     @classmethod
     def _truncate_snippet(cls, text: object) -> str:
         if not isinstance(text, str):
@@ -493,12 +480,14 @@ class MatrixApiTools(Toolkit):
             room_events["event_context"] = event_context
         return {"search_categories": {"room_events": room_events}}
 
-    @classmethod
-    def _build_search_path(cls, next_batch: str | None) -> str:
-        resolved_next_batch = cls._validate_optional_string(next_batch, field_name="next_batch")
-        if resolved_next_batch is None:
+    @staticmethod
+    def _build_search_path(next_batch: str | None) -> str:
+        if next_batch is None:
             return nio.Api._build_path(["search"])
-        return nio.Api._build_path(["search"], {"next_batch": resolved_next_batch})
+        if not next_batch.strip():
+            error_message = "next_batch must be omitted or a non-empty string."
+            raise ValueError(error_message)
+        return nio.Api._build_path(["search"], {"next_batch": next_batch.strip()})
 
     @classmethod
     def _check_rate_limit(
@@ -821,22 +810,7 @@ class MatrixApiTools(Toolkit):
                 operation="matrix_api_send_event",
             )
         except Exception as exc:
-            self._audit_write(
-                context=context,
-                room_id=room_id,
-                action="send_event",
-                status="error",
-                event_type=normalized_event_type,
-                content=normalized_content,
-                response=exc,
-            )
-            return self._error_payload(
-                action="send_event",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                message="Failed to send Matrix event.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, nio.RoomSendResponse):
             self._audit_write(
@@ -901,14 +875,7 @@ class MatrixApiTools(Toolkit):
                 state_key=resolved_state_key,
             )
         except Exception as exc:
-            return self._error_payload(
-                action="get_state",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                state_key=resolved_state_key,
-                message="Failed to fetch Matrix state event.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
             return self._payload(
@@ -1026,25 +993,7 @@ class MatrixApiTools(Toolkit):
                 content=normalized_content,
             )
         except Exception as exc:
-            self._audit_write(
-                context=context,
-                room_id=room_id,
-                action="put_state",
-                status="error",
-                event_type=normalized_event_type,
-                state_key=resolved_state_key,
-                dangerous=dangerous,
-                content=normalized_content,
-                response=exc,
-            )
-            return self._error_payload(
-                action="put_state",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                state_key=resolved_state_key,
-                message="Failed to write Matrix state event.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, nio.RoomPutStateResponse):
             self._audit_write(
@@ -1122,7 +1071,7 @@ class MatrixApiTools(Toolkit):
             allow_dangerous=allow_dangerous,
         )
 
-    async def _redact(  # noqa: PLR0911
+    async def _redact(
         self,
         context: ToolRuntimeContext,
         *,
@@ -1137,25 +1086,22 @@ class MatrixApiTools(Toolkit):
             field_name="event_id",
         )
         normalized_reason = (reason or "").strip() or None
-        error_message = event_id_error
-        if error_message is not None:
+        if event_id_error is not None:
             return self._error_payload(
                 action="redact",
                 room_id=room_id,
-                message=error_message,
+                message=event_id_error,
             )
 
         assert normalized_event_id is not None
 
-        thread_resolution_error = await self._redaction_thread_resolution_error(
+        error_message = await self._redaction_thread_resolution_error(
             context,
             room_id=room_id,
             event_id=normalized_event_id,
         )
         dangerous = False
-        if thread_resolution_error is not None:
-            error_message = thread_resolution_error
-        else:
+        if error_message is None:
             state_policy_error, dangerous = await self._redaction_state_policy_error(
                 context,
                 room_id=room_id,
@@ -1165,14 +1111,18 @@ class MatrixApiTools(Toolkit):
             if state_policy_error is not None:
                 return state_policy_error
 
+        if not dry_run and (limit_error := self._check_rate_limit(context, room_id, action="redact")) is not None:
+            error_message = limit_error
+
+        if error_message is not None:
+            return self._error_payload(
+                action="redact",
+                room_id=room_id,
+                target_event_id=normalized_event_id,
+                message=error_message,
+            )
+
         if dry_run:
-            if error_message is not None:
-                return self._error_payload(
-                    action="redact",
-                    room_id=room_id,
-                    target_event_id=normalized_event_id,
-                    message=error_message,
-                )
             return self._payload(
                 "ok",
                 action="redact",
@@ -1186,17 +1136,6 @@ class MatrixApiTools(Toolkit):
                 },
             )
 
-        if (limit_error := self._check_rate_limit(context, room_id, action="redact")) is not None:
-            error_message = limit_error
-
-        if error_message is not None:
-            return self._error_payload(
-                action="redact",
-                room_id=room_id,
-                target_event_id=normalized_event_id,
-                message=error_message,
-            )
-
         try:
             response = await context.client.room_redact(
                 room_id=room_id,
@@ -1204,23 +1143,7 @@ class MatrixApiTools(Toolkit):
                 reason=normalized_reason,
             )
         except Exception as exc:
-            self._audit_write(
-                context=context,
-                room_id=room_id,
-                action="redact",
-                status="error",
-                target_event_id=normalized_event_id,
-                reason=normalized_reason,
-                dangerous=dangerous,
-                response=exc,
-            )
-            return self._error_payload(
-                action="redact",
-                room_id=room_id,
-                target_event_id=normalized_event_id,
-                message="Failed to redact Matrix event.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, nio.RoomRedactResponse):
             self._audit_write(
@@ -1282,13 +1205,7 @@ class MatrixApiTools(Toolkit):
         try:
             response = await context.client.room_get_event(room_id, normalized_event_id)
         except Exception as exc:
-            return self._error_payload(
-                action="get_event",
-                room_id=room_id,
-                event_id=normalized_event_id,
-                message="Failed to fetch Matrix event.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
             return self._payload(
@@ -1369,12 +1286,7 @@ class MatrixApiTools(Toolkit):
                 nio.Api.to_json(request_body),
             )
         except Exception as exc:
-            return self._error_payload(
-                action="search",
-                room_id=room_id,
-                message="Failed to search Matrix room events.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, _MatrixSearchResponse):
             normalized_results: list[dict[str, object]] = []
@@ -1459,15 +1371,11 @@ class MatrixApiTools(Toolkit):
 
         resolved_room_id, room_id_error = self._resolve_room_id(context, room_id)
         if room_id_error is not None:
-            # Only an explicit room_id can be invalid; an omitted one defaults to the current room.
-            assert room_id is not None
             return self._error_payload(
                 action=normalized_action,
-                room_id=room_id.strip(),
+                room_id=resolved_room_id,
                 message=room_id_error,
             )
-
-        assert resolved_room_id is not None
 
         if normalized_action == "search" and (dry_run or allow_dangerous):
             return self._error_payload(
