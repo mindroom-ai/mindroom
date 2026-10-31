@@ -44,7 +44,7 @@ from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
-from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
+from mindroom.tool_system.dependencies import optional_dependency_environment
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-_GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
 _GOOGLE_REFRESH_TIMEOUT_SECONDS = 20.0
 _SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
 
@@ -429,7 +428,6 @@ class ScopedOAuthClientMixin:
 
     def _raw_credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
         """Create an unwrapped Google credential adapter from stored token data."""
-        ensure_tool_deps(_GOOGLE_OAUTH_DEPS, self._oauth_tool_name, self._runtime_paths)
         with optional_dependency_environment():
             from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
         client_config = self._oauth_provider.client_config(self._runtime_paths)
@@ -729,7 +727,6 @@ class ScopedOAuthClientMixin:
     def _auth_with_stored_oauth(self) -> None:
         """Authenticate using MindRoom-scoped stored OAuth credentials."""
         try:
-            ensure_tool_deps(_GOOGLE_OAUTH_DEPS, self._oauth_tool_name, self._runtime_paths)
             context = self._oauth_credential_context()
             result = refresh_oauth_credentials_sync(
                 context,

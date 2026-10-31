@@ -347,14 +347,11 @@ def test_google_api_toolkit_service_account_fallback_checks_instance_and_runtime
     ],
 )
 def test_google_wrapper_build_credentials_uses_provider_scopes(
-    monkeypatch: pytest.MonkeyPatch,
     tool_class: type[Any],
     expected_scopes: list[str],
     runtime_paths: RuntimePaths,
 ) -> None:
     """Stored tokens without a scope list should fall back to the provider scopes."""
-    monkeypatch.setattr("mindroom.oauth.client.ensure_tool_deps", lambda *_args, **_kwargs: None)
-
     tool = object.__new__(tool_class)
     tool._oauth_tool_name = tool_class._oauth_tool_name
     tool._oauth_provider = tool_class._oauth_provider
