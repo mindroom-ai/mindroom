@@ -79,7 +79,7 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                 tool_names = tuple(sorted(plugin.tools))
                 for tool_name in tool_names:
                     factory = plugin.tools[tool_name].factory
-                    # The registration decorator gives every plugin tool its factory.
+                    # Every plugin tool registration sets its factory.
                     assert factory is not None
                     try:
                         tool_class = load_toolkit_class(tool_name, factory)
