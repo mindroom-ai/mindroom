@@ -311,6 +311,11 @@ def _template_contains_overlapping_subtree(template_dir: Path, target_path: Path
     )
 
 
+def _context_runtime_paths(info: ValidationInfo) -> RuntimePaths | None:
+    """Return the runtime context a caller passed to validation, if any."""
+    return info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -783,7 +788,7 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_knowledge_base_paths_do_not_overlap(self, info: ValidationInfo) -> Config:
         """Reject parent/child top-level knowledge roots while allowing exact aliases."""
-        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        runtime_paths = _context_runtime_paths(info)
         if runtime_paths is None or len(self.knowledge_bases) < 2:
             return self
 
@@ -837,7 +842,7 @@ class Config(BaseModel):
         """Ensure git-backed private knowledge uses a dedicated subtree."""
         memory_notes_dir = Path("memory")
         memory_notes_entrypoint = Path("MEMORY.md")
-        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        runtime_paths = _context_runtime_paths(info)
         for agent_name, agent_config in self.agents.items():
             private_config = agent_config.private
             if private_config is None or private_config.knowledge is None:
@@ -875,7 +880,7 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_private_template_dirs(self, info: ValidationInfo) -> Config:
         """Ensure private template directories exist when runtime path resolution is available."""
-        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        runtime_paths = _context_runtime_paths(info)
         if runtime_paths is None or control_plane_owns_private_templates(runtime_paths):
             return self
         for agent_name, agent_config in self.agents.items():
@@ -895,7 +900,7 @@ class Config(BaseModel):
         """Ensure the internal user localpart does not collide with bot accounts."""
         if self.mindroom_user is None:
             return self
-        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        runtime_paths = _context_runtime_paths(info)
         if runtime_paths is None:
             return self
         reserved_localparts: dict[str, str] = {}
@@ -923,7 +928,7 @@ class Config(BaseModel):
         """Ensure no managed room key maps to the reserved root Space alias."""
         if not self.matrix_space.enabled:
             return self
-        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        runtime_paths = _context_runtime_paths(info)
         if runtime_paths is None:
             return self
         reserved_alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
