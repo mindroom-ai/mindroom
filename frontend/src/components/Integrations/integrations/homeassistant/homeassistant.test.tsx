@@ -7,7 +7,8 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 
 import { homeAssistantIntegration } from "./index";
 
-global.fetch = vi.fn();
+const fetchMock = vi.fn();
+global.fetch = fetchMock as typeof fetch;
 
 describe("homeAssistantIntegration", () => {
   beforeEach(() => {
@@ -16,7 +17,7 @@ describe("homeAssistantIntegration", () => {
 
   describe("loadStatus", () => {
     it("should return connected status when API returns connected", async () => {
-      (global.fetch as any).mockResolvedValueOnce({
+      fetchMock.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ connected: true }),
       });
@@ -24,13 +25,13 @@ describe("homeAssistantIntegration", () => {
       const status = await homeAssistantIntegration.loadStatus();
 
       expect(status).toEqual({ status: "connected" });
-      expect(global.fetch).toHaveBeenCalledWith(
+      expect(fetchMock).toHaveBeenCalledWith(
         "https://backend.example.test/api/homeassistant/status",
       );
     });
 
     it("should return available status when not connected", async () => {
-      (global.fetch as any).mockResolvedValueOnce({
+      fetchMock.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ connected: false }),
       });
@@ -41,7 +42,7 @@ describe("homeAssistantIntegration", () => {
     });
 
     it("should handle API errors gracefully", async () => {
-      (global.fetch as any).mockRejectedValueOnce(new Error("Network error"));
+      fetchMock.mockRejectedValueOnce(new Error("Network error"));
 
       const status = await homeAssistantIntegration.loadStatus();
 
@@ -49,7 +50,7 @@ describe("homeAssistantIntegration", () => {
     });
 
     it("appends agent_name and execution_scope when checking scoped status", async () => {
-      (global.fetch as any).mockResolvedValueOnce({
+      fetchMock.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ connected: false }),
       });
@@ -59,7 +60,7 @@ describe("homeAssistantIntegration", () => {
         executionScope: "shared",
       });
 
-      expect(global.fetch).toHaveBeenCalledWith(
+      expect(fetchMock).toHaveBeenCalledWith(
         "https://backend.example.test/api/homeassistant/status?agent_name=code&execution_scope=shared",
       );
     });
@@ -67,7 +68,7 @@ describe("homeAssistantIntegration", () => {
 
   describe("disconnect", () => {
     it("fails when the backend rejects the disconnect", async () => {
-      (global.fetch as any).mockResolvedValueOnce({ ok: false });
+      fetchMock.mockResolvedValueOnce({ ok: false });
 
       await expect(homeAssistantIntegration.disconnect()).rejects.toThrow(
         "Failed to disconnect Home Assistant",
@@ -75,14 +76,14 @@ describe("homeAssistantIntegration", () => {
     });
 
     it("appends agent_name and execution_scope to the disconnect request", async () => {
-      (global.fetch as any).mockResolvedValueOnce({ ok: true });
+      fetchMock.mockResolvedValueOnce({ ok: true });
 
       await homeAssistantIntegration.disconnect({
         agentName: "code",
         executionScope: "shared",
       });
 
-      expect(global.fetch).toHaveBeenCalledWith(
+      expect(fetchMock).toHaveBeenCalledWith(
         "https://backend.example.test/api/homeassistant/disconnect?agent_name=code&execution_scope=shared",
         expect.objectContaining({ method: "POST" }),
       );

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
 import {
   Settings,
   CheckCircle2,
@@ -6,6 +6,7 @@ import {
   Loader2,
   Key,
   ExternalLink,
+  type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,15 +43,19 @@ import {
 } from "@/hooks/useTools";
 import { useConfigStore } from "@/store/configStore";
 import { getIconForTool } from "./iconMapping";
-import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import { API_BASE_URL } from "@/lib/api";
 import {
+  builtInProviderCards,
+  oauthCard,
+  oauthIntegrationProvider,
+  scopedApiUrl,
+} from "./integrations/index";
+import type {
   Integration,
   IntegrationProvider,
   IntegrationStatus,
   ProviderCard,
-  GenericOAuthIntegrationProvider,
-  builtInProviderCards,
-} from "./integrations/index";
+} from "./integrations/types";
 import { homeAssistantIntegration } from "./integrations/homeassistant";
 import { EnhancedConfigDialog } from "./EnhancedConfigDialog";
 import { FilterSelector } from "@/components/shared/FilterSelector";
@@ -71,6 +76,19 @@ const CATEGORIES = [
   { id: "integrations", name: "Integrations" },
   { id: "information", name: "Information" },
 ];
+
+const SuccessBadge = ({
+  icon: Icon,
+  children,
+}: {
+  icon: LucideIcon;
+  children: ReactNode;
+}) => (
+  <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+    <Icon className="h-3 w-3 mr-1" />
+    {children}
+  </Badge>
+);
 
 const titleFromProviderId = (providerId: string) =>
   providerId
@@ -111,7 +129,7 @@ const providerForIntegration = (
   if (!integration.oauth_provider_id) {
     return null;
   }
-  return new GenericOAuthIntegrationProvider(
+  return oauthIntegrationProvider(
     integration.oauth_provider_id,
     integration.name,
   );
@@ -125,20 +143,21 @@ const discoveredOAuthCard = (
   const name =
     providerTool?.display_name.replace(/\s+Tool$/, "") ??
     titleFromProviderId(providerId);
-  return {
-    id: providerId,
+  return oauthCard(
+    providerId,
     name,
-    description: `Connect ${name} OAuth for ${providerTool?.display_name ?? "this tool"}.`,
-    category: providerTool?.category ?? "productivity",
-    icon: getIconForTool(providerTool?.icon ?? null, providerTool?.icon_color),
-    setup_type: "oauth",
-    oauth_provider_id: providerId,
-  };
+    `Connect ${name} OAuth for ${providerTool?.display_name ?? "this tool"}.`,
+    providerTool?.category ?? "productivity",
+    getIconForTool(providerTool?.icon ?? null, providerTool?.icon_color),
+  );
 };
 
 const oauthRedirectPlaceholderOrigin = () =>
   new URL(API_BASE_URL || window.location.origin, window.location.origin)
     .origin;
+
+const hasConfigFields = (integration: Integration) =>
+  Boolean(integration.config_fields?.length);
 
 const hasManualOAuthFallback = (integration: Integration) =>
   integration.setup_type === "oauth" &&
@@ -212,35 +231,20 @@ export function Integrations() {
     selectedScopePolicy?.effective_execution_scope ?? null;
   const selectedScopeLabel = selectedScopePolicy?.scope_label ?? null;
   const hidesSharedOnlyIntegrations =
-    selectedScopeAgent !== null &&
-    selectedExecutionScope !== null &&
-    selectedExecutionScope !== "shared";
+    selectedExecutionScope !== null && selectedExecutionScope !== "shared";
   const disablesDashboardCredentialManagement =
-    selectedScopeAgent !== null &&
     selectedScopePolicy?.dashboard_credentials_supported === false;
 
-  // Fetch tools from backend
   const {
     tools: backendTools,
     loading: toolsLoading,
     refetch: refetchTools,
     statusAuthoritative,
   } = useTools(effectiveScopeAgentName, selectedExecutionScope);
-  const currentScopeKey = useMemo(
-    () =>
-      [
-        effectiveScopeAgentName ?? "shared",
-        selectedExecutionScope ?? "unscoped",
-        hidesSharedOnlyIntegrations ? "isolated" : "shared",
-      ].join(":"),
-    [
-      effectiveScopeAgentName,
-      hidesSharedOnlyIntegrations,
-      selectedExecutionScope,
-    ],
-  );
+  const currentScopeKey = `${effectiveScopeAgentName ?? "shared"}:${
+    selectedExecutionScope ?? "unscoped"
+  }`;
 
-  // State
   const [integrationsState, setIntegrationsState] = useState<{
     scopeKey: string;
     integrations: Integration[];
@@ -287,7 +291,6 @@ export function Integrations() {
     }
   }, [scopeAgentName, scopedAgents]);
 
-  // Load integrations from providers and backend tools
   useEffect(() => {
     loadIntegrations();
   }, [backendTools, currentScopeKey]);
@@ -309,14 +312,13 @@ export function Integrations() {
       }
 
       const loadedIntegrations: Integration[] = [];
-      const backendToolsByName = new Map<string, ToolInfo>(
-        backendTools.map((tool) => [tool.name, tool]),
-      );
       const sharedProviderIds = providersSharedByTools(backendTools);
-      const findProviderTool = (providerId: string) =>
-        sharedProviderIds.has(providerId)
+      // The tool named after a provider stands for its card, else the provider's only tool.
+      const providerToolFor = (providerId: string) =>
+        backendTools.find((tool) => tool.name === providerId) ??
+        (sharedProviderIds.has(providerId)
           ? undefined
-          : backendTools.find((tool) => tool.auth_provider === providerId);
+          : backendTools.find((tool) => tool.auth_provider === providerId));
       // Built-in cards first, then providers discovered from tool metadata.
       const providerIds = new Set([
         ...builtInCardsById.keys(),
@@ -332,8 +334,7 @@ export function Integrations() {
         ) {
           continue;
         }
-        const providerTool =
-          backendToolsByName.get(providerId) ?? findProviderTool(providerId);
+        const providerTool = providerToolFor(providerId);
         const card =
           builtInCardsById.get(providerId) ??
           discoveredOAuthCard(providerId, providerTool);
@@ -341,8 +342,7 @@ export function Integrations() {
         loadedIntegrations.push(withProviderState(card, providerTool, status));
       }
 
-      // Load backend tools and map them to integrations
-      // (excluding those already handled by providers)
+      // Tool cards for every tool no provider card stands for
       const backendIntegrations = backendTools
         .filter(
           (tool) =>
@@ -394,29 +394,24 @@ export function Integrations() {
     }
   };
 
-  const integrationNeedsDashboardCredentials = (integration: Integration) => {
-    return (
-      integration.setup_type !== "none" ||
-      Boolean(integration.auth_provider) ||
-      Boolean(integration.config_fields && integration.config_fields.length > 0)
-    );
-  };
-
   // OAuth cards connect for the selected agent's scope; other credentials stay shared-only.
   const blocksScopedDashboardCredentials = (integration: Integration) =>
     disablesDashboardCredentialManagement &&
-    integrationNeedsDashboardCredentials(integration) &&
+    (integration.setup_type !== "none" ||
+      Boolean(integration.auth_provider) ||
+      hasConfigFields(integration)) &&
     !integration.oauth_provider_id;
 
   const openToolConfigDialog = (integration: Integration) => {
-    if (!integration.config_fields || integration.config_fields.length === 0) {
+    const configFields = integration.config_fields;
+    if (!configFields?.length) {
       return false;
     }
     setConfigDialog({
       service: integration.config_service ?? integration.id,
       displayName: integration.name,
       description: integration.description,
-      configFields: integration.config_fields,
+      configFields,
       isEditing: integration.status === "connected",
       docsUrl: integration.docs_url || null,
       helperText: integration.helper_text || null,
@@ -530,7 +525,6 @@ export function Integrations() {
         }
       }
     } else if (!openToolConfigDialog(integration)) {
-      // Show generic config dialog for tools with config_fields
       toast({
         title: "Configuration Error",
         description: `${integration.name} requires configuration but no fields are specified.`,
@@ -541,7 +535,7 @@ export function Integrations() {
 
   const runDisconnectOperation = async (
     integration: Integration,
-    disconnect: () => void | Promise<void>,
+    disconnect: () => Promise<void>,
     success?: { title: string; description: string },
   ) => {
     if (blocksScopedDashboardCredentials(integration)) {
@@ -578,28 +572,12 @@ export function Integrations() {
     }
   };
 
-  const handleProviderDisconnect = (
-    integration: Integration,
-    disconnect: () => Promise<void>,
-  ) =>
-    runDisconnectOperation(
-      integration,
-      disconnect,
-      integration.oauth_reset_required === true
-        ? {
-            title: "Connection reset",
-            description: `${integration.name} OAuth has been reset.`,
-          }
-        : undefined,
-    );
-
   const handleStoredCredentialDelete = (integration: Integration) =>
     runDisconnectOperation(integration, async () => {
       const response = await fetch(
-        withAgentExecutionScope(
-          `${API_BASE_URL}/api/credentials/${integration.config_service ?? integration.id}`,
-          effectiveScopeAgentName,
-          selectedExecutionScope,
+        scopedApiUrl(
+          `/api/credentials/${integration.config_service ?? integration.id}`,
+          scope,
         ),
         {
           method: "DELETE",
@@ -623,8 +601,15 @@ export function Integrations() {
     const provider = providerForIntegration(integration);
     const disconnectProvider = provider
       ? () =>
-          handleProviderDisconnect(integration, () =>
-            provider.disconnect(scope),
+          runDisconnectOperation(
+            integration,
+            () => provider.disconnect(scope),
+            integration.oauth_reset_required === true
+              ? {
+                  title: "Connection reset",
+                  description: `${integration.name} OAuth has been reset.`,
+                }
+              : undefined,
           )
       : undefined;
 
@@ -666,10 +651,9 @@ export function Integrations() {
       integration.environment_auth_configured === true &&
       integration.manual_auth_configured !== true ? (
         <>
-          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-            <Key className="h-3 w-3 mr-1" />
+          <SuccessBadge icon={Key}>
             Environment {manualFallbackLabel}
-          </Badge>
+          </SuccessBadge>
           <Button
             onClick={() => openToolConfigDialog(integration)}
             disabled={loading}
@@ -682,10 +666,7 @@ export function Integrations() {
       ) : manualFallbackAvailable &&
         integration.manual_auth_configured === true ? (
         <>
-          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-            <Key className="h-3 w-3 mr-1" />
-            {manualFallbackLabel}
-          </Badge>
+          <SuccessBadge icon={Key}>{manualFallbackLabel}</SuccessBadge>
           <Button
             onClick={() => openToolConfigDialog(integration)}
             disabled={loading}
@@ -705,48 +686,44 @@ export function Integrations() {
         </>
       ) : null;
 
-    // Handle tools with delegated authentication
+    const buttonText =
+      integration.setup_type === "special"
+        ? "Setup"
+        : integration.setup_type === "oauth"
+          ? "Connect"
+          : "Configure";
+    const icon =
+      integration.setup_type === "special" ? (
+        <Settings className="h-4 w-4" />
+      ) : integration.setup_type === "oauth" ? (
+        <ExternalLink className="h-4 w-4" />
+      ) : (
+        <Key className="h-4 w-4" />
+      );
+    const actionButton = (
+      <Button
+        onClick={() => handleIntegrationAction(integration)}
+        disabled={loading}
+        size="sm"
+        className="flex items-center gap-2"
+      >
+        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : icon}
+        {manualFallbackAvailable
+          ? `Connect with ${integration.name}`
+          : buttonText}
+      </Button>
+    );
+
+    // Tools whose authentication comes from a provider card
     if (integration.auth_provider) {
-      // Check if the auth provider is connected
       const authProvider = integrations.find(
         (i) => i.id === integration.auth_provider,
       );
-
       if (
-        integration.status === "connected" ||
-        integration.status === "available" ||
-        authProvider?.status === "connected"
+        integration.status !== "connected" &&
+        integration.status !== "available" &&
+        authProvider?.status !== "connected"
       ) {
-        // Auth provider is connected
-        if (integration.config_fields && integration.config_fields.length > 0) {
-          return (
-            <div className="flex gap-2 items-center">
-              <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-                <CheckCircle2 className="h-3 w-3 mr-1" />
-                Connected
-              </Badge>
-              <Button
-                onClick={() => handleIntegrationAction(integration)}
-                disabled={loading}
-                variant="outline"
-                size="sm"
-              >
-                <Settings className="h-4 w-4 mr-1" />
-                Configure
-              </Button>
-            </div>
-          );
-        } else {
-          // Tool with no additional config
-          return (
-            <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-              <CheckCircle2 className="h-3 w-3 mr-1" />
-              Connected
-            </Badge>
-          );
-        }
-      } else {
-        // Auth provider not connected
         return (
           <div className="flex items-center gap-2">
             <Badge variant="outline" className="text-muted-foreground">
@@ -773,67 +750,67 @@ export function Integrations() {
           </div>
         );
       }
+      if (!hasConfigFields(integration)) {
+        return <SuccessBadge icon={CheckCircle2}>Connected</SuccessBadge>;
+      }
+      return (
+        <div className="flex gap-2 items-center">
+          <SuccessBadge icon={CheckCircle2}>Connected</SuccessBadge>
+          <Button
+            onClick={() => handleIntegrationAction(integration)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            <Settings className="h-4 w-4 mr-1" />
+            Configure
+          </Button>
+        </div>
+      );
     }
 
-    // Tools with no setup required
+    // Tools with no setup required, whose config fields are optional
     if (integration.setup_type === "none") {
-      // Check if there are optional config fields
-      if (integration.config_fields && integration.config_fields.length > 0) {
-        // Check if any configuration has been saved
-        const hasConfig = integration.status === "connected";
-
-        if (hasConfig) {
-          // Show edit/reset buttons for configured tools
-          return (
-            <div className="flex gap-2">
-              <Button
-                onClick={() => handleIntegrationAction(integration)}
-                disabled={loading}
-                variant="outline"
-                size="sm"
-              >
-                <Settings className="h-4 w-4 mr-1" />
-                Settings
-              </Button>
-              <Button
-                onClick={() => handleStoredCredentialDelete(integration)}
-                disabled={loading}
-                variant="ghost"
-                size="sm"
-              >
-                Reset
-              </Button>
-            </div>
-          );
-        } else {
-          // Show optional configure button
-          return (
-            <div className="flex gap-2 items-center">
-              <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-                <CheckCircle2 className="h-3 w-3 mr-1" />
-                Ready
-              </Badge>
-              <Button
-                onClick={() => handleIntegrationAction(integration)}
-                disabled={loading}
-                variant="outline"
-                size="sm"
-              >
-                <Settings className="h-4 w-4 mr-1" />
-                Configure
-              </Button>
-            </div>
-          );
-        }
-      } else {
-        // No config fields, just show ready status
+      if (!hasConfigFields(integration)) {
+        return <SuccessBadge icon={CheckCircle2}>Ready to Use</SuccessBadge>;
+      }
+      if (integration.status === "connected") {
         return (
-          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-            <CheckCircle2 className="h-3 w-3 mr-1" />
-            Ready to Use
-          </Badge>
+          <div className="flex gap-2">
+            <Button
+              onClick={() => handleIntegrationAction(integration)}
+              disabled={loading}
+              variant="outline"
+              size="sm"
+            >
+              <Settings className="h-4 w-4 mr-1" />
+              Settings
+            </Button>
+            <Button
+              onClick={() => handleStoredCredentialDelete(integration)}
+              disabled={loading}
+              variant="ghost"
+              size="sm"
+            >
+              Reset
+            </Button>
+          </div>
         );
       }
+      return (
+        <div className="flex gap-2 items-center">
+          <SuccessBadge icon={CheckCircle2}>Ready</SuccessBadge>
+          <Button
+            onClick={() => handleIntegrationAction(integration)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            <Settings className="h-4 w-4 mr-1" />
+            Configure
+          </Button>
+        </div>
+      );
     }
 
     if (
@@ -886,28 +863,10 @@ export function Integrations() {
       );
     }
 
-    if (
-      integration.setup_type === "oauth" &&
-      integration.status !== "connected" &&
-      canConfigureOAuthClient
-    ) {
+    if (integration.status !== "connected" && canConfigureOAuthClient) {
       return (
         <div className="flex gap-2 items-center">
-          <Button
-            onClick={() => handleIntegrationAction(integration)}
-            disabled={loading}
-            size="sm"
-            className="flex items-center gap-2"
-          >
-            {loading ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <ExternalLink className="h-4 w-4" />
-            )}
-            {manualFallbackAvailable
-              ? `Connect with ${integration.name}`
-              : "Connect"}
-          </Button>
+          {actionButton}
           {oauthClientConfigButton}
           {manualFallbackButton}
         </div>
@@ -979,36 +938,6 @@ export function Integrations() {
       );
     }
 
-    const buttonText =
-      integration.setup_type === "special"
-        ? "Setup"
-        : integration.setup_type === "oauth"
-          ? "Connect"
-          : "Configure";
-
-    const icon =
-      integration.setup_type === "special" ? (
-        <Settings className="h-4 w-4" />
-      ) : integration.setup_type === "oauth" ? (
-        <ExternalLink className="h-4 w-4" />
-      ) : (
-        <Key className="h-4 w-4" />
-      );
-
-    const actionButton = (
-      <Button
-        onClick={() => handleIntegrationAction(integration)}
-        disabled={loading}
-        size="sm"
-        className="flex items-center gap-2"
-      >
-        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : icon}
-        {manualFallbackAvailable
-          ? `Connect with ${integration.name}`
-          : buttonText}
-      </Button>
-    );
-
     return manualFallbackButton ? (
       <div className="flex gap-2 items-center">
         {actionButton}
@@ -1037,10 +966,7 @@ export function Integrations() {
               <CardTitle className="text-lg">{integration.name}</CardTitle>
             </div>
             {isConnected ? (
-              <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-                <CheckCircle2 className="h-3 w-3 mr-1" />
-                Connected
-              </Badge>
+              <SuccessBadge icon={CheckCircle2}>Connected</SuccessBadge>
             ) : (
               <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 border-amber-500/20">
                 <Circle className="h-3 w-3 mr-1" />
@@ -1092,7 +1018,6 @@ export function Integrations() {
     );
   };
 
-  // Filter integrations
   const integrations =
     integrationsState.scopeKey === currentScopeKey
       ? integrationsState.integrations
@@ -1133,23 +1058,19 @@ export function Integrations() {
 
   const categories = useMemo(() => {
     const allCategories = [
-      { id: "all", name: "All", count: filteredIntegrations.length },
+      { id: "all", name: "All", integrations: filteredIntegrations },
       ...CATEGORIES.map((category) => ({
         ...category,
-        count: filteredIntegrations.filter((i) => i.category === category.id)
-          .length,
+        integrations: filteredIntegrations.filter(
+          (i) => i.category === category.id,
+        ),
       })),
     ];
 
     return filterMode !== "all"
-      ? allCategories.filter((cat) => cat.count > 0)
+      ? allCategories.filter((cat) => cat.integrations.length > 0)
       : allCategories;
   }, [filteredIntegrations, filterMode]);
-
-  const getIntegrationsForCategory = (categoryId: string) => {
-    if (categoryId === "all") return filteredIntegrations;
-    return filteredIntegrations.filter((i) => i.category === categoryId);
-  };
 
   // Show loading state while fetching tools
   if (toolsLoading && integrations.length === 0) {
@@ -1254,9 +1175,9 @@ export function Integrations() {
                   className="text-xs flex-shrink-0"
                 >
                   {category.name}
-                  {category.count > 0 && (
+                  {category.integrations.length > 0 && (
                     <Badge variant="secondary" className="ml-1 text-xs">
-                      {category.count}
+                      {category.integrations.length}
                     </Badge>
                   )}
                 </TabsTrigger>
@@ -1270,14 +1191,12 @@ export function Integrations() {
                 className="mt-4"
               >
                 <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {getIntegrationsForCategory(category.id).map(
-                    (integration) => (
-                      <IntegrationCard
-                        key={integration.id}
-                        integration={integration}
-                      />
-                    ),
-                  )}
+                  {category.integrations.map((integration) => (
+                    <IntegrationCard
+                      key={integration.id}
+                      integration={integration}
+                    />
+                  ))}
                 </div>
               </TabsContent>
             ))}
@@ -1285,7 +1204,7 @@ export function Integrations() {
         </div>
       </div>
 
-      {/* Dynamic Configuration Dialog */}
+      {/* Provider setup dialog */}
       {activeDialog && (
         <Dialog
           open={true}
@@ -1302,8 +1221,7 @@ export function Integrations() {
               </DialogDescription>
             </DialogHeader>
             <activeDialog.SetupComponent
-              agentName={effectiveScopeAgentName}
-              executionScope={selectedExecutionScope}
+              {...scope}
               onSuccess={async () => {
                 setActiveDialog(null);
                 await loadIntegrations(true);

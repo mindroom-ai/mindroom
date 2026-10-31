@@ -1,4 +1,4 @@
-import { isValidElement } from "react";
+import { createElement } from "react";
 import {
   SiGmail,
   SiGooglecalendar,
@@ -10,7 +10,7 @@ import {
   SiHomeassistant,
 } from "react-icons/si";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GenericOAuthIntegrationProvider, builtInProviderCards } from "./index";
+import { builtInProviderCards, oauthIntegrationProvider } from "./index";
 
 vi.mock("@/lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api")>()),
@@ -22,10 +22,7 @@ global.fetch = fetchMock as typeof fetch;
 const openMock = vi.fn();
 window.open = openMock as typeof window.open;
 
-const drive = new GenericOAuthIntegrationProvider(
-  "google_drive",
-  "Google Drive",
-);
+const drive = oauthIntegrationProvider("google_drive", "Google Drive");
 
 function openPopup(
   connectBody: Record<string, unknown> = {
@@ -65,33 +62,7 @@ describe("Generic OAuth integration provider", () => {
   });
 
   it("lists the built-in provider cards in display order", () => {
-    expect(
-      builtInProviderCards.map(
-        ({
-          id,
-          name,
-          description,
-          category,
-          setup_type,
-          icon,
-          oauth_provider_id,
-        }) => {
-          if (!isValidElement<{ className: string }>(icon)) {
-            throw new Error(`${id} has no icon element`);
-          }
-          return {
-            id,
-            name,
-            description,
-            category,
-            setup_type,
-            icon: icon.type,
-            iconClass: icon.props.className,
-            oauth_provider_id,
-          };
-        },
-      ),
-    ).toEqual([
+    expect(builtInProviderCards).toEqual([
       {
         id: "google_calendar",
         name: "Google Calendar",
@@ -99,8 +70,9 @@ describe("Generic OAuth integration provider", () => {
           "View and schedule meetings with your connected Google Calendar",
         category: "productivity",
         setup_type: "oauth",
-        icon: SiGooglecalendar,
-        iconClass: "h-5 w-5 text-blue-600",
+        icon: createElement(SiGooglecalendar, {
+          className: "h-5 w-5 text-blue-600",
+        }),
         oauth_provider_id: "google_calendar",
       },
       {
@@ -110,8 +82,9 @@ describe("Generic OAuth integration provider", () => {
           "Connect Google Cloud with read-only access for Google Cloud tools",
         category: "development",
         setup_type: "oauth",
-        icon: SiGooglecloud,
-        iconClass: "h-5 w-5 text-blue-600",
+        icon: createElement(SiGooglecloud, {
+          className: "h-5 w-5 text-blue-600",
+        }),
         oauth_provider_id: "google_cloud",
       },
       {
@@ -120,8 +93,9 @@ describe("Generic OAuth integration provider", () => {
         description: "Create, read, and edit documents with Google Docs",
         category: "productivity",
         setup_type: "oauth",
-        icon: SiGoogledocs,
-        iconClass: "h-5 w-5 text-blue-600",
+        icon: createElement(SiGoogledocs, {
+          className: "h-5 w-5 text-blue-600",
+        }),
         oauth_provider_id: "google_docs",
       },
       {
@@ -131,8 +105,9 @@ describe("Generic OAuth integration provider", () => {
           "Search, read, upload, and organize files in your connected Google Drive",
         category: "productivity",
         setup_type: "oauth",
-        icon: SiGoogledrive,
-        iconClass: "h-5 w-5 text-green-600",
+        icon: createElement(SiGoogledrive, {
+          className: "h-5 w-5 text-green-600",
+        }),
         oauth_provider_id: "google_drive",
       },
       {
@@ -141,8 +116,7 @@ describe("Generic OAuth integration provider", () => {
         description: "Read, search, and manage Gmail emails",
         category: "email",
         setup_type: "oauth",
-        icon: SiGmail,
-        iconClass: "h-5 w-5 text-red-500",
+        icon: createElement(SiGmail, { className: "h-5 w-5 text-red-500" }),
         oauth_provider_id: "google_gmail",
       },
       {
@@ -151,8 +125,9 @@ describe("Generic OAuth integration provider", () => {
         description: "Read, create, and update Google Sheets spreadsheets",
         category: "development",
         setup_type: "oauth",
-        icon: SiGooglesheets,
-        iconClass: "h-5 w-5 text-green-600",
+        icon: createElement(SiGooglesheets, {
+          className: "h-5 w-5 text-green-600",
+        }),
         oauth_provider_id: "google_sheets",
       },
       {
@@ -162,8 +137,9 @@ describe("Generic OAuth integration provider", () => {
           "List, create, update, complete, and delete tasks with Google Tasks",
         category: "productivity",
         setup_type: "oauth",
-        icon: SiGoogletasks,
-        iconClass: "h-5 w-5 text-blue-600",
+        icon: createElement(SiGoogletasks, {
+          className: "h-5 w-5 text-blue-600",
+        }),
         oauth_provider_id: "google_tasks",
       },
       {
@@ -172,9 +148,7 @@ describe("Generic OAuth integration provider", () => {
         description: "Control and monitor your smart home devices",
         category: "smart_home",
         setup_type: "special",
-        icon: SiHomeassistant,
-        iconClass: "h-5 w-5",
-        oauth_provider_id: undefined,
+        icon: createElement(SiHomeassistant, { className: "h-5 w-5" }),
       },
     ]);
   });
@@ -203,20 +177,13 @@ describe("Generic OAuth integration provider", () => {
     removeListener.mockRestore();
   });
 
-  it("settles on the newer popup message too: connected resolves and cancelled rejects", async () => {
-    const connected = openPopup();
-    const connect = drive.connect();
-    await vi.waitFor(() => expect(openMock).toHaveBeenCalled());
-    postOutcome(connected, "connected");
-    await connect;
-    expect(connected.close).toHaveBeenCalledOnce();
-
+  it("rejects a cancelled popup and leaves it to close itself", async () => {
     const cancelled = openPopup();
     const cancel = drive.connect();
     const rejection = expect(cancel).rejects.toThrow(
       "Google Drive authorization was cancelled",
     );
-    await vi.waitFor(() => expect(openMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(openMock).toHaveBeenCalled());
     postOutcome(cancelled, "cancelled");
     await rejection;
     // The popup's page closes itself, so it is left alone.
@@ -298,9 +265,10 @@ describe("Generic OAuth integration provider", () => {
       json: async () => ({
         connected: false,
         has_client_config: true,
-        has_custom_client_config: false,
+        has_custom_client_config: true,
         has_service_account_config: false,
         client_config_service: "google_oauth_client",
+        client_config_redirect_uri_supported: true,
       }),
     });
 
@@ -310,8 +278,9 @@ describe("Generic OAuth integration provider", () => {
     expect(status).toMatchObject({
       status: "available",
       oauth_client_configured: true,
-      oauth_custom_client_configured: false,
+      oauth_custom_client_configured: true,
       oauth_client_config_service: "google_oauth_client",
+      oauth_client_redirect_uri_supported: true,
     });
   });
 
@@ -373,6 +342,31 @@ describe("Generic OAuth integration provider", () => {
     await expect(drive.disconnect()).rejects.toThrow(
       "Failed to disconnect Google Drive",
     );
+  });
+
+  it("falls back to a generic connect error for a non-JSON error body", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      json: async () => {
+        throw new SyntaxError("Unexpected token <");
+      },
+    });
+
+    await expect(drive.connect()).rejects.toThrow(
+      "Failed to connect Google Drive",
+    );
+  });
+
+  it("fails connect when the backend returns no authorization URL", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ auth_url: "" }),
+    });
+
+    await expect(drive.connect()).rejects.toThrow(
+      "Failed to connect Google Drive",
+    );
+    expect(openMock).not.toHaveBeenCalled();
   });
 
   it("sends the selected agent scope with status, connect, and disconnect", async () => {

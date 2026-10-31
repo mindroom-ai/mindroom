@@ -48,6 +48,26 @@ interface ConfigField {
 
 type ConfigValue = string | boolean | number | string[];
 
+function configValueFor(field: ConfigField, raw: unknown): ConfigValue {
+  if (field.type === "boolean") {
+    return raw === true || raw === "true";
+  }
+  if (field.type === "number") {
+    const numericValue = Number(raw);
+    return Number.isFinite(numericValue) ? numericValue : String(raw);
+  }
+  if (field.type === "string[]") {
+    return raw as string[];
+  }
+  return String(raw);
+}
+
+const isSecretField = (field: ConfigField) =>
+  field.type === "password" ||
+  ["token", "key", "secret"].some((word) =>
+    field.name.toLowerCase().includes(word),
+  );
+
 function isStringArray(value: unknown): value is string[] {
   return (
     Array.isArray(value) && value.every((item) => typeof item === "string")
@@ -119,21 +139,27 @@ export function EnhancedConfigDialog({
     });
   };
 
-  // Just use the config fields as provided - no special filtering needed
-  const filteredFields = configFields;
-
   // Initialize default values and load existing credentials
   useEffect(() => {
     if (!open) return;
 
+    // Saved credentials win; other fields start from their defaults.
+    const initialValues = (credentials: Record<string, unknown>) => {
+      const values: Record<string, ConfigValue> = {};
+      configFields.forEach((field) => {
+        if (credentials[field.name] !== undefined) {
+          values[field.name] = configValueFor(field, credentials[field.name]);
+        } else if (field.default !== undefined && field.default !== null) {
+          values[field.name] = configValueFor(field, field.default);
+        }
+      });
+      return values;
+    };
+
     const loadExistingCredentials = async () => {
       setLoadingExisting(true);
 
-      // Use the config fields directly
-      let fieldsToUse = configFields;
-
       try {
-        // Try to load existing credentials
         const response = await fetch(
           withAgentExecutionScope(
             `${API_BASE_URL}/api/credentials/${service}`,
@@ -144,80 +170,24 @@ export function EnhancedConfigDialog({
         if (response.ok) {
           const data = await response.json();
           if (data.credentials) {
-            // Merge existing credentials with defaults
-            const defaults: Record<string, ConfigValue> = {};
-            fieldsToUse.forEach((field) => {
-              if (data.credentials[field.name] !== undefined) {
-                if (field.type === "boolean") {
-                  defaults[field.name] =
-                    data.credentials[field.name] === true ||
-                    data.credentials[field.name] === "true";
-                } else if (field.type === "number") {
-                  const numericValue = Number(data.credentials[field.name]);
-                  defaults[field.name] = Number.isFinite(numericValue)
-                    ? numericValue
-                    : String(data.credentials[field.name]);
-                } else if (field.type === "string[]") {
-                  defaults[field.name] = data.credentials[field.name];
-                } else {
-                  defaults[field.name] = String(data.credentials[field.name]);
-                }
-              } else if (
-                field.default !== undefined &&
-                field.default !== null
-              ) {
-                // Use default value with proper type
-                if (field.type === "boolean") {
-                  defaults[field.name] =
-                    field.default === true || field.default === "true";
-                } else if (field.type === "number") {
-                  const numericValue = Number(field.default);
-                  defaults[field.name] = Number.isFinite(numericValue)
-                    ? numericValue
-                    : String(field.default);
-                } else if (field.type === "string[]") {
-                  defaults[field.name] = field.default;
-                } else {
-                  defaults[field.name] = String(field.default);
-                }
-              }
-            });
-            setConfigValues(defaults);
-            setExistingConfigValues(defaults);
+            const values = initialValues(data.credentials);
+            setConfigValues(values);
+            setExistingConfigValues(values);
             setLoadingExisting(false);
             return;
           }
         }
-      } catch (error) {
+      } catch {
         console.log("No existing credentials found");
       }
 
-      // If no existing credentials, just use defaults
-      const defaults: Record<string, ConfigValue> = {};
-      fieldsToUse.forEach((field) => {
-        if (field.default !== undefined && field.default !== null) {
-          if (field.type === "boolean") {
-            defaults[field.name] =
-              field.default === true || field.default === "true";
-          } else if (field.type === "number") {
-            const numericValue = Number(field.default);
-            defaults[field.name] = Number.isFinite(numericValue)
-              ? numericValue
-              : String(field.default);
-          } else if (field.type === "string[]") {
-            defaults[field.name] = field.default;
-          } else {
-            defaults[field.name] = String(field.default);
-          }
-        }
-      });
-      setConfigValues(defaults);
+      setConfigValues(initialValues({}));
       setExistingConfigValues({});
       setLoadingExisting(false);
     };
 
     loadExistingCredentials();
-  }, [service, open, configFields, agentName, executionScope]); // Use stable dependencies
+  }, [service, open, configFields, agentName, executionScope]);
 
   const validateField = (
     field: ConfigField,
@@ -246,7 +216,7 @@ export function EnhancedConfigDialog({
       field.requiredWhenFieldChanges &&
       (value === undefined || value === "")
     ) {
-      const trackedField = filteredFields.find(
+      const trackedField = configFields.find(
         (candidate) => candidate.name === field.requiredWhenFieldChanges,
       );
       const trackedFieldName = field.requiredWhenFieldChanges;
@@ -294,7 +264,7 @@ export function EnhancedConfigDialog({
     setConfigValues({ ...configValues, [field.name]: value });
 
     // Clear errors for the edited field and fields whose validation depends on it.
-    const dependentFieldNames = filteredFields
+    const dependentFieldNames = configFields
       .filter((candidate) => candidate.requiredWhenFieldChanges === field.name)
       .map((candidate) => candidate.name);
     if (
@@ -312,7 +282,7 @@ export function EnhancedConfigDialog({
 
   const normalizedConfigValuesForSave = (): Record<string, ConfigValue> => {
     const normalized: Record<string, ConfigValue> = {};
-    filteredFields.forEach((field) => {
+    configFields.forEach((field) => {
       const value = configValues[field.name];
       if (field.type === "number") {
         if (value !== undefined && value !== "") {
@@ -343,7 +313,7 @@ export function EnhancedConfigDialog({
   const handleSave = async () => {
     // Validate all fields
     const errors: Record<string, string> = {};
-    filteredFields.forEach((field) => {
+    configFields.forEach((field) => {
       const error = validateField(field, configValues[field.name]);
       if (error) {
         errors[field.name] = error;
@@ -477,18 +447,6 @@ export function EnhancedConfigDialog({
     );
   };
 
-  const getFieldIcon = (field: ConfigField) => {
-    if (
-      field.type === "password" ||
-      field.name.toLowerCase().includes("token") ||
-      field.name.toLowerCase().includes("key") ||
-      field.name.toLowerCase().includes("secret")
-    ) {
-      return Key;
-    }
-    return null;
-  };
-
   const togglePasswordVisibility = (fieldName: string) => {
     setShowPassword((prev) => ({ ...prev, [fieldName]: !prev[fieldName] }));
   };
@@ -550,7 +508,7 @@ export function EnhancedConfigDialog({
         ) : (
           <>
             <div className="space-y-4 py-2 max-h-[400px] overflow-y-auto px-1">
-              {filteredFields.length === 0 ? (
+              {configFields.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-8 text-center">
                   <CheckCircle className="h-12 w-12 text-green-500 mb-3" />
                   <p className="text-sm text-muted-foreground">
@@ -561,13 +519,9 @@ export function EnhancedConfigDialog({
                   </p>
                 </div>
               ) : (
-                filteredFields.map((field, index) => {
-                  const FieldIcon = getFieldIcon(field);
-                  const isPasswordField =
-                    field.type === "password" ||
-                    field.name.toLowerCase().includes("token") ||
-                    field.name.toLowerCase().includes("key") ||
-                    field.name.toLowerCase().includes("secret");
+                configFields.map((field, index) => {
+                  const isPasswordField = isSecretField(field);
+                  const FieldIcon = isPasswordField ? Key : null;
                   const hasError = !!fieldErrors[field.name];
 
                   return (
@@ -678,11 +632,7 @@ export function EnhancedConfigDialog({
                                     togglePasswordVisibility(field.name)
                                   }
                                 >
-                                  {showPassword[field.name] ? (
-                                    <Lock className="h-4 w-4 text-muted-foreground" />
-                                  ) : (
-                                    <Lock className="h-4 w-4 text-muted-foreground" />
-                                  )}
+                                  <Lock className="h-4 w-4 text-muted-foreground" />
                                 </Button>
                               )}
                             </div>

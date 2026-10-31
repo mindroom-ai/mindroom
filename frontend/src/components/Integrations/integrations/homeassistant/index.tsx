@@ -1,16 +1,11 @@
 import { IntegrationProvider, IntegrationScope } from "../types";
+import { scopedApiUrl } from "..";
 import { HomeAssistantIntegration } from "@/components/HomeAssistantIntegration/HomeAssistantIntegration";
-import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 
 const homeAssistantUrl = (
   action: "disconnect" | "status",
   scope?: IntegrationScope,
-) =>
-  withAgentExecutionScope(
-    `${API_BASE_URL}/api/homeassistant/${action}`,
-    scope?.agentName,
-    scope?.executionScope,
-  );
+) => scopedApiUrl(`/api/homeassistant/${action}`, scope);
 
 export const homeAssistantIntegration: IntegrationProvider = {
   SetupComponent: HomeAssistantIntegration,
