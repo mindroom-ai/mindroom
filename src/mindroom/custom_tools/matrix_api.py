@@ -688,31 +688,13 @@ class MatrixApiTools(Toolkit):
         event_id: str,
     ) -> str | None:
         """Return a fail-closed error when the redaction target's thread membership is unknown."""
-        try:
-            thread_membership_known = await redaction_thread_membership_known(
-                context.conversation_reader,
-                context.relations,
-                room_id,
-                event_id=event_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to resolve redaction target thread mapping for matrix_api redact",
-                room_id=room_id,
-                target_event_id=event_id,
-                error=str(exc),
-            )
+        if not await redaction_thread_membership_known(
+            context.conversation_reader,
+            context.relations,
+            room_id,
+            event_id=event_id,
+        ):
             return "Failed to resolve redaction target thread mapping."
-
-        if not thread_membership_known:
-            logger.warning(
-                "Failed to resolve redaction target thread mapping for matrix_api redact",
-                room_id=room_id,
-                target_event_id=event_id,
-                error="thread membership unknown",
-            )
-            return "Failed to resolve redaction target thread mapping."
-
         return None
 
     @staticmethod

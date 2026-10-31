@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -261,26 +262,66 @@ async def test_event_thread_membership_unknown_through_non_message_ancestors(
     assert not known
 
 
-@pytest.mark.asyncio
-async def test_event_thread_membership_unknown_on_lookup_failure() -> None:
-    """A failed lookup leaves membership unknown instead of room level."""
+def _failing_relations(failure: str) -> RelationLookup:
+    """Return a relation lookup whose homeserver or journal raises ``boom``."""
     relations_client = MagicMock()
     relations_client.room_get_event = AsyncMock(side_effect=RuntimeError("boom"))
-    relations = make_relation_lookup(client=relations_client)
+    if failure == "homeserver":
+        return make_relation_lookup(client=relations_client)
+    relations = make_relation_lookup(client=_serving_client("$thread-reply:localhost", content=_THREAD_REPLY_CONTENT))
+    cast("FakeRelationStore", relations.store).failure = RuntimeError("boom")
+    return relations
 
-    known = await event_thread_membership_known(
-        make_conversation_reader_mock(),
-        relations,
-        "!room:localhost",
-        event_type="m.room.message",
-        content={
-            "body": "bridged reply",
-            "msgtype": "m.text",
-            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
-        },
-    )
+
+@pytest.mark.parametrize("failure", ["homeserver", "journal"])
+@pytest.mark.asyncio
+async def test_event_thread_membership_unknown_on_lookup_failure(failure: str) -> None:
+    """A failed lookup leaves membership unknown instead of room level, and logs why."""
+    with capture_logs() as logs:
+        known = await event_thread_membership_known(
+            make_conversation_reader_mock(),
+            _failing_relations(failure),
+            "!room:localhost",
+            event_type="m.room.message",
+            content={
+                "body": "bridged reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
+            },
+        )
 
     assert not known
+    assert {
+        "event": "Refusing a Matrix mutation whose thread membership is unknown",
+        "log_level": "warning",
+        "room_id": "!room:localhost",
+        "mutation": "send_event",
+        "target_event_id": None,
+        "error": "boom",
+    } in logs
+
+
+@pytest.mark.parametrize("failure", ["homeserver", "journal"])
+@pytest.mark.asyncio
+async def test_redaction_thread_membership_unknown_on_lookup_failure(failure: str) -> None:
+    """A redaction whose target lookup fails is unknown instead of room level, and logs why."""
+    with capture_logs() as logs:
+        known = await redaction_thread_membership_known(
+            make_conversation_reader_mock(),
+            _failing_relations(failure),
+            "!room:localhost",
+            event_id="$thread-reply:localhost",
+        )
+
+    assert not known
+    assert {
+        "event": "Refusing a Matrix mutation whose thread membership is unknown",
+        "log_level": "warning",
+        "room_id": "!room:localhost",
+        "mutation": "redact",
+        "target_event_id": "$thread-reply:localhost",
+        "error": "boom",
+    } in logs
 
 
 @pytest.mark.asyncio
