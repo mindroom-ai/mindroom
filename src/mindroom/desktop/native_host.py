@@ -1148,7 +1148,7 @@ def _error_payload(
 
 def _matrix_http_headers_path(runtime_paths: RuntimePaths) -> Path | None:
     value = runtime_paths.env_value("MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
-    return Path(value).expanduser() if value else None
+    return Path(value) if value else None
 
 
 __all__ = [

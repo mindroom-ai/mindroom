@@ -4457,7 +4457,7 @@ visibility = [
 [[modules]]
 path = "mindroom.desktop.cloudflare_access"
 depends_on = []
-visibility = ["mindroom.cli.desktop", "mindroom.desktop.native_host", "mindroom.desktop.session"]
+visibility = ["mindroom.cli.desktop", "mindroom.desktop.session"]
 
 [[modules]]
 path = "mindroom.desktop.sso"

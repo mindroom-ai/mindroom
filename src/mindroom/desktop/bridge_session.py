@@ -235,16 +235,12 @@ async def _build_bridge(
 async def first_worker_exit(workers: Collection[asyncio.Task[None]]) -> BaseException:
     """Wait until the first worker ends and return why; one that returns normally stopped unexpectedly.
 
-    A cancelled worker cancels the caller too.
+    A cancelled worker cancels the caller too, since its `exception()` raises `CancelledError`.
     """
     done, _ = await asyncio.wait(workers, return_when=asyncio.FIRST_COMPLETED)
     for worker in done:
-        try:
-            await worker
-        except asyncio.CancelledError:
-            raise
-        except BaseException as exc:
-            return exc
+        if (failure := worker.exception()) is not None:
+            return failure
     return DesktopWorkerStoppedError()
 
 
