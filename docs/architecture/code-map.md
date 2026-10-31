@@ -361,6 +361,7 @@ Matrix sync callback
 | `session_storage/legacy_usage_ledger.py` | The conversion's step that seeds the usage ledger of an Agno-layout database without one from its run rows and Agno 2 blobs |
 | `session_storage/legacy_usage_totals.py` | The layout version 7 step that keeps the usage stored session totals held beyond their run rows as one undated `pre_ledger` ledger row |
 | `session_storage/legacy_scope_metadata.py` | The layout version 7 step that moves the owner's per-scope force-compaction flag and preserved seen ids into one metadata value |
+| `session_storage/legacy_run_requirements.py` | The layout version 8 step, and the Agno-layout conversion's decode, that fold each paused run's stored requirements into the tool rows they copy, so a paused call is stored once |
 | `session_storage/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
 | `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |
@@ -480,7 +481,7 @@ Matrix sync callback
 | `desktop/file_actions.py` | Runs desktop folder listings and reads and fits them into one reply |
 | `desktop/gui_actions.py` | Runs desktop app input actions (semantic element actions, pointer, text, scroll, and key chords) through the local GUI provider |
 | `desktop/shell_actions.py` | Runs desktop shell actions, reports local and caller-scoped shell status, and delivers output inline or as an encrypted attachment |
-| `desktop/bridge_components.py` | Builds the local capability providers and bridge for one Desktop run, shared by the app helper and the terminal |
+| `desktop/bridge_session.py` | Opens, starts, and closes one Desktop bridge run (Matrix device, capability providers, bridge, admission, and workers) in one order, shared by the app helper and the terminal |
 | `desktop/filesystem.py` | Bounded, descriptor-confined reads from explicitly selected local folders |
 | `desktop/shell.py` | Runs locally approved desktop shell commands through MindRoom's shell engine |
 | `desktop/login_environment.py` | Captures the account's login-shell environment once for locally approved desktop commands |
@@ -510,7 +511,7 @@ Matrix sync callback
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments, runs one call through middleware to its outcome for the loop or to the tool's own value for runners outside it (injection, synchronous offload, generator draining, error text), and reads that value as the text and media references a runner hands its client |
 | `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before-call, environment, and after-call hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |
 | `tool_system/tool_environment.py` | The environment one tool call gives its shell commands, local or worker-routed: the plugin hooks' changes with the response's CLI grant over them |
-| `llm/` | Provider-neutral values the runtime shares: messages, media, usage, run records and their pause requirements, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
+| `llm/` | Provider-neutral values the runtime shares: messages, media, usage, run records and the pause requirements read from their tools, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
 | `llm/legacy_run_content.py` | The content a failed run earlier releases stored: its failure text in place of the model's, handed over redacted |
 | `llm/tool_search.py` | Portable deferred tool search for routes the build marks portable: the pipeline stage that leaves deferred schemas off the request and shows stored deferred calls as `call_tool` calls, the loop's rewrite of a model's `call_tool` calls to the functions they name, and the argument parsing both share, which every wire that sends tool-call arguments as an object uses to replay a call another provider stored |
 | `agent_loop/model_loop.py` | `run_model_loop`, the request and tool loop agents, team leaders, and skill reviews share: send the messages, append the answer, run its tool calls, and stop on a final answer, a stopping tool, a pause, a hook, or the request cap |

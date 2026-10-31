@@ -1,5 +1,5 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Run records, tool executions, and pause requirements, with their stored dict shapes.
+"""Run records and tool executions, with their stored dict shapes, and the pause requirements read from them.
 
 The conversation store splits a record's dict across its run, message, and tool rows (``session_storage/codec.py``).
 Keys and ``RunStatus`` strings are also those delegation state holds and those of the Agno-layout run rows, which only
@@ -9,21 +9,19 @@ the storage v2 conversion still reads; keys the records do not model are ignored
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from time import time
-from typing import Any
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from typing import TYPE_CHECKING, Any
+from uuid import NAMESPACE_URL, uuid5
 
 from mindroom.llm.events import ReportedCall
 from mindroom.llm.legacy_run_content import legacy_failure_text
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import RunMetrics
 
-
-def _new_id() -> str:
-    return str(uuid4())
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 def _stored_call_id(stored: Mapping[str, Any]) -> str:
@@ -74,7 +72,11 @@ _STORED_TOOL_KEYS = {"is_error": "tool_call_error", "stop_after_call": "stop_aft
 
 @dataclass(kw_only=True)
 class ToolExecution:
-    """One tool call the model requested, with its outcome or pause state."""
+    """One tool call the model requested, with its outcome, or its pause state and the decision a resume runs it by.
+
+    A paused call is stored only here: ``confirmed`` and ``confirmation_note`` hold the requester's decision, and
+    ``result`` an externally executed call's answer, until the resumed loop answers the call with them.
+    """
 
     tool_call_id: str
     tool_name: str
@@ -88,6 +90,10 @@ class ToolExecution:
     confirmation_note: str | None = None
     external_execution_required: bool | None = None
     approval_type: str | None = None
+    # The id a delegation call's child and hooks are kept under, given by the driver the first time it advances the
+    # call (``advance_delegation_call``), or kept from its requirement for a call an earlier release paused
+    # (``legacy_run_requirements``); a provider may reuse a call id within one run, so the call id cannot be it.
+    pause_id: str | None = None
 
     @property
     def is_paused(self) -> bool:
@@ -135,18 +141,14 @@ class ToolExecution:
         values = {_TOOL_FIELDS[key]: value for key, value in data.items() if key in _TOOL_FIELDS}
         # LEGACY_COMPAT: Tool executions stored without a call id.
         # Legacy format: a stored tool execution whose ``tool_call_id`` is null, empty, or absent. Agno 2.4.7 stored
-        # Ollama's calls so, since Ollama sends no call ids; the ``unknown`` placeholder that ``RunRequirement``
-        # reads for a requirement stored without its tool execution was written back so too.
+        # Ollama's calls so, since Ollama sends no call ids.
         # Last legacy release: v2026.4.35, the last release on Agno 2.4.7; v2026.4.36 moved to Agno 2.5.13, which
-        # gives an id-less call a uuid4 id. For the ``unknown`` placeholder, v2026.10.513, whose typed model wrote it
-        # back with a null id; the next release writes its derived id. The requirements it stands in for, stored
-        # without a tool execution, are unversioned external input.
+        # gives an id-less call a uuid4 id.
         # Handling: the execution reads with an id derived from its stored keys and values, so every read of its
         # row gives the same id and its readers need no missing-id case; two entries storing exactly the same keys
         # and values share it. A row written back stores that id, and every other key reads as stored.
         # Coverage: tests/llm/test_codecs.py::test_a_tool_execution_stored_without_a_call_id_reads_with_the_same_id,
-        #   tests/llm/test_codecs.py::test_a_run_whose_tool_executions_have_no_call_ids_still_loads,
-        #   tests/llm/test_codecs.py::test_run_requirement_reads_rows_agno_read_leniently
+        #   tests/llm/test_codecs.py::test_a_run_whose_tool_executions_have_no_call_ids_still_loads
         if not values.get("tool_call_id"):
             values["tool_call_id"] = _stored_call_id(data)
         return cls(**values)
@@ -165,51 +167,53 @@ def denial_note_for(reason: str | None) -> str:
     return reason or _DENIED_WITHOUT_REASON
 
 
-@dataclass
+@dataclass(frozen=True)
 class RunRequirement:
-    """What a paused run waits for: a confirmation or an external execution result for one tool call."""
+    """One call a paused run waits on: a confirmation or an external execution result, read from its tool entry.
+
+    A requirement is never stored: an agent run's are its paused tool entries, and a team run's add its paused member
+    runs', naming the member (``requirements``). Its decision is recorded on the entry itself, which is what the run
+    stores and a resume runs from.
+    """
 
     tool_execution: ToolExecution
-    id: str = field(default_factory=_new_id, kw_only=True)
-    confirmation: bool | None = field(default=None, kw_only=True)
-    confirmation_note: str | None = field(default=None, kw_only=True)
-    external_execution_result: str | None = field(default=None, kw_only=True)
-    member_agent_id: str | None = field(default=None, kw_only=True)
-    member_display_name: str | None = field(default=None, kw_only=True)
-    member_run_id: str | None = field(default=None, kw_only=True)
+    member_agent_id: str | None = None
+    member_display_name: str | None = None
+    member_run_id: str | None = None
 
     @property
     def needs_confirmation(self) -> bool:
         """Whether a confirmation decision is still outstanding."""
-        if self.confirmation is not None or self.tool_execution.confirmed is not None:
-            return False
-        return bool(self.tool_execution.requires_confirmation)
+        return bool(self.tool_execution.requires_confirmation) and self.tool_execution.confirmed is None
 
     @property
     def needs_external_execution(self) -> bool:
         """Whether an external execution result is still outstanding."""
-        if self.external_execution_result is not None:
-            return False
-        return bool(self.tool_execution.external_execution_required)
+        return bool(self.tool_execution.external_execution_required) and self.tool_execution.result is None
 
     def is_resolved(self) -> bool:
         """Whether nothing is outstanding."""
         return not self.needs_confirmation and not self.needs_external_execution
 
     @property
+    def confirmation(self) -> bool | None:
+        """The decision on a confirmation: True approved, False denied, None undecided."""
+        return self.tool_execution.confirmed
+
+    @property
     def denial_note(self) -> str:
         """The note a denied call answers the model with, which ``reject`` always records."""
-        if self.confirmation is not False or self.confirmation_note is None:
+        execution = self.tool_execution
+        if execution.confirmed is not False or execution.confirmation_note is None:
             msg = "This requirement is not a recorded denial"
             raise ValueError(msg)
-        return self.confirmation_note
+        return execution.confirmation_note
 
     def confirm(self) -> None:
-        """Approve the call; both this requirement and its tool execution record the decision."""
+        """Approve the call."""
         if not self.needs_confirmation:
             msg = "This requirement does not require confirmation"
             raise ValueError(msg)
-        self.confirmation = True
         self.tool_execution.confirmed = True
 
     def reject(self, note: str | None) -> None:
@@ -217,71 +221,15 @@ class RunRequirement:
         if not self.needs_confirmation:
             msg = "This requirement does not require confirmation"
             raise ValueError(msg)
-        note = denial_note_for(note)
-        self.confirmation = False
-        self.confirmation_note = note
         self.tool_execution.confirmed = False
-        self.tool_execution.confirmation_note = note
+        self.tool_execution.confirmation_note = denial_note_for(note)
 
     def set_external_execution_result(self, result: str) -> None:
         """Record the result an external executor produced for the call."""
         if not self.needs_external_execution:
             msg = "This requirement does not require external execution"
             raise ValueError(msg)
-        self.external_execution_result = result
         self.tool_execution.result = result
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict; None values are dropped."""
-        values = {
-            "id": self.id,
-            "confirmation": self.confirmation,
-            "confirmation_note": self.confirmation_note,
-            "external_execution_result": self.external_execution_result,
-            "member_agent_id": self.member_agent_id,
-            "member_agent_name": self.member_display_name,
-            "member_run_id": self.member_run_id,
-            "tool_execution": self.tool_execution.to_dict(),
-        }
-        return {key: value for key, value in values.items() if value is not None}
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> RunRequirement:
-        """Rebuild from a stored dict, ignoring keys this type does not model, such as older rows' user-input keys.
-
-        A missing tool execution becomes an ``unknown`` placeholder with a call id derived from the entry, and a
-        decision recorded only on the requirement reaches its tool execution, which is what a resume runs from.
-        """
-        # LEGACY_COMPAT: Run requirements stored without a tool execution.
-        # Legacy format: ``requirements`` entries lacking ``tool_execution``, which Agno's reader accepted as legacy
-        # data.
-        # Last legacy release: unversioned external input; no MindRoom release is known to write them, and
-        # agno 3.0.9 always wrote one.
-        # Handling: the entry reads with an ``unknown`` placeholder tool execution, under a call id derived from the
-        # entry's stored keys, as Agno's reader did apart from the id, so one such entry never fails the load of its
-        # session and every read gives its placeholder the same id.
-        # Coverage: tests/llm/test_codecs.py::test_run_requirement_reads_rows_agno_read_leniently
-        tool_data = data.get("tool_execution")
-        requirement = cls(
-            ToolExecution.from_dict(tool_data)
-            if isinstance(tool_data, Mapping)
-            else ToolExecution(tool_call_id=_stored_call_id(data), tool_name="unknown", tool_args={}),
-            id=identifier if isinstance(identifier := data.get("id"), str) else _new_id(),
-            confirmation=data.get("confirmation"),
-            confirmation_note=data.get("confirmation_note"),
-            external_execution_result=data.get("external_execution_result"),
-            member_agent_id=data.get("member_agent_id"),
-            member_display_name=data.get("member_agent_name"),
-            member_run_id=data.get("member_run_id"),
-        )
-        execution = requirement.tool_execution
-        if requirement.confirmation is not None and execution.confirmed is None:
-            execution.confirmed = requirement.confirmation
-            if requirement.confirmation is False and requirement.confirmation_note is not None:
-                execution.confirmation_note = requirement.confirmation_note
-        if requirement.external_execution_result is not None and execution.result is None:
-            execution.result = requirement.external_execution_result
-        return requirement
 
 
 @dataclass(kw_only=True)
@@ -294,7 +242,7 @@ class _RunRecordCommon:
     user_id: str | None = None
     status: RunStatus = RunStatus.running
     # What the run's model wrote, before a pause and after each resume, its requests' texts a blank line apart
-    # (``joined_texts``). A pause is in ``requirements`` and a failure in ``error``, never here.
+    # (``joined_texts``). A pause is in its paused ``tools`` and a failure in ``error``, never here.
     content: str | None = None
     # Why the run failed or was stopped, credentials redacted, set by whatever ended it so: the loop for an ``ERROR``
     # run, and delegation recovery for a child run it fails or cancels. A run its own cancellation stopped has none.
@@ -306,13 +254,17 @@ class _RunRecordCommon:
     # How many of ``tools`` are refused calls that do not count toward the run's tool-call limit: a call naming no
     # offered function, one whose arguments do not decode, and one of a cut-off response. A resume counts the rest.
     uncounted_tool_calls: int = 0
-    requirements: list[RunRequirement] | None = None
     metrics: RunMetrics | None = None
     metadata: dict[str, Any] | None = None
     created_at: int = field(default_factory=_now)
     # The content a resumed run carried from its pause, set by the resume (``resumed_record``); the loop joins what the
     # model writes since to it. Never stored, so a loaded record has none.
     carried_content: str | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def requirements(self) -> list[RunRequirement]:
+        """Return what the run waits on: a requirement for each of its paused tool entries, in call order."""
+        return [RunRequirement(tool) for tool in self.tools or () if tool.is_paused]
 
     @property
     def handover_content(self) -> str | None:
@@ -356,9 +308,9 @@ class _RunRecordCommon:
         result["created_at"] = self.created_at
         return result
 
-    # ``tools``, ``requirements``, and ``metrics`` are written exactly when set, ``[]`` and ``{}`` included, so a
-    # stored row writes back as it reads: older rows hold ``tools = []`` on runs without tool calls, and
-    # interrupted-turn records carry no ``metrics`` at all.
+    # ``tools`` and ``metrics`` are written exactly when set, ``[]`` and ``{}`` included, so a stored row writes back
+    # as it reads: older rows hold ``tools = []`` on runs without tool calls, and interrupted-turn records carry no
+    # ``metrics`` at all.
     def _metrics_dict(self) -> dict[str, Any]:
         return {} if self.metrics is None else {"metrics": self.metrics.to_dict()}
 
@@ -372,9 +324,6 @@ class _RunRecordCommon:
         tools = {} if self.tools is None else {"tools": [tool.to_dict() for tool in self.tools]}
         # Written only when some call does not count, so a run whose every call counts stores no key.
         return tools | ({"uncounted_tool_calls": self.uncounted_tool_calls} if self.uncounted_tool_calls else {})
-
-    def _requirements_dict(self) -> dict[str, Any]:
-        return {} if self.requirements is None else {"requirements": [item.to_dict() for item in self.requirements]}
 
 
 _TEXT_SEPARATOR = "\n\n"
@@ -394,7 +343,6 @@ def joined_texts(parts: Sequence[str]) -> str:
 
 def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
     tools = data.get("tools")
-    requirements = data.get("requirements")
     metrics = data.get("metrics")
     messages = [Message.from_dict(message) for message in data.get("messages") or []]
     values: dict[str, Any] = {
@@ -410,7 +358,6 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         "messages": messages,
         "tools": None if tools is None else [ToolExecution.from_dict(tool) for tool in tools],
         "uncounted_tool_calls": data.get("uncounted_tool_calls", 0),
-        "requirements": None if requirements is None else [RunRequirement.from_dict(item) for item in requirements],
         "metrics": None if metrics is None else RunMetrics.from_dict(metrics),
         "metadata": data.get("metadata"),
     }
@@ -434,7 +381,6 @@ class RunRecord(_RunRecordCommon):
             **self._metrics_dict(),
             **self._history_dict(),
             **self._tools_dict(),
-            **self._requirements_dict(),
         }
 
     @classmethod
@@ -445,7 +391,7 @@ class RunRecord(_RunRecordCommon):
 
 @dataclass(kw_only=True)
 class TeamRunRecord(_RunRecordCommon):
-    """A persisted team run; paused member runs ride along in ``member_responses``.
+    """A persisted team run; paused member runs ride along in ``member_responses``, which the team row does not store.
 
     ``ended_member_runs`` holds the terminal record of every member run that ended while the run ran, in the order
     they first ended: a member run stopped with its team run comes last. A mid-turn fold flags their rows as folded,
@@ -457,6 +403,23 @@ class TeamRunRecord(_RunRecordCommon):
     member_responses: list[RunRecord] = field(default_factory=list)
     ended_member_runs: list[RunRecord] = field(default_factory=list, compare=False, repr=False)
 
+    @property
+    def requirements(self) -> list[RunRequirement]:
+        """Return what the team run waits on: the leader's paused calls, then each paused member run's, naming it."""
+        return [
+            *super().requirements,
+            *(
+                RunRequirement(
+                    requirement.tool_execution,
+                    member_agent_id=member.agent_id,
+                    member_display_name=member.agent_display_name,
+                    member_run_id=member.run_id,
+                )
+                for member in self.member_responses
+                for requirement in member.requirements
+            ),
+        ]
+
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict, keys in stored order, split as a run's is; ``member_responses`` is always present."""
         return {
@@ -465,7 +428,6 @@ class TeamRunRecord(_RunRecordCommon):
             "status": self.status.value,
             **self._history_dict(),
             "member_responses": [member.to_dict() for member in self.member_responses],
-            **self._requirements_dict(),
             **self._tools_dict(),
         }
 

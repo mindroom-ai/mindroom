@@ -1,6 +1,6 @@
-# Delegation owners: target resolution, pause state, approval resumes, and the running child
+# Delegation owners: target resolution, approval resumes, and the running child
 
-This record holds the decisions behind one owner for turning a delegation call into its target, one stored list of a delegation pause's calls, one decision for how a saved approval's paused run resumes, and one context for the running child.
+This record holds the decisions behind one owner for turning a delegation call into its target, one decision for how a saved approval's paused run resumes, and one context for the running child.
 It records reasons, rejected alternatives, and accepted limitations; the code shows the mechanisms.
 
 ## Decisions
@@ -11,7 +11,6 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - The fresh and follow-up resolvers are separate entry points because a fresh direct call must still return a refusal when no caller identity exists, while a follow-up loads a session only its owner may read.
 - Both adapters resolve the target, including the follow-up refusal for a subagent whose caller lost a tool or that belongs to a Dynamic Workflow, before authorizing it, so a follow-up that fails both checks shows the follow-up refusal on every channel.
 - The caller's delegation allowlist is read from its config in one place, so the toolkit's description and the authorization check cannot disagree on it.
-- A delegation pause stores its pending calls once, as requirements, since each requirement holds its tool call; the separate tool list mirrored a framework pause shape that MindRoom no longer uses.
 - The decision of how a saved approval's paused run resumes has one owner that returns the stream to resume from and the decided calls the delegation driver still answers.
   Each caller keeps its own execution: agents and teams stream through the driver, and a resumed delegated child drives its nested delegations inline, without an event sink.
 - One context tracks the running child; the record adapter is a value that context holds rather than a second context, and the one check of whether a finished run is the child's lives with the context.

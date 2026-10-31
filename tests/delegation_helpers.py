@@ -212,11 +212,10 @@ def _deferred_call(call_id: str, function_name: str, **arguments: object) -> dic
 def _saved_approval_calls(state: DelegationState) -> tuple[ApprovalCall, ...]:
     """Supply the saved journal calls when a test drives delegation without Matrix publication."""
     calls = []
-    for requirement in state.pending_calls():
-        tool = requirement.tool_execution
-        call_id = tool.tool_call_id
+    for tool in state.pending_tools:
+        call_id = str(tool["tool_call_id"])
         if state.pending_child_id is None:
-            assert tool.tool_name in {"run_subagent", "continue_subagent"}
+            assert tool["tool_name"] in {"run_subagent", "continue_subagent"}
             assert state.pending_agent_name is not None
             invoking_agent, toolkit_name = state.pending_agent_name, "delegate"
         else:
@@ -225,11 +224,11 @@ def _saved_approval_calls(state: DelegationState) -> tuple[ApprovalCall, ...]:
         calls.append(
             ApprovalCall(
                 tool_call_id=call_id,
-                tool_name=tool.tool_name,
+                tool_name=str(tool["tool_name"]),
                 invoking_agent=invoking_agent,
                 toolkit_name=toolkit_name,
                 expires_at_ns=2**62,
-                arguments_digest=approval_arguments_digest(tool.tool_args),
+                arguments_digest=approval_arguments_digest(tool["tool_args"]),
             ),
         )
     return tuple(calls)

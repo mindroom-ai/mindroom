@@ -101,7 +101,7 @@ def _route_decisions(
     and call, which the resume checks against the calls the team waits for.
     """
     waiting: dict[str, list[RunRequirement]] = {}
-    for requirement in persisted.requirements or ():
+    for requirement in persisted.requirements:
         if not requirement.is_resolved():
             waiting.setdefault(requirement.tool_execution.tool_call_id, []).append(requirement)
 
@@ -163,7 +163,7 @@ class TeamResume:
         """
         routed = _route_decisions(paused, decisions, toolkit_owners=self.leader.built.spec.tool_owners())
         decided = {*routed.approved, *routed.denied}
-        for requirement in paused.requirements or ():
+        for requirement in paused.requirements:
             key = (requirement.member_agent_id, requirement.tool_execution.tool_call_id)
             if requirement.member_run_id is not None and key in decided:
                 add_approval_receipt_reader(
@@ -248,7 +248,7 @@ async def _build_paused_members(team: TeamSpec, paused: TeamRunRecord) -> None:
     The resume checks each member's decisions against the member's tools before anything runs; every other member
     builds on its first delegation, as in a turn.
     """
-    paused_members = {requirement.member_agent_id for requirement in paused.requirements or ()}
+    paused_members = {member.agent_id for member in paused.member_responses}
     for member in team.members:
         if member.id in paused_members:
             await member.ensure_built()

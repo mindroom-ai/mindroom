@@ -89,8 +89,8 @@ MASKS: dict[str, str] = {
     "metadata value, not maps keyed by scope",
     "summary_requests_name_their_model": "#3109 item 6: a compaction summary's usage row names the model that answered "
     "its request, as its run does",
-    "delegation_pause_stores_its_calls_once": "a run's delegation state lists the calls its pause asks about only as "
-    "requirements, without a second list of their tool executions",
+    "paused_calls_stored_once": "#3106 item 2: a run stores each paused call once, as its tool execution, and no "
+    "requirements beside it; a converted delegation call keeps its requirement's id as its pause id",
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()
@@ -259,23 +259,6 @@ def drop_inert_session_totals(observed: dict[str, Any]) -> None:
         data.pop("session_metrics", None)
 
 
-def _delegation_states(value: object) -> list[dict[str, Any]]:
-    """Return every run's delegation state ``value`` shows, at any depth."""
-    if isinstance(value, list):
-        return [state for item in value for state in _delegation_states(item)]
-    if not isinstance(value, dict):
-        return []
-    found = [state for item in value.values() for state in _delegation_states(item)]
-    state = value.get(DELEGATION_STATE_KEY)
-    return [state, *found] if isinstance(state, dict) and "pending_requirements" in state else found
-
-
-def drop_inert_pending_tools(observed: dict[str, Any]) -> None:
-    """Leave out the tool list a converted run's delegation state still holds beside its requirements, which nothing reads."""
-    for state in _delegation_states(observed):
-        state.pop("pending_tools", None)
-
-
 def readers_in_creation_order(observed: dict[str, Any], used: set[str]) -> None:
     """Show the turns readers list, which follow the log, in the creation order the old readers sorted them in."""
     turns, listed = observed["session_runs"], observed["list_runs"]
@@ -377,7 +360,7 @@ class MaskedBackend(StoreBackend):
         run_id, stored_status = record.run_id, status or record.status.value
         self.old_messages[run_id] = _old_kept(_dicts(record), stored_status)
         if isinstance(record, TeamRunRecord) and record.status is RunStatus.paused:
-            self.embedded[run_id] = [member.to_dict() for member in record.member_responses]
+            self.embedded[run_id] = [self._old_requirements(member.to_dict()) for member in record.member_responses]
         else:
             self.embedded.pop(run_id, None)
         if run_id in self.fold_rows:
@@ -415,9 +398,8 @@ class MaskedBackend(StoreBackend):
             if isinstance(team, TeamRunRecord) and team.status is RunStatus.paused:
                 members = [self._old_run(member.to_dict(), loaded=True) for member in team.member_responses]
                 if members != embedded:
-                    # Spec 3.10: the members a paused team run's requirements name, as stored now.
-                    named = {item.member_run_id for item in team.requirements or ()}
-                    assert {member.run_id for member in team.member_responses} <= named
+                    # Spec 3.10: a paused team run's members are its paused member rows, as stored now.
+                    assert all(member.status is RunStatus.paused for member in team.member_responses)
                     self._diverge(
                         "paused_team_members_from_requirements",
                         f"paused team run {team_id} resumes its members' rows, not the copies it embedded",
@@ -518,7 +500,9 @@ class MaskedBackend(StoreBackend):
         # The old store writes this copy over a visible run; the v2 store keeps the run as it is.
         assert self._old_list_entry(record.run_id) == before, f"a final save changed {record.run_id}"
         mask = "member_final_once_team_visible" if record.parent_run_id else "visible_run_is_final"
-        written = {**record.to_dict(), "messages": _old_kept(_dicts(record), record.status.value)}
+        written = self._old_requirements(
+            {**record.to_dict(), "messages": _old_kept(_dicts(record), record.status.value)},
+        )
         if usage or before != written:
             self._diverge(mask, f"{record.run_id} saved over a visible run that the Agno-layout store rewrote")
         self.used.add(mask)
@@ -621,7 +605,7 @@ class MaskedBackend(StoreBackend):
             self._diverge("delegation_state_is_a_key_patch", f"the Agno-layout store stored {run_id} again")
         else:
             written = {**record.to_dict(), "messages": _old_kept(_dicts(record), record.status.value)}
-            if self._old_list_entry(run_id) != written:
+            if self._old_list_entry(run_id) != self._old_requirements(written):
                 self._diverge("delegation_state_is_a_key_patch", reason)
             self.used.add("delegation_state_is_a_key_patch")
         return None
@@ -691,7 +675,7 @@ class MaskedBackend(StoreBackend):
             stored = self.store.get_run(run_id)
             assert stored is not None
             assert stored.status is RunStatus.cancelled
-            assert (stored.messages, stored.tools, stored.requirements) == ([], None, None)
+            assert (stored.messages, stored.tools) == ([], None)
             assert stored.metadata == fold.record.metadata
             self.fold_rows.add(run_id)
             self.used.add("fold_stores_cancelled_row")
@@ -807,6 +791,54 @@ class MaskedBackend(StoreBackend):
                 metadata.pop(DELEGATION_STATE_KEY, None)
             else:
                 metadata[DELEGATION_STATE_KEY] = old_key
+        return self._old_requirements(data)
+
+    def _old_requirements(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Give run dict ``data`` the requirements the old store kept beside its tools, and no pause ids; return it.
+
+        The driver's names give them: an agent run's latest gated call, as ``<call id>.req``; a member run's one gated
+        call, as ``<run id>.req``; and a team run that paused on a member, a copy of that member's call naming the
+        member, approved once the team run no longer waits. The old store's delegation state listed its pending
+        calls a second time, and the driver's states list none.
+        """
+        state = (data.get("metadata") or {}).get(DELEGATION_STATE_KEY)
+        if isinstance(state, dict) and "pending_requirements" not in state:
+            assert state["pending_tools"] == []
+            state["pending_requirements"] = []
+            self.used.add("paused_calls_stored_once")
+        for member in data.get("member_responses") or []:
+            self._old_requirements(member)
+        tools = data.get("tools") or []
+        for tool in tools:
+            if tool.pop("pause_id", None) is not None:
+                self.used.add("paused_calls_stored_once")
+        gated = [tool for tool in tools if tool.get("requires_confirmation")]
+        run_id = data["run_id"]
+        member_id = self.paused_members.get(run_id) if "team_id" in data else None
+        if member_id is not None:
+            call = {"tool_call_id": f"{member_id}.q", "tool_name": "dangerous", "tool_args": {}}
+            call["requires_confirmation"] = True
+            agent_id = self.records[member_id].agent_id if member_id in self.records else None
+            entry: dict[str, Any] = {
+                "id": f"{member_id}.req",
+                "member_agent_id": agent_id,
+                "member_agent_name": agent_id,
+                "member_run_id": member_id,
+                "tool_execution": call,
+            }
+            if data["status"] != RunStatus.paused.value:
+                call.update(confirmed=True, result="approved")
+                entry["confirmation"] = True
+        elif gated and "team_id" not in data:
+            latest = gated[-1]
+            entry = {"id": f"{run_id if data.get('parent_run_id') else latest['tool_call_id']}.req"}
+            entry["tool_execution"] = deepcopy(latest)
+            if latest.get("confirmed"):
+                entry["confirmation"] = True
+        else:
+            return data
+        data["requirements"] = [entry]
+        self.used.add("paused_calls_stored_once")
         return data
 
     def _old_list_entry(self, run_id: str) -> dict[str, Any] | None:
@@ -860,7 +892,6 @@ class MaskedBackend(StoreBackend):
         if untag_summary_requests(view["ledger"]):
             self.used.add("summary_requests_name_their_model")
         self._old_pending_view(view)
-        self._old_delegation_states(view)
         self._old_history_metadata(view)
         self._old_session_totals(view)
         row = view["row"]
@@ -868,12 +899,6 @@ class MaskedBackend(StoreBackend):
             row["updated_at"] = self.news_at[1]
             self.used.add("a_finished_interrupted_record_is_news")
         return view
-
-    def _old_delegation_states(self, view: dict[str, Any]) -> None:
-        """Show each delegation state with the tool list the Agno-layout store's writers kept beside its requirements."""
-        for state in _delegation_states(view):
-            state["pending_tools"] = [requirement["tool_execution"] for requirement in state["pending_requirements"]]
-            self.used.add("delegation_pause_stores_its_calls_once")
 
     def _old_session_totals(self, view: dict[str, Any]) -> None:
         """Show the usage totals the Agno-layout store kept beside its ledger, the sum of the ledger's run rows."""

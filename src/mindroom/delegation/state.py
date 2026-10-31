@@ -6,7 +6,6 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 
 from mindroom.history.types import HistoryScope
-from mindroom.llm.runs import RunRequirement
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -16,6 +15,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.llm.runs import RunRequirement
     from mindroom.llm.usage import RunMetrics
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -100,7 +100,10 @@ def _optional_names(value: object) -> bool:
 
 @dataclass(kw_only=True)
 class DelegationChild:
-    """One parent requirement and its stable child execution identity."""
+    """One parent delegation call and its stable child execution identity.
+
+    ``parent_requirement_id`` is the parent call's ``pause_id``.
+    """
 
     delegation_id: str
     parent_tool_call_id: str
@@ -171,14 +174,19 @@ class DelegationPendingTool:
 
 @dataclass
 class DelegationState:
-    """Persisted parent waits; workspace exports never own this state."""
+    """Persisted parent waits; workspace exports never own this state.
+
+    ``hooks`` are keyed by the ``pause_id`` of the delegation call they run for. ``pending_tools`` are the calls the
+    current approval asks about when the parent does not hold them: a delegation call's gate, under its card id, or
+    the calls of the child it waits on (``pending_child_id``), under ``child_card_id``s. An approval of the parent's
+    own calls lists none, since the parent's paused tool entries are those calls.
+    """
 
     children: list[DelegationChild] = field(default_factory=list)
     gates: dict[str, bool] = field(default_factory=dict)
     hooks: dict[str, DelegationHookState] = field(default_factory=dict)
+    pending_tools: list[dict[str, Any]] = field(default_factory=list)
     pending_tool_sources: dict[str, DelegationPendingTool] = field(default_factory=dict)
-    # The calls the presented approval generation asks about, as stored requirements.
-    pending_requirements: list[dict[str, Any]] = field(default_factory=list)
     pending_agent_name: str | None = None
     pending_child_id: str | None = None
     storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
@@ -190,14 +198,6 @@ class DelegationState:
     @classmethod
     def from_metadata(cls, metadata: dict[str, Any] | None) -> DelegationState:
         """Read the driver-owned snapshot attached to a run's metadata."""
-        # LEGACY_COMPAT: Delegation state that stored each pending call twice.
-        # Legacy format: `mindroom_delegation` metadata with a `pending_tools` list beside `pending_requirements`,
-        # holding the tool execution of each pending requirement again, in the same order.
-        # Last legacy release: v2026.10.747 wrote both lists; the release that replaces them, writing only
-        # `pending_requirements`, is not out yet.
-        # Handling: `pending_tools` is ignored, since the requirements hold the same calls, and the next write of
-        # the state drops it.
-        # Coverage: tests/test_response_turn.py::test_a_stored_delegation_pause_with_a_separate_tool_list_presents_its_requirements
         stored = (metadata or {}).get(DELEGATION_STATE_KEY)
         if stored is None:
             return cls()
@@ -209,6 +209,7 @@ class DelegationState:
             children=[DelegationChild.from_dict(child) for child in snapshot.get("children", [])],
             gates=dict(snapshot.get("gates", {})),
             hooks={key: DelegationHookState(**value) for key, value in snapshot.get("hooks", {}).items()},
+            pending_tools=list(snapshot.get("pending_tools", [])),
             pending_tool_sources={
                 call_id: DelegationPendingTool(
                     child=DelegationChild.from_dict(source["child"]),
@@ -217,20 +218,15 @@ class DelegationState:
                 )
                 for call_id, source in snapshot.get("pending_tool_sources", {}).items()
             },
-            pending_requirements=list(snapshot.get("pending_requirements", [])),
             pending_agent_name=snapshot.get("pending_agent_name"),
             pending_child_id=snapshot.get("pending_child_id"),
             storage_bindings=dict(snapshot.get("storage_bindings", {})),
         )
 
-    def pending_calls(self) -> list[RunRequirement]:
-        """Return fresh copies of the requirements the presented approval generation asks about."""
-        return [RunRequirement.from_dict(item) for item in self.pending_requirements]
-
     def clear_pending(self) -> None:
         """Clear only the presented approval generation, retaining sibling results."""
+        self.pending_tools = []
         self.pending_tool_sources = {}
-        self.pending_requirements = []
         self.pending_agent_name = None
         self.pending_child_id = None
 

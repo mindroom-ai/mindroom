@@ -515,13 +515,12 @@ class PausedAnswer:
 
 @dataclass(frozen=True)
 class PausedAttempt:
-    """One run durably paused before approval-gated tool execution."""
+    """One run durably paused before approval-gated tool execution, with the calls its approval asks about."""
 
     session_id: str
     run_id: str
-    tools: tuple[ToolExecution, ...]
+    requirements: tuple[RunRequirement, ...]
     toolkit_owners: Mapping[tuple[str, str], str]
-    requirements: tuple[RunRequirement, ...] = ()
     runtime_model_name: str | None = None
     team_member_model_names: tuple[tuple[str, str], ...] = ()
     response_text: str = ""
@@ -532,6 +531,11 @@ class PausedAttempt:
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     cli_call: dict[str, object] | None = None
     continuation_count: int = 0
+
+    @property
+    def tools(self) -> tuple[ToolExecution, ...]:
+        """The paused calls the approval asks about, in the order its cards show them."""
+        return tuple(requirement.tool_execution for requirement in self.requirements)
 
 
 class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N818
@@ -599,11 +603,7 @@ def pause_without_approval_error(record: AnyRunRecord, *, entity_label: str) -> 
     paused on any other externally executed call has nothing that can resume it, so the reply fails loudly. The
     loop stored the ``PAUSED`` row; the reply's lifecycle owner then records the failure over it.
     """
-    pending = [
-        requirement.tool_execution.tool_name
-        for requirement in record.requirements or ()
-        if not requirement.is_resolved()
-    ]
+    pending = [item.tool_execution.tool_name for item in record.requirements if not item.is_resolved()]
     msg = f"{entity_label} run {record.run_id!r} paused on {pending} without an approval to ask for"
     return RuntimeError(msg)
 
@@ -621,10 +621,13 @@ def own_approved_calls(record: AnyRunRecord, calls: Sequence[ApprovalCall]) -> t
 def pending_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
     """Return copies of the requirements the paused run ``record``'s approval cards ask about.
 
-    A delegation driver lists the calls it asked about as pending requirements, its own or those of the child it
-    waits on, whose approved calls ``own_approved_calls`` leaves to the child executor.
+    A delegation driver that asked about calls the run does not hold, a delegation's gate or the calls of the child
+    it waits on, lists them as its pending tools; otherwise the cards ask about the run's own waiting calls.
     """
-    return DelegationState.from_metadata(record.metadata).pending_calls() or deepcopy(record.requirements or [])
+    delegation = DelegationState.from_metadata(record.metadata)
+    if delegation.pending_tools:
+        return [RunRequirement(ToolExecution.from_dict(tool)) for tool in delegation.pending_tools]
+    return deepcopy(record.requirements)
 
 
 def paused_attempt_from_response(
@@ -639,83 +642,53 @@ def paused_attempt_from_response(
         msg = f"Paused run {record.run_id!r} names no session"
         raise RuntimeError(msg)
     delegation = DelegationState.from_metadata(record.metadata)
-    if requirements := delegation.pending_calls():
-        if delegation.pending_child_id is not None:
-            # A source that recorded no toolkit leaves its call unowned, as a missing key does.
-            toolkit_owners = {
-                (source.child.child_agent_name, requirement.tool_execution.tool_name): source.toolkit_name
-                for requirement in requirements
-                if (source := delegation.pending_tool_sources.get(requirement.tool_execution.tool_call_id)) is not None
-                and source.toolkit_name is not None
-            }
-        # The pause's tools are its requirements' own calls.
-        paused = _paused_attempt_from_pause(
+    if not delegation.pending_tools:
+        return _paused_attempt_from_pause(
+            record.requirements,
             toolkit_owners=toolkit_owners,
-            tools=(),
-            requirements=requirements,
             session_id=record.session_id,
             run_id=record.run_id,
         )
-        return (
-            replace(
-                paused,
-                approval_agent_name=delegation.pending_agent_name,
-                delegation_storage_bindings=delegation.storage_bindings,
-            )
-            if paused is not None
-            else None
-        )
-    return _paused_attempt_from_pause(
+    requirements = pending_approval_requirements(record)
+    if delegation.pending_child_id is not None:
+        # A source that recorded no toolkit leaves its call unowned, as a missing key does.
+        toolkit_owners = {
+            (source.child.child_agent_name, tool.tool_name): source.toolkit_name
+            for tool in (requirement.tool_execution for requirement in requirements)
+            if (source := delegation.pending_tool_sources.get(tool.tool_call_id)) is not None
+            and source.toolkit_name is not None
+        }
+    paused = _paused_attempt_from_pause(
+        requirements,
         toolkit_owners=toolkit_owners,
-        tools=record.tools or (),
-        requirements=record.requirements or (),
         session_id=record.session_id,
         run_id=record.run_id,
+    )
+    if paused is None:
+        return None
+    return replace(
+        paused,
+        approval_agent_name=delegation.pending_agent_name,
+        delegation_storage_bindings=delegation.storage_bindings,
     )
 
 
 def _paused_attempt_from_pause(
-    *,
-    tools: Sequence[ToolExecution],
     requirements: Sequence[RunRequirement],
+    *,
     toolkit_owners: Mapping[tuple[str, str], str],
     session_id: str,
     run_id: str,
 ) -> PausedAttempt | None:
-    """Build one restartable pause from a run's paused tools and confirmation requirements."""
-    pending_requirements = tuple(requirement for requirement in requirements if requirement.needs_confirmation)
-    requirement_call_ids = [requirement.tool_execution.tool_call_id for requirement in pending_requirements]
-    if len(requirement_call_ids) != len(set(requirement_call_ids)):
+    """Build one restartable pause from the calls of a run that still wait for a confirmation."""
+    pending = tuple(requirement for requirement in requirements if requirement.needs_confirmation)
+    call_ids = [requirement.tool_execution.tool_call_id for requirement in pending]
+    if len(call_ids) != len(set(call_ids)):
         msg = "Paused approval requirements contain duplicate tool-call IDs"
         raise RuntimeError(msg)
-    pending_tools = [tool for tool in tools if tool.requires_confirmation and tool.confirmed is None]
-    tool_call_ids = [tool.tool_call_id for tool in pending_tools]
-    if len(tool_call_ids) != len(set(tool_call_ids)):
-        msg = "Paused approval tools contain duplicate tool-call IDs"
-        raise RuntimeError(msg)
-    known_call_ids = set(tool_call_ids)
-    for requirement in pending_requirements:
-        tool = requirement.tool_execution
-        if tool.tool_call_id not in known_call_ids:
-            pending_tools.append(tool)
-            known_call_ids.add(tool.tool_call_id)
-    if not pending_tools:
+    if not pending:
         return None
-    return PausedAttempt(
-        session_id=session_id,
-        run_id=run_id,
-        tools=tuple(pending_tools),
-        requirements=pending_requirements,
-        approval_agent_name=next(
-            (
-                requirement.member_display_name
-                for requirement in pending_requirements
-                if requirement.member_display_name and requirement.member_agent_id is None
-            ),
-            None,
-        ),
-        toolkit_owners=toolkit_owners,
-    )
+    return PausedAttempt(session_id=session_id, run_id=run_id, requirements=pending, toolkit_owners=toolkit_owners)
 
 
 @dataclass(frozen=True)

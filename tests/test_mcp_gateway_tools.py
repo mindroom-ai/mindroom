@@ -21,7 +21,7 @@ from mindroom import agents, constants
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
 from mindroom.config.main import Config
-from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
+from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry, lazy_loading_prohibited_reason
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.hooks import HookRegistry, ToolAfterCallContext, ToolBeforeCallContext, ToolEnvironmentContext, hook
@@ -176,7 +176,10 @@ async def test_room_and_conversation_tools_are_hidden_and_cannot_be_selected(
 ) -> None:
     """Tools that need a Matrix room or an agent conversation cannot be discovered or reached through the gateway."""
     config = context.config.model_copy(deep=True)
-    config.agents["personal"].tools = ["calculator", ToolConfigEntry(name=toolkit, defer=deferred)]
+    # A control-plane tool cannot be deferred, so it is authored plain in both variants.
+    can_defer = lazy_loading_prohibited_reason(toolkit) is None
+    entry = ToolConfigEntry(name=toolkit, defer=True) if deferred and can_defer else ToolConfigEntry(name=toolkit)
+    config.agents["personal"].tools = ["calculator", entry]
     context = replace(context, config=config)
 
     def forbidden(*_args: object, **_kwargs: object) -> None:

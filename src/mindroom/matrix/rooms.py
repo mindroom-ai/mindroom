@@ -438,11 +438,8 @@ async def ensure_all_rooms_exist(
 
     """
     room_ids = {}
-
-    # Get all configured rooms
-    all_rooms = config.get_all_configured_rooms()
-
-    pending_rooms = iter(room_key for room_key in all_rooms if not room_key.startswith("!"))
+    managed_room_keys = config.managed_room_keys()
+    pending_rooms = iter(managed_room_keys)
 
     async def reconcile_rooms() -> None:
         for room_key in pending_rooms:
@@ -474,7 +471,7 @@ async def ensure_all_rooms_exist(
     # Bound network fanout, retaining sequential policy mutations in each room.
     # TaskGroup drains/cancels sibling workers before config reload can proceed.
     async with asyncio.TaskGroup() as workers:
-        for _ in range(min(4, len(all_rooms))):
+        for _ in range(min(4, len(managed_room_keys))):
             workers.create_task(reconcile_rooms())
 
     return room_ids
