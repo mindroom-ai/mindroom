@@ -35,14 +35,16 @@ Set up the homeserver (examples use `chat.example.com`):
    The handoff URL must use HTTPS on the homeserver's own origin.
    Add `"push": false` to turn push off: the app then registers no pusher for the homeserver and hides the push setting.
    Signed-in accounts pick up a change of the advert only when they sign out and in again.
-2. Serve the handoff page behind Access. It redirects to the app with the value of the `CF_Authorization` cookie:
+2. Serve the handoff page behind Access. It redirects to the app with the homeserver's own origin and the value of the `CF_Authorization` cookie:
 
     ```nginx
     location = /native/cloudflare-access {
       add_header Cache-Control "no-store" always;
-      return 302 "mindroom://cloudflare-access#token=$cookie_CF_Authorization";
+      return 302 "mindroom://cloudflare-access#origin=https://chat.example.com&token=$cookie_CF_Authorization";
     }
     ```
+
+   Write the origin into the config rather than taking it from the request; the app refuses a token whose callback names no origin or another one.
 
    If the same origin serves the MindRoom Chat web app, exclude `/native` from its service worker's navigation fallback (`serviceWorker.navigationFallbackExcludePaths` in the client chart, or `window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__`), or a Safari that has opened the web app answers the handoff with its own page.
    The page also answers when opened in Safari, where iOS hands the token to whichever app handles `mindroom://`.
