@@ -3285,12 +3285,8 @@ async def test_status_reading_a_frozen_tab_does_not_hold_up_other_calls(
 
 
 @pytest.mark.asyncio
-async def test_a_tab_frozen_by_its_script_lists_as_unresponsive_and_closes_cleanly(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_a_tab_frozen_by_its_script_lists_as_unresponsive_and_closes_cleanly(tmp_path: Path) -> None:
     """In a real browser, other tabs keep working beside a frozen one, and closing it logs no error."""
-    monkeypatch.setattr("mindroom.custom_tools.browser._TAB_TITLE_TIMEOUT_SECONDS", 0.5)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "page.html").write_text("<title>Healthy</title>", encoding="utf-8")
