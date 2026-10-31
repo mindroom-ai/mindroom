@@ -305,7 +305,7 @@ def resolve_runtime_paths(
     resolved_config_arg = Path(config_path).expanduser().resolve() if config_path is not None else None
     resolved_process_env = _copy_process_env(process_env)
     resolved_config_path = (
-        Path(resolved_config_arg or _find_config(process_env=resolved_process_env)).expanduser().resolve()
+        Path(resolved_config_arg or find_config_path(process_env=resolved_process_env)).expanduser().resolve()
     )
     config_dir = resolved_config_path.parent
     env_path = config_dir / ".env"
@@ -992,7 +992,7 @@ def resolve_avatar_path(
     return workspace_path
 
 
-def _find_config(*, process_env: Mapping[str, str]) -> Path:
+def find_config_path(*, process_env: Mapping[str, str]) -> Path:
     """Find the first existing config file, or fall back to ~/.mindroom/config.yaml.
 
     Returns the original (possibly relative) path, not a resolved one,

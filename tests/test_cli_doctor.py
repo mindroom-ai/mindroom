@@ -233,11 +233,11 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
         router=RouterConfig(model="default"),
     )
 
-    result = _check_single_provider("openai", config, runtime_paths)
+    result = _check_providers(config, runtime_paths)
 
     assert result == (0, 0, 1)
     assert validated == []
-    assert "openai: OPENAI_API_KEY not set" in capsys.readouterr().out
+    assert "openai: Set OPENAI_API_KEY (models: default)" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -319,7 +319,14 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Spellings config load accepts group under the runtime's route and get that route's checks."""
-    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={
+            "OLLAMA_HOST": "http://localhost:11434",
+            "ANTHROPIC_VERTEX_PROJECT_ID": "project",
+            "CLOUD_ML_REGION": "global",
+        },
+    )
     probed = _ollama_servers(monkeypatch)
     vertex_models: list[str] = []
 
@@ -512,7 +519,10 @@ def test_doctor_reports_ollama_settings_it_cannot_read_and_goes_on(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """An unreadable credential store leaves each Ollama check a warning instead of ending doctor."""
-    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"OLLAMA_HOST": "http://localhost:11434"},
+    )
     probed = _ollama_servers(monkeypatch)
 
     def unreadable(**_kwargs: object) -> str:
@@ -1067,7 +1077,7 @@ def test_doctor_does_not_check_a_key_an_earlier_release_copied_from_a_variable_s
 
     assert _check_providers(config, runtime_paths) == (0, 0, 1)
     assert sent == []
-    assert "openai: OPENAI_API_KEY not set" in " ".join(capsys.readouterr().out.split())
+    assert "openai: Set OPENAI_API_KEY (models: default)" in " ".join(capsys.readouterr().out.split())
 
 
 @pytest.mark.parametrize(

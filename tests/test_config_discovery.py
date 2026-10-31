@@ -353,7 +353,7 @@ class TestFindConfig:
         home_config = tmp_path / ".mindroom" / "config.yaml"
         _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
 
-        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
         assert result == home_config
 
     def test_returns_home_config_when_cwd_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -364,7 +364,7 @@ class TestFindConfig:
         home_config.write_text("agents: {}")
         _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
 
-        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
         assert result == home_config
 
     def test_prefers_cwd_over_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -376,7 +376,7 @@ class TestFindConfig:
         home_config.write_text("agents: {}")
         _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
 
-        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
         assert result == cwd_config
 
     def test_env_var_overrides_filesystem_search(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -390,7 +390,7 @@ class TestFindConfig:
             search_paths=[cwd_config],
         )
 
-        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
         assert result == env_config
 
     def test_env_var_expands_tilde(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -399,7 +399,7 @@ class TestFindConfig:
 
         _patch_config_globals(monkeypatch, env="~/my_config.yaml")
 
-        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
         assert result == Path("~/my_config.yaml").expanduser()
         assert "~" not in str(result)
 
@@ -842,7 +842,7 @@ class TestResolveConfigRelativePath:
             storage_path=storage_path,
         )
 
-        assert constants_mod._find_config(process_env=constants_mod.exported_process_env()) == Path("config.yaml")
+        assert constants_mod.find_config_path(process_env=constants_mod.exported_process_env()) == Path("config.yaml")
         assert constants_mod.resolve_primary_runtime_paths().config_path == Path("config.yaml").resolve()
         assert runtime_paths.config_path == config_path.resolve()
         assert runtime_paths.storage_root == storage_path.resolve()

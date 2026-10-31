@@ -1006,8 +1006,7 @@ class TestConfigInit:
 
     def test_provider_menu_lists_every_preset_once(self) -> None:
         """Every preset `--provider` accepts can also be picked from the setup menu."""
-        assert set(config_cli._PROVIDER_PRESET_MENU) == set(get_args(config_cli._ProviderPreset))
-        assert set(config_cli._PROVIDER_PRESET_MENU) >= config_cli._API_KEY_PRESETS
+        assert set(config_cli._PROVIDER_PRESETS) == set(get_args(config_cli._ProviderPreset))
 
     def test_init_help_separates_matrix_server_from_provider_presets(self) -> None:
         """Config init help should present Matrix server and model provider as separate choices."""
@@ -2198,7 +2197,7 @@ class TestConfigValidate:
         )
         config = Config(models=models, router=RouterConfig(model="default"))
 
-        assert config_cli._find_missing_env_keys(config, runtime_paths) == missing
+        assert config_cli.find_missing_env_variables(config, runtime_paths) == missing
 
     @pytest.mark.parametrize(
         ("models", "missing"),
@@ -2327,7 +2326,7 @@ class TestConfigValidate:
         )
         config = Config(models=models, router=RouterConfig(model="default"))
 
-        assert config_cli._find_missing_env_keys(config, runtime_paths) == missing
+        assert config_cli.find_missing_env_variables(config, runtime_paths) == missing
 
     def test_validate_asks_for_the_shared_key_of_a_model_whose_dashboard_key_cannot_be_read(
         self,
@@ -2356,7 +2355,7 @@ class TestConfigValidate:
             router=RouterConfig(model="default"),
         )
 
-        assert config_cli._find_missing_env_keys(config, runtime_paths) == [
+        assert config_cli.find_missing_env_variables(config, runtime_paths) == [
             ("azure", "AZURE_OPENAI_API_KEY", ("dashboard",)),
         ]
 
@@ -2381,7 +2380,7 @@ class TestConfigValidate:
             router=RouterConfig(model="default"),
         )
 
-        assert config_cli._find_missing_env_keys(config, runtime_paths) == [
+        assert config_cli.find_missing_env_variables(config, runtime_paths) == [
             ("azure", "AZURE_OPENAI_API_KEY", ("azure",)),
         ]
         assert missing_model_api_key_provider(config, runtime_paths, "default") is None
@@ -3167,7 +3166,8 @@ class TestRunErrorHandling:
             )
         )
         provider_guidance = (
-            "mindroom config init --provider {openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude"
+            "mindroom config init --provider "
+            "{anthropic,azure,bedrock_claude,codex,kimi,llama.cpp,ollama,openai,openrouter,vertexai_claude}"
         )
         assert provider_guidance in result.output
         assert "mindroom run --provider" in result.output
@@ -3431,6 +3431,22 @@ class TestVersionAndHelp:
         assert "Failed target: overlapping output directory" in output
         assert "Failed: lobby $thread:localhost: history fetch failed" in output
         assert "None" not in output
+
+    def test_threads_export_prints_an_export_failure_without_matrix_hints(self, tmp_path: Path) -> None:
+        """Export talks to the MindRoom API, so even a connection-looking failure is shown as it is."""
+        config_path = tmp_path / "config.yaml"
+        _write_minimal_runtime_config(config_path)
+
+        with patch(
+            "mindroom.cli.thread_export.request_thread_export",
+            new=AsyncMock(side_effect=OSError("Connection refused")),
+        ):
+            result = _invoke_with_runtime(["threads", "export"], config_path)
+
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 1
+        assert "Error: Connection refused" in output
+        assert "Matrix" not in output
 
     def test_threads_export_forwards_no_invited_rooms_flag(self, tmp_path: Path) -> None:
         """The --no-invited-rooms flag should reach the exporter."""
@@ -4084,8 +4100,8 @@ class TestDoctor:
         result = runner.invoke(app, ["doctor"], env={"MINDROOM_CONFIG_PATH": str(cfg)})
 
         assert result.exit_code == 0
-        assert "ANTHROPIC_API_KEY not set" not in result.output
-        assert "OPENAI_API_KEY not set" not in result.output
+        assert "Set ANTHROPIC_API_KEY" not in result.output
+        assert "OPENAI_API_KEY" not in result.output
 
     def test_uses_status_for_steps(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor wraps checks in status contexts for interactive progress feedback."""
@@ -4162,8 +4178,58 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "ANTHROPIC_API_KEY not set" in result.output
+        assert "anthropic: Set ANTHROPIC_API_KEY (models: default)" in result.output
         assert "2 warnings" in result.output
+
+    def test_an_automation_no_plugin_provides_fails_the_config_check(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor rejects a config that `config validate` rejects, and still checks the providers it names."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_CONFIG + "defaults:\n  automations:\n    - {name: missing_check, cron: '0 * * * *'}\n")
+        storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 1, output
+        assert "✗ Config invalid: defaults.automations: 'missing_check' is not provided by any loaded plugin" in output
+        assert "anthropic: ANTHROPIC_API_KEY valid" in output
+        assert "1 failed" in output
+
+    def test_warns_about_the_environment_a_model_reads_but_nothing_sets(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor warns about a missing Bedrock region and Azure endpoint, as `config validate` does."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-5\n"
+            "  azure:\n    provider: azure\n    id: gpt-6-astra\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        storage = tmp_path / "storage"
+        for variable in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AZURE_OPENAI_ENDPOINT"):
+            monkeypatch.delenv(variable, raising=False)
+            monkeypatch.delenv(f"{variable}_FILE", raising=False)
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "azure-key")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 0, output
+        assert "bedrock_claude: Set AWS_REGION (models: default)" in output
+        assert "azure: Set AZURE_OPENAI_ENDPOINT (models: azure)" in output
 
     @pytest.mark.parametrize("key_source", ["config", "dashboard"])
     def test_model_with_own_api_key_does_not_need_provider_key(
@@ -4187,7 +4253,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "ANTHROPIC_API_KEY not set" not in result.output
+        assert "ANTHROPIC_API_KEY" not in result.output
 
     @pytest.mark.parametrize("key_source", ["config", "dashboard", "unreadable-store"])
     def test_shared_key_is_never_sent_to_endpoint_of_model_with_own_key(

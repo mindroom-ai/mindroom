@@ -22,6 +22,7 @@ from .banner import make_banner
 from .config import (
     DEFAULT_API_HOST,
     DEFAULT_API_PORT,
+    PROVIDER_CHOICES,
     activate_cli_runtime,
     check_env_keys,
     config_app,
@@ -66,9 +67,7 @@ AI agents that live in Matrix and work everywhere via bridges.
   [cyan]mindroom run[/cyan]           Set up on first run, pair, and start
   [cyan]mindroom config init[/cyan]   Create a starter config without starting\
 """
-_CONFIG_INIT_PROVIDER_CHOICES = (
-    "{openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude,llama.cpp,vertexai_claude}"
-)
+_CONFIG_INIT_PROVIDER_CHOICES = "{" + ",".join(PROVIDER_CHOICES) + "}"
 # Exit code of `mindroom connect` when it declines to re-pair a connected machine (no terminal, no --force).
 # The macOS app matches it as `MindRoomCommand.alreadyConnectedExitCode`; change both together.
 _CONNECT_ALREADY_CONNECTED_EXIT_CODE = 3
@@ -375,7 +374,7 @@ async def _run(
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
     except OSError as exc:
-        if "connect" in str(exc).lower() or "refused" in str(exc).lower():
+        if _is_connection_os_error(exc):
             _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
@@ -445,7 +444,7 @@ def avatars_sync(
         _print_connection_error(exc, runtime_paths)
         raise typer.Exit(1) from None
     except OSError as exc:
-        if "connect" in str(exc).lower() or "refused" in str(exc).lower():
+        if _is_connection_os_error(exc):
             _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
@@ -625,19 +624,16 @@ def _print_thread_export_stats(stats: ThreadExportStats) -> None:
         console.print(f"[red]Failed:[/red] {failure.room_key} {target}: {failure.error}")
 
 
-def _handle_thread_export_error(exc: RuntimeError | OSError, runtime_paths: RuntimePaths, *, watch: bool) -> None:
+def _handle_thread_export_error(exc: RuntimeError | OSError, *, watch: bool) -> None:
     """Print one top-level export error and exit unless watch mode can retry."""
-    if isinstance(exc, ConnectionError) or _is_connection_os_error(exc):
-        _print_connection_error(exc, runtime_paths)
-    else:
-        console.print(f"[red]Error:[/red] {exc}")
+    console.print(f"[red]Error:[/red] {exc}")
     if not watch:
         raise typer.Exit(1) from None
 
 
-def _is_connection_os_error(exc: BaseException) -> bool:
+def _is_connection_os_error(exc: OSError) -> bool:
     """Return whether an OS error looks like a Matrix connection failure."""
-    return isinstance(exc, OSError) and ("connect" in str(exc).lower() or "refused" in str(exc).lower())
+    return "connect" in str(exc).lower() or "refused" in str(exc).lower()
 
 
 async def _threads_export(
@@ -678,7 +674,7 @@ async def _threads_export(
             console.print(f"[red]Error:[/red] {exc}")
             raise typer.Exit(1) from None
         except (OSError, RuntimeError) as exc:
-            _handle_thread_export_error(exc, runtime_paths, watch=watch)
+            _handle_thread_export_error(exc, watch=watch)
         else:
             _print_thread_export_stats(stats)
             if not watch:

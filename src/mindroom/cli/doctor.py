@@ -48,7 +48,13 @@ from mindroom.providers.ollama.settings import ollama_client_options
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
-from .config import activate_cli_runtime, console, load_config_quiet
+from .config import (
+    activate_cli_runtime,
+    automation_reference_issues,
+    console,
+    find_missing_env_variables,
+    load_config_quiet,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -184,6 +190,10 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
         # A message can quote a config key, which may contain brackets Rich reads as markup.
         console.print(f"[red]✗[/red] Config invalid: {escape(issues)}")
         return None, 0, 1, 0
+    if reference_issues := automation_reference_issues(config, runtime_paths):
+        # The config loads, so the remaining checks still run against it.
+        console.print(f"[red]✗[/red] Config invalid: {escape('; '.join(reference_issues))}")
+        return config, 0, 1, 0
     agents = len(config.agents)
     teams = len(config.teams)
     models = len(config.models)
@@ -524,6 +534,10 @@ def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, 
     passed = 0
     failed = 0
     warnings = 0
+    # A variable a model reads but nothing sets is reported once, as `config validate` reports it.
+    for route, env_key, model_names in find_missing_env_variables(config, runtime_paths):
+        console.print(f"[yellow]![/yellow] {route}: Set {env_key} (models: {', '.join(model_names)})")
+        warnings += 1
 
     for provider in sorted(provider_models):
         p, f, w = _check_single_provider(provider, config, runtime_paths)
@@ -597,9 +611,8 @@ def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths
     shared_key_models = _models_reading_shared_key(config, env_key, runtime_paths)
     api_key, key_name = _shared_key(provider, env_key, runtime_paths)
     if not api_key:
-        if shared_key_models:
-            console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
-        return 0, 0, int(bool(shared_key_models))
+        # `_check_providers` already warned about the missing variable.
+        return 0, 0, 0
     if _report_key_not_checked(provider, provider, key_name, _endpoint_variables(env_key, runtime_paths)):
         return 0, 0, 1
     skipped: list[str] = []
