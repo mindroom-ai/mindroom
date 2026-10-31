@@ -38,7 +38,7 @@ _OPENAI_MARGIN = 1.0
 _OTHER_MARGIN = 1.25
 _OPENAI_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-", "codex-")
 # tiktoken's cost grows with the square of a run without whitespace, so text is encoded in pieces of at most this many
-# characters, each cut after a newline or before a space where one is near; a hard cut adds at most one token per piece.
+# characters, each cut after a newline or before a word where one is near; a hard cut can add a token.
 _PIECE_CHARS = 8_192
 
 
@@ -80,16 +80,30 @@ def _loaded_o200k() -> tiktoken.Encoding | None:
     return encoder.value
 
 
+def _piece_end(text: str, start: int, end: int) -> int:
+    """Return where a piece starting at ``start`` ends, at most at ``end``: just before a word, after a newline or a space.
+
+    o200k_base starts a new token there, so pieces cut there count as one encode does; a stretch without such a
+    place is cut at ``end``, which can add a token.
+    """
+    newline = text.rfind("\n", start, end - 1)
+    while newline >= start and text[newline + 1].isspace():
+        newline = text.rfind("\n", start, newline)
+    if newline >= start:
+        return newline + 1
+    space = text.rfind(" ", start + 1, end - 1)
+    while space > start and text[space + 1].isspace():
+        space = text.rfind(" ", start + 1, space)
+    return space if space > start else end
+
+
 def _encoded_length(encoder: tiktoken.Encoding, text: str) -> int:
     total = 0
     start = 0
     while start < len(text):
         end = start + _PIECE_CHARS
         if end < len(text):
-            # After a newline or before a space, where o200k_base starts a new token anyway.
-            newline = text.rfind("\n", start, end - 1)
-            cut = newline + 1 if newline >= start else text.rfind(" ", start + 1, end)
-            end = cut if cut > start else end
+            end = _piece_end(text, start, end)
         total += len(encoder.encode(text[start:end], disallowed_special=()))
         start = end
     return total

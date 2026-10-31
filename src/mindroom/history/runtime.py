@@ -209,13 +209,16 @@ async def prepare_scope_history(
     estimated_history_tokens = await asyncio.to_thread(estimate_history_tokens, native_route=native_route)
     # A native checkpoint response is billed for the transcript it replaced, so native routes keep the estimate.
     reported_history_tokens = (
-        _reported_history_tokens(
-            session=session,
-            latest_run=visible_runs[-1],
-            resolved_inputs=resolved_inputs,
-            config=config,
-            model=model,
-            non_prompt_tokens=non_prompt_tokens,
+        await asyncio.to_thread(
+            partial(
+                _reported_history_tokens,
+                session=session,
+                latest_run=visible_runs[-1],
+                resolved_inputs=resolved_inputs,
+                config=config,
+                model=model,
+                non_prompt_tokens=non_prompt_tokens,
+            ),
         )
         if native_route is None and visible_runs
         else None
@@ -227,7 +230,7 @@ async def prepare_scope_history(
         current_history_tokens=current_history_tokens,
         # Only an active native route compacts between the trigger and hard budgets; without one, text compaction must.
         allow_native_compaction=native_route is not None,
-        summary_tokens=estimate_summary_tokens(session, counter),
+        summary_tokens=await asyncio.to_thread(estimate_summary_tokens, session, counter),
     )
     logger.info(
         "History preparation check",

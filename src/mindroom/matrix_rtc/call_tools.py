@@ -514,19 +514,17 @@ async def build_call_tools(
         voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
             voice_enrichment_items = (EnrichmentItem(key="voice_call", text=voice_instructions, cache_policy="stable"),)
-        brief = (
-            origin_brief(
-                await asyncio.to_thread(
-                    model_token_counter,
-                    config,
-                    runtime_paths,
-                    active_model_name,
-                    execution_identity=execution_identity,
-                ),
+        brief = ""
+        if origin_brief is not None:
+            counter = await asyncio.to_thread(
+                model_token_counter,
+                config,
+                runtime_paths,
+                active_model_name,
+                execution_identity=execution_identity,
             )
-            if origin_brief is not None
-            else ""
-        )
+            # Fitting the brief counts it several times, which stays off the event loop.
+            brief = await asyncio.to_thread(origin_brief, counter)
         if brief:
             voice_enrichment_items = (
                 *voice_enrichment_items,

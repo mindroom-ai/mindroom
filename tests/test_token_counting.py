@@ -275,3 +275,36 @@ def test_a_frozen_counter_keeps_the_calibration_it_started_with() -> None:
         asyncio.run(count_exact(fake_token_counter(count=halved), f"{index} " * 200))
     assert count(counter, "b" * 400).tokens < 400, "the live calibration moved"
     assert count(frozen, "b" * 400).tokens == before == 400
+
+
+def test_pieces_count_exactly_unless_a_run_has_no_newline_or_word_boundary() -> None:
+    """Pieces cut after a newline or before a word count as one encode does; only a hard cut can add a token."""
+    load_o200k()
+    counter = counter_for_model(ModelIdentity(id="gpt-4o", provider="openai"), local_encoder=True)
+    single_line = " ".join(f"word{index}" for index in range(8_000))
+    assert count(counter, single_line).tokens == _o200k(single_line)
+    spaced = "a  b   c    d " * 3_000
+    assert count(counter, spaced).tokens == _o200k(spaced)
+    for run in ("abc" * 6_000, " " * 20_000):
+        assert abs(count(counter, run).tokens - _o200k(run)) <= len(run) // 8_192 + 1
+
+
+def test_a_frozen_counter_keeps_the_encoder_it_started_with(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A counter frozen before the encoder loads keeps its stand-in, so its two measurements share one basis."""
+    release = threading.Event()
+    real_get_encoding = tiktoken.get_encoding
+
+    def slow_get_encoding(name: str) -> tiktoken.Encoding:
+        release.wait()
+        return real_get_encoding(name)
+
+    monkeypatch.setattr(families, "_o200k_encoder", families._Encoder())
+    monkeypatch.setattr(tiktoken, "get_encoding", slow_get_encoding)
+    counter = counter_for_model(ModelIdentity(id="qwen3.8:27b", provider="ollama"))
+    frozen = counts.frozen(counter)
+    before = count(frozen, "some memory text " * 50)
+
+    release.set()
+    load_o200k()
+
+    assert count(frozen, "some memory text " * 50) == before

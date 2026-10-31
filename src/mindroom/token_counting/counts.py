@@ -174,21 +174,23 @@ async def count_exact(counter: TokenCounter, text: str) -> TokenCount:
 
 
 def frozen(counter: TokenCounter) -> TokenCounter:
-    """Return a counter that estimates as ``counter`` does now, calibration included, and never changes.
+    """Return a counter that estimates as ``counter`` does now, calibration and encoder included, and never changes.
 
-    Sizes measured at two times compare only on one basis; later provider counts would move a live calibration.
+    Sizes measured at two times compare only on one basis; later provider counts would move a live calibration, and
+    an encoder that finishes loading in between would replace the stand-in.
     """
-    if counter.exact_locally:
-        return counter
-    with _state.lock:
-        counted, estimated = _state.ratios.get(counter.key, (1.0, 1.0))
-    scale = counted / estimated
+    scale = 1.0
+    if not counter.exact_locally:
+        with _state.lock:
+            counted, estimated = _state.ratios.get(counter.key, (1.0, 1.0))
+        scale = counted / estimated
+    loaded = counter.estimate("a") is not None
 
     def estimate(text: str) -> int | None:
-        tokens = counter.estimate(text)
+        tokens = counter.estimate(text) if loaded else None
         return None if tokens is None else math.ceil(tokens * scale)
 
-    return replace(counter, key=f"{counter.key}#frozen:{scale}", estimate=estimate, count=None)
+    return replace(counter, key=f"{counter.key}#frozen:{scale}:{loaded}", estimate=estimate, count=None)
 
 
 def _forget(key: _TextKey, _task: asyncio.Task[TokenCount]) -> None:

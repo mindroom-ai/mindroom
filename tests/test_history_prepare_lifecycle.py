@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2027,6 +2028,27 @@ async def test_the_reported_request_size_counts_its_answer_as_the_answering_rout
     # The route sizes the 500-token answer at 1,200 tokens; the whole history it sizes no higher than chars / 4.
     assert estimate < 4_000
     assert prepared.compaction_decision.current_history_tokens == 8_000 + 1_200 - 400
+
+
+@pytest.mark.asyncio
+async def test_history_preparation_counts_off_the_event_loop(tmp_path: Path) -> None:
+    """Sizing the latest answer and the summary encodes them, which must never stall the replies sharing the loop."""
+    loop_thread = threading.get_ident()
+    counted_on: set[int] = set()
+
+    def estimate(text: str) -> int:
+        counted_on.add(threading.get_ident())
+        return len(text) // 4
+
+    await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 8_000},
+        folded_run_ids=("run-0",),
+        counter=TokenCounter(key="threads", estimate=estimate),
+    )
+
+    assert counted_on
+    assert loop_thread not in counted_on
 
 
 @pytest.mark.asyncio

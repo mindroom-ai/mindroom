@@ -1535,7 +1535,9 @@ class CallManager:
                 raise RuntimeError(msg)
 
             async def get_live_instructions() -> str:
-                return _build_live_instructions(
+                # Counting the system prompt stays off the event loop.
+                return await asyncio.to_thread(
+                    _build_live_instructions,
                     await get_system_prompt(),
                     agent_display_name=self._config.agents[self._agent_name].display_name,
                     counter=openai_model_counter(live_config.model),
