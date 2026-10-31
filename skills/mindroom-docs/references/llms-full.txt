@@ -5046,12 +5046,13 @@ Agents also show a typing indicator while they work on a response.
 
 ## Live Updates
 
-When the homeserver relays live updates, as MindRoom's homeserver does for mindroom.chat and hosted MindRoom, MindRoom Chat shows a streamed reply about ten times a second, including its tool calls, worker progress, and [reasoning](#reasoning), without editing the message each time.
+When the homeserver relays live updates, as MindRoom's Tuwunel fork (`mindroom-tuwunel`) does for mindroom.chat, hosted MindRoom, and `mindroom-stack`, MindRoom Chat shows a streamed reply about ten times a second, including its tool calls, worker progress, and [reasoning](#reasoning), without editing the message each time.
 The message itself is then edited only every `update_interval` seconds (5 by default) and once at the end, so Element, bridges, and other clients show the reply in steps of about five seconds and end with the same final message.
 Live updates are encrypted like the reply in an encrypted room.
 They reach only accounts on the agents' homeserver; people on other homeservers see the message edits.
 MindRoom Chat opened while a reply is streaming shows the last edit until the next live update, at most five seconds later.
 A reply that is stopped or ends with an error keeps the text of its last edit, so up to `update_interval` seconds of text MindRoom Chat showed live can disappear above the note.
+A homeserver relays them when its `/_matrix/client/versions` lists `io.mindroom.ephemeral_opt_in`, which the fork does unless its `mindroom_ephemeral_events_enabled` option is off; with any other homeserver every client sees the progressive edits below.
 Set `defaults.streaming.live_frames: false` to turn live updates off, so every client sees the progressive edits below.
 
 ## Configuration
