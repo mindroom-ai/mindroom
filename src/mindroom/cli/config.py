@@ -988,7 +988,7 @@ def _models_with_a_key(config: Config, runtime_paths: RuntimePaths) -> set[str]:
     for name, model in config.models.items():
         try:
             if provider_route(model.provider) == "ollama":
-                found = saved_ollama_host(runtime_paths) is not None
+                found = bool(saved_ollama_host(runtime_paths))
             else:
                 found = missing_model_api_key_provider(config, runtime_paths, name) is None
         except (OSError, ValueError):
