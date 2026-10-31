@@ -58,7 +58,11 @@ from mindroom.script_runs.models import (
     script_worker_key_for_run,
 )
 from mindroom.script_runs.reasons import WORKER_CONFIGURATION_CHANGED
-from mindroom.script_runs.recovery import run_matches_recovery_signature, script_recovery_signature
+from mindroom.script_runs.recovery import (
+    run_matches_recovery_signature,
+    script_process_authority,
+    script_recovery_signature,
+)
 from mindroom.script_runs.store import (
     ScriptCallNotFoundError,
     ScriptRunNotFoundError,
@@ -1113,6 +1117,21 @@ async def test_active_runs_treat_an_unresolved_worker_backend_as_interruptible(t
     active = await runtime.active_runs()
 
     assert [(info.run_id, info.recoverable) for info in active] == [(run.run_id, False)]
+
+
+def test_process_authority_exists_only_for_a_configured_agent_with_the_script_tool() -> None:
+    """A run of a removed agent, or of an agent without the script tool, has no process authority to recover."""
+    config = Config(
+        agents={
+            "watcher": {"display_name": "Watcher", "tools": ["script"]},
+            "helper": {"display_name": "Helper", "tools": []},
+        },
+        defaults={"tools": []},
+    )
+
+    assert script_process_authority(config, "watcher") is not None
+    assert script_process_authority(config, "helper") is None
+    assert script_process_authority(config, "removed") is None
 
 
 def test_recovery_signature_of_a_fixed_authority_is_stable_across_releases() -> None:

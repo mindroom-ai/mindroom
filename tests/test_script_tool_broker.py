@@ -9,9 +9,9 @@ import time
 from collections.abc import Iterator  # noqa: TC003 - Agno reads tool annotations at runtime.
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -51,6 +51,7 @@ from mindroom.script_runs.broker import (
     drain_script_tool_cleanup,
 )
 from mindroom.script_runs.models import (
+    ScriptCallClaim,
     ScriptCallRecord,
     ScriptCallState,
     ScriptRunRecord,
@@ -391,16 +392,6 @@ async def _call_through_gateway(
 
 
 @pytest.mark.asyncio
-async def test_script_broker_acceptance_returns_the_durable_call_record(tmp_path: Path) -> None:
-    """Broker acceptance must not project a second field-for-field receipt type."""
-    broker, token = _broker(tmp_path, events=[])
-
-    accepted = await broker.accept_authenticated(_request(), f"Bearer {token}")
-
-    assert isinstance(accepted, ScriptCallRecord)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("retried", [False, True])
 async def test_script_broker_refuses_a_call_of_a_run_revoked_while_its_owner_is_checked(
     tmp_path: Path,
@@ -435,12 +426,7 @@ async def test_script_broker_keeps_submit_and_poll_retryable_until_recovery_comp
     with pytest.raises(ScriptRuntimeUnavailableError, match="unavailable"):
         await broker.accept_authenticated(_request(), f"Bearer {token}")
 
-    broker.store.claim_call(
-        run_id="run-1",
-        call_id="existing-call",
-        grant=ScriptToolGrant("calculator", "add"),
-        arguments_digest="existing-arguments",
-    )
+    _claim_unowned(broker, _request(call_id="existing-call"))
     with pytest.raises(ScriptRuntimeUnavailableError, match="unavailable"):
         await broker.get_authenticated("run-1", "existing-call", f"Bearer {token}")
     assert broker.store.get_call("run-1", "existing-call").state is ScriptCallState.PENDING
@@ -471,17 +457,7 @@ async def test_shutdown_during_call_preparation_never_starts_new_tool_execution(
     """A claim completing after the shutdown fence cannot create new tool side effects."""
     events: list[str] = []
     broker, token = _broker(tmp_path, events=events)
-    claimed = threading.Event()
-    release = threading.Event()
-    original_claim = broker.store.claim_call
-
-    def delayed_claim(**kwargs: object) -> object:
-        claim = original_claim(**kwargs)
-        claimed.set()
-        assert release.wait(timeout=SETTLE_TIMEOUT_SECONDS)
-        return claim
-
-    monkeypatch.setattr(broker.store, "claim_call", delayed_claim)
+    claimed, release = _pause_after_claim(monkeypatch, broker)
     acceptance = asyncio.create_task(broker.accept_authenticated(_request(), f"Bearer {token}"))
     try:
         assert await asyncio.to_thread(claimed.wait, SETTLE_TIMEOUT_SECONDS)
@@ -507,10 +483,7 @@ async def test_detach_drains_completed_calls_without_revoking_script(
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    class PausedCalculator(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class PausedCalculator(_Calculator):
         async def add(self, a: int, b: int) -> int:
             entered.set()
             await release.wait()
@@ -537,19 +510,9 @@ async def test_detach_budget_retains_pending_preparation_cleanup(
 ) -> None:
     """A blocked claim cannot delay primary shutdown beyond its budget."""
     broker, token = _broker(tmp_path, events=[])
-    claimed = threading.Event()
-    release = threading.Event()
-    original_claim = broker.store.claim_call
-
-    def delayed_claim(**kwargs: object) -> object:
-        claim = original_claim(**kwargs)
-        claimed.set()
-        # No bound: the finally below always releases it, and a release timeout would end the blocked claim and
-        # let a detach that wrongly waits for it finish.
-        release.wait()
-        return claim
-
-    monkeypatch.setattr(broker.store, "claim_call", delayed_claim)
+    # No bound: the finally below always releases it, and a release timeout would end the blocked claim and let a
+    # detach that wrongly waits for it finish.
+    claimed, release = _pause_after_claim(monkeypatch, broker, timeout=None)
     acceptance = asyncio.create_task(broker.accept_authenticated(_request(), f"Bearer {token}"))
     try:
         assert await asyncio.to_thread(claimed.wait, SETTLE_TIMEOUT_SECONDS)
@@ -606,6 +569,90 @@ def _replace_calculator_toolkit(
     monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
 
 
+class _Calculator(Toolkit):
+    """A replacement ``calculator`` whose ``add`` sums; tests override ``add`` to observe, block, or fail a call."""
+
+    def __init__(self) -> None:
+        super().__init__(name="calculator", tools=[self.add])
+
+    def add(self, a: int, b: int) -> object:
+        return a + b
+
+
+class _ConnectedCalculator(_Calculator):
+    """A replacement ``calculator`` with a connection lifecycle whose steps do nothing unless overridden."""
+
+    _requires_connect = True
+
+    def connect(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+@dataclass
+class _BlockingSyncSteps:
+    """Events a blocking synchronous calculator sets and waits on; set ``release_close`` first for a close that returns."""
+
+    body_entered: threading.Event = field(default_factory=threading.Event)
+    release_body: threading.Event = field(default_factory=threading.Event)
+    close_started: threading.Event = field(default_factory=threading.Event)
+    release_close: threading.Event = field(default_factory=threading.Event)
+    close_finished: threading.Event = field(default_factory=threading.Event)
+    close_calls: int = 0
+
+
+def _replace_with_blocking_sync_calculator(monkeypatch: pytest.MonkeyPatch) -> _BlockingSyncSteps:
+    """Register a connected ``calculator`` whose synchronous body and close each block until released."""
+    steps = _BlockingSyncSteps()
+
+    class BlockingSyncCalculator(_ConnectedCalculator):
+        def close(self) -> None:
+            steps.close_calls += 1
+            steps.close_started.set()
+            steps.release_close.wait()
+            steps.close_finished.set()
+
+        def add(self, a: int, b: int) -> int:
+            steps.body_entered.set()
+            steps.release_body.wait()
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, BlockingSyncCalculator)
+    return steps
+
+
+def _claim_unowned(broker: ScriptToolBroker, request: ScriptToolCallRequest) -> ScriptCallClaim:
+    """Durably claim *request* without an in-process owner, as a primary that restarted mid-call left it."""
+    return broker.store.claim_call(
+        run_id=request.run_id,
+        call_id=request.call_id,
+        grant=request.grant,
+        arguments_digest=request.arguments_digest,
+    )
+
+
+def _pause_after_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    broker: ScriptToolBroker,
+    *,
+    timeout: float | None = SETTLE_TIMEOUT_SECONDS,
+) -> tuple[threading.Event, threading.Event]:
+    """Pause each durable claim after it commits until released; return its claimed and release events."""
+    claimed, release = threading.Event(), threading.Event()
+    original_claim_call = broker.store.claim_call
+
+    def claim_then_pause(**kwargs: Any) -> ScriptCallClaim:  # noqa: ANN401 - Forwards claim_call's keywords.
+        claim = original_claim_call(**kwargs)
+        claimed.set()
+        assert release.wait(timeout=timeout)
+        return claim
+
+    monkeypatch.setattr(broker.store, "claim_call", claim_then_pause)
+    return claimed, release
+
+
 @pytest.mark.asyncio
 async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Path) -> None:
     """Removing the canonical hook bridge would skip events around the real registered tool."""
@@ -648,10 +695,7 @@ async def test_script_calls_share_the_detached_session_of_a_session_keyed_tool(
     """A script run belongs to no conversation, so ``claude_agent`` keeps the one session it shares outside them."""
     claude = ClaudeAgentTools()
 
-    class SessionKeyedCalculator(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class SessionKeyedCalculator(_Calculator):
         async def add(self, a: int, b: int) -> str:
             del a, b
             return await claude.claude_session_status()
@@ -758,15 +802,7 @@ async def test_script_broker_closes_a_filtered_requested_toolkit(
     """A rejected live toolkit must finish its asynchronous close lifecycle."""
     closed = asyncio.Event()
 
-    class AsyncClosingToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-            self._requires_connect = True
-
-        def add(self, a: int, b: int) -> int:
-            return a + b
-
-    toolkit = AsyncClosingToolkit()
+    toolkit = _ConnectedCalculator()
 
     async def close() -> None:
         closed.set()
@@ -803,10 +839,7 @@ async def test_script_broker_requests_approval_before_body_and_denial_prevents_e
     """
     events: list[str] = []
 
-    class RecordingToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class RecordingToolkit(_Calculator):
         def add(self, a: int, b: int) -> int:
             events.append("tool:body")
             return a + b
@@ -866,10 +899,7 @@ async def test_approved_call_rechecks_durable_authority_before_tool_body(
     """Approval cannot revive a call after the owning run was durably revoked."""
     body_called = False
 
-    class RecordingToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class RecordingToolkit(_Calculator):
         def add(self, a: int, b: int) -> int:
             nonlocal body_called
             body_called = True
@@ -906,12 +936,7 @@ async def test_orphaned_pending_receipt_settles_exact_approval(tmp_path: Path) -
     """Restart orphan detection closes the approval paired with its indeterminate receipt."""
     broker, token = _broker(tmp_path, events=[])
     request = _request(call_id="orphaned-approval")
-    broker.store.claim_call(
-        run_id=request.run_id,
-        call_id=request.call_id,
-        grant=request.grant,
-        arguments_digest=request.arguments_digest,
-    )
+    _claim_unowned(broker, request)
 
     receipt = await broker.get_authenticated(
         request.run_id,
@@ -932,9 +957,9 @@ async def test_script_broker_honors_function_authored_confirmation_when_overlay_
     """An authored confirmation requirement cannot be erased by script preapproval."""
     events: list[str] = []
 
-    class ConfirmingToolkit(Toolkit):
+    class ConfirmingToolkit(_Calculator):
         def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
+            super().__init__()
             self.functions["add"].requires_confirmation = True
 
         def add(self, a: int, b: int) -> int:
@@ -1009,10 +1034,7 @@ async def test_script_call_result_is_the_text_of_a_tool_result(
 ) -> None:
     """A tool that returns a tool result, as MCP-backed tools do, gives the script its text, not the object's repr."""
 
-    class ToolResultCalculator(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class ToolResultCalculator(_Calculator):
         def add(self, a: int, b: int) -> ToolResult:
             return ToolResult(content=f"sum={a + b}")
 
@@ -1033,12 +1055,7 @@ async def test_script_broker_runs_a_streaming_tool_to_the_end_of_its_stream(
     """A tool that streams its result runs inside its toolkit's connection, and the script gets the joined text."""
     lifecycle: list[str] = []
 
-    class ConnectedToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class ConnectedToolkit(_ConnectedCalculator):
         def connect(self) -> None:
             lifecycle.append("connect")
 
@@ -1060,14 +1077,10 @@ async def test_script_broker_runs_a_streaming_tool_to_the_end_of_its_stream(
     assert lifecycle == ["connect", "body", "close"]
 
 
-class _RoutedConnectionToolkit(Toolkit):
+class _RoutedConnectionToolkit(_ConnectedCalculator):
     """A calculator with a connection lifecycle; ``lifecycle`` records each step the primary runs."""
 
-    _requires_connect = True
     lifecycle: ClassVar[list[str]] = []
-
-    def __init__(self) -> None:
-        super().__init__(name="calculator", tools=[self.add])
 
     def connect(self) -> None:
         type(self).lifecycle.append("primary connect")
@@ -1117,20 +1130,9 @@ async def test_script_broker_offloads_blocking_sync_toolkit_connect(
 ) -> None:
     """A synchronous toolkit connect cannot block unrelated event-loop timers."""
 
-    class BlockingConnectToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class BlockingConnectToolkit(_ConnectedCalculator):
         def connect(self) -> None:
             time.sleep(0.1)
-
-        def close(self) -> None:
-            pass
-
-        def add(self, a: int, b: int) -> int:
-            return a + b
 
     _replace_calculator_toolkit(monkeypatch, BlockingConnectToolkit)
     broker, token = _broker(tmp_path, events=[])
@@ -1144,73 +1146,44 @@ async def test_script_broker_offloads_blocking_sync_toolkit_connect(
 
 
 @pytest.mark.asyncio
-async def test_script_broker_closes_toolkit_after_connect_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed connection cannot strand resources owned by the selected toolkit."""
-    lifecycle: list[str] = []
-
-    class FailingConnectToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def connect(self) -> None:
-            lifecycle.append("connect")
-            msg = "connect failed"
-            raise RuntimeError(msg)
-
-        def close(self) -> None:
-            lifecycle.append("close")
-
-        def add(self, a: int, b: int) -> int:
-            return a + b
-
-    _replace_calculator_toolkit(monkeypatch, FailingConnectToolkit)
-    broker, token = _broker(tmp_path, events=[])
-
-    receipt = await _call_through_gateway(broker, _request(call_id="failed-connect"), token)
-
-    assert receipt.state is ScriptCallState.FAILED
-    assert lifecycle == ["connect", "close"]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("stage", "kind", "retryable"),
-    [("connect", "runtime_failure", True), ("call", "tool_failure", False)],
-)
-@pytest.mark.parametrize(
-    ("error", "text"),
-    [(RuntimeError("calculator broke"), "calculator broke"), (TimeoutError(), "TimeoutError")],
-    ids=["with_text", "without_text"],
+    ("stage", "error", "kind", "text", "retryable"),
+    [
+        ("connect", RuntimeError("calculator broke"), "runtime_failure", "calculator broke", True),
+        ("connect", TimeoutError(), "runtime_failure", "TimeoutError", True),
+        ("connect", ValueError(), "call_rejected", "ValueError", False),
+        ("call", RuntimeError("calculator broke"), "tool_failure", "calculator broke", False),
+        ("call", TimeoutError(), "tool_failure", "TimeoutError", False),
+    ],
+    ids=["connect-with-text", "connect-without-text", "connect-rejects", "call-with-text", "call-without-text"],
 )
 async def test_script_broker_reports_why_a_call_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stage: str,
-    kind: str,
-    retryable: bool,
     error: Exception,
+    kind: str,
     text: str,
+    retryable: bool,
 ) -> None:
-    """A call whose toolkit or tool raises fails with the exception's text, or its type name when it has none."""
+    """A call whose toolkit or tool raises fails with the exception's text, or its type name when it has none.
 
-    class FailingToolkit(Toolkit):
+    A failed connection still closes its toolkit, so it strands no resources.
+    """
+    lifecycle: list[str] = []
+
+    class FailingToolkit(_ConnectedCalculator):
         _requires_connect = stage == "connect"
 
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
         def connect(self) -> None:
+            lifecycle.append("connect")
             raise error
 
         def close(self) -> None:
-            pass
+            lifecycle.append("close")
 
         def add(self, a: int, b: int) -> int:  # noqa: ARG002 - The script calls it with both arguments.
+            lifecycle.append("add")
             raise error
 
     _replace_calculator_toolkit(monkeypatch, FailingToolkit)
@@ -1220,37 +1193,7 @@ async def test_script_broker_reports_why_a_call_failed(
 
     assert receipt.state is ScriptCallState.FAILED
     assert receipt.error == {"kind": kind, "message": text, "retryable": retryable}
-
-
-@pytest.mark.asyncio
-async def test_script_broker_names_a_textless_rejection_by_its_type(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A toolkit that rejects its arguments without text fails the call with the exception's type name."""
-
-    class RejectingToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def connect(self) -> None:
-            raise ValueError
-
-        def close(self) -> None:
-            pass
-
-        def add(self, a: int, b: int) -> int:
-            return a + b
-
-    _replace_calculator_toolkit(monkeypatch, RejectingToolkit)
-    broker, token = _broker(tmp_path, events=[])
-
-    receipt = await _call_through_gateway(broker, _request(call_id="rejected"), token)
-
-    assert receipt.state is ScriptCallState.FAILED
-    assert receipt.error == {"kind": "call_rejected", "message": "ValueError", "retryable": False}
+    assert lifecycle == (["connect", "close"] if stage == "connect" else ["add"])
 
 
 @pytest.mark.asyncio
@@ -1264,12 +1207,7 @@ async def test_cancelled_sync_connect_closes_only_after_connect_returns(
     close_started = threading.Event()
     body_called = False
 
-    class BlockingConnectToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class BlockingConnectToolkit(_ConnectedCalculator):
         def connect(self) -> None:
             connect_started.set()
             release_connect.wait()
@@ -1313,15 +1251,7 @@ async def test_script_broker_offloads_blocking_sync_toolkit_close(
 ) -> None:
     """A synchronous toolkit close cannot block unrelated event-loop timers."""
 
-    class BlockingCloseToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def connect(self) -> None:
-            pass
-
+    class BlockingCloseToolkit(_ConnectedCalculator):
         def close(self) -> None:
             time.sleep(0.1)
 
@@ -1348,10 +1278,7 @@ async def test_script_broker_forgets_retained_execution_after_submitter_cancella
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    class BlockingToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class BlockingToolkit(_Calculator):
         async def add(self, a: int, b: int) -> int:
             entered.set()
             await release.wait()
@@ -1381,15 +1308,10 @@ async def test_script_broker_cancellation_waits_for_claim_schedule_ownership(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cancelled submitter cannot return while a new durable claim lacks an execution owner."""
-    claim_returned = threading.Event()
-    release_claim = threading.Event()
     execution_started = asyncio.Event()
     release_execution = asyncio.Event()
 
-    class BlockingToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class BlockingToolkit(_Calculator):
         async def add(self, a: int, b: int) -> int:
             execution_started.set()
             await release_execution.wait()
@@ -1398,15 +1320,7 @@ async def test_script_broker_cancellation_waits_for_claim_schedule_ownership(
     _replace_calculator_toolkit(monkeypatch, BlockingToolkit)
     broker, token = _broker(tmp_path, events=[])
     request = _request(call_id="cancelled-claim")
-    original_claim_call = broker.store.claim_call
-
-    def claim_call(**kwargs: object) -> object:
-        claim = original_claim_call(**kwargs)  # type: ignore[arg-type]
-        claim_returned.set()
-        assert release_claim.wait(timeout=SETTLE_TIMEOUT_SECONDS)
-        return claim
-
-    monkeypatch.setattr(broker.store, "claim_call", claim_call)
+    claim_returned, release_claim = _pause_after_claim(monkeypatch, broker)
     submission = asyncio.create_task(broker.accept_authenticated(request, f"Bearer {token}"))
     assert await asyncio.to_thread(claim_returned.wait, SETTLE_TIMEOUT_SECONDS)
     submission.cancel()
@@ -1432,10 +1346,7 @@ async def test_script_broker_cancel_run_closes_accepted_receipt_as_indeterminate
     """Revocation cancellation cannot leave an accepted side-effecting call pending forever."""
     entered = asyncio.Event()
 
-    class BlockingToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class BlockingToolkit(_Calculator):
         async def add(self, a: int, b: int) -> int:
             del a, b
             entered.set()
@@ -1463,51 +1374,26 @@ async def test_cancelled_sync_tool_retains_cleanup_until_body_and_close_finish(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cancellation returns promptly while the detached sync body still owns its toolkit."""
-    body_entered = threading.Event()
-    release_body = threading.Event()
-    close_started = threading.Event()
-    release_close = threading.Event()
-    close_finished = threading.Event()
-
-    class BlockingSyncToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def connect(self) -> None:
-            return None
-
-        def close(self) -> None:
-            close_started.set()
-            release_close.wait()
-            close_finished.set()
-
-        def add(self, a: int, b: int) -> int:
-            body_entered.set()
-            release_body.wait()
-            return a + b
-
-    _replace_calculator_toolkit(monkeypatch, BlockingSyncToolkit)
+    steps = _replace_with_blocking_sync_calculator(monkeypatch)
     broker, token = _broker(tmp_path, events=[])
     request = _request(call_id="cancelled-sync-call")
     accepted = await broker.accept_authenticated(request, f"Bearer {token}")
     assert accepted.state is ScriptCallState.PENDING
-    assert await asyncio.to_thread(body_entered.wait, SETTLE_TIMEOUT_SECONDS)
-    assert close_started.is_set() is False
+    assert await asyncio.to_thread(steps.body_entered.wait, SETTLE_TIMEOUT_SECONDS)
+    assert steps.close_started.is_set() is False
     broker.store.request_cancel(request.run_id)
 
     cancellation = asyncio.create_task(broker.cancel_run(request.run_id))
     try:
         await asyncio.wait_for(asyncio.shield(cancellation), timeout=SETTLE_TIMEOUT_SECONDS)
     finally:
-        close_started_before_body_returned = close_started.is_set()
-        release_body.set()
-        close_did_start = await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
-        close_finished_before_release = close_finished.is_set()
-        release_close.set()
+        close_started_before_body_returned = steps.close_started.is_set()
+        steps.release_body.set()
+        close_did_start = await asyncio.to_thread(steps.close_started.wait, SETTLE_TIMEOUT_SECONDS)
+        close_finished_before_release = steps.close_finished.is_set()
+        steps.release_close.set()
         await asyncio.wait_for(cancellation, timeout=SETTLE_TIMEOUT_SECONDS)
-    assert await asyncio.to_thread(close_finished.wait, SETTLE_TIMEOUT_SECONDS)
+    assert await asyncio.to_thread(steps.close_finished.wait, SETTLE_TIMEOUT_SECONDS)
     cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
 
     assert close_started_before_body_returned is False
@@ -1536,15 +1422,7 @@ async def test_cancelled_call_keeps_its_toolkit_until_every_nested_body_returns(
         releases[index].wait()
         return index
 
-    class NestedBodiesToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def connect(self) -> None:
-            return None
-
+    class NestedBodiesToolkit(_ConnectedCalculator):
         def close(self) -> None:
             close_started.set()
 
@@ -1599,15 +1477,7 @@ async def test_failed_call_keeps_its_toolkit_until_a_sibling_body_returns(
         msg = "the second body failed"
         raise RuntimeError(msg)
 
-    class SiblingBodiesToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def connect(self) -> None:
-            return None
-
+    class SiblingBodiesToolkit(_ConnectedCalculator):
         def close(self) -> None:
             close_started.set()
 
@@ -1640,46 +1510,18 @@ async def test_cancelled_sync_close_stays_retained_through_cancelled_drains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cancelled and timed-out drains cannot make a blocking sync close appear drained, nor run it twice."""
-    body_entered = threading.Event()
-    release_body = threading.Event()
-    close_started = threading.Event()
-    release_close = threading.Event()
-    close_finished = threading.Event()
-    close_calls = 0
-
-    class BlockingSyncToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def connect(self) -> None:
-            return None
-
-        def close(self) -> None:
-            nonlocal close_calls
-            close_calls += 1
-            close_started.set()
-            release_close.wait()
-            close_finished.set()
-
-        def add(self, a: int, b: int) -> int:
-            body_entered.set()
-            release_body.wait()
-            return a + b
-
-    _replace_calculator_toolkit(monkeypatch, BlockingSyncToolkit)
+    steps = _replace_with_blocking_sync_calculator(monkeypatch)
     broker, token = _broker(tmp_path, events=[])
     request = _request(call_id="cancelled-sync-close")
     await broker.accept_authenticated(request, f"Bearer {token}")
-    assert await asyncio.to_thread(body_entered.wait, SETTLE_TIMEOUT_SECONDS)
+    assert await asyncio.to_thread(steps.body_entered.wait, SETTLE_TIMEOUT_SECONDS)
     broker.store.request_cancel(request.run_id)
     await broker.cancel_run(request.run_id)
 
     [cleanup] = broker._cleanups.tasks
     await _cancel_a_drain(broker)
-    release_body.set()
-    assert await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
+    steps.release_body.set()
+    assert await asyncio.to_thread(steps.close_started.wait, SETTLE_TIMEOUT_SECONDS)
 
     try:
         await _cancel_a_drain(broker)
@@ -1689,11 +1531,11 @@ async def test_cancelled_sync_close_stays_retained_through_cancelled_drains(
         await _cancel_a_drain(broker)
         owned_after_second_cancel = broker._cleanups.tasks == {cleanup}
         second_drain = await drain_script_tool_cleanup(broker, timeout_seconds=0)
-        close_finished_before_release = close_finished.is_set()
+        close_finished_before_release = steps.close_finished.is_set()
     finally:
-        release_close.set()
+        steps.release_close.set()
 
-    assert await asyncio.to_thread(close_finished.wait, SETTLE_TIMEOUT_SECONDS)
+    assert await asyncio.to_thread(steps.close_finished.wait, SETTLE_TIMEOUT_SECONDS)
     assert await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
 
     assert owned_after_first_cancel is True
@@ -1701,7 +1543,7 @@ async def test_cancelled_sync_close_stays_retained_through_cancelled_drains(
     assert owned_after_second_cancel is True
     assert second_drain is False
     assert close_finished_before_release is False
-    assert close_calls == 1
+    assert steps.close_calls == 1
     await _assert_cleanup_forgotten(broker)
 
 
@@ -1716,15 +1558,7 @@ async def test_cancelled_async_tool_close_stays_retained_through_cancelled_drain
     release_close = threading.Event()
     close_finished = threading.Event()
 
-    class BlockingCloseToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def connect(self) -> None:
-            return None
-
+    class BlockingCloseToolkit(_ConnectedCalculator):
         def close(self) -> None:
             close_started.set()
             release_close.wait()
@@ -1769,32 +1603,12 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Bounded shutdown drains retained cleanup without cancelling its completion owner."""
-    body_entered = threading.Event()
-    release_body = threading.Event()
-    close_started = threading.Event()
-
-    class BlockingSyncToolkit(Toolkit):
-        _requires_connect = True
-
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def connect(self) -> None:
-            return None
-
-        def close(self) -> None:
-            close_started.set()
-
-        def add(self, a: int, b: int) -> int:
-            body_entered.set()
-            release_body.wait()
-            return a + b
-
-    _replace_calculator_toolkit(monkeypatch, BlockingSyncToolkit)
+    steps = _replace_with_blocking_sync_calculator(monkeypatch)
+    steps.release_close.set()
     broker, token = _broker(tmp_path, events=[])
     request = _request(call_id="shutdown-sync-cleanup")
     await broker.accept_authenticated(request, f"Bearer {token}")
-    assert await asyncio.to_thread(body_entered.wait, SETTLE_TIMEOUT_SECONDS)
+    assert await asyncio.to_thread(steps.body_entered.wait, SETTLE_TIMEOUT_SECONDS)
     broker.store.request_cancel(request.run_id)
     await broker.cancel_run(request.run_id)
     [original_cleanup] = broker._cleanups.tasks
@@ -1844,15 +1658,15 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
     try:
         await asyncio.wait_for(drain_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         await _cancel_a_drain(broker)
-        close_started_before_body_returned = close_started.is_set()
+        close_started_before_body_returned = steps.close_started.is_set()
         # The body stays blocked until the finally below, so shutdown returns only if its drain is bounded, and this
         # bound sits below shutdown's default budget, so a shutdown that drops its explicit budget fails.
         await asyncio.wait_for(shutdown, timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
         cleanup_owned_after_shutdown = broker._cleanups.tasks == {original_cleanup}
     finally:
-        release_body.set()
+        steps.release_body.set()
 
-    assert await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
+    assert await asyncio.to_thread(steps.close_started.wait, SETTLE_TIMEOUT_SECONDS)
     cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
 
     [(drain_timeout_seconds, budget_left_seconds, drained_before_shutdown_returned)] = shutdown_drains
@@ -1875,10 +1689,7 @@ async def test_queued_script_call_rechecks_durable_revocation_after_run_lock(
     release_first = asyncio.Event()
     executed_values: list[int] = []
 
-    class SerialToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class SerialToolkit(_Calculator):
         async def add(self, a: int, b: int) -> int:
             del a
             executed_values.append(b)
@@ -1938,12 +1749,7 @@ async def test_script_broker_marks_unowned_pending_claim_indeterminate(tmp_path:
     """A pending claim left by an unknown executor must never be resubmitted after ambiguity."""
     broker, token = _broker(tmp_path, events=[])
     request = _request(call_id="accepted-before-restart")
-    broker.store.claim_call(
-        run_id=request.run_id,
-        call_id=request.call_id,
-        grant=request.grant,
-        arguments_digest=request.arguments_digest,
-    )
+    _claim_unowned(broker, request)
 
     receipt = await _call_through_gateway(broker, request, token)
 
@@ -1963,23 +1769,8 @@ async def test_duplicate_post_returns_terminal_winner_when_claim_races_orphan_se
     """A duplicate stale pending claim must return the receipt that won durably."""
     broker, token = _broker(tmp_path, events=[])
     request = _request(call_id="racing-duplicate-post")
-    broker.store.claim_call(
-        run_id=request.run_id,
-        call_id=request.call_id,
-        grant=request.grant,
-        arguments_digest=request.arguments_digest,
-    )
-    original_claim_call = broker.store.claim_call
-    stale_claim_returned = threading.Event()
-    release_stale_claim = threading.Event()
-
-    def pause_after_stale_claim(**kwargs: object) -> object:
-        claim = original_claim_call(**kwargs)  # type: ignore[arg-type]
-        stale_claim_returned.set()
-        assert release_stale_claim.wait(timeout=SETTLE_TIMEOUT_SECONDS)
-        return claim
-
-    monkeypatch.setattr(broker.store, "claim_call", pause_after_stale_claim)
+    _claim_unowned(broker, request)
+    stale_claim_returned, release_stale_claim = _pause_after_claim(monkeypatch, broker)
     submission = asyncio.create_task(broker.accept_authenticated(request, f"Bearer {token}"))
     assert await asyncio.to_thread(stale_claim_returned.wait, SETTLE_TIMEOUT_SECONDS)
     published = broker.store.publish_call_result(
@@ -2001,12 +1792,7 @@ def test_script_broker_get_marks_unowned_pending_claim_indeterminate(tmp_path: P
     """GET polling must resolve an accepted claim whose in-process owner disappeared."""
     broker, _token = _broker(tmp_path, events=[])
     request = _request(call_id="orphaned-before-get")
-    broker.store.claim_call(
-        run_id=request.run_id,
-        call_id=request.call_id,
-        grant=request.grant,
-        arguments_digest=request.arguments_digest,
-    )
+    _claim_unowned(broker, request)
 
     receipt = broker.get_call(request.run_id, request.call_id)
 
@@ -2028,12 +1814,7 @@ def test_script_broker_get_returns_terminal_winner_when_publish_races_orphan_set
     """A stale pending read cannot conflict with an execution receipt that wins durably."""
     broker, _token = _broker(tmp_path, events=[])
     request = _request(call_id="racing-poll")
-    broker.store.claim_call(
-        run_id=request.run_id,
-        call_id=request.call_id,
-        grant=request.grant,
-        arguments_digest=request.arguments_digest,
-    )
+    _claim_unowned(broker, request)
     original_get_call = broker.store.get_call
     pending_read = threading.Event()
     release_stale_read = threading.Event()
@@ -2073,10 +1854,7 @@ async def test_script_broker_get_keeps_owned_execution_pending(
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    class BlockingToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class BlockingToolkit(_Calculator):
         async def add(self, a: int, b: int) -> int:
             entered.set()
             await release.wait()
@@ -2208,76 +1986,49 @@ async def test_script_broker_rejects_live_thread_when_durable_thread_is_none(tmp
     assert events == []
 
 
-@pytest.mark.asyncio
-async def test_script_broker_rejects_durable_live_worker_mismatch_before_dispatch(tmp_path: Path) -> None:
-    """A run may dispatch only through the same live worker authority that launched it."""
-    events: list[str] = []
-    broker, token = _broker(
-        tmp_path,
-        events=events,
-        durable_worker_id="worker-a",
-        live_worker_id="worker-b",
-    )
-
-    receipt = await _call_through_gateway(broker, _request(call_id="wrong-worker"), token)
-
-    assert receipt.state is ScriptCallState.FAILED
-    assert events == []
+_RUNTIME_CONTEXT_MISMATCH = "Live script runtime context does not match the durable run owner."
 
 
 @pytest.mark.asyncio
-async def test_script_broker_rejects_durable_worker_key_mismatch_before_dispatch(tmp_path: Path) -> None:
-    """A run cannot substitute another requester-scoped worker key at dispatch."""
+@pytest.mark.parametrize(
+    ("broker_options", "message"),
+    [
+        pytest.param(
+            {"durable_worker_id": "worker-a", "live_worker_id": "worker-b"},
+            _RUNTIME_CONTEXT_MISMATCH,
+            id="live-worker",
+        ),
+        pytest.param(
+            {"durable_worker_key": f"v1:default:user_agent:mallory:{_WORKER_RUN_ID}:watcher", "run_id": _WORKER_RUN_ID},
+            "Durable script worker key does not match the requester-and-agent process scope.",
+            id="requester-worker-key",
+        ),
+        pytest.param(
+            {"live_private_agent_names": frozenset({"watcher"})},
+            _RUNTIME_CONTEXT_MISMATCH,
+            id="private-scope",
+        ),
+        pytest.param(
+            {"durable_local_unsafe": True, "live_local_unsafe": False},
+            _RUNTIME_CONTEXT_MISMATCH,
+            id="local-execution",
+        ),
+    ],
+)
+async def test_script_broker_rejects_durable_live_authority_mismatch_before_dispatch(
+    tmp_path: Path,
+    broker_options: dict[str, Any],
+    message: str,
+) -> None:
+    """A run dispatches only through the worker, worker key, private scope, and execution mode that launched it."""
     events: list[str] = []
-    broker, token = _broker(
-        tmp_path,
-        events=events,
-        durable_worker_key=f"v1:default:user_agent:mallory:{_WORKER_RUN_ID}:watcher",
-        run_id=_WORKER_RUN_ID,
-    )
+    broker, token = _broker(tmp_path, events=events, **broker_options)
+    run_id = broker_options.get("run_id", "run-1")
 
-    receipt = await _call_through_gateway(
-        broker,
-        _request(call_id="wrong-worker-key", run_id=_WORKER_RUN_ID),
-        token,
-    )
+    receipt = await _call_through_gateway(broker, _request(call_id="mismatched-authority", run_id=run_id), token)
 
     assert receipt.state is ScriptCallState.FAILED
-    assert isinstance(receipt.error, dict)
-    assert "worker key" in str(receipt.error.get("message", "")).lower()
-    assert events == []
-
-
-@pytest.mark.asyncio
-async def test_script_broker_rejects_live_private_scope_mismatch_before_dispatch(tmp_path: Path) -> None:
-    """Resolver-provided private routing must match the current config-derived target."""
-    events: list[str] = []
-    broker, token = _broker(
-        tmp_path,
-        events=events,
-        live_private_agent_names=frozenset({"watcher"}),
-    )
-
-    receipt = await _call_through_gateway(broker, _request(call_id="wrong-private-scope"), token)
-
-    assert receipt.state is ScriptCallState.FAILED
-    assert events == []
-
-
-@pytest.mark.asyncio
-async def test_script_broker_rejects_durable_live_local_execution_mismatch(tmp_path: Path) -> None:
-    """The live execution mode must match the durable unsafe-local authority bit."""
-    events: list[str] = []
-    broker, token = _broker(
-        tmp_path,
-        events=events,
-        durable_local_unsafe=True,
-        live_local_unsafe=False,
-    )
-
-    receipt = await _call_through_gateway(broker, _request(call_id="wrong-local-mode"), token)
-
-    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {"kind": "call_rejected", "message": message, "retryable": False}
     assert events == []
 
 
@@ -2291,10 +2042,7 @@ async def test_script_broker_serializes_distinct_calls_within_one_run(
     second_entered = asyncio.Event()
     release_first = asyncio.Event()
 
-    class SerialToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
+    class SerialToolkit(_Calculator):
         async def add(self, a: int, b: int) -> int:
             if b == 2:
                 first_entered.set()
@@ -2319,87 +2067,53 @@ async def test_script_broker_serializes_distinct_calls_within_one_run(
     assert second_entered.is_set()
 
 
+_INVALID_RESULT_ERROR = {
+    "kind": "invalid_tool_result",
+    "message": "The tool returned a result that cannot be represented as strict JSON.",
+    "retryable": False,
+}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("result", [float("nan"), float("inf"), float("-inf")])
-async def test_script_broker_never_publishes_nonfinite_completed_receipt(
+@pytest.mark.parametrize(
+    ("result", "error"),
+    [
+        pytest.param(float("nan"), _INVALID_RESULT_ERROR, id="nan"),
+        pytest.param(float("inf"), _INVALID_RESULT_ERROR, id="inf"),
+        pytest.param(float("-inf"), _INVALID_RESULT_ERROR, id="-inf"),
+        pytest.param("\udcff", _INVALID_RESULT_ERROR, id="invalid-unicode"),
+        pytest.param(
+            "x" * (64 * 1024),
+            {
+                "kind": "result_too_large",
+                "message": "The tool result exceeds the background receipt size limit.",
+                "retryable": False,
+            },
+            id="oversized",
+        ),
+    ],
+)
+async def test_script_broker_publishes_an_unstorable_result_as_a_readable_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    result: float,
+    result: object,
+    error: dict[str, object],
 ) -> None:
-    """Non-finite tool output must become a readable terminal failure."""
+    """A result strict JSON cannot encode, or one over the receipt size limit, becomes a terminal failure."""
 
-    class NonFiniteToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def add(self, a: int, b: int) -> float:
+    class UnstorableResultToolkit(_Calculator):
+        def add(self, a: int, b: int) -> object:
             del a, b
             return result
 
-    _replace_calculator_toolkit(monkeypatch, NonFiniteToolkit)
+    _replace_calculator_toolkit(monkeypatch, UnstorableResultToolkit)
     broker, token = _broker(tmp_path, events=[])
 
-    receipt = await _call_through_gateway(broker, _request(call_id=f"nonfinite-{result!s}"), token)
+    receipt = await _call_through_gateway(broker, _request(call_id="unstorable-result"), token)
 
     assert receipt.state is ScriptCallState.FAILED
-    json.dumps(receipt.result, allow_nan=False)
-    json.dumps(receipt.error, allow_nan=False)
-
-
-@pytest.mark.asyncio
-async def test_script_broker_rejects_result_that_cannot_be_encoded_as_utf8(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Invalid Unicode output must become a readable terminal tool-result failure."""
-
-    class InvalidUnicodeToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def add(self, a: int, b: int) -> str:
-            del a, b
-            return "\udcff"
-
-    _replace_calculator_toolkit(monkeypatch, InvalidUnicodeToolkit)
-    broker, token = _broker(tmp_path, events=[])
-
-    receipt = await _call_through_gateway(broker, _request(call_id="invalid-unicode"), token)
-
-    assert receipt.state is ScriptCallState.FAILED
-    assert receipt.error == {
-        "kind": "invalid_tool_result",
-        "message": "The tool returned a result that cannot be represented as strict JSON.",
-        "retryable": False,
-    }
-
-
-@pytest.mark.asyncio
-async def test_script_broker_publishes_oversized_result_as_explicit_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A known receipt-size rejection is a terminal failure, not an indeterminate call."""
-
-    class OversizedToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def add(self, a: int, b: int) -> str:
-            del a, b
-            return "x" * (64 * 1024)
-
-    _replace_calculator_toolkit(monkeypatch, OversizedToolkit)
-    broker, token = _broker(tmp_path, events=[])
-
-    receipt = await _call_through_gateway(broker, _request(call_id="oversized-result"), token)
-
-    assert receipt.state is ScriptCallState.FAILED
-    assert receipt.error == {
-        "kind": "result_too_large",
-        "message": "The tool result exceeds the background receipt size limit.",
-        "retryable": False,
-    }
+    assert receipt.result is None
+    assert receipt.error == error
 
 
 @pytest.mark.asyncio
@@ -2433,3 +2147,131 @@ def test_script_broker_rejects_a_wrong_capability_and_an_unknown_run(tmp_path: P
     with pytest.raises(ScriptBrokerAuthenticationError, match="unavailable"):
         broker.authenticate("run-missing", f"Bearer {token}")
     assert broker.authenticate("run-1", f"Bearer {token}").run_id == "run-1"
+
+
+@pytest.mark.parametrize(
+    ("state", "failures", "attempts", "stored_state"),
+    [
+        pytest.param(
+            ScriptCallState.COMPLETED,
+            1,
+            [ScriptCallState.COMPLETED, ScriptCallState.INDETERMINATE],
+            ScriptCallState.INDETERMINATE,
+            id="fallback-stored",
+        ),
+        pytest.param(
+            ScriptCallState.COMPLETED,
+            2,
+            [ScriptCallState.COMPLETED, ScriptCallState.INDETERMINATE],
+            ScriptCallState.PENDING,
+            id="fallback-fails",
+        ),
+        pytest.param(
+            ScriptCallState.INDETERMINATE,
+            1,
+            [ScriptCallState.INDETERMINATE],
+            ScriptCallState.PENDING,
+            id="indeterminate-fails",
+        ),
+    ],
+)
+def test_a_receipt_the_store_cannot_publish_settles_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: ScriptCallState,
+    failures: int,
+    attempts: list[ScriptCallState],
+    stored_state: ScriptCallState,
+) -> None:
+    """A failed receipt write falls back once to a durable indeterminate receipt, else reports one without storing it."""
+    broker, _token = _broker(tmp_path, events=[])
+    call = _claim_unowned(broker, _request()).call
+    original_publish = broker.store.publish_call_result
+    published_states: list[ScriptCallState] = []
+
+    def failing_publish(**kwargs: Any) -> ScriptCallRecord:  # noqa: ANN401 - Forwards publish_call_result's keywords.
+        published_states.append(kwargs["state"])
+        if len(published_states) <= failures:
+            msg = "database is locked"
+            raise RuntimeError(msg)
+        return original_publish(**kwargs)
+
+    monkeypatch.setattr(broker.store, "publish_call_result", failing_publish)
+    completed = state is ScriptCallState.COMPLETED
+
+    receipt = broker._publish(
+        call,
+        state=state,
+        result=3 if completed else None,
+        error=None if completed else broker_module._INDETERMINATE_ERROR,
+    )
+
+    assert receipt.state is ScriptCallState.INDETERMINATE
+    assert receipt.error == broker_module._INDETERMINATE_ERROR
+    assert published_states == attempts
+    assert broker.store.get_call(call.run_id, call.call_id).state is stored_state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authorized", "reason"),
+    [
+        (False, "Background script authority changed while approval was pending."),
+        (None, "Background script owner runtime is temporarily unavailable."),
+    ],
+    ids=["revoked", "unavailable"],
+)
+async def test_script_broker_rechecks_live_authorization_before_tool_body(
+    tmp_path: Path,
+    authorized: bool | None,
+    reason: str,
+) -> None:
+    """A requester whose live authorization lapses after preparation never reaches the tool body."""
+    events: list[str] = []
+    broker, token = _broker(tmp_path, events=events)
+    resolver = cast("_RuntimeResolver", broker.runtime_resolver)
+    resolver.is_authorized = MagicMock(side_effect=[True, True, authorized])
+
+    accepted = await broker.accept_authenticated(_request(call_id="lapsed-authorization"), f"Bearer {token}")
+    receipt = await broker._tasks[(accepted.run_id, accepted.call_id)]
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {"kind": "approval_denied", "message": reason, "retryable": False}
+    assert events == ["tool:before_call", "tool:after_call"]
+
+
+def test_script_broker_refuses_a_call_outside_its_launch_grants(tmp_path: Path) -> None:
+    """Preparation refuses a call record whose grant the run never received, even past the store's own check."""
+    broker, _token = _broker(tmp_path, events=[])
+    call = _claim_unowned(broker, _request()).call
+    run = broker.store.get_run(call.run_id)
+    forged = replace(call, grant=ScriptToolGrant("calculator", "subtract"))
+
+    with pytest.raises(broker_module._CurrentGrantRevokedError):
+        broker._prepare_execution(run, forged, "background-script:forged")
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_waits_for_an_in_flight_claim_before_settling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation cannot settle a run while a claim it has not seen an owner for is still being prepared."""
+    events: list[str] = []
+    broker, token = _broker(tmp_path, events=events)
+    claimed, release = _pause_after_claim(monkeypatch, broker)
+    acceptance = asyncio.create_task(broker.accept_authenticated(_request(), f"Bearer {token}"))
+    try:
+        assert await asyncio.to_thread(claimed.wait, SETTLE_TIMEOUT_SECONDS)
+        broker.store.request_cancel("run-1")
+        cancellation = asyncio.create_task(broker.cancel_run("run-1"))
+        # A cancellation that skipped the claim would settle its pending receipt well within this bound.
+        done, _pending = await asyncio.wait({cancellation}, timeout=0.5)
+    finally:
+        release.set()
+    await acceptance
+    await asyncio.wait_for(cancellation, timeout=SETTLE_TIMEOUT_SECONDS)
+
+    assert done == set()
+    assert broker.store.get_call("run-1", "call-1").state is not ScriptCallState.PENDING
+    assert events == []

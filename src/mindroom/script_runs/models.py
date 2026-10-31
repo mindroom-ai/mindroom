@@ -136,14 +136,7 @@ def script_worker_key_for_run(base_worker_key: str, run_id: str) -> str:
 
 def script_worker_key_belongs_to_run(worker_key: str, run_id: str) -> bool:
     """Return whether *worker_key* is the exact user-agent key pinned to *run_id*."""
-    parts = worker_key.split(":")
-    if len(parts) < 6 or parts[-2] != run_id:
-        return False
-    base_worker_key = ":".join((*parts[:-2], parts[-1]))
-    try:
-        return script_worker_key_for_run(base_worker_key, run_id) == worker_key
-    except ValueError:
-        return False
+    return script_run_id_from_worker_key(worker_key) == run_id
 
 
 def script_run_id_from_worker_key(worker_key: str) -> str | None:
@@ -152,4 +145,8 @@ def script_run_id_from_worker_key(worker_key: str) -> str | None:
     if len(parts) < 6:
         return None
     run_id = parts[-2]
-    return run_id if script_worker_key_belongs_to_run(worker_key, run_id) else None
+    base_worker_key = ":".join((*parts[:-2], parts[-1]))
+    try:
+        return run_id if script_worker_key_for_run(base_worker_key, run_id) == worker_key else None
+    except ValueError:
+        return None

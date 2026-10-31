@@ -40,13 +40,7 @@ _REVOKED_CAPABILITY = "Background script capability has been revoked."
 _CALLS_NOT_ACCEPTED = "Background script run cannot accept new calls."
 _GRANT_NOT_GRANTED = "Requested script tool grant was not granted at launch."
 _RECEIPT_NOT_SERIALIZABLE = "Script call receipt must be JSON serializable."
-_TERMINAL_CALL_STATES = frozenset(
-    {
-        ScriptCallState.COMPLETED,
-        ScriptCallState.FAILED,
-        ScriptCallState.INDETERMINATE,
-    },
-)
+_TERMINAL_CALL_STATES = frozenset(ScriptCallState) - {ScriptCallState.PENDING}
 _TERMINAL_STATE_VALUES = tuple(sorted(state.value for state in TERMINAL_SCRIPT_RUN_STATES))
 _TERMINAL_STATE_PLACEHOLDERS = ", ".join("?" * len(_TERMINAL_STATE_VALUES))
 _RUN_TRANSITIONS = {
@@ -140,7 +134,7 @@ class ScriptRunStore:
 
     def get_run(self, run_id: str) -> ScriptRunRecord:
         """Return one durable run record."""
-        with self._read_connection() as connection:
+        with self._connection() as connection:
             return _select_run(connection, run_id)
 
     def list_runs(
@@ -163,7 +157,7 @@ class ScriptRunStore:
             clauses.append(f"state NOT IN ({_TERMINAL_STATE_PLACEHOLDERS})")
             params.extend(_TERMINAL_STATE_VALUES)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._read_connection() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 f"SELECT * FROM script_runs{where} ORDER BY created_at DESC, run_id DESC",  # noqa: S608
                 tuple(params),
@@ -246,12 +240,12 @@ class ScriptRunStore:
 
     def get_call(self, run_id: str, call_id: str) -> ScriptCallRecord:
         """Return one durable logical call receipt."""
-        with self._read_connection() as connection:
+        with self._connection() as connection:
             return _select_call(connection, run_id, call_id)
 
     def pending_calls(self, run_id: str) -> list[ScriptCallRecord]:
         """Return pending receipts that still need broker ownership settlement."""
-        with self._read_connection() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM script_calls WHERE run_id = ? AND state = ? ORDER BY call_id",
                 (run_id, ScriptCallState.PENDING.value),
@@ -532,7 +526,7 @@ class ScriptRunStore:
             migrate_legacy_script_run_columns(connection)
 
     @contextmanager
-    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+    def _connection(self) -> Iterator[sqlite3.Connection]:
         connection = _connect(self.database_path)
         try:
             yield connection
@@ -541,8 +535,7 @@ class ScriptRunStore:
 
     @contextmanager
     def _write_transaction(self) -> Iterator[sqlite3.Connection]:
-        connection = _connect(self.database_path)
-        try:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 yield connection
@@ -551,8 +544,6 @@ class ScriptRunStore:
                 raise
             else:
                 connection.execute("COMMIT")
-        finally:
-            connection.close()
 
 
 _SCHEMA_STATEMENTS = (

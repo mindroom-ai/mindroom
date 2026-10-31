@@ -28,9 +28,9 @@ _RECOVERY_SIGNATURE_VERSION = "v2"
 
 def script_process_authority(config: Config, agent_name: str) -> dict[str, object] | None:
     """Project configuration that determines one script worker's process authority."""
-    if agent_name not in config.agents:
+    agent = config.agents.get(agent_name)
+    if agent is None:
         return None
-    agent = config.agents[agent_name]
     resolved = config.resolve_agent(agent_name)
     if "script" not in resolved.tools.tool_names:
         return None
