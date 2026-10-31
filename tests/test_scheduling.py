@@ -2651,6 +2651,30 @@ async def test_agent_state_write_error_names_the_router_grant() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_status_write_describes_a_task_without_a_timezone_in_the_current_global_one() -> None:
+    """A runner's status write keeps a legacy task's recurring description in the timezone the config has now."""
+    client = make_matrix_client_mock(user_id="@mindroom_router:server")
+    client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!test:server",
+    )
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="0", month="1"),
+        message="check logs",
+        description="check logs",
+        room_id="!test:server",
+    )
+    writers = scheduled_task_runtime(_runtime_paths(), scheduling_bot(client), config=Config(timezone="Asia/Tokyo"))
+
+    await scheduling_runtime._save_task_status(client, _record("taskcron", workflow), "failed", writers=writers)
+
+    content = client.room_put_state.await_args.kwargs["content"]
+    assert (content["status"], content["cron_description"]) == ("failed", "At 09:00, only in January (Asia/Tokyo)")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("agent_level", "agent_writes"),
     [(100, True), (0, False), (None, False)],

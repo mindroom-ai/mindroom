@@ -520,3 +520,25 @@ async def test_scheduler_operation_failure_is_a_failed_call_with_its_reason() ->
 
     assert result.status == "failed"
     assert result.failure_text == "Task `task123` not found."
+
+
+@pytest.mark.asyncio
+async def test_scheduling_in_a_context_without_a_room_fails_while_reading_schedules_works() -> None:
+    """Creating or editing a schedule needs the conversation's room; listing and cancelling need only its context."""
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    tools = SchedulerTools()
+
+    with (
+        patch("mindroom.custom_tools.scheduler.list_scheduled_tasks", new=AsyncMock(return_value="listed")),
+        tool_runtime_context(replace(_make_context(config), room=None)),
+    ):
+        scheduled = await run_tool_call(
+            toolkit_offers(tools, "schedule"),
+            {"request": "in 10 minutes check logs", "new_thread": False},
+            _call_context(),
+            middleware=(),
+        )
+        listed = await run_tool_call(toolkit_offers(tools, "list_schedules"), {}, _call_context(), middleware=())
+
+    assert (scheduled.status, scheduled.failure_text) == ("failed", "Scheduler tool is unavailable in this context.")
+    assert (listed.status, listed.value) == ("ok", "listed")

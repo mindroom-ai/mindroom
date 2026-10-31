@@ -1672,6 +1672,53 @@ async def test_a_trigger_that_never_went_out_leaves_no_armed_approval(
 
 
 @pytest.mark.asyncio
+async def test_a_failed_withdrawal_of_an_unsent_trigger_still_records_the_failed_fire() -> None:
+    """An armed approval that cannot be withdrawn after a failed fire is logged, and the task is still marked failed."""
+    client = make_matrix_client_mock()
+    client.room_get_state_event.side_effect = joined_member_state
+    client.room_put_state = AsyncMock()
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="@general call it",
+        description="Morning DM",
+        room_id="!test:server",
+        thread_id="$thread123",
+        pre_approved_call=True,
+    )
+    record = ScheduledTaskRecord(
+        task_id="task1234",
+        room_id="!test:server",
+        status="pending",
+        created_at=datetime.now(UTC),
+        workflow=workflow,
+    )
+
+    with (
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        scheduled_call_approvals(
+            arm_scheduled_call_approval=AsyncMock(return_value="armed"),
+            withdraw_scheduled_call_approval=AsyncMock(side_effect=RuntimeError("journal unavailable")),
+        ),
+        patch(
+            "mindroom.scheduling.executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="failed", failure_reason="no")),
+        ),
+    ):
+        await run_once_task(
+            client,
+            "task1234",
+            workflow,
+            Config(),
+            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+            AsyncMock(),
+        )
+
+    assert client.room_put_state.await_args.kwargs["content"]["status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_failed_withdrawal_reports_a_failed_cancel_without_publishing_it() -> None:
     """Cancelling keeps its error result when the approval cannot be withdrawn, and publishes nothing."""
     client = AsyncMock()
@@ -2878,4 +2925,4 @@ def test_outside_an_agent_run_no_call_can_be_stored() -> None:
     with pytest.raises(SchedulingError) as exc_info:
         prepare_scheduled_call("post_slack_message", '{"channel": "U1"}')
 
-    assert "not one of this agent's tools" in str(exc_info.value)
+    assert str(exc_info.value) == "`post_slack_message` is not one of this agent's tools in this conversation."
