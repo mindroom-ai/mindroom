@@ -9,7 +9,8 @@ comparison 1 masks, starts apart: ``_APART`` pins those, and each one's comparis
 Compaction summary requests compare without the model they name (comparison 1's ``summary_requests_name_their_model``):
 a converted database keeps the untagged requests it stored, which usage reports attribute to the same model. Rows
 compare without the usage totals a converted row still holds in ``session_data``, which nothing reads since the ledger
-became the only usage owner.
+became the only usage owner, and a session without metadata compares as one with empty metadata, which an Agno-layout
+redaction rewrote it to (comparison 1's ``preserved_seen_ids_not_read``).
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import pytest
 from tests.session_storage.agno_layout import replacing_database
 from tests.storage_oracle.actions import Scenario, draw
 from tests.storage_oracle.determinism import deterministic
-from tests.storage_oracle.masks import drop_inert_session_totals, untag_summary_requests
+from tests.storage_oracle.masks import drop_inert_session_totals, empty_missing_metadata, untag_summary_requests
 from tests.storage_oracle.record import SEQUENCES, decode, first_difference, sequence_id
 from tests.storage_oracle.store_backend import StoreBackend
 
@@ -90,6 +91,7 @@ def _observed(determinism: Determinism, native: StoreBackend, converted: StoreBa
     for observed in (seen, shown):
         untag_summary_requests(observed["ledger"])
         drop_inert_session_totals(observed)
+        empty_missing_metadata(observed)
     return seen, shown
 
 

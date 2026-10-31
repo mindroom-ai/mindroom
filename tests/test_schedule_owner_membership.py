@@ -207,7 +207,7 @@ async def test_creatorless_schedule_is_invalid_and_left_untouched(owner_membersh
     """A schedule without a recorded creator has no requester to run as, so it is invalid state that is never rewritten."""
     client, _, state = _owner_schedule([{"membership": "join"}], created_by=None)
 
-    with pytest.raises(RuntimeError, match="has invalid state"):
+    with pytest.raises(SchedulingError, match="has invalid stored state"):
         await runnable_task(
             client,
             "!test:server",

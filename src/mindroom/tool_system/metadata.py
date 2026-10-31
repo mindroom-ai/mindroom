@@ -891,6 +891,7 @@ def _build_with_tool_dependencies(
 
     When ``build`` raises ImportError and the tool's optional extra installs, ``build`` runs once more.
     """
+    extra = metadata.dependency_extra or tool_name
     # Pre-check dependencies using find_spec (no side effects) before importing
     deps = metadata.dependencies or []
     if deps:
@@ -898,7 +899,7 @@ def _build_with_tool_dependencies(
         try:
             installed = ensure_tool_deps(
                 deps,
-                tool_name,
+                extra,
                 runtime_paths,
                 missing_message=f"Missing dependencies for tool '{tool_name}': {missing}",
             )
@@ -912,7 +913,7 @@ def _build_with_tool_dependencies(
     try:
         return build()
     except ImportError as first_error:
-        if not auto_install_optional_extra_for_import_retry(tool_name, runtime_paths):
+        if not auto_install_optional_extra_for_import_retry(extra, runtime_paths):
             logger.warning("tool_import_failed", tool_name=tool_name, error=str(first_error))
             logger.warning("tool_dependency_install_required", tool_name=tool_name)
             raise
@@ -1064,6 +1065,7 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
         tool_dict.pop("supports_toolkit_filters", None)
         tool_dict.pop("factory", None)
         tool_dict.pop("mcp_server_id", None)
+        tool_dict.pop("dependency_extra", None)
         tools.append(tool_dict)
 
     tools.sort(key=lambda tool: (tool["category"], tool["name"]))

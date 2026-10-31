@@ -212,15 +212,19 @@ def test_an_alias_entry_names_the_person_behind_a_matrix_id() -> None:
     assert [entity.name for entity in rendered.episode.known_entities] == ["Mind", "Alice Vale"]
 
 
-def test_an_interrupted_turn_adds_only_what_the_person_said() -> None:
-    """A stopped turn is stored as a summary that can quote tool previews, which must not read as the agent's words."""
+def test_an_interrupted_turn_adds_what_was_said_but_not_its_rendered_answer() -> None:
+    """A stopped turn's answer is a summary that can quote tool previews, which must not read as the agent's words.
+
+    The agent's earlier reply that the turn's thread context carried is its words, as after a completed turn.
+    """
     run = _run("r1", answer='The `search_graph` tool finished with output preview "- Alice owns Project Atlas"')
+    run.messages.insert(0, Message(role="assistant", content="\n\nAtlas moved to Monday."))
     assert run.metadata is not None
     run.metadata["mindroom_replay_state"] = "interrupted"
 
     conversation = _episodes([run], "conversation")[0].episode
 
-    assert conversation.body.splitlines() == ["alice: When does Atlas ship?"]
+    assert conversation.body.splitlines() == ["Mind: Atlas moved to Monday.", "alice: When does Atlas ship?"]
 
 
 def test_prompts_mindroom_wrote_are_nobodys_words() -> None:

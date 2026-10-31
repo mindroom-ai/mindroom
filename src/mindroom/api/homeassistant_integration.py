@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
+from mindroom.api.auth import browser_origin
 from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
 from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
@@ -24,11 +25,6 @@ from mindroom.homeassistant_url_validation import homeassistant_url_error_detail
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
-
-
-def _dashboard_url(request: Request) -> str:
-    """Return the dashboard base URL for OAuth redirects."""
-    return str(request.base_url).rstrip("/")
 
 
 class HomeAssistantStatus(BaseModel):
@@ -53,7 +49,6 @@ class HomeAssistantConfig(BaseModel):
     """Home Assistant configuration."""
 
     instance_url: str
-    client_id: str | None = None
     long_lived_token: str | None = None
     allow_private_url: bool = False
 
@@ -221,33 +216,30 @@ async def connect_oauth(
             detail="Home Assistant instance URL is required",
         )
 
-    if not config.client_id:
-        raise HTTPException(
-            status_code=400,
-            detail="OAuth Client ID is required for OAuth flow",
-        )
-
     instance_url = _normalize_instance_url(config.instance_url)
 
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
     resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=config.allow_private_url)
-    redirect_uri = f"{_dashboard_url(request)}/api/homeassistant/callback"
+    # Home Assistant identifies a client by a URL whose scheme and host the redirect URI must share: MindRoom's origin.
+    client_id = browser_origin(request)
+    if client_id is None:
+        raise HTTPException(status_code=503, detail="MINDROOM_PUBLIC_URL is not a valid URL")
     state = issue_pending_oauth_state(
         request,
         "homeassistant",
         agent_name,
         payload={
             "instance_url": instance_url,
-            "client_id": config.client_id,
+            "client_id": client_id,
             "allow_private_url": "true" if config.allow_private_url else "false",
         },
     )
 
     auth_params = {
-        "client_id": config.client_id,
-        "redirect_uri": redirect_uri,
+        "client_id": client_id,
+        "redirect_uri": f"{client_id}/api/homeassistant/callback",
         "response_type": "code",
         "state": state,
     }
@@ -373,7 +365,7 @@ async def callback(request: Request) -> RedirectResponse:
                 },
             )
 
-            return RedirectResponse(url=f"{_dashboard_url(request)}/?homeassistant=connected")
+            return RedirectResponse(url="/?homeassistant=connected")
 
     except ServerFetchUrlError as e:
         raise _homeassistant_url_http_error(e, allow_private_url=allow_private_url) from e

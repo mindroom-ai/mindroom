@@ -1274,6 +1274,7 @@ visibility = [
     "mindroom.history.storage",
     "mindroom.skill_learning.transcript",
     "mindroom.history.conversation_text",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.request_messages",
 ]
@@ -1962,6 +1963,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.homeassistant_integration"
 depends_on = [
+    "mindroom.api.auth",
     "mindroom.api.credentials_oauth_flows",
     "mindroom.api.credentials_target",
 ]
@@ -2878,6 +2880,7 @@ path = "mindroom.history.summary_message"
 depends_on = ["mindroom.llm"]
 visibility = [
     "mindroom.history.conversation_text",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
     "mindroom.history.replay",
@@ -3104,7 +3107,9 @@ depends_on = []
 path = "mindroom.history.interrupted_replay"
 depends_on = [
     "mindroom.constants",
+    "mindroom.history.run_visibility",
     "mindroom.history.storage",
+    "mindroom.history.summary_message",
     "mindroom.prompt_message_tags",
     "mindroom.tool_system.events",
     "mindroom.llm",
@@ -3679,6 +3684,7 @@ depends_on = [
     "mindroom.error_handling",
     "mindroom.execution_preparation",
     "mindroom.helper_usage",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
     "mindroom.history.replay",
@@ -6063,7 +6069,6 @@ path = "mindroom.tool_system.google_workspaces"
 depends_on = [
     "mindroom.tool_system",
     "mindroom.tool_system.agno_toolkits",
-    "mindroom.tool_system.registration",
     "mindroom.tool_system.registry",
 ]
 
@@ -7364,12 +7369,14 @@ expose = [
     "PLUGIN_MODULE_PREFIX",
     "ToolMetadataValidationError",
     "ToolRegistry",
+    "builtin_tool_registry",
     "compose_tool_registry",
     "plugin_module_registrations",
     "register_tool",
 ]
 from = ["mindroom.tool_system.registry"]
 visibility = [
+    "mindroom.tool_system.google_workspaces",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.registration",
@@ -7644,12 +7651,15 @@ from = ["mindroom.oauth.credential_lifecycle"]
 [[interfaces]]
 expose = [
     "InterruptedReplaySnapshot",
+    "NO_TURN_INPUT",
+    "TurnInput",
     "build_interrupted_replay_snapshot",
     "is_interrupted_replay_run",
     "persist_interrupted_replay",
     "persist_interrupted_replay_snapshot",
     "render_stopped_attempt",
     "split_interrupted_tool_trace",
+    "stored_turn_input",
 ]
 from = ["mindroom.history.interrupted_replay"]
 
