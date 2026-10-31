@@ -236,7 +236,7 @@ def test_clearing_the_force_flag_through_a_stale_session_lands_on_the_freshest_r
 
 @pytest.mark.asyncio
 async def test_a_reply_that_read_no_request_leaves_one_made_meanwhile(tmp_path: Path) -> None:
-    """Only the request a reply read clears, so one made while it compacted automatically stays for the next reply."""
+    """Only the request a reply read clears, so one made while that reply ran stays for the next reply."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1")])
