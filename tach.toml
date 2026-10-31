@@ -6124,10 +6124,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.media_attachments"
-depends_on = [
-    "mindroom.providers.registry",
-    "mindroom.tool_system.runtime_context",
-]
+depends_on = ["mindroom.tool_system.runtime_context"]
 
 [[modules]]
 path = "mindroom.tool_system.media_transport"
