@@ -1500,7 +1500,7 @@ async def test_a_call_whose_access_resolves_during_its_wait_returns_its_handle(t
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     runtime = await tool_job_runtime(
         tmp_path,
-        grant=lambda _job: "allowed" if grant["access"] == "allowed" else "pending",
+        grant=lambda _job: grant["access"],
     )
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)

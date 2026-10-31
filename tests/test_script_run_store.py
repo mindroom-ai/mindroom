@@ -42,7 +42,7 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
-def _new_run(*, token_hash: str | None = None) -> ScriptRunRecord:
+def _new_run() -> ScriptRunRecord:
     return ScriptRunRecord(
         run_id="run-1",
         agent_name="watcher",
@@ -50,7 +50,7 @@ def _new_run(*, token_hash: str | None = None) -> ScriptRunRecord:
         room_id="!room:example.test",
         source_digest="source-digest",
         grants=(ScriptToolGrant("website", "read_url"),),
-        token_hash=token_hash or "capability-digest",
+        token_hash="capability-digest",  # noqa: S106
     )
 
 

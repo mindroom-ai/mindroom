@@ -107,7 +107,7 @@ async def test_a_wait_that_starts_while_access_resolves_gives_back_its_claim(tmp
     grant = {"access": "allowed"}
     runtime = await tool_job_runtime(
         tmp_path,
-        grant=lambda _job: "allowed" if grant["access"] == "allowed" else "pending",
+        grant=lambda _job: grant["access"],
     )
     owner = job_owner()
 

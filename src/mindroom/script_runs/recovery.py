@@ -70,14 +70,14 @@ def script_recovery_signature(
     return f"{_RECOVERY_SIGNATURE_VERSION}:{digest}"
 
 
-def verified_script_recovery_signature(
+def run_matches_recovery_signature(
     *,
     run: ScriptRunRecord,
     backend: WorkerBackend | None,
     config: Config,
     gateway_url: str,
-) -> str | None:
-    """Return the current authority only when it matches the run's durable recovery digest."""
+) -> bool:
+    """Return whether the current authority still signs to the run's durable recovery digest."""
     current_signature = script_recovery_signature(
         backend=backend,
         config=config,
@@ -85,6 +85,4 @@ def verified_script_recovery_signature(
         gateway_url=gateway_url,
         resource_profile=run.resource_profile,
     )
-    if current_signature is None or current_signature != run.recovery_signature:
-        return None
-    return current_signature
+    return current_signature is not None and current_signature == run.recovery_signature

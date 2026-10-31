@@ -47,7 +47,7 @@ from mindroom.script_runs.reasons import (
     SCRIPT_TOOL_REMOVED,
     WORKER_CONFIGURATION_CHANGED,
 )
-from mindroom.script_runs.recovery import script_process_authority, verified_script_recovery_signature
+from mindroom.script_runs.recovery import run_matches_recovery_signature, script_process_authority
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
 from mindroom.script_runs.wire import ScriptWorkerError
 from mindroom.script_runs.worker_client import ScriptWorkerClient
@@ -195,7 +195,7 @@ class _LiveScriptRuntimeResolver:
 
     runtime_paths: RuntimePaths
     bot_provider: Callable[[str], AgentBot | None]
-    worker_backend_provider: Callable[[ScriptRunRecord | None], WorkerBackend | None]
+    worker_backend_provider: Callable[[ScriptRunRecord], WorkerBackend | None]
     approval_provider: Callable[[], _BackgroundApprovalManager | None] = approval_manager.get_approval_store
 
     def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
@@ -383,7 +383,8 @@ class ScriptRuntimeLifecycle:
     def tool_manager(self) -> ScriptRunManager | None:
         """Return the manager script tools use while this runtime serves them, else None.
 
-        Serving starts when activation with the API completes and ends at `unbind_api` or the start of `shutdown`.
+        Serving starts when activation with the API begins its startup reconciliation and ends at `unbind_api` or the
+        start of `shutdown`.
         """
         return self.manager if self.api_enabled and self._started and self._start_requested else None
 
@@ -399,14 +400,14 @@ class ScriptRuntimeLifecycle:
             )
 
     async def start(self) -> None:
-        """Bind tools and reconcile after both API and live agent registries exist."""
+        """Request activation; it runs once the API is ready too."""
         self._start_requested = True
         if self.api_enabled and not self._api_ready.is_set():
             return
         await self._activate()
 
     async def _activate(self) -> None:
-        """Activate exactly once after both composition roots have reported ready."""
+        """Activate once both composition roots have reported ready, and again after the API rebinds."""
         async with self._activation_lock:
             if self._started:
                 return
@@ -460,34 +461,25 @@ class ScriptRuntimeLifecycle:
         required_backend_locator: str | None = None,
     ) -> WorkerBackend | None:
         async with self._worker_refresh_lock:
-            return await self._refresh_worker_backend_locked(
-                required_backend_locator=required_backend_locator,
-            )
-
-    async def _refresh_worker_backend_locked(
-        self,
-        *,
-        required_backend_locator: str | None = None,
-    ) -> WorkerBackend | None:
-        current = self._current_worker_lease
-        if current is not None and (
-            required_backend_locator is None or current.manager.cleanup_locator == required_backend_locator
-        ):
-            self._publish_worker_lease(current)
-            return current.manager
-        if current is not None:
-            self._publish_worker_lease(None)
-            await asyncio.to_thread(current.release)
-        lease = await self._acquire_current_worker_lease(required_backend_locator)
-        if lease is None:
-            self._publish_worker_lease(None)
-            return None
-        if required_backend_locator is not None and lease.manager.cleanup_locator != required_backend_locator:
-            await asyncio.to_thread(lease.release)
-            self._publish_worker_lease(None)
-            return None
-        self._publish_worker_lease(lease)
-        return lease.manager
+            current = self._current_worker_lease
+            if current is not None and (
+                required_backend_locator is None or current.manager.cleanup_locator == required_backend_locator
+            ):
+                self._publish_worker_lease(current)
+                return current.manager
+            if current is not None:
+                self._publish_worker_lease(None)
+                await asyncio.to_thread(current.release)
+            lease = await self._acquire_current_worker_lease(required_backend_locator)
+            if lease is None:
+                self._publish_worker_lease(None)
+                return None
+            if required_backend_locator is not None and lease.manager.cleanup_locator != required_backend_locator:
+                await asyncio.to_thread(lease.release)
+                self._publish_worker_lease(None)
+                return None
+            self._publish_worker_lease(lease)
+            return lease.manager
 
     async def _acquire_current_worker_lease(
         self,
@@ -716,14 +708,11 @@ class ScriptRuntimeLifecycle:
 
     def _run_matches_recovery_contract(self, run: ScriptRunRecord, *, config: Config) -> bool:
         """Return whether the current backend advertises this run as recoverable."""
-        return (
-            verified_script_recovery_signature(
-                run=run,
-                backend=self.manager.worker_backend_for(run),
-                config=config,
-                gateway_url=self.manager.gateway_url,
-            )
-            is not None
+        return run_matches_recovery_signature(
+            run=run,
+            backend=self.manager.worker_backend_for(run),
+            config=config,
+            gateway_url=self.manager.gateway_url,
         )
 
     async def _interrupt_runs(
@@ -866,14 +855,14 @@ class ScriptRuntimeLifecycle:
             )
             unauthorized_ids = {run.run_id for run in unauthorized}
             runs = [run for run in runs if run.run_id not in unauthorized_ids]
-        touch_targets: dict[tuple[int, str], tuple[WorkerBackend, str]] = {}
-        for run in runs:
-            run_backend = self.manager.worker_backend_for(run)
-            if run_backend is not None and run.worker_key is not None:
-                touch_targets[(id(run_backend), run.worker_key)] = (run_backend, run.worker_key)
-        await asyncio.gather(
-            *(self._touch_worker(run_backend, worker_key) for run_backend, worker_key in touch_targets.values()),
-        )
+        backend = self.manager.worker_backend
+        if backend is not None:
+            worker_keys = dict.fromkeys(
+                run.worker_key
+                for run in runs
+                if run.worker_key is not None and self.manager.worker_backend_for(run) is backend
+            )
+            await asyncio.gather(*(self._touch_worker(backend, worker_key) for worker_key in worker_keys))
         semaphore = asyncio.Semaphore(self.pass_concurrency)
 
         async def reconcile_run(run: ScriptRunRecord) -> None:
@@ -972,14 +961,11 @@ class ScriptRuntimeLifecycle:
                 backend = await self._refresh_worker_backend(required_backend_locator=run.worker_backend_locator)
                 if backend is not None and run.worker_key is not None:
                     await asyncio.to_thread(backend.touch_worker, run.worker_key)
-                if (
-                    verified_script_recovery_signature(
-                        run=run,
-                        backend=backend,
-                        config=config,
-                        gateway_url=self.manager.gateway_url,
-                    )
-                    is None
+                if not run_matches_recovery_signature(
+                    run=run,
+                    backend=backend,
+                    config=config,
+                    gateway_url=self.manager.gateway_url,
                 ):
                     await self.manager.revoke(run.run_id, reason=WORKER_CONFIGURATION_CHANGED)
                     await self.manager.reconcile_durable(run_id=run.run_id)
@@ -1141,7 +1127,7 @@ class ScriptRuntimeLifecycle:
         *,
         deadline: float,
         timeout_seconds: float,
-        preserved_runs: Sequence[ScriptRunRecord] = (),
+        preserved_runs: Sequence[ScriptRunRecord],
     ) -> None:
         try:
             await asyncio.wait_for(
@@ -1315,12 +1301,12 @@ async def _script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: i
     explicit_url = (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip()
     if explicit_url:
         gateway_url = explicit_url.rstrip("/")
-        await _validate_script_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
+        await _validate_script_gateway(gateway_url)
         return gateway_url
     public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
     if public_url:
         gateway_url = f"{public_url.rstrip('/')}/api/script-gateway"
-        await _validate_script_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
+        await _validate_script_gateway(gateway_url)
         return gateway_url
     msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
     raise ValueError(msg)
@@ -1340,7 +1326,7 @@ async def optional_script_gateway_url(runtime_paths: RuntimePaths, *, host: str,
         return ""
 
 
-async def _validate_script_gateway(gateway_url: str, *, worker_process_enabled: bool) -> None:
+async def _validate_script_gateway(gateway_url: str) -> None:
     parsed = urlsplit(gateway_url)
     try:
         port = parsed.port
@@ -1358,8 +1344,6 @@ async def _validate_script_gateway(gateway_url: str, *, worker_process_enabled: 
     ):
         msg = "Background-script gateway must be a valid HTTP(S) URL."
         raise ValueError(msg)
-    if not worker_process_enabled:
-        return
     try:
         resolved = await asyncio.to_thread(
             socket.getaddrinfo,

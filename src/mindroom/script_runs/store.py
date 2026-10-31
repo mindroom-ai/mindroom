@@ -22,6 +22,7 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptRunState,
     ScriptToolGrant,
+    utc_timestamp,
 )
 
 if TYPE_CHECKING:
@@ -140,10 +141,7 @@ class ScriptRunStore:
     def get_run(self, run_id: str) -> ScriptRunRecord:
         """Return one durable run record."""
         with self._read_connection() as connection:
-            row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
-        if row is None:
-            raise ScriptRunNotFoundError(run_id)
-        return _run_from_row(row)
+            return _select_run(connection, run_id)
 
     def list_runs(
         self,
@@ -189,10 +187,7 @@ class ScriptRunStore:
     ) -> ScriptCallClaim:
         """Create one call claim or return its stable duplicate receipt, only while the run accepts calls."""
         with self._write_transaction() as connection:
-            run_row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
-            if run_row is None:
-                raise ScriptRunNotFoundError(run_id)
-            run = _run_from_row(run_row)
+            run = _select_run(connection, run_id)
             # Checked first, so a retried call of a run revoked since its capability was verified is refused too.
             if not run.accepts_calls:
                 raise ScriptCapabilityError(_CALLS_NOT_ACCEPTED)
@@ -209,8 +204,8 @@ class ScriptRunStore:
 
             if grant not in run.grants:
                 raise ScriptCapabilityError(_GRANT_NOT_GRANTED)
-            now = _utc_now()
-            window_start = (datetime.now(UTC) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+            now = utc_timestamp()
+            window_start = utc_timestamp(datetime.now(UTC) - timedelta(minutes=1))
             recent_call_count = int(
                 connection.execute(
                     "SELECT COUNT(*) FROM script_calls WHERE run_id = ? AND created_at >= ?",
@@ -252,13 +247,7 @@ class ScriptRunStore:
     def get_call(self, run_id: str, call_id: str) -> ScriptCallRecord:
         """Return one durable logical call receipt."""
         with self._read_connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM script_calls WHERE run_id = ? AND call_id = ?",
-                (run_id, call_id),
-            ).fetchone()
-        if row is None:
-            raise ScriptCallNotFoundError(call_id)
-        return _call_from_row(row)
+            return _select_call(connection, run_id, call_id)
 
     def pending_calls(self, run_id: str) -> list[ScriptCallRecord]:
         """Return pending receipts that still need broker ownership settlement."""
@@ -279,13 +268,7 @@ class ScriptRunStore:
         """Publish indeterminate only if no terminal execution receipt already won."""
         receipt_json = _serialize_receipt(result=None, error=error)
         with self._write_transaction() as connection:
-            row = connection.execute(
-                "SELECT * FROM script_calls WHERE run_id = ? AND call_id = ?",
-                (run_id, call_id),
-            ).fetchone()
-            if row is None:
-                raise ScriptCallNotFoundError(call_id)
-            existing = _call_from_row(row)
+            existing = _select_call(connection, run_id, call_id)
             if existing.state in _TERMINAL_CALL_STATES:
                 return existing
             connection.execute(
@@ -350,13 +333,10 @@ class ScriptRunStore:
     def request_cancel(self, run_id: str, *, reason: str | None = None) -> ScriptRunRecord:
         """Durably revoke a run before any cancellation signal is sent."""
         with self._write_transaction() as connection:
-            row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
-            if row is None:
-                raise ScriptRunNotFoundError(run_id)
-            run = _run_from_row(row)
+            run = _select_run(connection, run_id)
             if run.cancel_requested_at is not None or run.state in TERMINAL_SCRIPT_RUN_STATES:
                 return run
-            now = _utc_now()
+            now = utc_timestamp()
             connection.execute(
                 """
                 UPDATE script_runs
@@ -371,10 +351,7 @@ class ScriptRunStore:
         """Persist the containment-checked storage-relative directory for one launch snapshot."""
         normalized = _validated_snapshot_locator(run_id, locator)
         with self._write_transaction() as connection:
-            row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
-            if row is None:
-                raise ScriptRunNotFoundError(run_id)
-            run = _run_from_row(row)
+            run = _select_run(connection, run_id)
             if run.snapshot_locator is not None:
                 if run.snapshot_locator == normalized:
                     return run
@@ -402,13 +379,10 @@ class ScriptRunStore:
         _validate_run_error(error)
         _validate_run_output(output)
         with self._write_transaction() as connection:
-            row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
-            if row is None:
-                raise ScriptRunNotFoundError(run_id)
-            run = _run_from_row(row)
+            run = _select_run(connection, run_id)
             if run.state in TERMINAL_SCRIPT_RUN_STATES or run.finished_at is not None:
                 return run
-            now = _utc_now()
+            now = utc_timestamp()
             updated = replace(
                 run,
                 finished_at=now,
@@ -449,16 +423,10 @@ class ScriptRunStore:
             msg = f"Script run '{run_id}' cleanup can finalize only to a terminal state."
             raise ScriptRunStoreError(msg)
         with self._write_transaction() as connection:
-            row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
-            if row is None:
-                raise ScriptRunNotFoundError(run_id)
-            run = _run_from_row(row)
+            run = _select_run(connection, run_id)
             if run.state in TERMINAL_SCRIPT_RUN_STATES:
                 return run
-            if state not in _RUN_TRANSITIONS[run.state]:
-                msg = f"Script run '{run_id}' cannot transition from {run.state.value} to {state.value}."
-                raise ScriptRunStoreError(msg)
-            finished_at = run.finished_at or _utc_now()
+            finished_at = run.finished_at or utc_timestamp()
             final_error = run.error if error is None else error
             updated = replace(
                 run,
@@ -494,17 +462,14 @@ class ScriptRunStore:
         """Validate and atomically apply one durable run-state transition."""
         _validate_run_error(error)
         with self._write_transaction() as connection:
-            row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
-            if row is None:
-                raise ScriptRunNotFoundError(run_id)
-            run = _run_from_row(row)
+            run = _select_run(connection, run_id)
             if state is ScriptRunState.RUNNING and run.cancel_requested_at is not None:
                 msg = f"Script run '{run_id}' cannot enter running after cancellation was requested."
                 raise ScriptRunStoreError(msg)
             if state is not run.state and state not in _RUN_TRANSITIONS[run.state]:
                 msg = f"Script run '{run_id}' cannot transition from {run.state.value} to {state.value}."
                 raise ScriptRunStoreError(msg)
-            now = _utc_now()
+            now = utc_timestamp()
             started_at = run.started_at
             finished_at = run.finished_at
             if state is ScriptRunState.RUNNING and started_at is None:
@@ -658,6 +623,23 @@ def _connect(database_path: Path) -> sqlite3.Connection:
     connection.execute("PRAGMA synchronous = FULL")
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+def _select_run(connection: sqlite3.Connection, run_id: str) -> ScriptRunRecord:
+    row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
+    if row is None:
+        raise ScriptRunNotFoundError(run_id)
+    return _run_from_row(row)
+
+
+def _select_call(connection: sqlite3.Connection, run_id: str, call_id: str) -> ScriptCallRecord:
+    row = connection.execute(
+        "SELECT * FROM script_calls WHERE run_id = ? AND call_id = ?",
+        (run_id, call_id),
+    ).fetchone()
+    if row is None:
+        raise ScriptCallNotFoundError(call_id)
+    return _call_from_row(row)
 
 
 def script_capability_hash(token: str) -> str:
@@ -822,7 +804,3 @@ def _validated_snapshot_locator(run_id: str, locator: str) -> str:
 
 def _nullable_string(value: object) -> str | None:
     return str(value) if value is not None else None
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")

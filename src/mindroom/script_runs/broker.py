@@ -266,20 +266,6 @@ class ScriptToolBroker:
             msg = "Background script call is unavailable."
             raise ScriptRuntimeUnavailableError(msg)
 
-    def _prepare_call(self, request: ScriptToolCallRequest, run: ScriptRunRecord) -> _PreparedScriptCall:
-        claim = self.store.claim_call(
-            run_id=run.run_id,
-            call_id=request.call_id,
-            grant=request.grant,
-            arguments_digest=request.arguments_digest,
-        )
-        return _PreparedScriptCall(
-            run=run,
-            call=claim.call,
-            arguments=request.arguments,
-            created=claim.created,
-        )
-
     def _prepare_authenticated_call(
         self,
         request: ScriptToolCallRequest,
@@ -287,7 +273,13 @@ class ScriptToolBroker:
     ) -> _PreparedScriptCall:
         run = self.authenticate(request.run_id, authorization)
         self._require_call_admission()
-        return self._prepare_call(request, run)
+        claim = self.store.claim_call(
+            run_id=run.run_id,
+            call_id=request.call_id,
+            grant=request.grant,
+            arguments_digest=request.arguments_digest,
+        )
+        return _PreparedScriptCall(run=run, call=claim.call, arguments=request.arguments, created=claim.created)
 
     async def _accept_prepared_call(
         self,
@@ -446,16 +438,12 @@ class ScriptToolBroker:
         authorization: str | None,
     ) -> ScriptCallRecord:
         """Authenticate a receipt and settle approval debt discovered as orphaned."""
-        await asyncio.to_thread(self.authenticate, run_id, authorization)
+        run = await asyncio.to_thread(self.authenticate, run_id, authorization)
         self._require_call_admission()
         receipt = await asyncio.to_thread(self.get_call, run_id, call_id)
         if receipt.state is ScriptCallState.INDETERMINATE:
-            run, call = await asyncio.gather(
-                asyncio.to_thread(self.store.get_run, run_id),
-                asyncio.to_thread(self.store.get_call, run_id, call_id),
-            )
             await self.runtime_resolver.settle_approval(
-                _background_origin(run, call),
+                _background_origin(run, receipt),
                 reason="Background script call ownership was orphaned after restart.",
             )
         return receipt

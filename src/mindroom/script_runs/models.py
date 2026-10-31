@@ -35,6 +35,11 @@ class ScriptCallState(StrEnum):
     INDETERMINATE = "indeterminate"
 
 
+def utc_timestamp(moment: datetime | None = None) -> str:
+    """Return *moment*, or now, in the UTC form run and call timestamps are stored and compared in."""
+    return (moment or datetime.now(UTC)).isoformat().replace("+00:00", "Z")
+
+
 @dataclass(frozen=True, slots=True)
 class ScriptToolGrant:
     """One permitted toolkit/function pair captured at script launch."""
@@ -70,7 +75,7 @@ class ScriptRunRecord:
     max_tool_calls_per_minute: int = 30
     max_runtime_seconds: int = 24 * 60 * 60
     state: ScriptRunState = ScriptRunState.STARTING
-    created_at: str = field(default_factory=lambda: _utc_now())
+    created_at: str = field(default_factory=utc_timestamp)
     started_at: str | None = None
     finished_at: str | None = None
     exit_code: int | None = None
@@ -105,10 +110,6 @@ class ScriptCallClaim:
 
     call: ScriptCallRecord
     created: bool
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 _SCRIPT_RUN_ID_RE = re.compile(r"script-[0-9a-f]{32}")
