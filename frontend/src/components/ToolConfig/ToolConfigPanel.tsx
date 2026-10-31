@@ -69,10 +69,7 @@ function coerceEditValue(
         .filter((entry) => entry.length > 0);
     return [];
   }
-  if (field.type === "boolean") {
-    if (typeof value === "boolean") return String(value);
-    return "";
-  }
+  if (field.type === "boolean") return String(value === true);
   if (field.type === "number") {
     if (typeof value === "number") return String(value);
     return "";

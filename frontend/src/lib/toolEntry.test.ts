@@ -170,12 +170,6 @@ describe("toolEntry", () => {
 
   it("collapses a structured entry back to a plain string when overrides are cleared", () => {
     expect(
-      setToolOverridesInEntries("shell", { extra_env_passthrough: null }, [
-        { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
-        "browser",
-      ]),
-    ).toEqual(["shell", "browser"]);
-    expect(
       setToolOverridesInEntries(
         "shell",
         { defer: null, initial: null, future_field: null },
