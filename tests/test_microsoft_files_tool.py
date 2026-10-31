@@ -202,26 +202,46 @@ def test_a_file_that_is_not_a_graph_item_or_link_is_refused(
 
 
 @pytest.mark.parametrize(
-    "call",
+    ("call", "code"),
     [
-        lambda tools: tools.microsoft_files_list_folder(folder="report.docx"),
-        lambda tools: tools.microsoft_files_get_file("report.docx"),
-        lambda tools: tools.microsoft_files_download_file("report.docx"),
-        lambda tools: tools.microsoft_files_replace_file("report.docx", "report.docx", "etag", WEB_URL),
-        lambda tools: tools.microsoft_files_upload_file("report.docx", folder="report.docx", expected_web_url=WEB_URL),
-        lambda tools: tools.microsoft_files_excel_list_worksheets("report.docx"),
-        lambda tools: tools.microsoft_files_excel_read_range("report.docx", "Budget"),
-        lambda tools: tools.microsoft_files_excel_update_range("report.docx", "Budget", "A1", [[1]], WEB_URL),
+        (lambda tools: tools.microsoft_files_list_folder(folder="report.docx"), "invalid_file"),
+        (lambda tools: tools.microsoft_files_get_file("report.docx"), "invalid_file"),
+        (lambda tools: tools.microsoft_files_download_file("report.docx"), "invalid_file"),
+        (
+            lambda tools: tools.microsoft_files_replace_file("report.docx", "report.docx", "etag", WEB_URL),
+            "invalid_file",
+        ),
+        (
+            lambda tools: tools.microsoft_files_upload_file(
+                "report.docx",
+                folder="report.docx",
+                expected_web_url=WEB_URL,
+            ),
+            "invalid_file",
+        ),
+        (lambda tools: tools.microsoft_files_excel_list_worksheets("report.docx"), "invalid_file"),
+        (lambda tools: tools.microsoft_files_excel_read_range("report.docx", "Budget"), "invalid_file"),
+        (
+            lambda tools: tools.microsoft_files_excel_update_range("report.docx", "Budget", "A1", [[1]], WEB_URL),
+            "invalid_file",
+        ),
+        (lambda tools: tools.microsoft_files_search(" "), "invalid_argument"),
+        (lambda tools: tools.microsoft_files_search("plan", limit=51), "invalid_argument"),
+        # A sharing link is redeemed for lasting access, so a refused listing must not reach Graph.
+        (lambda tools: tools.microsoft_files_list_folder(SHARE_LINK, limit=0), "invalid_argument"),
+        (lambda tools: tools.microsoft_files_list_folder(SHARE_LINK, limit=201), "invalid_argument"),
+        (lambda tools: tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget", "A1:"), "invalid_argument"),
     ],
 )
-def test_a_malformed_file_is_refused_before_asking_for_a_connection(
+def test_a_malformed_argument_is_refused_before_asking_for_a_connection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     call: Callable[[MicrosoftFilesTools], str],
+    code: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph(), connected=False)
 
-    assert json.loads(call(tools))["code"] == "invalid_file"
+    assert json.loads(call(tools))["code"] == code
     assert graph.requests == []
 
 
@@ -387,39 +407,6 @@ def test_search_refuses_a_malformed_page_token(
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
     assert json.loads(tools.microsoft_files_search("plan", page_token=page_token))["code"] == "invalid_page_token"
-    assert graph.requests == []
-
-
-@pytest.mark.parametrize("limit", [0, 201])
-def test_list_folder_refuses_a_limit_before_redeeming_a_link(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    limit: int,
-) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
-
-    assert json.loads(tools.microsoft_files_list_folder(SHARE_LINK, limit=limit))["code"] == "invalid_argument"
-    assert graph.requests == []
-
-
-@pytest.mark.parametrize(
-    "call",
-    [
-        lambda tools: tools.microsoft_files_search(" "),
-        lambda tools: tools.microsoft_files_search("plan", limit=51),
-        lambda tools: tools.microsoft_files_list_folder(limit=0),
-        lambda tools: tools.microsoft_files_excel_read_range(ITEM_PATH, "a/b"),
-        lambda tools: tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget", "A1:"),
-    ],
-)
-def test_a_malformed_argument_is_refused_before_asking_for_a_connection(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    call: Callable[[MicrosoftFilesTools], str],
-) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _Graph(), connected=False)
-
-    assert json.loads(call(tools))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -762,7 +749,7 @@ def test_excel_refuses_impossible_worksheet_names(
     monkeypatch: pytest.MonkeyPatch,
     worksheet: str,
 ) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph(), connected=False)
 
     assert json.loads(tools.microsoft_files_excel_read_range(ITEM_PATH, worksheet, "A1"))["code"] == "invalid_argument"
     assert graph.requests == []

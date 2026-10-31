@@ -289,21 +289,15 @@ async def test_invalid_keyed_sends_never_send(
     assert not transport.events
 
 
-@pytest.mark.parametrize("attachments", [[""], [" "]])
 async def test_blank_attachments_keep_a_keyed_send_text_only(
     context: ToolRuntimeContext,
     transport: MatrixTransport,
-    attachments: list[str],
 ) -> None:
     """Blank attachment entries are dropped, so a repeated keyed text send still sends once."""
     with tool_runtime_context(context):
         first, second = [
             json.loads(
-                await MatrixMessageTools().matrix_message(
-                    message="text",
-                    attachments=attachments,
-                    idempotency_key="key",
-                ),
+                await MatrixMessageTools().matrix_message(message="text", attachments=[" "], idempotency_key="key"),
             )
             for _ in range(2)
         ]

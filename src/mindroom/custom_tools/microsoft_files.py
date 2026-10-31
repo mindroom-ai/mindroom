@@ -547,23 +547,20 @@ class MicrosoftFilesTools(Toolkit):
 
         """
 
-        def build() -> tuple[str, str]:
+        def build() -> str:
             _parse_file(file)
             sheet = _worksheet(worksheet)
             if address is None:
-                target = "usedRange(valuesOnly=true)"
-            else:
-                checked, shape = _address(address)
-                _checked_range_size(*shape)
-                target = f"range(address='{checked}')"
-            return sheet, target
+                return f"{sheet}/usedRange(valuesOnly=true)"
+            checked, shape = _address(address)
+            _checked_range_size(*shape)
+            return f"{sheet}/range(address='{checked}')"
 
-        def operation(session: GraphSession, checked: tuple[str, str]) -> Mapping[str, object]:
-            sheet, target = checked
+        def operation(session: GraphSession, target: str) -> Mapping[str, object]:
             item = _resolve(file, session)
             payload = session.json(
                 "GET",
-                f"{item.path}/workbook/worksheets/{sheet}/{target}",
+                f"{item.path}/workbook/worksheets/{target}",
                 params={"$select": "address,values,rowCount,columnCount"},
             )
             return {"range": _range(payload)}
