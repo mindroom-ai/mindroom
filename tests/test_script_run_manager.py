@@ -33,7 +33,7 @@ from mindroom.script_runs.manager import (
     ScriptRunManagerError,
     ScriptRunStatus,
 )
-from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
+from mindroom.script_runs.models import TERMINAL_SCRIPT_RUN_STATES, ScriptRunRecord, ScriptRunState, ScriptToolGrant
 from mindroom.script_runs.reasons import PROCESS_EXIT_OBSERVED, SUPERVISOR_UNAVAILABLE
 from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import MAX_RUN_ERROR_BYTES, ScriptRunStore
@@ -69,7 +69,9 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     import os
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
+
+    from mindroom.script_runs.supervised import ScriptSnapshot
 
 
 def _runtime_paths(
@@ -173,12 +175,7 @@ class _Broker:
 
     async def cancel_run(self, run_id: str) -> None:
         run = self.store.get_run(run_id)
-        assert run.cancel_requested_at is not None or run.state in {
-            ScriptRunState.EXITED,
-            ScriptRunState.FAILED,
-            ScriptRunState.CANCELLED,
-            ScriptRunState.INTERRUPTED,
-        }
+        assert run.cancel_requested_at is not None or run.state in TERMINAL_SCRIPT_RUN_STATES
         self.cancelled_runs.append(run_id)
         self.cancelled_states.append(run.state)
         if self.failures:
@@ -196,6 +193,7 @@ class _WorkerBackend:
     saw_starting: bool = False
     list_worker_thread_ids: list[int] = field(default_factory=list)
     retired_worker_keys: list[str] = field(default_factory=list)
+    retire_failures: list[BaseException] = field(default_factory=list)
 
     def ensure_worker(
         self,
@@ -249,6 +247,8 @@ class _WorkerBackend:
         return self.handles[worker_key]
 
     def retire_worker(self, worker_key: str) -> None:
+        if self.retire_failures:
+            raise self.retire_failures.pop(0)
         self.retired_worker_keys.append(worker_key)
         self.handles.pop(worker_key, None)
 
@@ -304,8 +304,9 @@ class _WorkerClient:
     launch_config_snapshots: list[dict[str, object] | None] = field(default_factory=list)
     cancel_observed_revocation: bool = False
     cancel_forces: list[bool] = field(default_factory=list)
-    cancel_handles: list[str] = field(default_factory=list)
-    requested_handles: list[str] = field(default_factory=list)
+    launched_run_ids: list[str] = field(default_factory=list)
+    status_run_ids: list[str] = field(default_factory=list)
+    cancelled_run_ids: list[str] = field(default_factory=list)
     next_status: WorkerScriptStatus = field(
         default_factory=lambda: WorkerScriptStatus(state="exited", exit_code=-15),
     )
@@ -336,10 +337,8 @@ class _WorkerClient:
         starting = self.store.get_run(run_id)
         assert starting.state is ScriptRunState.STARTING
         assert starting.worker_id == worker.worker_id
-        supervisor_handle = f"shell:{run_id.removeprefix('script-')}"
-        assert len(supervisor_handle) == len("shell:") + 32
-        self.requested_handles.append(supervisor_handle)
-        if len(self.requested_handles) == 2 and self.second_launch_entered is not None:
+        self.launched_run_ids.append(run_id)
+        if len(self.launched_run_ids) == 2 and self.second_launch_entered is not None:
             self.second_launch_entered.set()
         workspace = Path(worker.debug_metadata["state_root"]) / "workspace"
         source = workspace / ".mindroom" / "script-runs" / run_id / "source.py"
@@ -362,7 +361,8 @@ class _WorkerClient:
         *,
         run_id: str,
     ) -> WorkerScriptStatus:
-        del worker, run_id
+        del worker
+        self.status_run_ids.append(run_id)
         if self.status_failures:
             raise self.status_failures.pop(0)
         if self.status_results:
@@ -378,7 +378,7 @@ class _WorkerClient:
     ) -> WorkerScriptCancel:
         del worker
         self.cancel_forces.append(force)
-        self.cancel_handles.append(f"shell:{run_id.removeprefix('script-')}")
+        self.cancelled_run_ids.append(run_id)
         self.cancel_observed_revocation = self.store.get_run(run_id).cancel_requested_at is not None
         if self.cancel_failures:
             raise self.cancel_failures.pop(0)
@@ -417,6 +417,40 @@ def _manager(
         cancellation_poll_interval_seconds=0,
     )
     return manager, worker_backend, client
+
+
+async def _started(*_args: object, **kwargs: object) -> ShellRunResult:
+    return ShellRunResult(message="Started background process", handle=str(kwargs["handle"]))
+
+
+def _fake_local_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    launch: Callable[..., Awaitable[ShellRunResult]] = _started,
+    kill: str | Callable[[bool], str] = lambda force: "Force-killed process" if force else "Terminated process",
+    check: str | Callable[[], str] = "Status: FINISHED (exit code -9)",
+) -> list[tuple[str, bool]]:
+    """Route unsafe-local runs through a fake primary shell supervisor and return the signals it receives."""
+    signals: list[tuple[str, bool]] = []
+
+    def signal(_socket_path: str, *, namespace: str, handle: str, force: bool) -> str:
+        del namespace
+        signals.append((handle, force))
+        return kill if isinstance(kill, str) else kill(force)
+
+    def status(_socket_path: str, *, namespace: str, handle: str) -> str:
+        del namespace, handle
+        return check if isinstance(check, str) else check()
+
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch)
+    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", signal)
+    monkeypatch.setattr(supervised_module, "check_command_via_supervisor", status)
+    return signals
+
+
+def _handle(run_id: str) -> str:
+    return f"shell:{run_id.removeprefix('script-')}"
 
 
 @pytest.mark.asyncio
@@ -518,7 +552,7 @@ async def _wait_for_cancel_request(manager: ScriptRunManager, run_id: str) -> No
 
 
 @pytest.mark.asyncio
-async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: Path) -> None:
+async def test_worker_launch_sees_durable_intent_and_private_snapshot(tmp_path: Path) -> None:
     """Worker allocation sees durable intent, then the launch sees private snapshotted files."""
     manager, backend, client = _manager(tmp_path)
     context = _context(tmp_path)
@@ -542,7 +576,7 @@ async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: P
             state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
     ]
-    assert client.requested_handles == [f"shell:{run.run_id.removeprefix('script-')}"]
+    assert client.launched_run_ids == [run.run_id]
     assert run.max_tool_calls_per_minute == 4
     assert run.max_runtime_seconds == 3600
     assert run.snapshot_locator is not None
@@ -654,7 +688,7 @@ async def test_launch_snapshots_profile_from_the_backend_admitted_after_launch_g
     assert run.resource_requests == {"cpu": "400m", "memory": "1Gi"}
     assert run.resource_limits == {"cpu": "1", "memory": "3Gi"}
     assert admitted_backend.specs[-1].resource_profile == "standard"
-    assert client.requested_handles
+    assert client.launched_run_ids
 
 
 @pytest.mark.asyncio
@@ -700,12 +734,11 @@ async def test_local_launch_keeps_workspace_code_out_of_the_shim(
     manager, _backend, _client = _manager(tmp_path, mode="local")
     launched_argv: list[list[str]] = []
 
-    async def launch_local(*_args: object, **kwargs: object) -> ShellRunResult:
+    async def launch_local(*args: object, **kwargs: object) -> ShellRunResult:
         launched_argv.append(list(cast("list[str]", kwargs["argv"])))
-        return ShellRunResult(message="Started background process", handle=str(kwargs["handle"]))
+        return await _started(*args, **kwargs)
 
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+    _fake_local_supervisor(monkeypatch, launch=launch_local)
 
     await manager.run(_context(tmp_path, mode="local"), source="print('ok')\n")
 
@@ -728,14 +761,12 @@ async def test_shutdown_fence_drains_admitted_launch_and_rejects_racing_launch(
         client.launch_release = release_launch
     else:
 
-        async def launch_local(*_args: object, **_kwargs: object) -> ShellRunResult:
+        async def launch_local(*args: object, **kwargs: object) -> ShellRunResult:
             launch_entered.set()
             await release_launch.wait()
-            handle = str(_kwargs["handle"])
-            return ShellRunResult(message="Started background process", handle=handle)
+            return await _started(*args, **kwargs)
 
-        monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-        monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+        _fake_local_supervisor(monkeypatch, launch=launch_local)
 
     admitted_launch = asyncio.create_task(manager.run(_context(tmp_path, mode=mode), source="print('ok')\n"))
     await asyncio.wait_for(launch_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
@@ -783,7 +814,7 @@ async def test_static_worker_backend_rejects_script_before_creating_any_state(tm
 
     assert manager.store.list_runs() == []
     assert static_backend.list_workers() == []
-    assert client.requested_handles == []
+    assert client.launched_run_ids == []
 
 
 @pytest.mark.asyncio
@@ -796,7 +827,7 @@ async def test_kubernetes_worker_rejects_scripts_without_a_gateway_only_listener
 
     assert manager.store.list_runs() == []
     assert backend.specs == []
-    assert client.requested_handles == []
+    assert client.launched_run_ids == []
 
 
 @pytest.mark.asyncio
@@ -826,7 +857,7 @@ async def test_kubernetes_worker_accepts_scripts_with_an_explicit_isolated_gatew
             state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
     ]
-    assert len(client.requested_handles) == 1
+    assert len(client.launched_run_ids) == 1
 
 
 @pytest.mark.asyncio
@@ -859,7 +890,7 @@ async def test_kubernetes_worker_requires_an_explicit_gateway_with_isolation_att
 
     assert manager.store.list_runs() == []
     assert backend.specs == []
-    assert client.requested_handles == []
+    assert client.launched_run_ids == []
 
 
 @pytest.mark.asyncio
@@ -896,7 +927,7 @@ async def test_worker_launch_requires_primary_visible_state_before_snapshot(
         *,
         source: bytes,
         token: str,
-    ) -> tuple[Path, Path]:
+    ) -> ScriptSnapshot:
         del source, token
         snapshot_writes.append(run_id)
         message = "snapshot creation must not be reached"
@@ -911,7 +942,6 @@ async def test_worker_launch_requires_primary_visible_state_before_snapshot(
     assert snapshot_writes == []
     [failed] = manager.store.list_runs()
     assert failed.state is ScriptRunState.FAILED
-    assert failed.snapshot_locator is None
 
 
 @pytest.mark.asyncio
@@ -942,7 +972,7 @@ async def test_a_launch_that_raises_fails_its_run_with_why(
         await manager.run(_context(tmp_path), source="print('ok')\n")
 
     [failed] = manager.store.list_runs()
-    assert (failed.state, failed.error) == (ScriptRunState.FAILED, text)
+    assert (failed.state, failed.error, failed.cancellation_reason) == (ScriptRunState.FAILED, text, text)
 
 
 @pytest.mark.asyncio
@@ -1228,7 +1258,7 @@ async def test_private_user_scope_rejects_background_worker_before_persisting_ru
 
     assert manager.store.list_runs() == []
     assert backend.specs == []
-    assert client.requested_handles == []
+    assert client.launched_run_ids == []
 
 
 @pytest.mark.asyncio
@@ -1251,9 +1281,9 @@ async def test_unsafe_local_launch_rejects_uncontained_platform_before_durable_w
 ) -> None:
     """Unsafe-local scripts fail closed when supervisor hard-crash containment is unavailable."""
     manager, backend, _client = _manager(tmp_path, mode="off")
-    monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: False, raising=False)
-    launch = AsyncMock(return_value=ShellRunResult(message="Started background process", handle=f"shell:{'a' * 32}"))
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch)
+    monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: False)
+    launch = AsyncMock(side_effect=_started)
+    _fake_local_supervisor(monkeypatch, launch=launch)
 
     with pytest.raises(ScriptRunManagerError, match="Linux"):
         await manager.run(_context(tmp_path, mode="off"), source="print('ok')\n")
@@ -1278,7 +1308,7 @@ async def test_ambiguous_worker_launch_failure_retires_exact_worker_when_runner_
     assert stored.state is ScriptRunState.INTERRUPTED
     assert stored.cancel_requested_at is not None
     assert client.cancel_forces == [True]
-    assert client.cancel_handles == [f"shell:{stored.run_id.removeprefix('script-')}"]
+    assert client.cancelled_run_ids == [stored.run_id]
     assert backend.handles == {}
     assert len(backend.retired_worker_keys) == 2
 
@@ -1335,11 +1365,7 @@ async def test_local_supervisor_that_cannot_start_fails_the_request_with_the_man
     [failed] = manager.store.list_runs()
     assert failed.state is ScriptRunState.FAILED
 
-    async def launch_local(*_args: object, **kwargs: object) -> ShellRunResult:
-        return ShellRunResult(message="Started background process", handle=str(kwargs["handle"]))
-
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+    _fake_local_supervisor(monkeypatch)
     running = await manager.run(context, source="print('ok')\n")
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", refuse_start)
 
@@ -1369,24 +1395,11 @@ async def test_ambiguous_running_persistence_retires_exact_worker_when_runner_is
     context = _context(tmp_path)
     original_transition = manager.store.transition_run
 
-    def fail_running_transition(
-        run_id: str,
-        *,
-        state: ScriptRunState,
-        worker_id: str | None = None,
-        exit_code: int | None = None,
-        error: str | None = None,
-    ) -> ScriptRunRecord:
+    def fail_running_transition(run_id: str, *, state: ScriptRunState, **kwargs: object) -> ScriptRunRecord:
         if state is ScriptRunState.RUNNING:
             msg = "durable update failed"
             raise RuntimeError(msg)
-        return original_transition(
-            run_id,
-            state=state,
-            worker_id=worker_id,
-            exit_code=exit_code,
-            error=error,
-        )
+        return original_transition(run_id, state=state, **kwargs)
 
     monkeypatch.setattr(manager.store, "transition_run", fail_running_transition)
     client.cancel_failures.append(RuntimeError("worker unavailable"))
@@ -1412,13 +1425,12 @@ async def test_post_spawn_store_read_failure_signals_local_process_before_failin
     context = _context(tmp_path, mode="local")
     spawned = False
     failed_read = False
-    killed_handles: list[str] = []
     original_get_run = manager.store.get_run
 
-    async def launch_local(*_args: object, **_kwargs: object) -> ShellRunResult:
+    async def launch_local(*args: object, **kwargs: object) -> ShellRunResult:
         nonlocal spawned
         spawned = True
-        return ShellRunResult(message="Started background process", handle=str(_kwargs["handle"]))
+        return await _started(*args, **kwargs)
 
     def fail_first_post_spawn_read(run_id: str) -> ScriptRunRecord:
         nonlocal failed_read
@@ -1428,25 +1440,7 @@ async def test_post_spawn_store_read_failure_signals_local_process_before_failin
             raise RuntimeError(msg)
         return original_get_run(run_id)
 
-    def kill_local(
-        _socket_path: str,
-        *,
-        namespace: str,
-        handle: str,
-        force: bool,
-    ) -> str:
-        del namespace, force
-        killed_handles.append(handle)
-        return "Force-killed process"
-
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
-    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", kill_local)
-    monkeypatch.setattr(
-        supervised_module,
-        "check_command_via_supervisor",
-        lambda *_args, **_kwargs: "Status: FINISHED (exit code -9)",
-    )
+    signals = _fake_local_supervisor(monkeypatch, launch=launch_local)
     monkeypatch.setattr(manager.store, "get_run", fail_first_post_spawn_read)
 
     with pytest.raises(RuntimeError, match="durable read failed"):
@@ -1454,7 +1448,7 @@ async def test_post_spawn_store_read_failure_signals_local_process_before_failin
 
     [stored] = manager.store.list_runs()
     assert stored.state is ScriptRunState.INTERRUPTED
-    assert killed_handles == [f"shell:{stored.run_id.removeprefix('script-')}"]
+    assert signals == [(_handle(stored.run_id), True)]
 
 
 @pytest.mark.asyncio
@@ -1468,17 +1462,7 @@ async def test_local_status_reports_pending_cancellation_when_its_supervisor_fal
     unavailable = "Error: Shell supervisor is unavailable: [Errno 111] Connection refused"
     status_replies = [unavailable, "Status: RUNNING (PID 7, elapsed 1.0s)\nPartial output:\nstill working"]
 
-    async def launch_local(*_args: object, **kwargs: object) -> ShellRunResult:
-        return ShellRunResult(message="Started background process", handle=str(kwargs["handle"]))
-
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
-    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", lambda *_args, **_kwargs: unavailable)
-    monkeypatch.setattr(
-        supervised_module,
-        "check_command_via_supervisor",
-        lambda *_args, **_kwargs: status_replies.pop(0),
-    )
+    _fake_local_supervisor(monkeypatch, kill=unavailable, check=lambda: status_replies.pop(0))
     run = await manager.run(context, source="print('ok')\n")
     manager.store.request_cancel(run.run_id, reason="Cancellation requested by the owning agent.")
 
@@ -1490,30 +1474,23 @@ async def test_local_status_reports_pending_cancellation_when_its_supervisor_fal
     assert status_replies == []
 
 
-def _unreachable_worker(client: _WorkerClient, backend: _WorkerBackend, monkeypatch: pytest.MonkeyPatch) -> None:
+def _unreachable_worker(client: _WorkerClient, backend: _WorkerBackend) -> None:
     """Make the run's worker refuse its signal and first status poll, and its backend refuse retirement."""
     client.cancel_failures.append(ScriptWorkerError("Worker script request failed: connection refused"))
     client.status_failures.append(ScriptWorkerError("Worker script request failed: timed out"))
-
-    def refuse_retirement(worker_key: str) -> None:
-        del worker_key
-        msg = "Worker container could not be removed."
-        raise WorkerBackendError(msg)
-
-    monkeypatch.setattr(backend, "retire_worker", refuse_retirement)
+    backend.retire_failures.append(WorkerBackendError("Worker container could not be removed."))
 
 
 @pytest.mark.asyncio
 async def test_worker_status_reports_pending_cancellation_when_its_worker_is_unreachable(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A worker that cannot confirm a cancellation leaves the run pending and reports its latest output."""
     manager, backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n")
     manager.store.request_cancel(run.run_id, reason="Cancellation requested by the owning agent.")
-    _unreachable_worker(client, backend, monkeypatch)
+    _unreachable_worker(client, backend)
     client.next_status = WorkerScriptStatus(state="running", output="still working")
 
     status = await manager.status(context, run_id=run.run_id)
@@ -1526,7 +1503,6 @@ async def test_worker_status_reports_pending_cancellation_when_its_worker_is_unr
 @pytest.mark.asyncio
 async def test_status_reports_an_exited_run_whose_worker_could_not_be_removed_yet(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A recorded exit is reported even when retiring the run's worker still fails; cleanup retries later."""
     manager, backend, client = _manager(tmp_path)
@@ -1534,13 +1510,7 @@ async def test_status_reports_an_exited_run_whose_worker_could_not_be_removed_ye
     run = await manager.run(context, source="print('ok')\n")
     manager.store.request_cancel(run.run_id, reason="Cancellation requested by the owning agent.")
     client.next_status = WorkerScriptStatus(state="exited", output="done", exit_code=-15)
-
-    def refuse_retirement(worker_key: str) -> None:
-        del worker_key
-        msg = "Worker container could not be removed."
-        raise WorkerBackendError(msg)
-
-    monkeypatch.setattr(backend, "retire_worker", refuse_retirement)
+    backend.retire_failures.append(WorkerBackendError("Worker container could not be removed."))
 
     status = await manager.status(context, run_id=run.run_id)
 
@@ -1553,21 +1523,60 @@ async def test_status_reports_an_exited_run_whose_worker_could_not_be_removed_ye
 @pytest.mark.asyncio
 async def test_unconfirmed_cancellation_fails_the_request_but_keeps_its_cause_for_reconciliation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The requester sees the manager's error; lifecycle reconciliation still sees the worker failure it retries."""
     manager, backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n")
-    _unreachable_worker(client, backend, monkeypatch)
+    _unreachable_worker(client, backend)
 
     with pytest.raises(ScriptRunManagerError, match="connection refused"):
         await manager.cancel(context, run_id=run.run_id)
 
-    _unreachable_worker(client, backend, monkeypatch)
+    _unreachable_worker(client, backend)
     with pytest.raises(ScriptWorkerError, match="connection refused"):
         await manager.reconcile_durable(run_id=run.run_id)
     assert manager.store.get_run(run.run_id).state is ScriptRunState.RUNNING
+
+
+async def _cancel_local_launch_after_spawn(
+    manager: ScriptRunManager,
+    context: ToolRuntimeContext,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    check: str,
+) -> list[tuple[str, bool]]:
+    """Cancel one local launch while its first post-spawn store read is in flight; return the signals it sent."""
+    spawned = False
+    blocked_read = False
+    read_entered = threading.Event()
+    release_read = threading.Event()
+    original_get_run = manager.store.get_run
+
+    async def launch_local(*args: object, **kwargs: object) -> ShellRunResult:
+        nonlocal spawned
+        spawned = True
+        return await _started(*args, **kwargs)
+
+    def block_first_post_spawn_read(run_id: str) -> ScriptRunRecord:
+        nonlocal blocked_read
+        if spawned and not blocked_read:
+            blocked_read = True
+            read_entered.set()
+            assert release_read.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+        return original_get_run(run_id)
+
+    signals = _fake_local_supervisor(monkeypatch, launch=launch_local, check=check)
+    monkeypatch.setattr(manager.store, "get_run", block_first_post_spawn_read)
+
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    assert await asyncio.to_thread(read_entered.wait, SETTLE_TIMEOUT_SECONDS)
+    launch.cancel()
+    release_read.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await launch
+    return signals
 
 
 @pytest.mark.asyncio
@@ -1578,58 +1587,34 @@ async def test_post_spawn_task_cancellation_signals_local_process_before_propaga
     """Task cancellation after local spawn retains ownership until the process exits."""
     manager, _backend, _client = _manager(tmp_path, mode="local")
     context = _context(tmp_path, mode="local")
-    spawned = False
-    blocked_read = False
-    read_entered = threading.Event()
-    release_read = threading.Event()
-    killed_handles: list[str] = []
-    original_get_run = manager.store.get_run
-
-    async def launch_local(*_args: object, **_kwargs: object) -> ShellRunResult:
-        nonlocal spawned
-        spawned = True
-        return ShellRunResult(message="Started background process", handle=str(_kwargs["handle"]))
-
-    def block_first_post_spawn_read(run_id: str) -> ScriptRunRecord:
-        nonlocal blocked_read
-        if spawned and not blocked_read:
-            blocked_read = True
-            read_entered.set()
-            assert release_read.wait(timeout=SETTLE_TIMEOUT_SECONDS)
-        return original_get_run(run_id)
-
-    def kill_local(
-        _socket_path: str,
-        *,
-        namespace: str,
-        handle: str,
-        force: bool,
-    ) -> str:
-        del namespace, force
-        killed_handles.append(handle)
-        return "Force-killed process"
-
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
-    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", kill_local)
-    monkeypatch.setattr(
-        supervised_module,
-        "check_command_via_supervisor",
-        lambda *_args, **_kwargs: "Status: FINISHED (exit code -9)",
+    signals = await _cancel_local_launch_after_spawn(
+        manager,
+        context,
+        monkeypatch,
+        check="Status: FINISHED (exit code -9)",
     )
-    monkeypatch.setattr(manager.store, "get_run", block_first_post_spawn_read)
-
-    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    assert await asyncio.to_thread(read_entered.wait, SETTLE_TIMEOUT_SECONDS)
-    launch.cancel()
-    release_read.set()
-
-    with pytest.raises(asyncio.CancelledError):
-        await launch
 
     [stored] = manager.store.list_runs()
     assert stored.state is ScriptRunState.INTERRUPTED
-    assert killed_handles == [f"shell:{stored.run_id.removeprefix('script-')}"]
+    assert signals == [(_handle(stored.run_id), True)]
+
+
+@pytest.mark.asyncio
+async def test_post_spawn_task_cancellation_keeps_an_unconfirmed_local_process_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task cancellation after local spawn cannot end a run whose process is not yet confirmed gone."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    context = _context(tmp_path, mode="local")
+    signals = await _cancel_local_launch_after_spawn(manager, context, monkeypatch, check="Status: RUNNING")
+
+    [stored] = manager.store.list_runs()
+    assert stored.state is ScriptRunState.STARTING
+    assert stored.cancel_requested_at is not None
+    assert stored.snapshot_locator is not None
+    assert manager.broker.cancelled_runs == [stored.run_id]
+    assert signals == [(_handle(stored.run_id), True)]
 
 
 @pytest.mark.asyncio
@@ -1740,7 +1725,7 @@ async def test_worker_launch_stops_when_cancelled_before_worker_allocation(
     assert cancelled.state is ScriptRunState.CANCELLED
     assert reconciled.state is ScriptRunState.CANCELLED
     assert launch_result.state is ScriptRunState.CANCELLED
-    assert client.requested_handles == []
+    assert client.launched_run_ids == []
 
 
 @pytest.mark.asyncio
@@ -1854,27 +1839,13 @@ async def test_local_cancel_waits_for_snapshot_write_and_removes_capability(
     release_write = threading.Event()
     original_write_snapshot = manager_module._write_snapshot
 
-    def blocked_write_snapshot(*args: object, **kwargs: object) -> tuple[Path, Path]:
+    def blocked_write_snapshot(*args: object, **kwargs: object) -> ScriptSnapshot:
         write_started.set()
         assert release_write.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return original_write_snapshot(*args, **kwargs)
 
-    async def launch_local(*_args: object, **kwargs: object) -> ShellRunResult:
-        return ShellRunResult(message="Started background process", handle=str(kwargs["handle"]))
-
     monkeypatch.setattr(manager_module, "_write_snapshot", blocked_write_snapshot)
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
-    monkeypatch.setattr(
-        supervised_module,
-        "kill_command_via_supervisor",
-        lambda *_args, **_kwargs: "Terminated process shell:test",
-    )
-    monkeypatch.setattr(
-        supervised_module,
-        "check_command_via_supervisor",
-        lambda *_args, **_kwargs: "Status: FINISHED (exit code -15)",
-    )
+    _fake_local_supervisor(monkeypatch, check="Status: FINISHED (exit code -15)")
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
     assert await asyncio.to_thread(write_started.wait, SETTLE_TIMEOUT_SECONDS)
     [starting] = manager.store.list_runs(include_finished=False)
@@ -1928,7 +1899,7 @@ async def test_task_cancellation_during_durable_reservation_finishes_as_interrup
     assert cancellation_retained_ownership is True
     assert stored.state is ScriptRunState.INTERRUPTED
     assert manager.broker.cancelled_runs == [stored.run_id]
-    assert client.requested_handles == []
+    assert client.launched_run_ids == []
 
 
 @pytest.mark.asyncio
@@ -1979,7 +1950,7 @@ async def test_repeated_cancellation_cannot_abandon_durable_reservation_finaliza
     assert repeated_cancellation_retained_ownership is True
     assert stored.state is ScriptRunState.INTERRUPTED
     assert manager.broker.cancelled_runs == [stored.run_id]
-    assert client.requested_handles == []
+    assert client.launched_run_ids == []
 
 
 @pytest.mark.asyncio
@@ -2014,7 +1985,7 @@ async def test_preallocation_cancel_releases_capacity(
     assert launch_result.state is ScriptRunState.CANCELLED
 
     assert manager.store.get_run(starting.run_id).state is ScriptRunState.CANCELLED
-    assert client.requested_handles == []
+    assert client.launched_run_ids == []
     replacement = await manager.run(context, source="print('ok')\n", limits=limits)
     assert replacement.state is ScriptRunState.RUNNING
 
@@ -2040,22 +2011,9 @@ async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
     release_assignment = threading.Event()
     original_transition = manager.store.transition_run
 
-    def transition_then_pause(
-        run_id: str,
-        *,
-        state: ScriptRunState,
-        worker_id: str | None = None,
-        exit_code: int | None = None,
-        error: str | None = None,
-    ) -> ScriptRunRecord:
-        result = original_transition(
-            run_id,
-            state=state,
-            worker_id=worker_id,
-            exit_code=exit_code,
-            error=error,
-        )
-        if state is ScriptRunState.STARTING and worker_id is not None:
+    def transition_then_pause(run_id: str, *, state: ScriptRunState, **kwargs: object) -> ScriptRunRecord:
+        result = original_transition(run_id, state=state, **kwargs)
+        if state is ScriptRunState.STARTING and kwargs.get("worker_id") is not None:
             worker_assigned.set()
             assert release_assignment.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return result
@@ -2070,7 +2028,7 @@ async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
 
     assert launch_result.state is ScriptRunState.INTERRUPTED
     assert launch_result.cancellation_reason == interruption_reason
-    assert client.requested_handles == []
+    assert client.launched_run_ids == []
 
 
 @pytest.mark.asyncio
@@ -2098,10 +2056,10 @@ async def test_worker_launch_rechecks_durable_intent_immediately_before_spawn(
         *,
         source: bytes,
         token: str,
-    ) -> tuple[Path, Path]:
-        paths = original_write_snapshot(workspace, run_id, source=source, token=token)
+    ) -> ScriptSnapshot:
+        snapshot = original_write_snapshot(workspace, run_id, source=source, token=token)
         manager.store.request_cancel(run_id, reason=interruption_reason)
-        return paths
+        return snapshot
 
     monkeypatch.setattr(manager_module, "_write_snapshot", snapshot_then_cancel)
 
@@ -2109,7 +2067,7 @@ async def test_worker_launch_rechecks_durable_intent_immediately_before_spawn(
 
     assert launch_result.state is ScriptRunState.INTERRUPTED
     assert launch_result.cancellation_reason == interruption_reason
-    assert client.requested_handles == []
+    assert client.launched_run_ids == []
 
 
 @pytest.mark.asyncio
@@ -2307,114 +2265,53 @@ async def test_worker_retirement_subsumes_snapshot_cleanup(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled_call", ["signal", "status"])
 async def test_revoked_process_reconciliation_propagates_task_cancellation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    cancelled_call: str,
 ) -> None:
-    """A cancelled lifecycle pass cannot reinterpret cancellation as runner failure and retire a worker."""
-    manager, _backend, _client = _manager(tmp_path)
+    """A cancelled lifecycle pass cannot defer cancellation as a signal error or retire a worker as runner failure."""
+    manager, backend, client = _manager(tmp_path)
     run = await manager.run(_context(tmp_path), source="print('ok')\n")
-    revoked = manager.store.request_cancel(run.run_id, reason="runtime reload")
-    retired: list[str] = []
-
-    async def cancel_during_termination(
-        _manager: ScriptRunManager,
-        _run: ScriptRunRecord,
-        *,
-        force: bool,
-    ) -> WorkerScriptStatus:
-        del force
-        raise asyncio.CancelledError
-
-    async def record_retirement(
-        _manager: ScriptRunManager,
-        retired_run: ScriptRunRecord,
-    ) -> ScriptRunRecord:
-        retired.append(retired_run.run_id)
-        return retired_run
-
-    monkeypatch.setattr(ScriptRunManager, "_terminate_and_confirm", cancel_during_termination)
-    monkeypatch.setattr(ScriptRunManager, "_retire_worker_to_confirm_exit", record_retirement)
+    manager.store.request_cancel(run.run_id, reason="runtime reload")
+    if cancelled_call == "signal":
+        client.cancel_failures.append(asyncio.CancelledError())
+    else:
+        client.status_failures.append(asyncio.CancelledError())
 
     with pytest.raises(asyncio.CancelledError):
-        await manager._reconcile_revoked_process_run(revoked, force=True)
+        await manager.reconcile_revoked_process(run_id=run.run_id)
 
-    assert retired == []
+    assert client.status_run_ids == ([] if cancelled_call == "signal" else [run.run_id])
+    assert backend.retired_worker_keys == []
+    assert manager.store.get_run(run.run_id).finished_at is None
 
 
 @pytest.mark.asyncio
-async def test_signal_wait_propagates_task_cancellation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Task cancellation during process signalling must not be converted into a deferred signal error."""
-    manager, _backend, _client = _manager(tmp_path)
-    run = await manager.run(_context(tmp_path), source="print('ok')\n")
-    waited: list[str] = []
-
-    async def cancel_during_signal(
-        _manager: ScriptRunManager,
-        _run: ScriptRunRecord,
-        *,
-        force: bool,
-    ) -> WorkerScriptCancel:
-        del force
-        raise asyncio.CancelledError
-
-    async def record_wait(
-        _manager: ScriptRunManager,
-        waited_run: ScriptRunRecord,
-    ) -> WorkerScriptStatus:
-        waited.append(waited_run.run_id)
-        return WorkerScriptStatus(state="exited", exit_code=-9)
-
-    monkeypatch.setattr(ScriptRunManager, "_signal_process", cancel_during_signal)
-    monkeypatch.setattr(ScriptRunManager, "_wait_for_process_exit", record_wait)
+async def test_ambiguous_launch_preservation_propagates_task_cancellation(tmp_path: Path) -> None:
+    """Cancellation while preserving an ambiguous launch must reach the outer finalizer."""
+    manager, _backend, client = _manager(tmp_path)
+    client.launch_failure = RuntimeError("launch response lost")
+    client.cancel_failures.append(asyncio.CancelledError())
 
     with pytest.raises(asyncio.CancelledError):
-        await manager._signal_and_wait(run, force=True)
+        await manager.run(_context(tmp_path), source="print('ok')\n")
 
-    assert waited == []
-
-
-@pytest.mark.asyncio
-async def test_ambiguous_launch_preservation_propagates_task_cancellation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cancellation while acquiring ambiguous-launch ownership must reach the outer finalizer."""
-    manager, _backend, _client = _manager(tmp_path)
-
-    async def cancel_during_ownership(
-        _manager: ScriptRunManager,
-        _context: ToolRuntimeContext,
-        _run_id: str,
-    ) -> ScriptRunRecord:
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(ScriptRunManager, "_owned_run", cancel_during_ownership)
-
-    with pytest.raises(asyncio.CancelledError):
-        await manager._preserve_ambiguous_launch(_context(tmp_path), f"script-{'a' * 32}")
+    [stored] = manager.store.list_runs()
+    assert stored.state is ScriptRunState.INTERRUPTED
+    assert client.status_run_ids == []
 
 
 @pytest.mark.asyncio
 async def test_worker_retirement_failure_leaves_observed_exit_nonterminal_for_retry(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A confirmed exit cannot become terminal until exact worker retirement succeeds."""
     manager, backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n")
     client.next_status = WorkerScriptStatus(state="exited", output="finished", exit_code=0)
-    original_retire = backend.retire_worker
-
-    def fail_retirement(_worker_key: str) -> None:
-        message = "retirement unavailable"
-        raise RuntimeError(message)
-
-    monkeypatch.setattr(backend, "retire_worker", fail_retirement)
+    backend.retire_failures.append(RuntimeError("retirement unavailable"))
     with pytest.raises(RuntimeError, match="retirement unavailable"):
         await manager.reconcile_durable(run_id=run.run_id)
 
@@ -2424,7 +2321,6 @@ async def test_worker_retirement_failure_leaves_observed_exit_nonterminal_for_re
     assert pending.finished_at is not None
     assert pending.output == "finished"
 
-    monkeypatch.setattr(backend, "retire_worker", original_retire)
     completed = await manager.reconcile_durable(run_id=run.run_id)
     assert completed.state is ScriptRunState.EXITED
     assert backend.retired_worker_keys == [run.worker_key]
@@ -2543,11 +2439,9 @@ async def test_controls_hide_runs_from_other_requesters(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_source_path_must_be_regular_and_workspace_contained(tmp_path: Path) -> None:
-    """Path launch rejects traversal and snapshots the original workspace bytes."""
+    """Path launch rejects a path that leaves the workspace."""
     manager, _backend, _client = _manager(tmp_path)
     context = _context(tmp_path)
-    outside = tmp_path / "outside.py"
-    outside.write_text("print('outside')\n", encoding="utf-8")
 
     with pytest.raises(ScriptRunManagerError, match="workspace"):
         await manager.run(context, path="../../outside.py")
@@ -2571,37 +2465,21 @@ async def test_source_path_is_snapshotted_before_launch(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_source_path_leaf_swap_cannot_redirect_snapshot(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A checked source leaf cannot be swapped to an outside symlink before it is read."""
+async def test_source_path_symlink_leaf_cannot_redirect_snapshot(tmp_path: Path) -> None:
+    """A source leaf linked to an outside file is refused by the no-follow open instead of read."""
     manager, _backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     workspace = agent_workspace_root_path(context.runtime_paths.storage_root, "watcher")
     workspace.mkdir(parents=True, exist_ok=True)
-    source_path = workspace / "watch.py"
-    source_path.write_text("print('ok')\n", encoding="utf-8")
     outside = tmp_path / "outside.py"
     outside.write_text("print('outside')\n", encoding="utf-8")
-    original_open = Path.open
-    swapped = False
+    (workspace / "watch.py").symlink_to(outside)
 
-    def swap_before_path_open(path: Path, *args: object, **kwargs: object):  # noqa: ANN202
-        nonlocal swapped
-        if path == source_path and not swapped:
-            source_path.rename(workspace / "watch-original.py")
-            source_path.symlink_to(outside)
-            swapped = True
-        return original_open(path, *args, **kwargs)
+    with pytest.raises(ScriptRunManagerError):
+        await manager.run(context, path="watch.py")
 
-    monkeypatch.setattr(Path, "open", swap_before_path_open)
-
-    run = await manager.run(context, path="watch.py")
-
-    snapshot, _token = client.launch_paths[run.run_id]
-    assert snapshot.read_text(encoding="utf-8") == "print('ok')\n"
-    assert swapped is False
+    assert manager.store.list_runs() == []
+    assert client.launched_run_ids == []
 
 
 @pytest.mark.asyncio
@@ -2612,8 +2490,8 @@ async def test_source_limit_and_exactly_one_input_are_enforced(tmp_path: Path) -
 
     with pytest.raises(ScriptRunManagerError, match="exactly one"):
         await manager.run(context, source="print(1)", path="watch.py")
-    with pytest.raises(ScriptRunManagerError, match="131072"):
-        await manager.run(context, source="x" * (128 * 1024 + 1))
+    with pytest.raises(ScriptRunManagerError, match=str(launch_contract.MAX_SOURCE_BYTES)):
+        await manager.run(context, source="x" * (launch_contract.MAX_SOURCE_BYTES + 1))
 
     assert manager.store.list_runs() == []
 
@@ -2655,7 +2533,7 @@ async def test_slow_worker_launch_does_not_block_an_independent_reservation(tmp_
     await asyncio.wait_for(client.second_launch_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     try:
-        assert len(client.requested_handles) == 2
+        assert len(client.launched_run_ids) == 2
     finally:
         client.launch_release.set()
         await asyncio.gather(first, second)
@@ -2753,11 +2631,7 @@ async def test_reconcile_enforces_runtime_limit_through_revocation_path(
     """An expired run is revoked and broker-cancelled before its worker receives a signal."""
     manager, _backend, client = _manager(tmp_path)
     context = _context(tmp_path)
-    run = await manager.run(
-        context,
-        source="print('ok')\n",
-        limits=ScriptRunLimits(max_runtime_hours=1e-12),
-    )
+    run = await manager.run(context, source="print('ok')\n")
     monkeypatch.setattr(manager_module, "_runtime_expired", lambda _run: True)
 
     reconciled = await manager.reconcile_durable(run_id=run.run_id)
@@ -2822,18 +2696,17 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
         )
         assert handle is not None
         starting = manager.store.list_runs(include_finished=False)[0]
-        assert handle == f"shell:{starting.run_id.removeprefix('script-')}"
+        assert handle == _handle(starting.run_id)
         return ShellRunResult(message="Started background process", handle=handle)
 
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+    _fake_local_supervisor(monkeypatch, launch=launch_local)
 
     run = await manager.run(context, source="print('ok')\n")
 
     assert run.local_unsafe is True
     assert run.worker_id is None
     assert run.worker_key is None
-    assert observed["handle"] == f"shell:{run.run_id.removeprefix('script-')}"
+    assert observed["handle"] == _handle(run.run_id)
     assert observed["socket_path"] == "/control/shell.sock"
     assert observed["namespace"] == f"script:local:{run.run_id}"
 
@@ -2873,27 +2746,8 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
             raise AssertionError(msg)
         return workspace
 
-    async def launch_local(
-        _socket_path: str,
-        *,
-        namespace: str,
-        argv: list[str],
-        env: dict[str, str],
-        cwd: str | None,
-        tail: int,
-        timeout: float,  # noqa: ASYNC109
-        handle: str | None = None,
-        max_runtime_seconds: float | None = None,
-    ) -> ShellRunResult:
-        assert max_runtime_seconds is not None
-        assert max_runtime_seconds > 0
-        del namespace, argv, env, cwd, tail, timeout
-        assert handle is not None
-        return ShellRunResult(message="Started background process", handle=handle)
-
     monkeypatch.setattr(ToolRuntimeContext, "agent_workspace_root", blocking_workspace)
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+    _fake_local_supervisor(monkeypatch)
 
     run = await manager.run(context, source=source, path=path)
 
@@ -2918,18 +2772,17 @@ async def test_local_launch_rechecks_durable_intent_immediately_before_spawn(
         *,
         source: bytes,
         token: str,
-    ) -> tuple[Path, Path]:
-        paths = original_write_snapshot(workspace, run_id, source=source, token=token)
+    ) -> ScriptSnapshot:
+        snapshot = original_write_snapshot(workspace, run_id, source=source, token=token)
         manager.store.request_cancel(run_id, reason="cancelled during snapshot")
-        return paths
+        return snapshot
 
     async def launch_local(*_args: object, **_kwargs: object) -> ShellRunResult:
         launch_calls.append("called")
         return ShellRunResult(message="unexpected launch")
 
     monkeypatch.setattr(manager_module, "_write_snapshot", snapshot_then_cancel)
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+    _fake_local_supervisor(monkeypatch, launch=launch_local)
 
     launch_result = await manager.run(context, source="print('ok')\n")
 
@@ -2945,40 +2798,17 @@ async def test_ambiguous_local_launch_failure_remains_retryable_until_exit(
     """An unconfirmed local launch owner stays nonterminal for another signal attempt."""
     manager, _backend, _client = _manager(tmp_path, mode="local")
     context = _context(tmp_path, mode="local")
-    killed_handles: list[str] = []
     termination_confirmed = False
 
     async def failed_launch(*_args: object, **_kwargs: object) -> ShellRunResult:
         message = "launch response lost"
         raise RuntimeError(message)
 
-    def kill_local(
-        _socket_path: str,
-        *,
-        namespace: str,
-        handle: str,
-        force: bool,
-    ) -> str:
-        del namespace
-        assert force is (len(killed_handles) == 0)
-        killed_handles.append(handle)
-        return "Force-killed process" if force else "Terminated process"
-
-    def check_local(
-        _socket_path: str,
-        *,
-        namespace: str,
-        handle: str,
-    ) -> str:
-        del namespace, handle
-        if termination_confirmed:
-            return "Status: FINISHED (exit code -9)"
-        return "Status: RUNNING"
-
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", failed_launch)
-    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", kill_local)
-    monkeypatch.setattr(supervised_module, "check_command_via_supervisor", check_local)
+    signals = _fake_local_supervisor(
+        monkeypatch,
+        launch=failed_launch,
+        check=lambda: "Status: FINISHED (exit code -9)" if termination_confirmed else "Status: RUNNING",
+    )
 
     with pytest.raises(RuntimeError, match="launch response lost"):
         await manager.run(context, source="print('ok')\n")
@@ -2986,13 +2816,13 @@ async def test_ambiguous_local_launch_failure_remains_retryable_until_exit(
     stored = manager.store.list_runs()[0]
     assert stored.state is ScriptRunState.STARTING
     assert stored.cancel_requested_at is not None
-    assert killed_handles == [f"shell:{stored.run_id.removeprefix('script-')}"]
+    assert signals == [(_handle(stored.run_id), True)]
 
     termination_confirmed = True
     reconciled = await manager.reconcile_durable(run_id=stored.run_id)
 
     assert reconciled.state is ScriptRunState.INTERRUPTED
-    assert killed_handles == [f"shell:{stored.run_id.removeprefix('script-')}"] * 2
+    assert signals == [(_handle(stored.run_id), True), (_handle(stored.run_id), False)]
 
 
 @pytest.mark.asyncio
@@ -3006,49 +2836,12 @@ async def test_local_launch_adopts_cancellation_before_running_transition(
     launch_entered = asyncio.Event()
     launch_release = asyncio.Event()
 
-    async def launch_local(
-        _socket_path: str,
-        *,
-        namespace: str,
-        argv: list[str],
-        env: dict[str, str],
-        cwd: str | None,
-        tail: int,
-        timeout: float,  # noqa: ASYNC109
-        handle: str | None = None,
-        max_runtime_seconds: float | None = None,
-    ) -> ShellRunResult:
-        assert max_runtime_seconds is not None
-        assert max_runtime_seconds > 0
-        del namespace, argv, env, cwd, tail, timeout
-        assert handle is not None
+    async def launch_local(*args: object, **kwargs: object) -> ShellRunResult:
         launch_entered.set()
         await launch_release.wait()
-        return ShellRunResult(message="Started background process", handle=handle)
+        return await _started(*args, **kwargs)
 
-    def kill_local(
-        _socket_path: str,
-        *,
-        namespace: str,
-        handle: str,
-        force: bool,
-    ) -> str:
-        del namespace, handle, force
-        return "Force-killed process"
-
-    def check_local(
-        _socket_path: str,
-        *,
-        namespace: str,
-        handle: str,
-    ) -> str:
-        del namespace, handle
-        return "Status: FINISHED (exit code -9)"
-
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
-    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", kill_local)
-    monkeypatch.setattr(supervised_module, "check_command_via_supervisor", check_local)
+    _fake_local_supervisor(monkeypatch, launch=launch_local)
 
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
     await launch_entered.wait()
@@ -3076,51 +2869,16 @@ async def test_local_launch_does_not_publish_running_after_unconfirmed_cancel(
     launch_release = asyncio.Event()
     process_exited = False
 
-    async def launch_local(
-        _socket_path: str,
-        *,
-        namespace: str,
-        argv: list[str],
-        env: dict[str, str],
-        cwd: str | None,
-        tail: int,
-        timeout: float,  # noqa: ASYNC109
-        handle: str | None = None,
-        max_runtime_seconds: float | None = None,
-    ) -> ShellRunResult:
-        assert max_runtime_seconds is not None
-        assert max_runtime_seconds > 0
-        del namespace, argv, env, cwd, tail, timeout
-        assert handle is not None
+    async def launch_local(*args: object, **kwargs: object) -> ShellRunResult:
         launch_entered.set()
         await launch_release.wait()
-        return ShellRunResult(message="Started background process", handle=handle)
+        return await _started(*args, **kwargs)
 
-    def kill_local(
-        _socket_path: str,
-        *,
-        namespace: str,
-        handle: str,
-        force: bool,
-    ) -> str:
-        del namespace, handle
-        return "Force-killed process" if force else "Terminated process"
-
-    def check_local(
-        _socket_path: str,
-        *,
-        namespace: str,
-        handle: str,
-    ) -> str:
-        del namespace, handle
-        if process_exited:
-            return "Status: FINISHED (exit code -9)"
-        return "Status: RUNNING"
-
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
-    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", kill_local)
-    monkeypatch.setattr(supervised_module, "check_command_via_supervisor", check_local)
+    _fake_local_supervisor(
+        monkeypatch,
+        launch=launch_local,
+        check=lambda: "Status: FINISHED (exit code -9)" if process_exited else "Status: RUNNING",
+    )
 
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
     await launch_entered.wait()
@@ -3311,8 +3069,7 @@ async def test_unsafe_local_launch_rejects_a_resource_profile(
 ) -> None:
     """A primary-process run cannot claim resource bounds nothing would enforce."""
     manager, _backend, _client = _manager(tmp_path, mode="local")
-    monkeypatch.setattr(manager_module, "launch_supervised_script", AsyncMock(return_value=None))
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    _fake_local_supervisor(monkeypatch)
 
     with pytest.raises(ScriptRunManagerError, match="Resource profiles require a worker backend"):
         await manager.run(_context(tmp_path, mode="local"), source="print('ok')\n", resource_profile="small")
@@ -3325,17 +3082,18 @@ async def test_source_limit_admits_exactly_the_limit_from_either_input(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A source of exactly the limit launches, and a workspace file one byte over it is refused."""
+    """A source of exactly the limit launches, and a workspace file one byte or far over it is refused."""
     manager, _backend, _client = _manager(tmp_path, mode="local")
     context = _context(tmp_path, mode="local")
     workspace = agent_workspace_root_path(context.runtime_paths.storage_root, "watcher")
     workspace.mkdir(parents=True)
     (workspace / "watch.py").write_bytes(b"#" * (launch_contract.MAX_SOURCE_BYTES + 1))
-    monkeypatch.setattr(manager_module, "launch_supervised_script", AsyncMock(return_value=None))
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    (workspace / "huge.py").write_bytes(b"#" * (2 * launch_contract.MAX_SOURCE_BYTES))
+    _fake_local_supervisor(monkeypatch)
 
-    with pytest.raises(ScriptRunManagerError, match=str(launch_contract.MAX_SOURCE_BYTES)):
-        await manager.run(context, path="watch.py")
+    for path in ("watch.py", "huge.py"):
+        with pytest.raises(ScriptRunManagerError, match=f"exceeds the {launch_contract.MAX_SOURCE_BYTES}-byte limit"):
+            await manager.run(context, path=path)
     run = await manager.run(context, source="#" * launch_contract.MAX_SOURCE_BYTES)
 
     assert run.state is ScriptRunState.RUNNING
@@ -3352,18 +3110,7 @@ async def test_a_refused_local_launch_fails_its_start_and_ends_its_run(
     async def refuse(*_args: object, **_kwargs: object) -> ShellRunResult:
         return ShellRunResult(message="Error: handle is already in use")
 
-    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", refuse)
-    monkeypatch.setattr(
-        supervised_module,
-        "kill_command_via_supervisor",
-        lambda *_args, **_kwargs: "Error: Unknown handle",
-    )
-    monkeypatch.setattr(
-        supervised_module,
-        "check_command_via_supervisor",
-        lambda *_args, **_kwargs: "Error: Unknown handle",
-    )
+    _fake_local_supervisor(monkeypatch, launch=refuse, kill="Error: Unknown handle", check="Error: Unknown handle")
 
     with pytest.raises(ScriptRunManagerError, match="handle is already in use"):
         await manager.run(_context(tmp_path, mode="local"), source="print('ok')\n")

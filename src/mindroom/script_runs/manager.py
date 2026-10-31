@@ -21,7 +21,7 @@ from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import (
     open_directory_within_root,
-    open_regular_file_within_root,
+    read_regular_file_within_root,
     resolve_path_within_root,
     write_file_within_root,
 )
@@ -138,7 +138,7 @@ class _RetiringWorkerBackend(Protocol):
 def script_execution_uses_worker(
     runtime_paths: RuntimePaths,
     *,
-    worker_backend_configured: bool = False,
+    worker_backend_configured: bool,
 ) -> bool:
     """Return whether configured script execution leaves the primary process."""
     proxy_config = sandbox_proxy_config(runtime_paths)
@@ -479,25 +479,15 @@ class ScriptRunManager:
             return
         if durable.state in TERMINAL_SCRIPT_RUN_STATES:
             return
+        error = _bounded_error(failure)
         if durable.cancel_requested_at is not None:
             failure_state = _terminal_state_for(durable)
         else:
             failure_state = (
                 ScriptRunState.INTERRUPTED if isinstance(failure, asyncio.CancelledError) else ScriptRunState.FAILED
             )
-            durable = await asyncio.to_thread(
-                self.store.request_cancel,
-                run.run_id,
-                reason=_bounded_error(failure),
-            )
-        await self.broker.cancel_run(run.run_id)
-        await self._cleanup_owned_resources(durable)
-        await asyncio.to_thread(
-            self.store.finalize_cleaned_run,
-            run.run_id,
-            state=failure_state,
-            error=_bounded_error(failure),
-        )
+            durable = await asyncio.to_thread(self.store.request_cancel, run.run_id, reason=error)
+        await self._release_and_finalize(durable, state=failure_state, error=error)
 
     async def _complete_cancel_before_spawn(
         self,
@@ -505,13 +495,21 @@ class ScriptRunManager:
     ) -> ScriptRunRecord:
         if run.state in TERMINAL_SCRIPT_RUN_STATES:
             return run
-        await self.broker.cancel_run(run.run_id)
+        return await self._release_and_finalize(run, state=_terminal_state_for(run))
+
+    async def _release_and_finalize(
+        self,
+        run: ScriptRunRecord,
+        *,
+        state: ScriptRunState,
+        error: str | None = None,
+        broker_revoked: bool = False,
+    ) -> ScriptRunRecord:
+        """Release broker and owned resources before publishing one terminal state."""
+        if not broker_revoked:
+            await self.broker.cancel_run(run.run_id)
         await self._cleanup_owned_resources(run)
-        return await asyncio.to_thread(
-            self.store.finalize_cleaned_run,
-            run.run_id,
-            state=_terminal_state_for(run),
-        )
+        return await asyncio.to_thread(self.store.finalize_cleaned_run, run.run_id, state=state, error=error)
 
     async def status(
         self,
@@ -538,7 +536,7 @@ class ScriptRunManager:
         if run.cancel_requested_at is not None:
             try:
                 reconciled = await self._terminate_durable_run_locked(
-                    run,
+                    run.run_id,
                     reason=run.cancellation_reason or OWNER_CANCELLATION,
                 )
             except (ScriptRunManagerError, *_REQUEST_FAILURES):
@@ -549,10 +547,7 @@ class ScriptRunManager:
                 return ScriptRunStatus(run=pending, output=status.output)
             return ScriptRunStatus(run=reconciled, output=reconciled.output)
         if _runtime_expired(run):
-            reconciled = await self._terminate_durable_run_locked(
-                run,
-                reason=MAX_RUNTIME_EXCEEDED,
-            )
+            reconciled = await self._terminate_durable_run_locked(run.run_id, reason=MAX_RUNTIME_EXCEEDED)
             return ScriptRunStatus(run=reconciled, output=reconciled.output)
         status = await self._process_status(run)
         reconciled = await self._apply_process_status(run, status)
@@ -574,7 +569,7 @@ class ScriptRunManager:
             if run.state not in TERMINAL_SCRIPT_RUN_STATES:
                 await asyncio.to_thread(self.store.request_cancel, run_id, reason=OWNER_CANCELLATION)
             async with self._run_lock(run_id):
-                return await self._terminate_durable_run_locked(run, force=force, reason=OWNER_CANCELLATION)
+                return await self._terminate_durable_run_locked(run_id, force=force, reason=OWNER_CANCELLATION)
         except _REQUEST_FAILURES as exc:
             raise ScriptRunManagerError(str(exc)) from exc
 
@@ -590,31 +585,25 @@ class ScriptRunManager:
 
     async def _terminate_durable_run_locked(
         self,
-        run: ScriptRunRecord,
+        run_id: str,
         *,
         force: bool = False,
         reason: str,
         broker_revoked: bool = False,
     ) -> ScriptRunRecord:
-        run = await asyncio.to_thread(self.store.get_run, run.run_id)
+        run = await asyncio.to_thread(self.store.get_run, run_id)
         if run.state in TERMINAL_SCRIPT_RUN_STATES:
             return run
         if run.finished_at is not None:
             return await self._finalize_observed_exit(run, broker_revoked=broker_revoked)
-        revoked = await asyncio.to_thread(self.store.request_cancel, run.run_id, reason=reason)
+        revoked = await asyncio.to_thread(self.store.request_cancel, run_id, reason=reason)
         broker_error: BaseException | None = None
-        process_error: BaseException | None = None
         if not broker_revoked:
             try:
-                await self.broker.cancel_run(run.run_id)
+                await self.broker.cancel_run(run_id)
             except BaseException as exc:
                 broker_error = exc
-        try:
-            revoked = await self._reconcile_revoked_process_run(revoked, force=force)
-        except BaseException as exc:
-            process_error = exc
-        if process_error is not None:
-            raise process_error
+        revoked = await self._reconcile_revoked_process_run(revoked, force=force)
         if broker_error is not None:
             raise broker_error
         return await self._finalize_observed_exit(revoked, broker_revoked=True)
@@ -642,7 +631,19 @@ class ScriptRunManager:
         """Reconcile process truth for one trusted durable lifecycle record."""
         async with self._run_lock(run_id):
             run = await asyncio.to_thread(self.store.get_run, run_id)
-            return await self._reconcile_durable_run_locked(run, broker_revoked=broker_revoked)
+            if run.state in TERMINAL_SCRIPT_RUN_STATES:
+                return run
+            # An observed exit is always revoked too, and termination finalizes it without signalling again.
+            if run.cancel_requested_at is not None:
+                return await self._terminate_durable_run_locked(
+                    run_id,
+                    reason=run.cancellation_reason or OWNER_CANCELLATION,
+                    broker_revoked=broker_revoked,
+                )
+            if _runtime_expired(run):
+                return await self._terminate_durable_run_locked(run_id, reason=MAX_RUNTIME_EXCEEDED)
+            status = await self._process_status(run)
+            return await self._apply_process_status(run, status)
 
     async def reconcile_revoked_process(self, *, run_id: str) -> ScriptRunRecord:
         """Record process truth for one already-revoked run without broker or resource cleanup."""
@@ -654,32 +655,6 @@ class ScriptRunManager:
                 msg = "Background script process-only reconciliation requires durable revocation."
                 raise ScriptRunManagerError(msg)
             return await self._reconcile_revoked_process_run(run, force=False)
-
-    async def _reconcile_durable_run_locked(
-        self,
-        run: ScriptRunRecord,
-        *,
-        broker_revoked: bool = False,
-    ) -> ScriptRunRecord:
-        if run.state in TERMINAL_SCRIPT_RUN_STATES:
-            return run
-        if run.finished_at is not None:
-            return await self._finalize_observed_exit(run, broker_revoked=broker_revoked)
-        if run.cancel_requested_at is not None:
-            return await self._terminate_durable_run_locked(
-                run,
-                force=False,
-                reason=run.cancellation_reason or OWNER_CANCELLATION,
-                broker_revoked=broker_revoked,
-            )
-        if _runtime_expired(run):
-            return await self._terminate_durable_run_locked(
-                run,
-                force=False,
-                reason=MAX_RUNTIME_EXCEEDED,
-            )
-        status = await self._process_status(run)
-        return await self._apply_process_status(run, status)
 
     async def _launch_worker(
         self,
@@ -726,20 +701,16 @@ class ScriptRunManager:
                 config_snapshot=runner_config_snapshot(context.runtime_paths, context.config),
             )
         except BaseException as exc:
-            await self._preserve_ambiguous_launch(context, run.run_id)
+            await self._preserve_ambiguous_launch(run.run_id)
             raise _AmbiguousLaunchError(exc) from exc
-        return await self._settle_spawned_run(context, run)
+        return await self._settle_spawned_run(run)
 
-    async def _settle_spawned_run(
-        self,
-        context: ToolRuntimeContext,
-        run: ScriptRunRecord,
-    ) -> ScriptRunRecord:
+    async def _settle_spawned_run(self, run: ScriptRunRecord) -> ScriptRunRecord:
         """Publish one spawned process or preserve a concurrent cancellation."""
         try:
             launched = await asyncio.to_thread(self.store.get_run, run.run_id)
             if launched.cancel_requested_at is not None:
-                await self._preserve_ambiguous_launch(context, run.run_id)
+                await self._preserve_ambiguous_launch(run.run_id)
                 return await asyncio.to_thread(self.store.get_run, run.run_id)
             return await asyncio.to_thread(
                 self.store.transition_run,
@@ -748,38 +719,27 @@ class ScriptRunManager:
             )
         except asyncio.CancelledError as exc:
             with suppress(_AmbiguousLaunchError):
-                await run_coroutine_until_complete(
-                    self._resolve_ambiguous_launch_failure(context, run.run_id, exc),
-                )
-            raise
+                await run_coroutine_until_complete(self._resolve_ambiguous_launch_failure(run.run_id, exc))
+            # Like every ambiguous launch, the run stays retryable until its process exit is confirmed.
+            raise _AmbiguousLaunchError(exc) from exc
         except BaseException as exc:
-            return await self._resolve_ambiguous_launch_failure(context, run.run_id, exc)
+            return await self._resolve_ambiguous_launch_failure(run.run_id, exc)
 
-    async def _resolve_ambiguous_launch_failure(
-        self,
-        context: ToolRuntimeContext,
-        run_id: str,
-        failure: BaseException,
-    ) -> ScriptRunRecord:
+    async def _resolve_ambiguous_launch_failure(self, run_id: str, failure: BaseException) -> ScriptRunRecord:
         durable: ScriptRunRecord | None = None
         with suppress(Exception):
             durable = await asyncio.to_thread(self.store.get_run, run_id)
         if durable is not None and durable.cancel_requested_at is not None:
             if durable.state not in TERMINAL_SCRIPT_RUN_STATES:
-                await self._preserve_ambiguous_launch(context, run_id)
+                await self._preserve_ambiguous_launch(run_id)
                 durable = await asyncio.to_thread(self.store.get_run, run_id)
             return durable
-        await self._preserve_ambiguous_launch(context, run_id)
+        await self._preserve_ambiguous_launch(run_id)
         raise _AmbiguousLaunchError(failure) from failure
 
-    async def _preserve_ambiguous_launch(self, context: ToolRuntimeContext, run_id: str) -> None:
+    async def _preserve_ambiguous_launch(self, run_id: str) -> None:
         try:
-            run = await self._owned_run(context, run_id)
-            await self._terminate_durable_run_locked(
-                run,
-                force=True,
-                reason=AMBIGUOUS_LAUNCH,
-            )
+            await self._terminate_durable_run_locked(run_id, force=True, reason=AMBIGUOUS_LAUNCH)
         except asyncio.CancelledError:
             raise
         except BaseException:
@@ -820,10 +780,10 @@ class ScriptRunManager:
                 max_runtime_seconds=run.max_runtime_seconds,
             )
         except BaseException as exc:
-            return await self._resolve_ambiguous_launch_failure(context, run.run_id, exc)
+            return await self._resolve_ambiguous_launch_failure(run.run_id, exc)
         if refusal is not None:
-            return await self._resolve_ambiguous_launch_failure(context, run.run_id, ScriptRunManagerError(refusal))
-        return await self._settle_spawned_run(context, run)
+            return await self._resolve_ambiguous_launch_failure(run.run_id, ScriptRunManagerError(refusal))
+        return await self._settle_spawned_run(run)
 
     async def _owned_run(self, context: ToolRuntimeContext, run_id: str) -> ScriptRunRecord:
         not_found = f"Background script '{run_id}' was not found."
@@ -843,7 +803,7 @@ class ScriptRunManager:
             source_bytes = source.encode("utf-8")
         else:
             try:
-                source_bytes = await asyncio.to_thread(_resolve_and_read_workspace_source, context, path or "")
+                source_bytes = await asyncio.to_thread(_read_workspace_source, context, path or "")
             except (OSError, ValueError) as exc:
                 raise ScriptRunManagerError(str(exc)) from exc
         if not source_bytes:
@@ -864,7 +824,7 @@ class ScriptRunManager:
             )
         worker = await self._worker_handle(run)
         if worker is None:
-            return WorkerScriptStatus.unknown_handle()
+            return WorkerScriptStatus(state="unknown")
         return await self.worker_client.status(
             worker,
             run_id=run.run_id,
@@ -931,7 +891,7 @@ class ScriptRunManager:
                 exit_code=process_status.exit_code,
                 error=(SUPERVISOR_UNAVAILABLE if process_status.state == "unknown" else None),
                 output=_bounded_output(process_status.output),
-                cancellation_reason=run.cancellation_reason or OWNER_CANCELLATION,
+                cancellation_reason=OWNER_CANCELLATION,
             ),
         )
 
@@ -948,7 +908,7 @@ class ScriptRunManager:
                 exit_code=None,
                 error="Background script worker was retired after its runner became unavailable.",
                 output="",
-                cancellation_reason=run.cancellation_reason or OWNER_CANCELLATION,
+                cancellation_reason=OWNER_CANCELLATION,
             ),
         )
 
@@ -962,14 +922,7 @@ class ScriptRunManager:
         if run.finished_at is None:
             msg = "Background script process exit has not been observed durably."
             raise ScriptRunManagerError(msg)
-        if not broker_revoked:
-            await self.broker.cancel_run(run.run_id)
-        await self._cleanup_owned_resources(run)
-        return await asyncio.to_thread(
-            self.store.finalize_cleaned_run,
-            run.run_id,
-            state=_terminal_state_for(run),
-        )
+        return await self._release_and_finalize(run, state=_terminal_state_for(run), broker_revoked=broker_revoked)
 
     async def _terminate_and_confirm(
         self,
@@ -1046,7 +999,7 @@ class ScriptRunManager:
 
     async def _worker_handle(self, run: ScriptRunRecord) -> WorkerHandle | None:
         backend = self.worker_backend_for(run)
-        if backend is None and not run.local_unsafe and run.worker_id is not None:
+        if backend is None and run.worker_id is not None:
             msg = "Background script worker backend is unavailable; retry reconciliation."
             raise ScriptRunManagerError(msg)
         if backend is None or run.worker_id is None or run.worker_key is None:
@@ -1075,9 +1028,9 @@ class ScriptRunManager:
             self._run_locks[run_id] = lock
         return lock
 
-    async def _record_snapshot_locator(self, run: ScriptRunRecord, workspace: Path) -> ScriptRunRecord:
+    async def _record_snapshot_locator(self, run: ScriptRunRecord, workspace: Path) -> None:
         locator = _snapshot_locator(self.store.storage_root, workspace, run.run_id)
-        return await asyncio.to_thread(self.store.record_snapshot_locator, run.run_id, locator)
+        await asyncio.to_thread(self.store.record_snapshot_locator, run.run_id, locator)
 
     async def _cleanup_owned_resources(self, run: ScriptRunRecord) -> None:
         if run.local_unsafe:
@@ -1103,11 +1056,6 @@ class ScriptRunManager:
             msg = f"Background script worker backend is unavailable; {retry}."
             raise ScriptRunManagerError(msg)
         await asyncio.to_thread(_require_script_worker_backend(backend).retire_worker, worker_key)
-
-
-def _resolve_and_read_workspace_source(context: ToolRuntimeContext, relative_path: str) -> bytes:
-    """Resolve and read one script source while keeping workspace I/O off the request loop."""
-    return _read_workspace_source(context.agent_workspace_root(create=True), relative_path)
 
 
 def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) -> None:
@@ -1160,21 +1108,19 @@ def _worker_workspace(context: ToolRuntimeContext, worker: WorkerHandle) -> Path
     return resolved_workspace
 
 
-def _read_workspace_source(workspace: Path, relative_path: str) -> bytes:
-    """Read one bounded regular file through no-follow workspace descriptors."""
+def _read_workspace_source(context: ToolRuntimeContext, relative_path: str) -> bytes:
+    """Read one script source, cut one byte past the limit, through no-follow workspace descriptors."""
+    workspace = context.agent_workspace_root(create=True)
     relative = Path(relative_path)
     if relative.is_absolute() or relative == Path() or ".." in relative.parts:
         msg = "Script source path must stay within the workspace root."
         raise ValueError(msg)
-    with (
-        open_regular_file_within_root(workspace, relative) as descriptor,
-        os.fdopen(
-            descriptor,
-            "rb",
-            closefd=False,
-        ) as source,
-    ):
-        return source.read(launch_contract.MAX_SOURCE_BYTES + 1)
+    return read_regular_file_within_root(
+        workspace,
+        relative,
+        max_bytes=launch_contract.MAX_SOURCE_BYTES + 1,
+        truncate=True,
+    )
 
 
 def _snapshot_locator(storage_root: Path, workspace: Path, run_id: str) -> str:
