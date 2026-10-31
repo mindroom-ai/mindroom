@@ -158,6 +158,14 @@ describe('InstanceActions Component', () => {
       expect(screen.getByRole('button', { name: /Restart/i })).toBeInTheDocument()
     })
 
+    it('should show stop and restart for provisioning instances, such as a crash loop', () => {
+      render(<InstanceActions instanceId="1" currentStatus="provisioning" />)
+
+      expect(screen.getByRole('button', { name: /Stop/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Restart/i })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /Provision/i })).not.toBeInTheDocument()
+    })
+
     it('should not show restart for stopped instances', () => {
       render(<InstanceActions instanceId="1" currentStatus="stopped" />)
 
