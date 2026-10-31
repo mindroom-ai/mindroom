@@ -1,33 +1,20 @@
-"""Tools registry for all available Agno tools.
+"""Built-in tool registrations.
 
-This module provides a centralized registry for all tools that can be used by agents.
-Tools are registered by string name and can be instantiated dynamically when loading agents.
+Importing this package registers every built-in tool: it imports each tool's decorated factory,
+or the module itself for a tool registered as metadata only.
 """
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
-from mindroom.tool_system.declarations import (
-    ConfigField,
-    SetupType,
-    ToolCategory,
-    ToolFileAccess,
-    ToolManagedInitArg,
-    ToolStatus,
-)
-from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools import (
-    agent_manager,  # noqa: F401
-    compact_context,  # noqa: F401
-    delegate,  # noqa: F401
-    dynamic_tools,  # noqa: F401
-    dynamic_workflow,  # noqa: F401
-    knowledge_graph,  # noqa: F401
-    memory,  # noqa: F401
-    report_publishing,  # noqa: F401
-    self_config,  # noqa: F401
-    skill_manage,  # noqa: F401
+    agent_manager,
+    compact_context,
+    delegate,
+    dynamic_tools,
+    dynamic_workflow,
+    knowledge_graph,
+    memory,
+    report_publishing,
+    self_config,
+    skill_manage,
 )
 from mindroom.tools.agentql import agentql_tools
 from mindroom.tools.airflow import airflow_tools
@@ -66,6 +53,7 @@ from mindroom.tools.docker import docker_tools
 from mindroom.tools.duckdb import duckdb_tools
 from mindroom.tools.duckduckgo import duckduckgo_tools
 from mindroom.tools.e2b import e2b_tools
+from mindroom.tools.egress_credentials import egress_credentials_tools
 from mindroom.tools.eleven_labs import eleven_labs_tools
 from mindroom.tools.email import email_tools
 from mindroom.tools.exa import exa_tools
@@ -90,6 +78,7 @@ from mindroom.tools.google_tasks import google_tasks_tools
 from mindroom.tools.googlesearch import googlesearch_tools
 from mindroom.tools.groq import groq_tools
 from mindroom.tools.hackernews import hackernews_tools
+from mindroom.tools.homeassistant import homeassistant_tools
 from mindroom.tools.invite_router import invite_router_tools
 from mindroom.tools.jina import jina_tools
 from mindroom.tools.jira import jira_tools
@@ -116,6 +105,7 @@ from mindroom.tools.notion import notion_tools
 from mindroom.tools.oauth_connections import oauth_connections_tools
 from mindroom.tools.openai import openai_tools
 from mindroom.tools.openbb import openbb_tools
+from mindroom.tools.openclaw_compat import openclaw_compat_tools
 from mindroom.tools.openweather import openweather_tools
 from mindroom.tools.outlook_calendar import outlook_calendar_tools
 from mindroom.tools.outlook_mail import outlook_mail_tools
@@ -149,7 +139,7 @@ from mindroom.tools.telegram import telegram_tools
 from mindroom.tools.thread_model import thread_model_tools
 from mindroom.tools.thread_move import thread_move_tools
 from mindroom.tools.thread_resolution import thread_resolution_tools
-from mindroom.tools.thread_summary import register_thread_summary_tools
+from mindroom.tools.thread_summary import thread_summary_tools
 from mindroom.tools.thread_tags import thread_tags_tools
 from mindroom.tools.todo import todo_tools
 from mindroom.tools.todoist import todoist_tools
@@ -171,262 +161,3 @@ from mindroom.tools.youtube import youtube_tools
 from mindroom.tools.zendesk import zendesk_tools
 from mindroom.tools.zep import zep_tools
 from mindroom.tools.zoom import zoom_tools
-
-if TYPE_CHECKING:
-    from mindroom.tool_system.authoring import Toolkit
-
-
-__all__ = [
-    "agentql_tools",
-    "airflow_tools",
-    "apify_tools",
-    "approved_egress_tools",
-    "arxiv_tools",
-    "atlassian_tools",
-    "attachments_tools",
-    "aws_lambda_tools",
-    "aws_ses_tools",
-    "baidusearch_tools",
-    "bitbucket_tools",
-    "brandfetch_tools",
-    "brightdata_tools",
-    "browser_mcp_tools",
-    "browser_tools",
-    "browserbase_tools",
-    "cal_com_tools",
-    "calculator_tools",
-    "callback_manager_tools",
-    "cartesia_tools",
-    "chat_ui_tools",
-    "claude_agent_tools",
-    "clickup_tools",
-    "coding_tools",
-    "composio_tools",
-    "config_manager_tools",
-    "confluence_tools",
-    "crawl4ai_tools",
-    "csv_tools",
-    "custom_api_tools",
-    "daytona_tools",
-    "desktop_tools",
-    "discord_tools",
-    "docker_tools",
-    "duckdb_tools",
-    "duckduckgo_tools",
-    "e2b_tools",
-    "eleven_labs_tools",
-    "email_tools",
-    "exa_tools",
-    "external_trigger_manager_tools",
-    "fal_tools",
-    "file_generation_tools",
-    "file_tools",
-    "financial_datasets_api_tools",
-    "firecrawl_tools",
-    "gemini_tools",
-    "giphy_tools",
-    "github_tools",
-    "gmail_tools",
-    "google_bigquery_tools",
-    "google_calendar_tools",
-    "google_docs_tools",
-    "google_drive_tools",
-    "google_maps_tools",
-    "google_scholar_tools",
-    "google_sheets_tools",
-    "google_tasks_tools",
-    "googlesearch_tools",
-    "groq_tools",
-    "hackernews_tools",
-    "invite_router_tools",
-    "jina_tools",
-    "jira_tools",
-    "linear_tools",
-    "linkup_tools",
-    "lumalabs_tools",
-    "matrix_api_tools",
-    "matrix_message_tools",
-    "matrix_room_tools",
-    "matrix_voice_message_tools",
-    "mem0_tools",
-    "microsoft_files_tools",
-    "microsoft_meetings_tools",
-    "microsoft_onenote_tools",
-    "microsoft_people_tools",
-    "microsoft_sharepoint_tools",
-    "microsoft_teams_tools",
-    "microsoft_todo_tools",
-    "modelslabs_tools",
-    "moviepy_video_tools",
-    "neo4j_tools",
-    "newspaper4k_tools",
-    "notion_tools",
-    "oauth_connections_tools",
-    "openai_tools",
-    "openbb_tools",
-    "openweather_tools",
-    "outlook_calendar_tools",
-    "outlook_mail_tools",
-    "oxylabs_tools",
-    "pandas_tools",
-    "postgres_tools",
-    "pubmed_tools",
-    "python_tools",
-    "reasoning_tools",
-    "reddit_tools",
-    "redshift_tools",
-    "register_thread_summary_tools",
-    "replicate_tools",
-    "resend_tools",
-    "scheduler_tools",
-    "scrapegraph_tools",
-    "script_tools",
-    "searxng_tools",
-    "serpapi_tools",
-    "serper_tools",
-    "shared_directories_tools",
-    "shell_tools",
-    "shopify_tools",
-    "slack_tools",
-    "sleep_tools",
-    "spider_tools",
-    "spotify_tools",
-    "sql_tools",
-    "stop_reply_tools",
-    "tavily_tools",
-    "telegram_tools",
-    "thread_model_tools",
-    "thread_move_tools",
-    "thread_resolution_tools",
-    "thread_tags_tools",
-    "todo_tools",
-    "todoist_tools",
-    "trafilatura_tools",
-    "trello_tools",
-    "twilio_tools",
-    "unsplash_tools",
-    "update_awareness_tools",
-    "usage_stats_tools",
-    "visualization_tools",
-    "web_browser_tools",
-    "webex_tools",
-    "website_tools",
-    "whatsapp_tools",
-    "wikipedia_tools",
-    "x_tools",
-    "yfinance_tools",
-    "youtube_tools",
-    "zendesk_tools",
-    "zep_tools",
-    "zoom_tools",
-]
-
-
-@register_tool_with_metadata(
-    name="openclaw_compat",
-    file_access=ToolFileAccess.NONE,
-    display_name="OpenClaw Compat",
-    description="Convenience bundle that implies shell, coding, browser, and other common tools",
-    docs_url="https://docs.mindroom.chat/openclaw/#openclaw_compat",
-    category=ToolCategory.DEVELOPMENT,
-    icon="Workflow",
-    icon_color="text-orange-500",
-    helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, matrix_message, attachments, matrix_room.",
-)
-def _openclaw_compat_tools() -> type[Toolkit]:
-    """Return an empty toolkit — the real tools are loaded via tool preset expansion."""
-    from mindroom.tool_system.authoring import Toolkit
-
-    return Toolkit
-
-
-@register_tool_with_metadata(
-    name="homeassistant",
-    file_access=ToolFileAccess.NONE,
-    display_name="Home Assistant",
-    description="Control and monitor smart home devices",
-    category=ToolCategory.SMART_HOME,
-    icon="Home",
-    icon_color="text-blue-500",
-    dependencies=["httpx"],
-    status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.SPECIAL,
-    requires_primary_runtime=True,
-    managed_init_args=(
-        ToolManagedInitArg.CREDENTIALS_MANAGER,
-        ToolManagedInitArg.WORKER_TARGET,
-    ),
-    config_fields=[
-        ConfigField(
-            name="HOMEASSISTANT_URL",
-            label="Home Assistant URL",
-            type="url",
-            required=True,
-            placeholder="http://homeassistant.local:8123",
-            description="URL to your Home Assistant instance",
-        ),
-        ConfigField(
-            name="HOMEASSISTANT_TOKEN",
-            label="Access Token",
-            type="password",
-            required=True,
-            placeholder="Bearer token",
-            description="Long-lived access token from Home Assistant",
-        ),
-        ConfigField(
-            name="HOMEASSISTANT_ALLOW_PRIVATE_URL",
-            label="Allow Private Home Assistant URL",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Allow a trusted self-hosted Home Assistant URL on a private, local, or loopback network.",
-        ),
-    ],
-    docs_url="https://docs.mindroom.chat/tools/location-commerce-and-home/#homeassistant",
-    function_names=(
-        "activate_scene",
-        "call_service",
-        "get_entity_state",
-        "list_entities",
-        "set_brightness",
-        "set_color",
-        "set_temperature",
-        "toggle",
-        "trigger_automation",
-        "turn_off",
-        "turn_on",
-    ),
-)
-def _homeassistant_tools() -> type[Toolkit]:
-    """Return Home Assistant tools for smart home control."""
-    from mindroom.custom_tools.homeassistant import HomeAssistantTools
-
-    return HomeAssistantTools
-
-
-@register_tool_with_metadata(
-    name="egress_credentials",
-    file_access=ToolFileAccess.NONE,
-    requires_primary_runtime=True,
-    display_name="Egress Credentials",
-    description=(
-        "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use"
-    ),
-    docs_url="https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
-    category=ToolCategory.INTEGRATIONS,
-    icon="KeyRound",
-    icon_color="text-amber-600",
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
-    managed_init_args=(
-        ToolManagedInitArg.RUNTIME_PATHS,
-        ToolManagedInitArg.WORKER_TARGET,
-    ),
-    config_fields=[],
-    function_names=("list_egress_credentials",),
-)
-def _egress_credentials_tools() -> type[Toolkit]:
-    """Return the egress broker credential status tool."""
-    from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
-
-    return EgressCredentialsTools

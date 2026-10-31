@@ -633,9 +633,13 @@ per-file-ignores."cluster/k8s/kind/*" = [
 per-file-ignores."src/mindroom/tools/*" = [
   "PLC0415", # `import` should be at the top-level of a file"
 ]
+per-file-ignores."src/mindroom/tools/__init__.py" = [
+  "F401", # the package imports each registration only so it registers its tool
+]
 
 [tool.vulture]
 paths = [ "src/mindroom", "vulture_whitelist.py" ]
+ignore_decorators = [ "@register_tool_with_metadata" ]
 min_confidence = 60
 sort_by_size = true
 

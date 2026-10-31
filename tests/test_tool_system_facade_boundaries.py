@@ -244,20 +244,6 @@ def _builtin_registration_modules() -> list[str]:
     return sorted(modules)
 
 
-def _manifest_modules() -> list[str]:
-    tree = ast.parse((SOURCE_ROOT / "tools" / "__init__.py").read_text())
-    modules: list[str] = []
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            modules.extend(alias.name for alias in node.names if alias.name.startswith("mindroom.tools."))
-        elif isinstance(node, ast.ImportFrom):
-            if node.module == "mindroom.tools":
-                modules.extend(f"mindroom.tools.{alias.name}" for alias in node.names)
-            elif node.module and node.module.startswith("mindroom.tools."):
-                modules.append(node.module)
-    return modules
-
-
 def test_tool_system_runtime_and_extensions_modules_are_removed() -> None:
     """The runtime and extensions facade modules should no longer exist."""
     assert not (SOURCE_ROOT / "tool_system" / "runtime.py").exists()
@@ -312,11 +298,18 @@ def test_builtin_tools_depend_only_on_declaration_and_registration_leaves() -> N
     assert not _builtin_tool_forbidden_importers()
 
 
-def test_builtin_tool_manifest_explicitly_imports_every_registration_module() -> None:
-    """The deterministic manifest should list every built-in registration module exactly once."""
-    manifest_modules = _manifest_modules()
-    assert len(manifest_modules) == len(set(manifest_modules))
-    assert sorted(manifest_modules) == _builtin_registration_modules()
+def test_builtin_tool_manifest_only_imports_every_registration_module_once() -> None:
+    """The package imports each registration module once, itself or through its factory, and exports or registers nothing."""
+    tree = ast.parse((SOURCE_ROOT / "tools" / "__init__.py").read_text())
+    statements = tree.body[1:] if ast.get_docstring(tree) is not None else tree.body
+    assert all(isinstance(node, ast.ImportFrom) for node in statements)
+    manifest = [
+        f"mindroom.tools.{alias.name}" if node.module == "mindroom.tools" else node.module
+        for node in statements
+        for alias in node.names
+    ]
+    assert len(manifest) == len(set(manifest))
+    assert sorted(manifest) == _builtin_registration_modules()
 
 
 def test_tach_does_not_expose_catalog_private_registry_helpers() -> None:
