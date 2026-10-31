@@ -194,6 +194,7 @@ def test_router_and_agent_accept_invites_support_user_patterns(policy: list[str]
             },
             "members_of_rooms",
         ),
+        ({"router": {"access": {"users": ["@user:example.com", "@user:example.com"]}}}, "users"),
         (
             {
                 "agents": {
@@ -224,7 +225,7 @@ def test_router_and_agent_accept_invites_support_user_patterns(policy: list[str]
 )
 def test_membership_schema_rejects_duplicate_entries(payload: dict[str, object], duplicate: str) -> None:
     """Duplicate access entries must fail validation instead of changing policy silently."""
-    with pytest.raises(ValidationError, match=duplicate):
+    with pytest.raises(ValidationError, match=f"Duplicate {duplicate} are not allowed"):
         Config.model_validate(payload)
 
 

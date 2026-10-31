@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationInfo
 
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import validate_unique_entries
@@ -22,6 +22,15 @@ def _validate_invite_acceptance_policy(value: bool | list[str]) -> bool | list[s
 
 
 InviteAcceptancePolicy = Annotated[bool | list[str], AfterValidator(_validate_invite_acceptance_policy)]
+
+
+def _validate_unique_field_entries(values: list[str], info: ValidationInfo) -> list[str]:
+    """Reject duplicate grants so authored intent has one interpretation."""
+    assert info.field_name is not None
+    return validate_unique_entries(values, field_name=info.field_name)
+
+
+_UniqueEntries = Annotated[list[str], AfterValidator(_validate_unique_field_entries)]
 
 
 def validate_concrete_matrix_user_ids(
@@ -61,7 +70,7 @@ class ResponderAccessConfig(BaseModel):
         default=None,
         description="Allow joined members of the current room; the router defaults to true",
     )
-    members_of_rooms: list[str] | None = Field(
+    members_of_rooms: _UniqueEntries | None = Field(
         default=None,
         description=(
             "Allow joined members of these managed rooms; unset infers the responder's configured rooms "
@@ -69,19 +78,10 @@ class ResponderAccessConfig(BaseModel):
         ),
         json_schema_extra=dashboard_hint(reference="room"),
     )
-    users: list[str] = Field(
+    users: _UniqueEntries = Field(
         default_factory=list,
         description="Allow these Matrix user IDs or glob patterns",
     )
-
-    @field_validator("members_of_rooms", "users")
-    @classmethod
-    def validate_unique_entries(cls, values: list[str] | None, info: ValidationInfo) -> list[str] | None:
-        """Reject duplicate grants so authored intent has one interpretation."""
-        if values is None:
-            return None
-        assert info.field_name is not None
-        return validate_unique_entries(values, field_name=info.field_name)
 
 
 class RoomDefaultsConfig(BaseModel):
