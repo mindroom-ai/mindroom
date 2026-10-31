@@ -281,6 +281,14 @@ _SNAPSHOT_JS = """
 """
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingDialog:
+    """How a tab answers its next dialog."""
+
+    accept: bool
+    prompt_text: str | None
+
+
 @dataclass
 class _BrowserTabState:
     """State for one browser tab."""
@@ -288,7 +296,7 @@ class _BrowserTabState:
     target_id: str
     page: Page
     refs: dict[str, str] = field(default_factory=dict)
-    pending_dialog: dict[str, Any] | None = None
+    pending_dialog: _PendingDialog | None = None
     console: list[dict[str, Any]] = field(default_factory=list)
     upload_staging: list[TemporaryDirectory[str]] = field(default_factory=list)
     upload_staged_bytes: int = 0
@@ -1362,11 +1370,7 @@ class BrowserTools(Toolkit):
     ) -> dict[str, Any]:
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
-        tab.pending_dialog = {
-            "accept": accept,
-            "promptText": prompt_text,
-            "timeoutMs": timeout_ms,
-        }
+        tab.pending_dialog = _PendingDialog(accept=accept, prompt_text=prompt_text)
         return {
             "accept": accept,
             "action": "dialog",
@@ -1917,8 +1921,8 @@ class BrowserTools(Toolkit):
             await dialog.dismiss()
             return
         tab.pending_dialog = None
-        if behavior.get("accept"):
-            await dialog.accept(str(behavior.get("promptText") or ""))
+        if behavior.accept:
+            await dialog.accept(behavior.prompt_text or "")
             return
         await dialog.dismiss()
 

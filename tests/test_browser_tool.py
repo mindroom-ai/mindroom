@@ -1094,6 +1094,41 @@ async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch)
     assert payload["targetId"] == "tab-1"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accept", [True, False])
+async def test_dialog_action_answers_only_the_next_dialog(monkeypatch: pytest.MonkeyPatch, accept: bool) -> None:
+    """A dialog action sets how the next dialog is answered; later dialogs are dismissed."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    tab = _BrowserTabState(target_id="tab-1", page=SimpleNamespace())
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=object()))
+    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+
+    payload = json.loads(await tool.browser(action="dialog", accept=accept, promptText="yes", timeoutMs=500))
+
+    assert payload == {
+        "accept": accept,
+        "action": "dialog",
+        "armed": True,
+        "profile": "mindroom",
+        "promptText": "yes",
+        "status": "ok",
+        "targetId": "tab-1",
+        "timeoutMs": 500,
+    }
+    first: Any = SimpleNamespace(accept=AsyncMock(), dismiss=AsyncMock())
+    later: Any = SimpleNamespace(accept=AsyncMock(), dismiss=AsyncMock())
+    await BrowserTools._handle_dialog(tab, first)
+    await BrowserTools._handle_dialog(tab, later)
+    if accept:
+        first.accept.assert_awaited_once_with("yes")
+        first.dismiss.assert_not_awaited()
+    else:
+        first.accept.assert_not_awaited()
+        first.dismiss.assert_awaited_once_with()
+    later.accept.assert_not_awaited()
+    later.dismiss.assert_awaited_once_with()
+
+
 def _install_upload_tab(tool: BrowserTools, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     set_input_files = AsyncMock()
     locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
