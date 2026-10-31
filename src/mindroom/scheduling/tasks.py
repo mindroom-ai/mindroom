@@ -74,7 +74,7 @@ _schedule_edit_locks: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = 
 
 
 def schedule_edit_lock(client: nio.AsyncClient, room_id: str, task_id: str) -> asyncio.Lock:
-    """Serialize every read-then-write of one task's state across local clients: edits, cancellations, and status writes."""
+    """Serialize every write of one task's state across local clients: edits, cancellations, and status writes."""
     key = (client.homeserver, room_id, task_id)
     lock = _schedule_edit_locks.get(key)
     if lock is None:

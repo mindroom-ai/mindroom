@@ -36,6 +36,7 @@ from tests.scheduling_helpers import (
     runnable_task,
     schedule_runtime_paths,
     scheduled_task_runtime,
+    scheduled_task_state_event,
     scheduling_bot,
     serve_full_room_state,
     serve_task_state_events,
@@ -408,10 +409,12 @@ async def test_a_one_time_task_finishing_during_an_edit_write_stays_completed(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("canceller", ["departed_creator", "cancel", "cancel_all"])
 async def test_edit_cannot_resurrect_schedule_while_cancellation_is_persisting(
     owner_membership_runtime_paths: RuntimePaths,
+    canceller: str,
 ) -> None:
-    """Runtime cancellation and a separate API client must serialize their writes."""
+    """An edit from a separate API client waits for a cancellation that is still writing, so it cannot bring the task back."""
     client, workflow, state = _owner_schedule([{"membership": "leave"}])
     existing = await scheduling.get_scheduled_task(
         client,
@@ -450,16 +453,28 @@ async def test_edit_cannot_resurrect_schedule_while_cancellation_is_persisting(
                 timezone="UTC",
             )
 
-    async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
-        tasks.create_task(
-            runnable_task(
+    async def cancel() -> object:
+        if canceller == "cancel":
+            return await scheduling.cancel_scheduled_task(
                 client,
                 "!test:server",
                 "owner_task",
-                config=Config(),
-                runtime_paths=owner_membership_runtime_paths,
-            ),
+                owner_membership_runtime_paths,
+            )
+        if canceller == "cancel_all":
+            return await scheduling.cancel_all_scheduled_tasks(client, "!test:server", owner_membership_runtime_paths)
+        return await runnable_task(
+            client,
+            "!test:server",
+            "owner_task",
+            config=Config(),
+            runtime_paths=owner_membership_runtime_paths,
         )
+
+    event = scheduled_task_state_event("owner_task", dict(state), sender=_SCHEDULE_WRITER)
+    serve_full_room_state(client, "!test:server", [event])
+    async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
+        tasks.create_task(cancel())
         await write_started.wait()
         tasks.create_task(edit())
         await edit_started.wait()
