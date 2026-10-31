@@ -33,7 +33,7 @@ from mindroom.custom_tools.memory import MemoryTools
 from mindroom.delegation.state import DelegationState
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.llm.events import ReportedCall, ToolCallOrigin
-from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
@@ -335,7 +335,7 @@ async def test_hidden_delegation_uses_native_child_owner(
         assert catalog.store is not None
         saved = catalog.store.get_run("run")
         assert saved is not None
-        assert saved.requirements is None
+        assert saved.requirements == []
         followup_id = uuid4()
         async with owner._window("bash-followup"):
             await owner.operation(
@@ -561,7 +561,9 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             assert isinstance(paused, PausedAttempt)
             assert paused.cli_call is not None
             assert paused.runtime_model_name == "parent-model"
-            approved = [replace(waiting, confirmation=True) for waiting in paused.requirements]
+            approved = [
+                RunRequirement(replace(waiting.tool_execution, confirmed=True)) for waiting in paused.requirements
+            ]
             approval_calls = approval_calls_for_cli_pause(paused, "helper", approved)
 
             presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)

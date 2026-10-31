@@ -361,20 +361,24 @@ async def test_a_database_from_any_older_layout_takes_the_paused_run_rewrite_too
 
 @pytest.mark.asyncio
 async def test_a_database_at_version_5_takes_only_the_paused_run_rewrite(tmp_path: Path) -> None:
-    """The snapshot step ran when the database reached version 5, so the step to version 6 runs only its own rewrite.
+    """The snapshot step ran when the database reached version 5, so the steps after it run only their own rewrites.
 
-    v2026.10.683's children hold a null requested model, which only the snapshot step fills.
+    v2026.10.683's children hold a null requested model, which only the snapshot step fills; the step to version 8
+    only drops the pending calls' second copy from the delegation state.
     """
     paths = _restore("v2026.10.683", tmp_path)
     database = _database(paths)
     _store_paused_notice(database)
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute('UPDATE "leader_sessions_log_meta" SET version = 5')
-    metadata = _query(database, 'SELECT metadata FROM "leader_sessions_log_runs"')
+    metadata = [json.loads(text) for (text,) in _query(database, 'SELECT metadata FROM "leader_sessions_log_runs"')]
+    for run_metadata in metadata:
+        del run_metadata[DELEGATION_STATE_KEY]["pending_requirements"]
 
     await migrate_conversation_storage(paths)
 
-    assert _query(database, 'SELECT metadata FROM "leader_sessions_log_runs"') == metadata
+    stored = _query(database, 'SELECT metadata FROM "leader_sessions_log_runs"')
+    assert [json.loads(text) for (text,) in stored] == metadata
     assert _parent_content(paths) is None
     assert _query(database, 'SELECT version FROM "leader_sessions_log_meta"') == [(LOG_VERSION,)]
 

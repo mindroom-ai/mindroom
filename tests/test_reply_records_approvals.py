@@ -83,12 +83,14 @@ def _paused(run_id: str = "run-1", text: str = "Reading document") -> PausedAtte
     return PausedAttempt(
         session_id=_target().session_id,
         run_id=run_id,
-        tools=(
-            ToolExecution(
-                tool_call_id=f"call-{run_id}",
-                tool_name="read_document",
-                requires_confirmation=True,
-                approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE,
+        requirements=(
+            RunRequirement(
+                ToolExecution(
+                    tool_call_id=f"call-{run_id}",
+                    tool_name="read_document",
+                    requires_confirmation=True,
+                    approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE,
+                ),
             ),
         ),
         response_text=text,
