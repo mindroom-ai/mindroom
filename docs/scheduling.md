@@ -97,7 +97,7 @@ Cancel one task, or every task in the room.
 ```
 
 Use `!list_schedules` to find task IDs.
-Only a pending task can be cancelled; one that already ran, failed, or was cancelled is left as it is.
+Only a pending task can be cancelled; a one-time task that already ran, and a task that failed or was cancelled, stay as they are.
 
 **Aliases:** `!cancelschedule`, `!cancel-schedule`
 
