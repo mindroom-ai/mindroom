@@ -1093,6 +1093,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 ### Schedules
 
 Lists scheduled tasks across rooms with room, status, schedule type, delivery mode, and next run time.
+A room whose schedules cannot be read, for example because the router is not in it, is named above the list with the reason, and the home tab counts it, instead of showing as empty.
 You can edit a task's timing, description, and visible or silent delivery, or cancel it.
 See [Scheduling](https://docs.mindroom.chat/scheduling/).
 
@@ -1256,7 +1257,7 @@ Upload and delete return HTTP 409 for Git-backed bases (see [Sync Behavior](http
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/schedules` | List scheduled tasks, optionally filtered by room, including each task's `silent` flag |
+| GET | `/api/schedules` | List scheduled tasks, optionally filtered by room, including each task's `silent` flag; `unreadable_rooms` names each room whose tasks could not be read, with the reason |
 | PUT | `/api/schedules/{task_id}` | Edit a scheduled task, including `silent` |
 | DELETE | `/api/schedules/{task_id}` | Cancel a scheduled task |
 
@@ -7155,6 +7156,8 @@ A key follows the [agent naming rules](https://docs.mindroom.chat/configuration/
 | `matrix_username` | string | `mindroom_<agent key>` | Matrix localpart pattern; it contains `{username}` exactly once plus at least one other character, so no agent takes a person's bare localpart, and renders to `[a-z0-9._=/-]`. `_<MINDROOM_NAMESPACE>` is appended when a namespace is set, and the default account carries the same suffix. |
 | `agent` | object | Required | Any [agent](https://docs.mindroom.chat/configuration/agents/#configuration-options) fields; the defaults for every user's agent. |
 | `users` | object | `{}` | Per-user overrides keyed by concrete Matrix user ID, with no patterns. Each override is an agent field that replaces the template's value whole, so a list or object is not merged. |
+
+In the template's `delegate_to`, the template key names each user's own agent, so `delegate_to: [mind]` lets every user's agent run fresh copies of itself as [subagents](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation).
 
 Placeholders are replaced as exact tokens, so other braces in prompts stay literal and a replaced value is never replaced again.
 
@@ -14050,6 +14053,7 @@ Set `delegate_to` on the calling agent to the agent names it may run as subagent
 MindRoom adds the `delegate` tool automatically when `delegate_to` is non-empty, so you do not list it in `tools:`.
 Every target must be a configured agent, or the config fails to load.
 An agent may run a fresh copy of itself only when its own name is in `delegate_to`.
+For a personal agent template, see [Personal Agents](https://docs.mindroom.chat/personal-agents/#configuration).
 Subagents may delegate further through their own `delegate_to`, up to a maximum depth of 3.
 
 ```yaml

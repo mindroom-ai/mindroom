@@ -40,8 +40,35 @@ describe("Schedules", () => {
       json: async () => ({
         timezone: "UTC",
         tasks: [silentTask, visibleTask],
+        unreadable_rooms: [],
       }),
     } as Response);
+  });
+
+  it("names each room whose schedules could not be read, with the reason", async () => {
+    vi.mocked(global.fetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        timezone: "UTC",
+        tasks: [visibleTask],
+        unreadable_rooms: [
+          {
+            room_id: "!lobby:example.org",
+            room_alias: "#lobby:example.org",
+            error: "Unable to retrieve scheduled tasks: M_FORBIDDEN",
+          },
+        ],
+      }),
+    } as Response);
+
+    render(<Schedules />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("#lobby:example.org");
+    expect(alert).toHaveTextContent(
+      "Unable to retrieve scheduled tasks: M_FORBIDDEN",
+    );
+    expect(screen.getByText("Visible status check")).toBeInTheDocument();
   });
 
   it("identifies visible schedules and exposes their delivery mode", async () => {
