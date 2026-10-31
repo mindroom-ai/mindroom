@@ -492,7 +492,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     def action(value: str, run_context: AgnoRunContext) -> str:
         assert run_context.metadata == {"source": "original"}
         effects.append(value)
-        return control_result if control else "action result"
+        return control_result if control else "action result: " + "x" * 600
 
     name = "switch_thread_model" if control else "action"
     runtime = _helper_runtime(tmp_path, tools=["shell"])
@@ -634,7 +634,15 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     assert saved is not None
     assert saved.metadata["mindroom_replay_state"] == "interrupted"
     assert all(not message.tool_calls for message in saved.messages)
-    assert "turn stopped before completion" in saved.messages[-1].get_content_string()
+    replayed = saved.messages[-1].get_content_string()
+    assert "turn stopped before completion" in replayed
+    # Later turns see the recovered call whole, as the tool got and returned it.
+    outcome, result_kind = ("finished", "output") if approved else ("failed", "error")
+    recovered = (control_result if control else "action result: " + "x" * 600) if approved else denial
+    arguments = json.dumps({"value": "exact\nargument"})
+    assert (
+        f"- The `{name}` tool {outcome} with input {arguments} and {result_kind} {json.dumps(recovered)}." in replayed
+    )
 
 
 @pytest.mark.asyncio

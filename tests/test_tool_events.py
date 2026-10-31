@@ -1,9 +1,11 @@
 """Tests for tool event formatting and metadata payloads."""
 
 import json
+from dataclasses import replace
 
 import pytest
 
+from mindroom.llm.events import ReportedCall, ToolCallOrigin
 from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.tool_system.events import (
@@ -454,6 +456,32 @@ def test_streaming_tool_tracker_marks_a_visible_slot_its_failed_call_completes()
     assert tracker.update_visible_trace_entry(visible_trace, pending_tool, completed_trace) is True
     assert completed_trace.is_error is True
     assert visible_trace[0].is_error is True
+
+
+def test_a_tracked_calls_entries_carry_it_whole_and_serialize_only_its_previews() -> None:
+    """A hidden CLI call's started slot and completion keep the call whole; the Matrix card and stored trace do not."""
+    # Assembled at runtime so no literal secret sits in the repository.
+    token = "sk-" + "proj" + "A1b2C3d4" * 5
+    started = ReportedCall("call-read", "read_file", {"path": f"{token}/" + "x" * 300})
+    finished = replace(started, result=f"key {token} " + "y" * 600)
+    origin = ToolCallOrigin("bash-1", "files")
+    tracker = StreamingToolTracker()
+    _marker, visible = tracker.start(started, tool_index=1, origin=origin)
+    assert visible is not None
+    assert visible.call == started
+    pending, completed = tracker.complete(finished, origin=origin)
+    assert pending is not None
+    assert tracker.update_visible_trace_entry([visible], pending, completed) is True
+
+    assert (visible.call, completed.call) == (finished, finished)
+    traced = [visible, completed]
+    bare = [replace(entry, call=None) for entry in traced]
+    card = json.dumps(build_tool_trace_content(traced))
+    assert card == json.dumps(build_tool_trace_content(bare))
+    assert token not in card
+    assert json.dumps(serialize_tool_trace(traced, include_internal=True)) == json.dumps(
+        serialize_tool_trace(bare, include_internal=True),
+    )
 
 
 def test_build_tool_trace_content_preserves_all_events_for_v2_indexing() -> None:
