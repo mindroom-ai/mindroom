@@ -23,19 +23,6 @@ class SupportsPrimaryCallPlacement(Protocol):
         ...
 
 
-@runtime_checkable
-class ReleasesAfterUse(Protocol):
-    """An owned toolkit whose calls in this process start resources it holds until ``aclose`` releases them.
-
-    A run or call that used such a toolkit releases it when it ends. A worker holds what the calls routed to it start,
-    so the calls such a toolkit keeps in the primary (``SupportsPrimaryCallPlacement``) must start nothing to release.
-    """
-
-    async def aclose(self) -> None:
-        """Release what this toolkit's calls started in this process."""
-        ...
-
-
 class ToolAuthoredOverrideValidator(str, Enum):
     """Explicit authored-override validation modes for a tool."""
 

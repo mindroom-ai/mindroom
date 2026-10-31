@@ -35,7 +35,7 @@ from agno.utils.schema import (
 from mindroom.llm.media import Audio, File, Image, Video, named_by_resource
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import authoring
-from mindroom.tool_system.declarations import ReleasesAfterUse, SupportsPrimaryCallPlacement
+from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
 from mindroom.tool_system.tool_function import AdaptedToolkit, InjectedValue, ToolFunction, ToolValue
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
@@ -142,21 +142,6 @@ def requires_connect(toolkit: AnyToolkit) -> TypeGuard[Toolkit]:
     if not isinstance(toolkit, Toolkit) or not toolkit.requires_connect:
         return False
     return _FINISHING.get(toolkit, _Finishing()).to_worker is None or isinstance(toolkit, SupportsPrimaryCallPlacement)
-
-
-def holds_call_resources(toolkit: AnyToolkit) -> bool:
-    """Whether this process holds something of ``toolkit`` that the run or call using it must release when it ends.
-
-    That is the connection ``requires_connect`` names, or what the calls of an owned toolkit that ``ReleasesAfterUse``
-    start here, such as the browser's Chromium; a toolkit whose calls go to a worker starts that in the worker.
-    """
-    if requires_connect(toolkit):
-        return True
-    return (
-        isinstance(toolkit, authoring.Toolkit)
-        and isinstance(toolkit, ReleasesAfterUse)
-        and _FINISHING.get(toolkit, _Finishing()).to_worker is None
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -772,7 +757,6 @@ __all__ = [
     "adapt_toolkit",
     "configure_toolkit_functions",
     "framework_arguments",
-    "holds_call_resources",
     "injected_parameters",
     "model_arguments",
     "offered_refusal",

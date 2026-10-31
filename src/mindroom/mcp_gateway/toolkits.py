@@ -17,7 +17,7 @@ from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.toolkit_connections import (
     RetainedToolkitCleanups,
-    release_toolkit,
+    close_connected_toolkit,
     toolkit_call_lifetime,
 )
 
@@ -56,7 +56,7 @@ async def _close_once_built(building: asyncio.Task[AnyToolkit]) -> None:
         toolkit = await building
     except Exception:
         return
-    await release_toolkit(toolkit, executor=_TOOL_EXECUTOR)
+    await close_connected_toolkit(toolkit, executor=_TOOL_EXECUTOR)
 
 
 def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> AnyToolkit:

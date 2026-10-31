@@ -50,7 +50,7 @@ from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload,
 from mindroom.tool_jobs.runtime import BackgroundOutcome, format_job_handle, get_background_runtime
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
-from mindroom.tool_system.agno_toolkits import holds_call_resources
+from mindroom.tool_system.agno_toolkits import requires_connect
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
@@ -126,8 +126,8 @@ def approval_can_run_as_job(function: ToolFunction, toolkit: AnyToolkit) -> bool
         isinstance(toolkit, JobTools)
         or function.external_execution
         or function.stop_after_call
-        # What a run holds for its calls, such as a connection or a browser, is released when it ends.
-        or holds_call_resources(toolkit)
+        # A connection opened for one run must finish its calls inside that run.
+        or requires_connect(toolkit)
     )
 
 
@@ -149,8 +149,8 @@ def wait_mode(tool: JobTool, *, depth: int, context: ToolRuntimeContext) -> Tool
     if (
         isinstance(tool.toolkit, JobTools)
         or _is_background_job_excluded(tool, context)
-        # What a run holds for its calls, such as a connection or a browser, is released when it ends.
-        or holds_call_resources(tool.toolkit)
+        # A connection opened for one run must finish its calls inside that run.
+        or requires_connect(tool.toolkit)
     ):
         return "native"
     # A call a CLI command makes returns to that command, whose own result is what the reply saves.

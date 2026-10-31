@@ -1,7 +1,6 @@
 """An agent's run connects the toolkits that hold a connection for one run, and closes them after it.
 
-A toolkit that sets ``requires_connect``, such as Postgres, holds a connection its run must close. An owned toolkit
-whose calls start a process resource it holds, as the browser's start Chromium, is released after the run or call.
+A toolkit that sets ``requires_connect``, such as Postgres, holds a connection its run must close.
 """
 
 from __future__ import annotations
@@ -25,13 +24,10 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools.browser import BrowserTools
 from mindroom.message_target import MessageTarget
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_system import authoring
 from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
-from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
@@ -39,7 +35,7 @@ from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 from mindroom.tool_system.toolkit_connections import (
     RetainedToolkitCleanups,
     _shielded_lifecycle,
-    release_toolkit,
+    close_connected_toolkit,
     run_connection,
     toolkit_call_lifetime,
 )
@@ -162,12 +158,11 @@ def _agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     turns: Sequence[Sequence[ScriptStep]],
-    tools: Sequence[str] = ("database", "archive"),
 ) -> tuple[Config, ScriptedModel]:
-    """Configure an agent with ``tools``, by default the database and archive toolkits, on a scripted model."""
+    """Configure an agent with the database and archive toolkits on a scripted model."""
     config = bind_runtime_paths(
         Config(
-            agents={"worker": AgentConfig(display_name="Worker", tools=list(tools))},
+            agents={"worker": AgentConfig(display_name="Worker", tools=["database", "archive"])},
             models={"default": ModelConfig(provider="openai", id="test-model", api_key="test-key")},
         ),
         test_runtime_paths(tmp_path),
@@ -489,169 +484,9 @@ class _CacheTools(Toolkit):
 
 
 @pytest.mark.asyncio
-async def test_releasing_a_toolkit_leaves_one_that_holds_nothing_alone() -> None:
-    """Only a toolkit that holds a connection or its calls' resources is closed or released."""
-    await release_toolkit(_CacheTools())
-    await release_toolkit(_DatabaseTools())
+async def test_closing_a_connected_toolkit_leaves_a_toolkit_without_a_connection_alone() -> None:
+    """Only a toolkit that holds a connection is closed."""
+    await close_connected_toolkit(_CacheTools())
+    await close_connected_toolkit(_DatabaseTools())
 
     assert EVENTS == ["database close"]
-
-
-class _ProfileTools(authoring.Toolkit):
-    """An owned toolkit whose calls start a process resource it holds until released, as the browser's start Chromium."""
-
-    def __init__(self) -> None:
-        super().__init__(name="profile")
-
-    @authoring.tool
-    def open_page(self, url: str) -> str:
-        """Open one page.
-
-        Args:
-            url: The page.
-
-        """
-        EVENTS.append("page open")
-        return f"opened {url}"
-
-    async def aclose(self) -> None:
-        """Release the process resource, recording it."""
-        EVENTS.append("profile release")
-
-
-class _FailingProfileTools(_ProfileTools):
-    """A resource-holding toolkit whose release fails."""
-
-    async def aclose(self) -> None:
-        """Fail to release, recording the attempt."""
-        await super().aclose()
-        msg = "release failed"
-        raise RuntimeError(msg)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("fails", [False, True])
-async def test_a_run_releases_an_owned_toolkit_holding_process_resources_once_it_ends(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fails: bool,
-) -> None:
-    """The run releases what the toolkit's calls started, however the run ends, after closing the toolkits after it."""
-    turn = [_request(), raising(ValueError("boom"))] if fails else [_request(), *answer("Opened.")]
-    turns = [[_request(), *calls(tool_call("open_page", "call_open", url="https://example.com"))], turn]
-    with registered_toolkit("profile", _ProfileTools), registered_toolkit("database", _DatabaseTools):
-        config, _model = _agent(tmp_path, monkeypatch, turns, tools=("profile", "database"))
-        await _reply(config)
-
-    assert EVENTS == ["database connect", "request", "page open", "request", "database close", "profile release"]
-
-
-@pytest.mark.asyncio
-async def test_a_failed_release_is_logged_and_the_run_still_closes_its_other_toolkits(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A release that raises is a warning, as a failed close is, and every other toolkit still closes."""
-    turns = [[_request(), *answer("Nothing to open.")]]
-    with registered_toolkit("database", _DatabaseTools), registered_toolkit("profile", _FailingProfileTools):
-        config, _model = _agent(tmp_path, monkeypatch, turns, tools=("database", "profile"))
-        with capture_logs() as logs:
-            await _reply(config)
-
-    assert EVENTS == ["database connect", "request", "profile release", "database close"]
-    assert [(entry["toolkit"], entry["error"]) for entry in logs if entry["event"] == "toolkit_close_failed"] == [
-        ("profile", "release failed"),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_a_call_lifetime_releases_an_owned_toolkit_holding_process_resources() -> None:
-    """A call that builds its own toolkit, as the MCP gateway and script runs do, releases it once the call ends."""
-    cleanups = RetainedToolkitCleanups(failure_event="test_cleanup_failed")
-    async with toolkit_call_lifetime(_ProfileTools(), cleanups):
-        EVENTS.append("body")
-    await release_toolkit(_ProfileTools())
-
-    assert EVENTS == ["body", "profile release", "profile release"]
-
-
-class _SlowProfileTools(_ProfileTools):
-    """A resource-holding toolkit whose release waits until the test lets it finish."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.release = asyncio.Event()
-
-    async def aclose(self) -> None:
-        """Start releasing, then finish once released."""
-        EVENTS.append("profile release started")
-        await self.release.wait()
-        await super().aclose()
-
-
-@pytest.mark.asyncio
-async def test_a_cancelled_call_hands_the_release_to_its_cleanups() -> None:
-    """A cancelled call does not wait for the release; its cleanups finish it, so a shutdown can wait for them."""
-    cleanups = RetainedToolkitCleanups(failure_event="test_cleanup_failed")
-    toolkit = _SlowProfileTools()
-    entered = asyncio.Event()
-
-    async def call() -> None:
-        async with toolkit_call_lifetime(toolkit, cleanups):
-            entered.set()
-            await asyncio.Event().wait()
-
-    calling = asyncio.create_task(call())
-    await entered.wait()
-    calling.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(calling, timeout=5)
-
-    assert len(cleanups.tasks) == 1
-    toolkit.release.set()
-    assert await cleanups.drain(5)
-    assert EVENTS == ["profile release started", "profile release"]
-
-
-def test_a_toolkit_routed_to_a_worker_holds_no_process_resources_here() -> None:
-    """A worker holds the resources of the calls routed to it, so the primary has nothing to release."""
-    toolkit = configure_toolkit_functions(_ProfileTools(), to_worker=lambda _name, entrypoint: entrypoint)
-
-    assert run_connection(toolkit) is None
-
-
-@pytest.mark.asyncio
-async def test_a_primary_browser_is_released_after_the_run_that_used_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A browser whose calls run in the primary closes its profiles, so the next reply's browser can open them."""
-    toolkit = BrowserTools(test_runtime_paths(tmp_path))
-
-    async def close_profiles() -> None:
-        EVENTS.append("browser profiles closed")
-
-    monkeypatch.setattr(toolkit, "_close_profiles", close_profiles)
-    connect = run_connection(toolkit)
-    assert connect is not None
-    close = await connect()
-    assert close is not None
-    await close()
-
-    assert EVENTS == ["browser profiles closed"]
-
-
-class _VendorSessionTools(Toolkit):
-    """A vendor toolkit with an ``aclose`` of its own, which MindRoom leaves to the vendor's lifecycle."""
-
-    def __init__(self) -> None:
-        super().__init__(name="vendor_session", tools=[])
-
-    async def aclose(self) -> None:
-        """Record the close."""
-        EVENTS.append("vendor close")
-
-
-def test_a_vendor_toolkit_with_its_own_aclose_is_not_released() -> None:
-    """Only MindRoom's own toolkits declare process resources through ``aclose``."""
-    assert run_connection(_VendorSessionTools()) is None
