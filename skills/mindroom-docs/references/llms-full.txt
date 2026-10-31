@@ -7060,6 +7060,7 @@ It applies only when MindRoom creates the room, and never joins someone who alre
 
 An onboarding failure affects only that human, and the onboarding room keeps working for everyone else.
 Failed onboarding is retried automatically, first after 30 seconds and then at doubling intervals up to one hour, and a config reload retries it immediately.
+Onboarding blocked by an adopted room's unlisted members is also retried as soon as that room's membership changes.
 A personal room that fails its ownership or membership checks keeps retrying only while its reconciliation is still failing; otherwise it is checked again on restart or config reload.
 A join or command that arrives before the personal-room agent connects is handled once it does.
 Revoking the human's access to the agent, or disabling `personal_rooms`, cancels a welcome that has not been sent yet.
@@ -7067,7 +7068,7 @@ Revoking the human's access to the agent, or disabling `personal_rooms`, cancels
 | Log message | Meaning |
 | --- | --- |
 | `Personal-room validation failed for an onboarding trigger` | An existing personal room failed ownership or membership checks, for example because another account already holds the alias, or a guest the agent cannot remove was raised to the agent's power level. |
-| `Personal-room imported roster has unattested members` | An adopted room contains someone other than a MindRoom agent that its record does not list; the warning names every unlisted member, and MindRoom does not change the room. |
+| `Personal-room imported roster has unattested members` | An adopted room contains someone other than a MindRoom agent that its record does not list; the warning names every unlisted member, and retries repeat it only when those members change. MindRoom does not change the room, and that human's onboarding, such as the invite, admin grant, and welcome, waits until the room holds only participants its record lists. |
 | `Personal-room validation failed for an owner membership event` | The owner joined or changed their profile in a personal room that fails these checks; the agent keeps answering there. A room whose reconciliation is still failing keeps retrying up to hourly; otherwise the room is checked again on restart or config reload. |
 | `Personal-room onboarding trigger failed` | Any other failure, such as an invite refused by the human's homeserver. |
 | `Personal-room reconciliation failed` | An automatic retry failed; the log shows the attempt number and the delay before the next try. |

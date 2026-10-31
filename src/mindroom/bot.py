@@ -360,6 +360,7 @@ class AgentBot:
             self.personal_rooms,
             self._lookup_personal_room_target,
             self._provision_personal_agent,
+            self._report_personal_room_membership_change,
         )
         self._room_lifecycle = BotRoomLifecycle(
             BotRoomLifecycleDeps(
@@ -2161,6 +2162,16 @@ class AgentBot:
     def personal_room_target_ready(self) -> None:
         """Let the router onboard a user at once because their own agent finished its first sync."""
         self._personal_room_lifecycle.target_ready()
+
+    def _report_personal_room_membership_change(self, room_id: str) -> None:
+        """Forward a room's membership change to the router, which owns personal-room retries."""
+        router = self.orchestrator.agent_bots.get(ROUTER_AGENT_NAME)
+        if router is not None:
+            router.personal_room_membership_changed(room_id)
+
+    def personal_room_membership_changed(self, room_id: str) -> None:
+        """Retry at once onboarding that the personal room's imported roster blocked, as its membership changed."""
+        self._personal_room_lifecycle.membership_changed(room_id)
 
     async def _on_job_cancel(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Cancel this entity's background jobs a person asked to stop from their client."""

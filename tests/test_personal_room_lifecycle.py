@@ -683,34 +683,134 @@ async def test_failure_during_reload_leaves_no_stale_delay(coordination: Coordin
 
 
 @pytest.mark.asyncio
-async def test_imported_roster_mismatch_is_a_warning_without_traceback(
+async def test_imported_roster_mismatch_warns_once_until_its_members_change(
     coordination: Coordination,
     clock: Clock,
 ) -> None:
-    """A room waiting for someone to remove unattested members is reported on each retry, never as a crash."""
+    """A room waiting for someone to remove unattested members is warned about once, never as a crash.
+
+    Retries that find the same members, including after a reload, log at debug; other members warn again.
+    """
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
-    coordination.owner.ensure.side_effect = PersonalRoomRosterMismatchError(
-        "!personal:localhost",
-        {"@eve:localhost", "@bob:localhost"},
-    )
+    both = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost", "@bob:localhost"})
+    eve = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    coordination.owner.ensure.side_effect = [both, both, both, eve, None, eve]
     with capture_logs() as logs:
         await lifecycle._reconcile()
         clock.now += 30
         await lifecycle._reconcile()
-    assert [entry for entry in logs if entry["log_level"] in {"warning", "error"}] == [
-        {
-            "event": "Personal-room imported roster has unattested members",
-            "log_level": "warning",
-            "user_id": "@alice:localhost",
-            "room_id": "!lobby:localhost",
-            "personal_room_id": "!personal:localhost",
-            "unexpected_user_ids": ("@bob:localhost", "@eve:localhost"),
-            "attempt": attempt,
-            "retry_in_seconds": delay,
-        }
-        for attempt, delay in ((1, 30.0), (2, 60.0))
+        # Each user's provisioning from a template requests a reload, so a reload alone does not warn again.
+        lifecycle.config_changed()
+        await lifecycle._reconcile()
+        clock.now += 30
+        await lifecycle._reconcile()
+        clock.now += 60
+        await lifecycle._reconcile()
+        assert lifecycle._reconciled
+        # A mismatch that returns after the room was fixed is a new problem.
+        lifecycle.config_changed()
+        await lifecycle._reconcile()
+    roster = [entry for entry in logs if entry["event"] == "Personal-room imported roster has unattested members"]
+    assert [(entry["log_level"], entry["unexpected_user_ids"], entry["attempt"]) for entry in roster] == [
+        ("warning", ("@bob:localhost", "@eve:localhost"), 1),
+        ("debug", ("@bob:localhost", "@eve:localhost"), 2),
+        ("debug", ("@bob:localhost", "@eve:localhost"), 1),
+        ("warning", ("@eve:localhost",), 2),
+        ("warning", ("@eve:localhost",), 1),
     ]
+    assert roster[0] == {
+        "event": "Personal-room imported roster has unattested members",
+        "log_level": "warning",
+        "user_id": "@alice:localhost",
+        "room_id": "!lobby:localhost",
+        "personal_room_id": "!personal:localhost",
+        "unexpected_user_ids": ("@bob:localhost", "@eve:localhost"),
+        "attempt": 1,
+        "retry_in_seconds": 30.0,
+    }
+    assert not [entry for entry in logs if entry["log_level"] == "error"]
+
+
+@pytest.mark.asyncio
+async def test_membership_change_retries_a_blocked_personal_room_at_once(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """Someone leaving an adopted room may fix its roster, so its owner is retried without waiting out any delay."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = [
+        PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"}),
+        None,
+    ]
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    lifecycle.membership_changed("!elsewhere:localhost")
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert coordination.owner.ensure.await_count == 1
+
+    lifecycle.membership_changed("!personal:localhost")
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+
+    assert coordination.owner.ensure.await_count == 2
+    assert clock.now == 1000.0
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("clock")
+async def test_membership_change_during_an_attempt_retries_after_it(coordination: Coordination) -> None:
+    """An attempt may read the room before a change it races, so that change still earns one more attempt."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    attempts = 0
+
+    async def ensure(*_args: object, **_kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            lifecycle.membership_changed("!personal:localhost")
+        if attempts <= 2:
+            raise mismatch
+
+    coordination.owner.ensure.side_effect = ensure
+    await lifecycle._reconcile()
+    lifecycle.membership_changed("!personal:localhost")
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+
+    assert attempts == 3
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_member_events_report_membership_changes_but_not_profile_updates(coordination: Coordination) -> None:
+    """The router retries a blocked room only when someone joins, leaves, or is invited, not on every profile edit."""
+    lifecycle = coordination.lifecycle
+    lifecycle.agent_name = "helper"
+    report = Mock()
+    lifecycle.report_membership_change = report
+    room = nio.MatrixRoom("!personal:localhost", "@mindroom_helper:localhost")
+
+    def member(membership: str, previous: str) -> nio.RoomMemberEvent:
+        return nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": f"${membership}",
+                "sender": "@eve:localhost",
+                "state_key": "@eve:localhost",
+                "origin_server_ts": 1,
+                "content": {"membership": membership},
+                "unsigned": {"prev_content": {"membership": previous}},
+            },
+        )
+
+    await lifecycle.member_event(room, member("join", "join"))
+    report.assert_not_called()
+    await lifecycle.member_event(room, member("leave", "join"))
+    report.assert_called_once_with("!personal:localhost")
 
 
 @pytest.mark.asyncio

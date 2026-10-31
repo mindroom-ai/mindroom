@@ -822,6 +822,49 @@ async def test_an_imported_room_with_unattested_people_names_them_and_removes_no
 
 
 @pytest.mark.asyncio
+async def test_an_imported_room_onboards_its_owner_as_soon_as_the_unattested_person_leaves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router warns once while the room stays unchanged, and the target seeing the departure retries it at once."""
+    server = MatrixServer()
+    router, target = bots(tmp_path, server, monkeypatch, welcome="")
+    room_id = await target.personal_rooms.ensure("@alice:localhost", "!lobby:localhost", server)
+    # An imported room its owner has not been invited to yet, holding someone its record does not list.
+    server.state[room_id] = [event for event in server.state[room_id] if event["state_key"] != "@alice:localhost"]
+    path = personal_room_record_path(target.runtime_paths, "helper", "@alice:localhost")
+    record = read_personal_room(path)
+    record.adoption = PersonalRoomAdoption(creator_user_id=server.user_id, agent_user_id=server.user_id)
+    write_personal_room(path, record)
+    server.set_member(room_id, "@eve:localhost", "join")
+    lifecycle = router._personal_room_lifecycle
+
+    with capture_logs() as logs:
+        for _ in range(2):
+            lifecycle.config_changed()
+            lifecycle.schedule_reconciliation()
+            assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert server.membership(room_id, "@alice:localhost") is None
+
+        server.set_member(room_id, "@eve:localhost", "leave")
+        left = _room_member_event(
+            event_id="$eve-left",
+            user_id="@eve:localhost",
+            membership="leave",
+            prev_membership="join",
+        )
+        await _dispatch_member(target, nio.MatrixRoom(room_id, target.agent_user.user_id), left)
+        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+
+    assert server.membership(room_id, "@alice:localhost") == "invite"
+    assert [
+        entry["log_level"] for entry in logs if entry["event"] == "Personal-room imported roster has unattested members"
+    ] == ["warning", "debug"]
+    assert lifecycle._reconciled
+    assert not server.kicks
+
+
+@pytest.mark.asyncio
 async def test_existing_alias_requires_creator_marker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
