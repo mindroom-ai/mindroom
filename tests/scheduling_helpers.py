@@ -100,16 +100,28 @@ def serve_full_room_state(client: Any, room_id: str, events: list[dict[str, Any]
     client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events or [], room_id=room_id))
 
 
-def serve_room_schedule_state(client: Any, room_id: str, events: list[dict[str, Any]]) -> None:  # noqa: ANN401
-    """Answer the room-state snapshot and each task's own state read from the same events, as a homeserver would."""
-    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events, room_id=room_id))
-    contents = {(event["type"], event["state_key"]): event["content"] for event in events}
+def serve_room_schedule_state(
+    client: Any,  # noqa: ANN401
+    room_id: str,
+    events: list[dict[str, Any]],
+    *,
+    sender: str = SCHEDULE_WRITER_ID,
+) -> None:
+    """Answer the room-state snapshot and each task's own state read from the same events, as a homeserver would.
 
-    async def get_state_event(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
-        return nio.RoomGetStateEventResponse(dict(contents[event_type, state_key]), event_type, state_key, room_id)
+    Reads of other state events still reach the client's previous ``room_get_state_event`` mock.
+    """
+    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events, room_id=room_id))
+    tasks = {event["state_key"]: event["content"] for event in events if event["type"] == SCHEDULED_TASK_EVENT_TYPE}
+    fallback = client.room_get_state_event
+
+    async def get_state_event(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == SCHEDULED_TASK_EVENT_TYPE and state_key in tasks:
+            return nio.RoomGetStateEventResponse(dict(tasks[state_key]), event_type, state_key, room_id)
+        return await fallback(room_id=room_id, event_type=event_type, state_key=state_key)
 
     client.room_get_state_event = AsyncMock(side_effect=get_state_event)
-    serve_task_state_events(client)
+    serve_task_state_events(client, sender=sender)
 
 
 def joined_member_state(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:

@@ -61,6 +61,7 @@ from tests.scheduling_helpers import (
     run_once_task,
     schedule_runtime_paths,
     scheduled_task_runtime,
+    scheduled_task_state_event,
     scheduling_bot,
     serve_full_room_state,
     serve_room_schedule_state,
@@ -1769,19 +1770,10 @@ async def test_cancel_all_scheduled_tasks_rereads_each_task_before_cancelling(
         thread_id="$thread",
     )
     content = {"task_id": "task1", "workflow": workflow.model_dump_json(), "status": "pending"}
-    serve_room_schedule_state(
+    serve_full_room_state(
         client,
         "!test:server",
-        [
-            {
-                "type": SCHEDULED_TASK_EVENT_TYPE,
-                "state_key": "task1",
-                "content": content,
-                "event_id": "$state_task1",
-                "sender": SCHEDULE_WRITER_ID,
-                "origin_server_ts": 1234567890,
-            },
-        ],
+        [scheduled_task_state_event("task1", content, sender=SCHEDULE_WRITER_ID)],
     )
     client.room_get_state_event = AsyncMock(
         return_value=nio.RoomGetStateEventResponse(
