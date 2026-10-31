@@ -44,7 +44,6 @@ if TYPE_CHECKING:
         ModelProvider,
         ModelRequest,
         NativeHistoryRoute,
-        PortableReplayEstimator,
         StreamEvent,
         TokenCounter,
     )
@@ -76,11 +75,6 @@ class WrappedProvider:
     def native_history_route(self) -> NativeHistoryRoute | None:
         """The wrapped provider's native-history route."""
         return self.inner.native_history_route
-
-    @property
-    def replay_estimator(self) -> PortableReplayEstimator | None:
-        """The wrapped provider's replay estimator."""
-        return self.inner.replay_estimator
 
     @property
     def token_counter(self) -> TokenCounter:

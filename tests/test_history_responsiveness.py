@@ -30,7 +30,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.session_storage.agent_storage import create_agent_state_storage
-from mindroom.token_budget import estimate_compaction_input_tokens
+from mindroom.token_counting.counts import TokenCount, count
 from tests.conftest import install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.history.runtime import HistoryPreparationInputs
+    from mindroom.llm.provider import TokenCounter
 
 
 def _agent_inputs(config: Config) -> HistoryPreparationInputs:
@@ -110,22 +111,13 @@ async def test_history_sizing_allows_loop_progress(
         await entered.wait()
         released.set()
 
-    def controlled_text_estimate(
-        value: str,
-        *,
-        model_id: str | None = None,
-        conservative_fallback: bool = False,
-    ) -> int:
+    def controlled_text_estimate(counter: TokenCounter, value: str) -> TokenCount:
         loop.call_soon_threadsafe(entered.set)
         loop_progress.append(released.wait(timeout=1))
-        return estimate_compaction_input_tokens(
-            value,
-            model_id=model_id,
-            conservative_fallback=conservative_fallback,
-        )
+        return count(counter, value)
 
     if stage == "summary":
-        monkeypatch.setattr("mindroom.history.compaction.estimate_compaction_input_tokens", controlled_text_estimate)
+        monkeypatch.setattr("mindroom.history.compaction.count", controlled_text_estimate)
     else:
         monkeypatch.setattr(ResponsesAdapter, "estimate_portable_replay_tokens", controlled_estimate)
     heartbeat = asyncio.create_task(release_from_loop())
@@ -154,7 +146,7 @@ async def test_history_sizing_allows_loop_progress(
                 threshold_tokens=1000,
                 progress=None,
                 complete=_reported,
-                replay_estimator=model,
+                counter=model.token_counter,
             )
             assert outcome is not None
         await heartbeat
@@ -216,7 +208,7 @@ async def test_history_storage_work_allows_loop_progress(
             threshold_tokens=1000,
             progress=None,
             complete=_reported,
-            replay_estimator=model,
+            counter=model.token_counter,
         )
         assert outcome is not None
         await heartbeat
@@ -330,7 +322,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
                 resolved_inputs=resolved,
                 history_budget=1000,
                 before_tokens=11,
-                replay_estimator=model,
+                counter=model.token_counter,
                 config=config,
                 runtime_paths=paths,
             ),
@@ -449,17 +441,13 @@ async def test_summary_retry_sizing_allows_loop_progress(
     loop = asyncio.get_running_loop()
     loop_progress: list[bool] = []
 
-    def controlled_estimate(value: str, *, model_id: str | None = None, conservative_fallback: bool = False) -> int:
+    def controlled_estimate(counter: TokenCounter, value: str) -> TokenCount:
         released = threading.Event()
         loop.call_soon_threadsafe(released.set)
         loop_progress.append(released.wait(timeout=1))
-        return estimate_compaction_input_tokens(
-            value,
-            model_id=model_id,
-            conservative_fallback=conservative_fallback,
-        )
+        return count(counter, value)
 
-    monkeypatch.setattr("mindroom.history.compaction.estimate_compaction_input_tokens", controlled_estimate)
+    monkeypatch.setattr("mindroom.history.compaction.count", controlled_estimate)
     summary = "Greeting received."
     responses: list[object] = [summary]
     if retry == "fallback":

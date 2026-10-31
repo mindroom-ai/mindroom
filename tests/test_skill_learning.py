@@ -72,6 +72,7 @@ from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec
 from tests.conftest import delete_runs, install_model_providers, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.token_counter import fake_token_counter
 from tests.providers.golden_support import SentRequest, httpx2_transport, streamed_reply
 
 if TYPE_CHECKING:
@@ -79,7 +80,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider, StreamEvent
+    from mindroom.llm.provider import ModelProvider, StreamEvent, TokenCounter
     from mindroom.tool_system.tool_function import ToolFunction
 
 LEARNED = (
@@ -114,7 +115,7 @@ class _ScriptedModel:
     identity: ModelIdentity = _SCRIPTED
     capabilities: Capabilities = field(default_factory=Capabilities)
     native_history_route: None = None
-    replay_estimator: None = None
+    token_counter: TokenCounter = field(default_factory=fake_token_counter)
     model_params: dict[str, Any] = field(default_factory=dict)
     received: list[ModelRequest] = field(default_factory=list)
     requests: list[list[str]] = field(default_factory=list)

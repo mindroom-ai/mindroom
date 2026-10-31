@@ -45,7 +45,6 @@ if TYPE_CHECKING:
         ModelIdentity,
         ModelRequest,
         NativeHistoryRoute,
-        PortableReplayEstimator,
         StreamEvent,
         TokenCounter,
     )
@@ -67,11 +66,6 @@ class ResponsesAdapter:
     @property
     def native_history_route(self) -> NativeHistoryRoute:
         """Responses keeps provider-side state, so every request carries its replay policy and compaction settings."""
-        return self
-
-    @property
-    def replay_estimator(self) -> PortableReplayEstimator:
-        """Responses sizes explicitly replayed history as its requests send it."""
         return self
 
     @property
@@ -137,6 +131,7 @@ class ResponsesAdapter:
         try:
             return estimate_responses_replay_tokens(
                 messages,
+                counter=self.token_counter,
                 model_id=self.identity.id,
                 cache_system_prompt=self.settings.cache_system_prompt,
                 explicit_breakpoint=self.wire.explicit_breakpoint,

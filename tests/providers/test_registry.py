@@ -200,7 +200,7 @@ def test_every_documented_provider_value_gets_its_adapter_and_identity(route: st
     assert (provider.identity, provider.capabilities) == (adapter.identity, adapter.capabilities)
     native_history = adapter if adapter_type in {ResponsesAdapter, ClaudeProvider} else None
     assert provider.native_history_route is native_history
-    assert provider.replay_estimator is (adapter if adapter_type is ResponsesAdapter else None)
+    assert provider.token_counter.replay is (adapter if adapter_type is ResponsesAdapter else None)
     assert provider.model_params == adapter.model_params
 
 

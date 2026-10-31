@@ -1,7 +1,8 @@
 """The local counter of each model: its own tokenizer where one runs locally, otherwise a scaled o200k_base estimate.
 
 o200k_base loads in a background thread on first use, because tiktoken downloads its vocabulary then, without a
-timeout, and no reply may wait for that. Until it has loaded, or when it cannot load, estimates are None.
+timeout, and no reply may wait for that. Until it has loaded, or when it cannot load, estimates are None and counts
+use a stand-in (``token_counting.counts``).
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ def _load_in_background() -> None:
     try:
         load_o200k()
     except Exception:
-        logger.warning("o200k_base did not load; token estimates count UTF-8 bytes instead", exc_info=True)
+        logger.warning("o200k_base did not load; token estimates use a quarter token per character", exc_info=True)
 
 
 def _loaded_o200k() -> tiktoken.Encoding | None:

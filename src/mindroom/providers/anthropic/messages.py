@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import anthropic
 from anthropic import NOT_GIVEN, AsyncAnthropic, AsyncAnthropicVertex
@@ -227,8 +227,6 @@ class ClaudeProvider:
     settings: ClaudeSettings
     http_client: httpx2.AsyncClient = MODEL_HTTP_CLIENT
     google_credentials: _AmbientGoogleCredentials = field(default_factory=_AmbientGoogleCredentials, compare=False)
-    # Claude sizes replayed history canonically.
-    replay_estimator: ClassVar[None] = None
 
     @property
     def native_history_route(self) -> NativeHistoryRoute:
@@ -783,8 +781,6 @@ def _claude_capabilities(
         # Vertex summaries always keep the provider's sampling default; the newest Claude generations reject
         # non-default sampling on every route.
         provider_default_sampling=route == "vertexai_claude" or claude_rejects_sampling_controls(model_id),
-        # Claude's tokenizer has no local encoding and counts more tokens than o200k for some text.
-        conservative_token_estimates=True,
     )
 
 

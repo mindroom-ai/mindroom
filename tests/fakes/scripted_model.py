@@ -12,7 +12,6 @@ from mindroom.llm.provider import (
     ModelIdentity,
     ModelRequest,
     NativeHistoryRoute,
-    PortableReplayEstimator,
     StreamEvent,
     TextDelta,
     TokenCounter,
@@ -59,9 +58,8 @@ class ScriptedModel:
     identity: ModelIdentity = SYNTHETIC
     capabilities: Capabilities = field(default_factory=Capabilities)
     requests: list[ModelRequest] = field(default_factory=list)
-    # A scripted route keeps no provider-side history, sizes replayed history canonically, and records no settings.
+    # A scripted route keeps no provider-side history and records no settings.
     native_history_route: NativeHistoryRoute | None = None
-    replay_estimator: PortableReplayEstimator | None = None
     token_counter: TokenCounter = field(default_factory=fake_token_counter)
     model_params: dict[str, Any] = field(default_factory=dict)
 

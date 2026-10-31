@@ -7,13 +7,15 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import tiktoken
 from structlog.testing import capture_logs
 
 from mindroom.history.compaction import _rewrite_working_session_for_compaction
+from mindroom.llm.provider import TokenCounter
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.token_counting.counts import count, count_exact
 from tests.conftest import seed_session
 from tests.fakes.summary_model import summary_model as _summary_model
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
     _completed_run,
@@ -69,32 +71,21 @@ def _assert_truthful_sizing_fields(
     assert "summary_input_budget" not in entry
 
 
+async def _endpoint(text: str) -> int:
+    return len(text)
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("summary_model", "kind"),
-    [
-        pytest.param(
-            _summary_model(model_id="claude-sonnet-5", claude=True),
-            "utf8_bytes_token_upper_bound",
-            id="claude-byte-bound",
-        ),
-        pytest.param(
-            _summary_model(model_id="gpt-4o"),
-            "model_tiktoken_tokens",
-            id="known-tiktoken-model",
-        ),
-        pytest.param(
-            _summary_model(model_id="local-model"),
-            "o200k_base_tokens",
-            id="unknown-model",
-        ),
-    ],
-)
-async def test_chunk_events_report_actual_sizing_strategy(
-    tmp_path: Path,
-    summary_model: ModelProvider,
-    kind: str,
-) -> None:
+@pytest.mark.parametrize("kind", ["estimated", "calibrated", "exact"])
+async def test_chunk_events_report_how_the_summary_input_was_counted(tmp_path: Path, kind: str) -> None:
+    counter = (
+        TokenCounter(key="local", estimate=quarter_tokens, exact_locally=True)
+        if kind == "exact"
+        else fake_token_counter(count=_endpoint)
+    )
+    if kind == "calibrated":
+        # The endpoint counted other text at four times its estimate.
+        await count_exact(counter, "x" * 40)
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
@@ -115,21 +106,16 @@ async def test_chunk_events_report_actual_sizing_strategy(
             storage=storage,
             working_session=working_session,
             summary_input_budget=8_000,
-            summary_model=summary_model,
+            summary_model=_summary_model(token_counter=counter),
         )
 
     assert rewrite_result is not None
-    payload = summary_inputs[0]
-    if kind == "utf8_bytes_token_upper_bound":
-        estimate = len(payload.encode("utf-8"))
-    elif kind == "model_tiktoken_tokens":
-        estimate = len(tiktoken.encoding_for_model("gpt-4o").encode(payload, disallowed_special=()))
-    else:
-        estimate = len(tiktoken.get_encoding("o200k_base").encode(payload, disallowed_special=()))
+    sent = count(counter, summary_inputs[0])
+    assert sent.kind == kind
     for event in ("Compaction summary chunk request", "Compaction summary chunk completed"):
         _assert_truthful_sizing_fields(
             _single_event(logs, event),
-            estimate=estimate,
+            estimate=sent.tokens,
             budget_tokens=8_000,
             kind=kind,
         )
@@ -159,14 +145,14 @@ async def test_failed_event_uses_truthful_sizing_fields(tmp_path: Path) -> None:
             storage=storage,
             working_session=working_session,
             summary_input_budget=8_000,
-            summary_model=_summary_model(model_id="claude-sonnet-5", claude=True),
+            summary_model=_summary_model(),
         )
 
     _assert_truthful_sizing_fields(
         _single_event(logs, "Compaction summary chunk failed"),
-        estimate=len(summary_inputs[0].encode("utf-8")),
+        estimate=quarter_tokens(summary_inputs[0]),
         budget_tokens=8_000,
-        kind="utf8_bytes_token_upper_bound",
+        kind="estimated",
     )
 
 
@@ -184,7 +170,7 @@ async def test_no_run_fit_warning_uses_token_budget_field(tmp_path: Path) -> Non
             storage=storage,
             working_session=working_session,
             summary_input_budget=1,
-            summary_model=_summary_model(model_id="claude-sonnet-5", claude=True),
+            summary_model=_summary_model(),
         )
 
     assert rewrite_result is None

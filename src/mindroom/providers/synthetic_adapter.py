@@ -104,7 +104,6 @@ class SyntheticProvider:
     settings: SyntheticSettings
     # The synthetic model keeps no history of its own, and its replayed history is sized canonically.
     native_history_route: ClassVar[None] = None
-    replay_estimator: ClassVar[None] = None
 
     @property
     def model_params(self) -> dict[str, Any]:

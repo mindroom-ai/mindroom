@@ -25,12 +25,13 @@ from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, install_model_providers
 from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer, calls, tool_call
+from tests.fakes.token_counter import fake_token_counter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from mindroom.agent_cli.session import TurnToolRegistry
-    from mindroom.llm.provider import ModelIdentity, NativeHistoryRoute, PortableReplayEstimator, StreamEvent
+    from mindroom.llm.provider import ModelIdentity, NativeHistoryRoute, StreamEvent, TokenCounter
 
 
 def cli_window() -> str | None:
@@ -93,6 +94,7 @@ from agno.tools.function import ToolResult
 from agno.media import Image, File
 from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolExecutionTarget, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
+from tests.fakes.token_counter import fake_token_counter
 
 class ParityTools(Toolkit):
     def __init__(self, api_key: str):
@@ -213,9 +215,9 @@ class ScriptedProvider:
     requests: list[ModelRequest] = field(default_factory=list)
     identity: ModelIdentity = SYNTHETIC
     capabilities: Capabilities = field(default_factory=Capabilities)
-    # A scripted route keeps no provider-side history, sizes replayed history canonically, and records no settings.
+    # A scripted route keeps no provider-side history and records no settings.
     native_history_route: NativeHistoryRoute | None = None
-    replay_estimator: PortableReplayEstimator | None = None
+    token_counter: TokenCounter = field(default_factory=fake_token_counter)
     model_params: dict[str, Any] = field(default_factory=dict)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:

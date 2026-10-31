@@ -41,6 +41,7 @@ from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import _completed_team_run, _team_session, replay_settings, seed_summary
 from tests.session_storage.layout_4 import upgrade_from_layout_4
 from tests.team_turn_helpers import (
@@ -98,7 +99,7 @@ def test_a_summary_only_plan_replays_the_summary_without_runs() -> None:
     summary_tokens = estimate_prompt_visible_history_tokens(
         session=_owned_session(_SUMMARY, runs=False),
         history_settings=_ALL_HISTORY,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     plan = plan_replay_that_fits(
@@ -106,7 +107,7 @@ def test_a_summary_only_plan_replays_the_summary_without_runs() -> None:
         history_settings=_ALL_HISTORY,
         available_history_budget=summary_tokens,
         current_history_tokens=summary_tokens + 1_000,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     history = scope_history_messages(
         session.runs,
@@ -128,12 +129,12 @@ def test_replay_estimate_counts_the_rendered_summary_once() -> None:
     without = estimate_prompt_visible_history_tokens(
         session=_owned_session(None),
         history_settings=_ALL_HISTORY,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     with_summary = estimate_prompt_visible_history_tokens(
         session=_owned_session(_SUMMARY),
         history_settings=_ALL_HISTORY,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     rendered = str(compaction_summary_message(_SUMMARY, run_local=False).content)
@@ -158,10 +159,13 @@ def test_request_estimate_matches_the_replay_estimate_for_the_same_messages() ->
     session = _owned_session(None)
     messages = [message for run in session.runs for message in run.messages]
 
-    assert estimate_request_messages_tokens(messages, replay_estimator=None) == estimate_prompt_visible_history_tokens(
+    assert estimate_request_messages_tokens(
+        messages,
+        counter=fake_token_counter(),
+    ) == estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=_ALL_HISTORY,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
 

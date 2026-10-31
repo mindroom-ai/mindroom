@@ -24,7 +24,16 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import TokenCounter
 
-__all__ = ["TokenCount", "TokenCountKind", "count", "count_exact", "fit_text", "prefetch", "text_tokens"]
+__all__ = [
+    "TokenCount",
+    "TokenCountKind",
+    "count",
+    "count_exact",
+    "fit_text",
+    "prefetch",
+    "text_tokens",
+    "utf8_byte_bound",
+]
 
 logger = get_logger(__name__)
 
@@ -76,9 +85,18 @@ def _text_key(counter: TokenCounter, text: str) -> _TextKey:
     return counter.key, hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest()
 
 
-def _utf8_bytes(text: str) -> TokenCount:
-    """Count UTF-8 bytes, which no byte-level tokenizer exceeds, while the counter's estimate is unavailable."""
-    return TokenCount(len(text.encode("utf-8", "surrogatepass")), "estimated")
+def utf8_byte_bound(text: str) -> int:
+    """Return the UTF-8 byte count of ``text``, which no byte-level tokenizer's token count exceeds."""
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
+def _without_encoder(text: str) -> TokenCount:
+    """Estimate a quarter token per character while the counter's encoder is unavailable.
+
+    That is only briefly after startup, or for good when its vocabulary cannot be loaded; an upper bound such as the
+    UTF-8 byte count would triple history estimates meanwhile and compact conversations that fit.
+    """
+    return TokenCount(len(text) // 4, "estimated")
 
 
 def count(counter: TokenCounter, text: str) -> TokenCount:
@@ -87,7 +105,7 @@ def count(counter: TokenCounter, text: str) -> TokenCount:
         return TokenCount(0, "exact")
     if counter.exact_locally:
         tokens = counter.estimate(text)
-        return _utf8_bytes(text) if tokens is None else TokenCount(tokens, "exact")
+        return _without_encoder(text) if tokens is None else TokenCount(tokens, "exact")
     state = _state
     with state.lock:
         exact = state.exact.get(_text_key(counter, text))
@@ -96,7 +114,7 @@ def count(counter: TokenCounter, text: str) -> TokenCount:
         return TokenCount(exact, "exact")
     estimate = counter.estimate(text)
     if estimate is None:
-        return _utf8_bytes(text)
+        return _without_encoder(text)
     if ratio is not None:
         counted, estimated = ratio
         return TokenCount(math.ceil(estimate * counted / estimated), "calibrated")
@@ -131,7 +149,7 @@ async def count_exact(counter: TokenCounter, text: str) -> TokenCount:
         state.exact[_text_key(counter, text)] = tokens
         if len(state.exact) > _MAX_CACHED:
             del state.exact[next(iter(state.exact))]
-        # A byte count stands in only until the estimate loads, so it never calibrates the estimate.
+        # Calibration scales the counter's own estimate, never the stand-in used before its encoder loads.
         if estimate:
             counted, estimated = state.ratios.get(counter.key, (0.0, 0.0))
             state.ratios[counter.key] = (counted * _DECAY + tokens, estimated * _DECAY + estimate)

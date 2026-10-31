@@ -30,7 +30,7 @@ from mindroom.history.types import (
     HistoryScope,
     PreparedHistoryState,
 )
-from mindroom.llm.messages import Message, system_text
+from mindroom.llm.messages import Message, system_texts
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import (
@@ -40,7 +40,8 @@ from mindroom.teams.members import (
 )
 from mindroom.teams.runtime import leader_tool_specs
 from mindroom.teams.spec import TeamMode
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.token_budget import stable_serialize
+from mindroom.token_counting.counts import count
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
@@ -66,7 +67,7 @@ from tests.teams.squad import start_team
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from mindroom.llm.provider import ModelRequest
+    from mindroom.llm.provider import ModelRequest, TokenCounter
 
 _PAIR = TeamConfig(
     display_name="Pair",
@@ -133,8 +134,9 @@ def _expected_static_tokens(built: BuiltTeam, prompt: str) -> int:
         {key: value for key, value in asdict(tool).items() if value is not None}
         for tool in leader_tool_specs(built.spec)
     ]
-    system_content = system_text(built.spec.leader.system_messages)
-    return estimate_text_tokens(prompt) + estimate_text_tokens(system_content) + len(stable_serialize(payloads)) // 4
+    counter = built.spec.leader.model.token_counter
+    parts = [prompt, *system_texts(built.spec.leader.system_messages), stable_serialize(payloads)]
+    return sum(count(counter, part).tokens for part in parts)
 
 
 @pytest.mark.asyncio
@@ -146,6 +148,7 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
     config, runtime_paths = _pair_config(tmp_path)
     built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
     estimator = build_static_token_estimator(
+        built.spec.leader.model.token_counter,
         built.spec.leader.system_messages,
         leader_tool_specs(built.spec),
         frozenset(),
@@ -176,7 +179,7 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
             config=config,
             history_settings=built.history_settings,
             static_prompt_tokens=estimator.estimate("Current prompt"),
-            non_prompt_tokens=estimator.non_prompt_tokens(),
+            non_prompt_tokens=estimator.non_prompt_tokens,
             scope_context=scope_context,
             active_model_name="default",
             active_context_window=None,
@@ -216,12 +219,13 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
     real_estimator = execution_preparation.build_static_token_estimator
 
     def capture_estimator(
+        counter: TokenCounter,
         system_messages: tuple[Message, ...],
         tools: Any,  # noqa: ANN401
         deferred_tool_names: frozenset[str],
     ) -> Any:  # noqa: ANN401
         sized["system_messages"], sized["tools"] = system_messages, list(tools)
-        return real_estimator(system_messages, tools, deferred_tool_names)
+        return real_estimator(counter, system_messages, tools, deferred_tool_names)
 
     monkeypatch.setattr(execution_preparation, "build_static_token_estimator", capture_estimator)
 

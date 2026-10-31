@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from mindroom.history.storage import FoldBasis
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, TokenCounter
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
@@ -134,14 +134,14 @@ class PreparedScopeHistory:
 
     session: ConversationSession | None
     resolved_inputs: HistoryPreparationInputs
+    # How the route the run's requests go to counts tokens, which the final replay plan sizes with.
+    counter: TokenCounter
     compaction_decision: CompactionDecision = field(
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     # The native settings the run's requests carry, when the provider route manages history of its own.
     native_history: NativeHistory | None = None
-    # The route's own estimate of explicitly replayed history, which the final replay plan sizes with.
-    replay_estimator: PortableReplayEstimator | None = None
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
@@ -158,7 +158,7 @@ async def prepare_scope_history(
     allow_native_compaction: bool,
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning; ``model`` is the provider the run's requests go to."""
-    replay_estimator = model.replay_estimator
+    counter = model.token_counter
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
             session=None,
@@ -172,7 +172,7 @@ async def prepare_scope_history(
                 allowed=allow_native_compaction,
                 runs=(),
             ),
-            replay_estimator=replay_estimator,
+            counter=counter,
         )
 
     execution_plan = resolved_inputs.execution_plan
@@ -202,7 +202,7 @@ async def prepare_scope_history(
         estimate_prompt_visible_history_tokens,
         session=session,
         history_settings=resolved_inputs.history_settings,
-        replay_estimator=replay_estimator,
+        counter=counter,
     )
     # Large provider projections spend seconds in tokenizers that release the GIL.
     estimated_history_tokens = await asyncio.to_thread(estimate_history_tokens, native_route=native_route)
@@ -227,7 +227,7 @@ async def prepare_scope_history(
         current_history_tokens=current_history_tokens,
         # Only an active native route compacts between the trigger and hard budgets; without one, text compaction must.
         allow_native_compaction=native_route is not None,
-        summary_tokens=estimate_summary_tokens(session),
+        summary_tokens=estimate_summary_tokens(session, counter),
     )
     logger.info(
         "History preparation check",
@@ -287,7 +287,7 @@ async def prepare_scope_history(
                 resolved_inputs=resolved_inputs,
                 history_budget=compaction_budget,
                 before_tokens=current_history_tokens,
-                replay_estimator=replay_estimator,
+                counter=counter,
                 config=config,
                 runtime_paths=runtime_paths,
             ),
@@ -312,7 +312,7 @@ async def prepare_scope_history(
         compaction_decision=compaction_decision,
         compaction_reply_outcome=compaction_reply_outcome,
         native_history=native_history,
-        replay_estimator=replay_estimator,
+        counter=counter,
     )
 
 
@@ -359,7 +359,7 @@ def _reported_history_tokens(
         return None
     # Sized as the next request replays them: as history, whose earlier reasoning a model may render.
     replayed = [replace(message, from_history=True) for message in messages[anchor:]]
-    newer_tokens = estimate_request_messages_tokens(replayed, replay_estimator=model.replay_estimator)
+    newer_tokens = estimate_request_messages_tokens(replayed, counter=model.token_counter)
     return reported + newer_tokens - non_prompt_tokens
 
 
@@ -506,7 +506,7 @@ async def _compact_before_reply(
     resolved_inputs: HistoryPreparationInputs,
     history_budget: int | None,
     before_tokens: int,
-    replay_estimator: PortableReplayEstimator | None,
+    counter: TokenCounter,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> CompactionOutcome | None:
@@ -530,7 +530,7 @@ async def _compact_before_reply(
             threshold_tokens=resolved_inputs.execution_plan.trigger_threshold_tokens,
             progress=progress,
             complete=complete,
-            replay_estimator=replay_estimator,
+            counter=counter,
         )
     except ConversationChangedError:
         # A request the conversation outran stays, so the next reply compacts what the conversation holds then.
@@ -661,7 +661,7 @@ def finalize_history_preparation(
 
     session = prepared_scope_history.session
     native_history = prepared_scope_history.native_history
-    replay_estimator = prepared_scope_history.replay_estimator
+    counter = prepared_scope_history.counter
     if session is None:
         replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
         replays_persisted_history = False
@@ -670,7 +670,7 @@ def finalize_history_preparation(
             estimate_prompt_visible_history_tokens,
             session=session,
             history_settings=history_settings,
-            replay_estimator=replay_estimator,
+            counter=counter,
         )
         current_history_tokens = estimate_history_tokens(native_route=native_history_route(native_history))
         if history_budget is not None and current_history_tokens > history_budget:
@@ -685,7 +685,7 @@ def finalize_history_preparation(
                 history_settings=history_settings,
                 available_history_budget=history_budget,
                 current_history_tokens=current_history_tokens,
-                replay_estimator=replay_estimator,
+                counter=counter,
             )
             log_replay_plan(
                 replay_plan=replay_plan,

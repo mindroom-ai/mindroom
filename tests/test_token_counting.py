@@ -82,9 +82,9 @@ def test_estimates_wait_for_the_encoder_without_blocking(monkeypatch: pytest.Mon
     counter = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"), count=endpoint)
     text = "naïve text"
 
-    assert count(counter, text) == TokenCount(len(text.encode()), "estimated")
+    assert count(counter, text) == TokenCount(len(text) // 4, "estimated")
     asyncio.run(count_exact(counter, "other text"))
-    assert count(counter, text).kind == "estimated", "no calibration sample against the byte fallback"
+    assert count(counter, text).kind == "estimated", "no calibration sample against the stand-in"
 
     release.set()
     assert load_o200k() is not None
@@ -167,7 +167,8 @@ def test_slow_count_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [log["event"] for log in logs] == ["Token count failed"]
 
 
-def test_prefetch_dedupes_caps_and_cleans_up() -> None:
+def test_prefetch_dedupes_caps_and_cleans_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(counts, "_MAX_PENDING", 8)
     gate = asyncio.Event()
     counted: list[str] = []
 

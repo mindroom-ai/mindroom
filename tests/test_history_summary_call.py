@@ -40,10 +40,10 @@ from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import TableNames
-from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import Await
 from tests.fakes.summary_model import summary_model, summary_steps, summary_turn
+from tests.fakes.token_counter import quarter_tokens
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     _completed_run,
@@ -420,7 +420,7 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
         compacted_runs=[big_run, small_run],
         max_input_tokens=220,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert [run.run_id for run in included_runs] == ["run-big"]
@@ -448,7 +448,7 @@ def test_build_summary_input_oversized_run_preserves_messages_before_omitted_met
         compacted_runs=[run],
         max_input_tokens=280,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
@@ -474,7 +474,7 @@ def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> No
         compacted_runs=[run],
         max_input_tokens=220,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert included_runs == [run]
@@ -494,7 +494,7 @@ def test_build_summary_input_normal_run_omits_empty_filtered_metadata() -> None:
         compacted_runs=[run],
         max_input_tokens=10_000,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert included_runs == [run]
@@ -542,7 +542,7 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
         compacted_runs=[run],
         max_input_tokens=10_000,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert included_runs == [run]
@@ -571,7 +571,7 @@ def test_build_summary_input_preserves_complete_near_cap_summary_without_claimin
         compacted_runs=[run],
         max_input_tokens=1_001,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert included_runs == []
@@ -587,7 +587,7 @@ def test_build_summary_input_returns_no_progress_when_run_envelope_cannot_fit() 
         compacted_runs=[_completed_run("run-1")],
         max_input_tokens=1,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert summary_input == ""
@@ -602,7 +602,7 @@ def test_build_summary_input_preserves_previous_summary_text() -> None:
         compacted_runs=[run],
         max_input_tokens=1_000,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert included_runs == [run]
@@ -624,7 +624,7 @@ def test_build_summary_input_renders_a_block_list_one_block_per_line() -> None:
         compacted_runs=[run],
         max_input_tokens=1_000,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert '{"text":"first block","type":"text"}\n{"text":"second block","type":"text"}' in summary_input
@@ -679,7 +679,7 @@ def test_build_summary_input_excludes_legacy_persisted_prompt_roles(tmp_path: Pa
         compacted_runs=[run],
         history_settings=replay_settings(),
         max_input_tokens=1_000,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert included_runs == [run]
@@ -714,7 +714,7 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
         compacted_runs=[run],
         history_settings=replay_settings(max_tool_calls_from_history=1),
         max_input_tokens=1_000,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert included_runs == [run]
@@ -770,7 +770,7 @@ def test_build_summary_input_oversized_run_keeps_the_call_its_result_answers() -
         compacted_runs=[run],
         max_input_tokens=300,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert [included_run.run_id for included_run in included_runs] == ["run-big-result"]
@@ -789,7 +789,7 @@ def test_build_summary_input_oversized_run_keeps_the_call_its_result_answers() -
         compacted_runs=[result_only],
         max_input_tokens=300,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert "Run truncated to fit compaction budget." in summary_input
@@ -824,7 +824,7 @@ def test_each_tool_result_names_its_own_call_in_the_summary_input() -> None:
         compacted_runs=[run],
         max_input_tokens=100_000,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert '<message role="tool" tool_name="missing_tool">\nError: The requested tool does not exist.' in summary_input
@@ -856,7 +856,7 @@ def test_a_failed_tool_result_is_marked_in_the_summary_input(max_input_tokens: i
         compacted_runs=[run],
         max_input_tokens=max_input_tokens,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert '<message role="tool" tool_call_id="c1" tool_name="shell" error="true">\nmake: *** No rule' in summary_input

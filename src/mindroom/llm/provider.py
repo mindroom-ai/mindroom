@@ -48,9 +48,7 @@ class Capabilities:
     """What a provider route supports, so policy code stops probing adapter classes.
 
     ``url_media`` holds the media kinds whose URLs the route sends for the provider to fetch; the pipeline downloads
-    the URLs of every other kind (``providers/pipeline/remote_media.py``). ``conservative_token_estimates`` marks a
-    route whose tokenizer no local encoding matches and can count more tokens than o200k for the same text, so
-    compaction sizes its input by an upper bound.
+    the URLs of every other kind (``providers/pipeline/remote_media.py``).
     """
 
     structured_output: StructuredOutput = "json_mode"
@@ -59,7 +57,6 @@ class Capabilities:
     native_tool_search: bool = False
     native_compaction: bool = False
     provider_default_sampling: bool = False
-    conservative_token_estimates: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -392,11 +389,6 @@ class ModelProvider(Protocol):
         Having one does not imply ``capabilities.native_compaction``: a route whose provider keeps history without
         compacting it still plans its replay through this route.
         """
-        ...
-
-    @property
-    def replay_estimator(self) -> PortableReplayEstimator | None:
-        """How the route sizes explicitly replayed history, or None to size it canonically."""
         ...
 
     @property

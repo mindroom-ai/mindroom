@@ -53,6 +53,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     ModelRequest,
     NativeCompactionReplay,
+    TokenCounter,
     ToolSpec,
 )
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -65,6 +66,7 @@ from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import persist_to, watch_session_row
+from mindroom.token_counting.counts import utf8_byte_bound
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
@@ -74,6 +76,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.usage.storage import run_usage_snapshot
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.summary_model import summary_model
+from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import (
     BIG_TOOL,
     TEST_AGENT_SCOPE,
@@ -485,7 +488,7 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     pdf = File(content=b"%PDF-1.7\n" + b"x" * 300_000, mime_type="application/pdf", filename="report.pdf")
     message = Message(role="user", content="Summarize the attached report.", files=[pdf])
 
-    tokens = estimate_request_messages_tokens([message], replay_estimator=model)
+    tokens = estimate_request_messages_tokens([message], counter=model.token_counter)
 
     assert tokens < 10_000
 
@@ -502,8 +505,9 @@ def test_request_sizing_leaves_out_deferred_tool_definitions() -> None:
         ),
     ]
 
-    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) < 1_000
-    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) > 0
+    counter = fake_token_counter()
+    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"}), counter) < 1_000
+    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"}), counter) > 0
 
 
 def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None:
@@ -514,9 +518,10 @@ def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None
         parameters={"type": "object", "properties": {"key": {"type": "string"}}},
         strict=None,
     )
-    static = build_static_token_estimator((), [lookup], frozenset())
+    counter = fake_token_counter()
+    static = build_static_token_estimator(counter, (), [lookup], frozenset())
 
-    assert mid_turn_compaction._tool_tokens([lookup], [], frozenset()) == static.estimate("")
+    assert mid_turn_compaction._tool_tokens([lookup], [], frozenset(), counter) == static.estimate("")
 
 
 @pytest.mark.parametrize("provider", ["openai", "claude", "claude_legacy"])
@@ -531,7 +536,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
     server-tool blocks before v2026.9.44.
     """
     if provider == "openai":
-        replay_estimator = responses_adapter(tmp_path, "gpt-6-luna", store=False)
+        counter = responses_adapter(tmp_path, "gpt-6-luna", store=False).token_counter
         provider_data: dict[str, Any] = {
             RESPONSE_OUTPUT_KEY: [
                 {
@@ -556,7 +561,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
             ],
         }
     else:
-        replay_estimator = None
+        counter = fake_token_counter()
         search = [
             {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
             {
@@ -574,13 +579,11 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
         Message(role="assistant", provider_data=provider_data),
     ]
 
-    total = estimate_request_messages_tokens(
-        searched,
-        replay_estimator=replay_estimator,
-    ) + mid_turn_compaction._tool_tokens(
+    total = estimate_request_messages_tokens(searched, counter=counter) + mid_turn_compaction._tool_tokens(
         [BIG_TOOL],
         searched,
         frozenset({"big_tool"}),
+        counter,
     )
 
     assert 15_000 < total < 30_000
@@ -718,8 +721,12 @@ async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
     summary_calls: SummaryCalls,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A Claude summarizer sizes its input by bytes, more conservatively than request estimates.
-    install_model_providers(monkeypatch, {"summary": summary_model(model_id="claude-haiku-5-5", claude=True)})
+    # The summarizer counts a token per byte, more than request estimates do.
+    by_bytes = TokenCounter(key="bytes", estimate=utf8_byte_bound)
+    install_model_providers(
+        monkeypatch,
+        {"summary": summary_model(model_id="claude-haiku-5-5", token_counter=by_bytes)},
+    )
     config, paths = _config(tmp_path, context_window=20_000, summary_context_window=8_000)
     model = ToolLoopModel(tool_rounds=25)
     facts = iter(range(100))
@@ -1432,9 +1439,14 @@ async def test_a_mid_turn_compaction_notice_sizes_the_request_before_and_after_i
     # The first request after the fold carries its summary.
     rewritten = next(request for request in model.requests if any(map(is_compaction_summary, request.messages)))
     rewritten_tokens = (
-        estimate_request_messages_tokens(rewritten.messages, replay_estimator=None)
-        + mid_turn_compaction._thinking_tokens(rewritten.messages)
-        + mid_turn_compaction._tool_tokens(rewritten.request.tools, rewritten.messages, frozenset())
+        estimate_request_messages_tokens(rewritten.messages, counter=fake_token_counter())
+        + mid_turn_compaction._thinking_tokens(rewritten.messages, fake_token_counter())
+        + mid_turn_compaction._tool_tokens(
+            rewritten.request.tools,
+            rewritten.messages,
+            frozenset(),
+            fake_token_counter(),
+        )
     )
     assert outcome.after_tokens == rewritten_tokens
     assert outcome.after_tokens < outcome.before_tokens
@@ -1450,14 +1462,9 @@ async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path, m
     sized: list[tuple[str | None, ...]] = []
     estimated = mid_turn_compaction._estimated_request_tokens
 
-    def recording(
-        compaction: mid_turn_compaction._MidTurnCompaction,
-        policy: mid_turn_compaction._Policy,
-        messages: list[Message],
-        tools: Sequence[ToolSpec],
-    ) -> int:
+    def recording(policy: mid_turn_compaction._Policy, messages: list[Message], tools: Sequence[ToolSpec]) -> int:
         sized.append(tuple(message.id for message in messages))
-        return estimated(compaction, policy, messages, tools)
+        return estimated(policy, messages, tools)
 
     monkeypatch.setattr(mid_turn_compaction, "_estimated_request_tokens", recording)
 

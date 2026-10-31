@@ -47,15 +47,15 @@ from mindroom.history.types import (
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, NativeCompactionReplay, PortableReplayEstimator
+from mindroom.llm.provider import Capabilities, ModelIdentity, NativeCompactionReplay, TokenCounter
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import delete_runs, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
@@ -87,7 +87,7 @@ def _included_run_count(
             compacted_runs=compacted_runs,
             max_input_tokens=budget,
             history_settings=_ALL_HISTORY_SETTINGS,
-            token_estimator=estimate_compaction_input_tokens,
+            token_estimator=quarter_tokens,
         )[1],
     )
 
@@ -581,13 +581,13 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     assert (
         estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=history_settings,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         )
         > replay_budget
     )
@@ -781,7 +781,7 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     summary = ScopeSummary(text="critical work detail " * 500, updated_at=datetime.now(UTC))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    summary_tokens = estimate_summary_tokens(_session("session-1", runs=[], summary=summary))
+    summary_tokens = estimate_summary_tokens(_session("session-1", runs=[], summary=summary), fake_token_counter())
     session = _session(
         "session-1",
         runs=[
@@ -888,7 +888,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     history_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=_ALL_HISTORY_SETTINGS,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     trigger_budget = history_tokens // 2
     hard_budget = history_tokens * 2
@@ -961,7 +961,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         estimate_prompt_visible_history_tokens(
             session=persisted,
             history_settings=_ALL_HISTORY_SETTINGS,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         )
         <= trigger_budget
     )
@@ -1007,7 +1007,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
                 compacted_runs=visible_runs,
                 history_settings=history_settings,
                 max_input_tokens=budget,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 9
@@ -1020,12 +1020,12 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     before_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     assert before_tokens > replay_budget
 
@@ -1081,7 +1081,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     outcome = completed_outcome(lifecycle)
     assert outcome.compacted_run_count == 23
     assert outcome.runs_after == 0
-    summary_only_tokens = estimate_summary_tokens(persisted)
+    summary_only_tokens = estimate_summary_tokens(persisted, fake_token_counter())
     assert outcome.after_tokens == summary_only_tokens
     assert outcome.after_tokens < replay_budget
     assert folded_run_ids(storage) == [f"run-{index:02}" for index in range(1, 24)]
@@ -1110,7 +1110,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         estimate_prompt_visible_history_tokens(
             session=current_run_session,
             history_settings=history_settings,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         )
         > summary_only_tokens
     )
@@ -1176,7 +1176,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
@@ -1285,7 +1285,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
                 compacted_runs=visible_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 1
@@ -1295,7 +1295,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
                 compacted_runs=visible_runs[1:],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 1
@@ -1912,13 +1912,13 @@ async def _prepare_with_reported_usage(
     *,
     history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
     folded_run_ids: tuple[str, ...] = (),
-    replay_estimator: PortableReplayEstimator | None = None,
+    counter: TokenCounter | None = None,
 ) -> tuple[PreparedScopeHistory, int, RecordingCompactionLifecycle]:
     """Prepare a reply after three runs; return it, the chars / 4 history estimate, and the compaction notices.
 
     ``latest`` configures the newest run, and a summary folding ``folded_run_ids`` is stored as written at
     ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, 400 are the system prompt and tools. The
-    answering model sizes replayed history with ``replay_estimator``, canonically when it is None.
+    answering model counts with ``counter``, a quarter token per character when it is None.
     """
     runs = [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", **latest)]
     config, runtime_paths = _make_config(
@@ -1935,7 +1935,7 @@ async def _prepare_with_reported_usage(
     estimate = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
@@ -1965,7 +1965,7 @@ async def _prepare_with_reported_usage(
             model=ScriptedModel(
                 [],
                 identity=ModelIdentity(id="fake-model", provider="fake"),
-                replay_estimator=replay_estimator,
+                token_counter=counter or fake_token_counter(),
             ),
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=400,
@@ -2021,7 +2021,7 @@ async def test_the_reported_request_size_counts_its_answer_as_the_answering_rout
     prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 8_000},
-        replay_estimator=ReplayEstimate(1_200),
+        counter=fake_token_counter(replay=ReplayEstimate(1_200)),
     )
 
     # The route sizes the 500-token answer at 1,200 tokens; the whole history it sizes no higher than chars / 4.
@@ -2039,7 +2039,7 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
         prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
             root,
             {"input_tokens": 8_000, "reasoning_tokens": reasoning_tokens},
-            replay_estimator=responses_adapter(root, store=False),
+            counter=responses_adapter(root, store=False).token_counter,
         )
         sized[reasoning_tokens] = prepared.compaction_decision.current_history_tokens
 

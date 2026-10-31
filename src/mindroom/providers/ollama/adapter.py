@@ -75,7 +75,6 @@ class OllamaProvider:
     _client: AsyncClient | None = field(default=None, init=False, repr=False)
     # Ollama keeps no history of its own, and its replayed history is sized canonically.
     native_history_route: ClassVar[None] = None
-    replay_estimator: ClassVar[None] = None
 
     @property
     def model_params(self) -> dict[str, Any]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
@@ -58,6 +59,8 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.types import ConversationSession
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.token_budget import estimate_text_tokens
+from mindroom.token_counting import counts as token_counts
+from mindroom.token_counting.counts import TokenCount, count
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
@@ -69,6 +72,7 @@ from tests.conftest import (
     unstored_team_scope_context,
 )
 from tests.fakes.scripted_model import ScriptedModel
+from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import replay_settings
 from tests.turn_model_helpers import turn_model
 
@@ -223,6 +227,7 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
             active_context_window=10_000,
             execution_plan=execution_plan,
         ),
+        counter=fake_token_counter(),
     )
 
 
@@ -832,16 +837,77 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
 
     tools = PreparedTools(functions=build.spec.functions).specs()
     assert tools
-    estimator = build_static_token_estimator(system_messages, tools, build.request_template.deferred_tools.names)
+    counter = build.spec.model.token_counter
+    estimator = build_static_token_estimator(
+        counter,
+        system_messages,
+        tools,
+        build.request_template.deferred_tools.names,
+    )
     assert prepared.prepared_history.prepared_context_tokens == estimator.estimate(
         render_prepared_messages_text(prepared.turn.in_request_order()),
     )
     assert prepare_scope_history.await_count == 1
-    assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens()
+    assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens
     assert (
-        estimator.non_prompt_tokens()
-        > build_static_token_estimator(system_messages, (), frozenset()).non_prompt_tokens()
+        estimator.non_prompt_tokens
+        > build_static_token_estimator(counter, system_messages, (), frozenset()).non_prompt_tokens
     )
+
+
+@pytest.mark.asyncio
+async def test_reply_preparation_counts_the_static_prompt_in_the_background(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider count of the system prompt and tools never holds up the reply; a later reply reads it cached."""
+    monkeypatch.setattr(token_counts, "_MAX_PENDING", 8)
+    endpoint_called = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_endpoint(text: str) -> int:
+        endpoint_called.set()
+        await release.wait()
+        return len(text)
+
+    config, runtime_paths = _bound_agent_config(tmp_path, tools=("calculator",))
+    build = _build(config, runtime_paths)
+    counter = fake_token_counter(count=slow_endpoint)
+    build = replace(build, spec=replace(build.spec, model=ScriptedModel([], token_counter=counter)))
+    system_messages = prompt_for_turn(build)
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
+    )
+
+    async with asyncio.timeout(10):
+        await _prepare_agent_execution_context_for_test(
+            make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
+            scope_context=None,
+            build=build,
+            system_messages=system_messages,
+            prompt="Current request",
+            thread_history=None,
+            runtime_paths=runtime_paths,
+            config=config,
+            resolved_runtime_model=resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent"), None),
+        )
+
+    async with asyncio.timeout(5):
+        await endpoint_called.wait()
+    assert not release.is_set(), "the reply was prepared while the provider was still counting"
+    parts = build_static_token_estimator(
+        counter,
+        system_messages,
+        PreparedTools(functions=build.spec.functions).specs(),
+        build.request_template.deferred_tools.names,
+    ).parts
+    assert all(count(counter, part).kind == "estimated" for part in parts)
+    release.set()
+    await asyncio.gather(*token_counts._state.pending.values())
+    assert all(count(counter, part) == TokenCount(len(part), "exact") for part in parts)
 
 
 @pytest.mark.asyncio
@@ -878,8 +944,8 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
     )
 
     kwargs = prepare_bound_scope_history.await_args.kwargs
-    estimator = build_static_token_estimator(leader_system_messages, leader_tools, frozenset())
-    assert kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens()
+    estimator = build_static_token_estimator(fake_token_counter(), leader_system_messages, leader_tools, frozenset())
+    assert kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens
 
 
 @pytest.mark.asyncio
@@ -931,7 +997,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     )
 
     assert [message.role for message in prepared.turn.context] == ["user", "assistant"]
-    estimator = build_static_token_estimator(leader_system_messages, (), frozenset())
+    estimator = build_static_token_estimator(fake_token_counter(), leader_system_messages, (), frozenset())
     # Persisted replay is budgeted around the turn's estimate; fallback replay records the estimate of its own turn.
     sized = static_prompt_tokens[0] if replays_persisted_history else prepared.prepared_history.prepared_context_tokens
     assert sized == estimator.estimate(render_prepared_messages_text(prepared.turn.in_request_order()))

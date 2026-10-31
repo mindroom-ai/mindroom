@@ -55,6 +55,7 @@ from mindroom.streaming import (
 )
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
+from mindroom.token_counting.counts import prefetch
 from mindroom.tool_system.events import has_tool_trace, strip_visible_tool_markers
 
 if TYPE_CHECKING:
@@ -850,10 +851,13 @@ async def prepare_agent_execution_context(
         response_sender_id = entity_identity_registry(config, runtime_paths).current_ids.get(agent_name)
         response_sender = response_sender_id.full_id if response_sender_id is not None else None
     static_token_estimator = build_static_token_estimator(
+        build.spec.model.token_counter,
         system_messages,
         PreparedTools(functions=build.spec.functions).specs(),
         build.request_template.deferred_tools.names,
     )
+    # The system prompt and tools are stable inputs: count them exactly in the background, for later replies.
+    prefetch(static_token_estimator.counter, *static_token_estimator.parts)
     compaction_config = build.history_settings.compaction_config
 
     async def _prepare_agent_scope_history(
@@ -870,7 +874,7 @@ async def prepare_agent_execution_context(
         return await prepare_scope_history(
             model=build.spec.model,
             resolved_inputs=resolved_inputs,
-            non_prompt_tokens=static_token_estimator.non_prompt_tokens(),
+            non_prompt_tokens=static_token_estimator.non_prompt_tokens,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,
@@ -939,7 +943,13 @@ async def prepare_bound_team_run_context(
     the run adds is among them. ``history_settings`` are the built team's, whose replay policy and compaction config
     the scope follows.
     """
-    static_token_estimator = build_static_token_estimator(leader_system_messages, leader_tools, frozenset())
+    static_token_estimator = build_static_token_estimator(
+        model.token_counter,
+        leader_system_messages,
+        leader_tools,
+        frozenset(),
+    )
+    prefetch(static_token_estimator.counter, *static_token_estimator.parts)
     team_compaction_config = history_settings.compaction_config
 
     async def _prepare_team_scope_history(
@@ -954,7 +964,7 @@ async def prepare_bound_team_run_context(
             active_model_name=active_model_name,
             active_context_window=active_context_window,
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
-            non_prompt_tokens=static_token_estimator.non_prompt_tokens(),
+            non_prompt_tokens=static_token_estimator.non_prompt_tokens,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
             allow_native_compaction=ctx.scheduled_history_budget is None,

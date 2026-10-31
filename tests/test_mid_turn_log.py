@@ -32,6 +32,7 @@ from mindroom.session_storage.store import watch_session_row
 from mindroom.session_storage.summary_rows import Fold
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
+from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import compact_runs, log_of, replay_settings, stored_run_ids
 
 if TYPE_CHECKING:
@@ -509,6 +510,8 @@ def test_a_fold_completed_after_a_later_turn_replays_its_summary_first(storage: 
     planned = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=_ALL_HISTORY,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
-    assert estimate_request_messages_tokens([m for m in built if m.from_history], replay_estimator=None) == planned
+    assert (
+        estimate_request_messages_tokens([m for m in built if m.from_history], counter=fake_token_counter()) == planned
+    )

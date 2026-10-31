@@ -103,8 +103,8 @@ if TYPE_CHECKING:
         ModelProvider,
         ModelRequest,
         NativeHistoryRoute,
-        PortableReplayEstimator,
         StreamEvent,
+        TokenCounter,
         ToolChoice,
         ToolSpec,
     )
@@ -265,9 +265,9 @@ class _RecordingAdapter:
         return self.adapter.native_history_route
 
     @property
-    def replay_estimator(self) -> PortableReplayEstimator | None:
-        """The adapter's replay estimator."""
-        return self.adapter.replay_estimator
+    def token_counter(self) -> TokenCounter:
+        """The adapter's token counter."""
+        return self.adapter.token_counter
 
     @property
     def model_params(self) -> dict[str, Any]:

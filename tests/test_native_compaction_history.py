@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -28,10 +29,10 @@ from mindroom.history.storage import with_force_compaction
 from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest
+from mindroom.llm.provider import ModelRequest, TokenCounter
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.native_compaction import checkpoint_summary, replay_basis
+from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_summary, replay_basis
 from mindroom.providers.openai.responses_wire import conversation_digest
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
@@ -855,6 +856,14 @@ def test_history_reads_the_routes_native_settings_through_the_request_pipeline(t
     assert native is not None
     assert native.native_compaction is not None
     assert native == configured(adapter)
-    assert provider.replay_estimator is adapter
+    assert provider.token_counter.replay is adapter
     chat = build_model_provider(config, paths, "chat")
-    assert (configured(chat), chat.replay_estimator) == (None, None)
+    assert (configured(chat), chat.token_counter.replay) == (None, None)
+
+
+def test_the_checkpoint_guard_counts_the_serialized_items_with_the_routes_counter() -> None:
+    """Opaque checkpoint text has no provider count, so the route's counter sizes it as the request serializes it."""
+    items = [{"type": "compaction", "encrypted_content": "opaque" * 50}]
+    one_per_character = TokenCounter(key="characters", estimate=len)
+
+    assert checkpoint_estimated_tokens(items, one_per_character) == len(json.dumps(items, ensure_ascii=False))
