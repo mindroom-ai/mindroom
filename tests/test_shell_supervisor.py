@@ -1411,3 +1411,36 @@ async def test_supervised_launch_passes_the_launch_contract_and_reports_a_refusa
         launch_contract.TOKEN_PATH_ENV: str(tmp_path / "cap"),
         launch_contract.WORKSPACE_ROOT_ENV: str(tmp_path),
     }
+
+
+@pytest.mark.asyncio
+async def test_script_shim_refuses_a_capability_path_the_launch_did_not_name(tmp_path: Path) -> None:
+    """The shim runs nothing when its capability argument is not the file the launch environment names."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.write_text("raw-secret", encoding="utf-8")
+    launched_token_path = workspace / "launched-capability"
+    launched_token_path.write_text("other-secret", encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(launched_token_path),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.startswith("Exit code 1\n")
+    assert "Script capability path does not match the launch environment." in result.message
+    assert not token_path.exists()

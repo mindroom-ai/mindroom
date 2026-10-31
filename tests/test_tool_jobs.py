@@ -2249,3 +2249,38 @@ async def test_failed_detached_drain_reports_its_job(tmp_path: Path) -> None:
         release.set()
         blocked = False
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_job_whose_access_still_resolves_is_neither_started_nor_shown(tmp_path: Path) -> None:
+    """A resolving grant refuses a new job and keeps an existing one out of lookup, listing, and the ended jobs."""
+    grant = {"access": "pending"}
+    runtime = await tool_job_runtime(tmp_path, grant=lambda _job: grant["access"])
+    owner = job_owner()
+    key = ConversationKey(
+        recipient="parent",
+        room_id="!room:test",
+        thread_id="$root",
+        requester_id="@alice:test",
+        silent=False,
+    )
+
+    async def completed() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    try:
+        with pytest.raises(JobAccessError):
+            await runtime.start("refused", tool_name="tool", depth=0, adapter={}, owner=owner, operation=completed)
+        grant["access"] = "allowed"
+        await start_job(runtime, "job-1", tool_name="tool", depth=0, adapter={}, owner=owner, operation=completed)
+        await wait_for_status(runtime, "job-1", "completed")
+        assert [job.job_id for job in await runtime.ended_jobs(key)] == ["job-1"]
+
+        grant["access"] = "pending"
+
+        with pytest.raises(JobAccessError):
+            await lookup(runtime, "job-1", owner=owner, depth=0)
+        assert await runtime.list_jobs(owner=owner, depth=0) == []
+        assert await runtime.ended_jobs(key) == ()
+    finally:
+        await runtime.shutdown()

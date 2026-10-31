@@ -24,6 +24,7 @@ from mindroom.config.models import DefaultsConfig
 from mindroom.constants import RuntimePaths
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.script_runs import launch_contract
 from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs import supervised as supervised_module
 from mindroom.script_runs.manager import (
@@ -33,9 +34,9 @@ from mindroom.script_runs.manager import (
     ScriptRunStatus,
 )
 from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
-from mindroom.script_runs.reasons import SUPERVISOR_UNAVAILABLE
+from mindroom.script_runs.reasons import PROCESS_EXIT_OBSERVED, SUPERVISOR_UNAVAILABLE
 from mindroom.script_runs.recovery import script_recovery_signature
-from mindroom.script_runs.store import ScriptRunStore
+from mindroom.script_runs.store import MAX_RUN_ERROR_BYTES, ScriptRunStore
 from mindroom.script_runs.wire import (
     SCRIPT_PROTOCOL_VERSION,
     ScriptWorkerError,
@@ -915,8 +916,12 @@ async def test_worker_launch_requires_primary_visible_state_before_snapshot(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "text"),
-    [(RuntimeError("worker pool exhausted"), "worker pool exhausted"), (TimeoutError(), "TimeoutError")],
-    ids=["with_text", "without_text"],
+    [
+        (RuntimeError("worker pool exhausted"), "worker pool exhausted"),
+        (TimeoutError(), "TimeoutError"),
+        (RuntimeError("x" * (MAX_RUN_ERROR_BYTES + 1)), "x" * MAX_RUN_ERROR_BYTES),
+    ],
+    ids=["with_text", "without_text", "oversized"],
 )
 async def test_a_launch_that_raises_fails_its_run_with_why(
     tmp_path: Path,
@@ -924,7 +929,7 @@ async def test_a_launch_that_raises_fails_its_run_with_why(
     error: Exception,
     text: str,
 ) -> None:
-    """A run whose launch raises fails with the exception's text, or its type name when it has none."""
+    """A run whose launch raises fails with the exception's bounded text, or its type name when it has none."""
     manager, backend, _client = _manager(tmp_path)
 
     def fail(*_arguments: object, **_options: object) -> WorkerHandle:
@@ -3181,3 +3186,153 @@ async def test_unsafe_local_runs_launch_report_and_stop_through_a_real_superviso
         assert lost.run.output == ""
     finally:
         supervisor.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("run_locator", "backend_locator"),
+    [("locator-a", "locator-b"), (None, None)],
+    ids=["other_backend", "no_locator"],
+)
+async def test_worker_backend_is_only_the_backend_that_owns_the_run(
+    tmp_path: Path,
+    run_locator: str | None,
+    backend_locator: str | None,
+) -> None:
+    """A run another backend owns, or one with no recorded backend, has no worker backend."""
+    manager, backend, _client = _manager(tmp_path)
+    run = await manager.run(_context(tmp_path), source="print('ok')\n")
+    assert manager.worker_backend_for(run) is backend
+
+    backend.cleanup_locator = backend_locator
+
+    assert manager.worker_backend_for(replace(run, worker_backend_locator=run_locator)) is None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_retires_a_worker_only_through_the_backend_that_owns_it(tmp_path: Path) -> None:
+    """An exited run keeps its worker and stays retryable until the backend that owns the worker is published again."""
+    manager, backend, _client = _manager(tmp_path)
+    run = await manager.run(_context(tmp_path), source="print('ok')\n")
+    _observe_exit(manager.store, run.run_id)
+    backend.cleanup_locator = "locator-b"
+
+    with pytest.raises(ScriptRunManagerError, match="backend is unavailable; retry cleanup"):
+        await manager.reconcile_durable(run_id=run.run_id)
+
+    assert backend.retired_worker_keys == []
+    assert manager.store.get_run(run.run_id).state is ScriptRunState.RUNNING
+    backend.cleanup_locator = "locator-a"
+    assert (await manager.reconcile_durable(run_id=run.run_id)).state is ScriptRunState.EXITED
+    assert backend.retired_worker_keys == [run.worker_key]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_refuses_a_worker_key_another_run_owns(tmp_path: Path) -> None:
+    """A run recorded with another run's worker key cannot retire that worker."""
+    manager, backend, _client = _manager(tmp_path)
+    owner = await manager.run(_context(tmp_path), source="print('ok')\n")
+    intruder = manager.store.create_run(
+        replace(owner, run_id=f"script-{'1' * 32}", state=ScriptRunState.STARTING, started_at=None),
+    )
+    _observe_exit(manager.store, intruder.run_id)
+
+    with pytest.raises(ScriptRunManagerError, match="ownership is invalid"):
+        await manager.reconcile_durable(run_id=intruder.run_id)
+
+    assert backend.retired_worker_keys == []
+    assert owner.worker_key in backend.handles
+
+
+def _observe_exit(store: ScriptRunStore, run_id: str) -> None:
+    store.record_process_exit(
+        run_id,
+        exit_code=0,
+        error=None,
+        output="",
+        cancellation_reason=PROCESS_EXIT_OBSERVED,
+    )
+
+
+@pytest.mark.asyncio
+async def test_launch_binds_a_backend_default_profile_when_none_is_requested(tmp_path: Path) -> None:
+    """A launch that names no profile gets the backend's own default, whichever profile that is."""
+    manager, backend, _client = _manager(tmp_path)
+    manager.worker_backend = _ProfiledWorkerBackend(
+        store=manager.store,
+        runtime_paths=backend.runtime_paths,
+        resource_profiles=replace(_profiles(), default_profile="standard"),
+    )
+
+    run = await manager.run(_context(tmp_path), source="print('ok')\n")
+
+    assert run.resource_profile == "standard"
+    assert run.resource_limits == {"cpu": "1", "memory": "2Gi"}
+
+
+@pytest.mark.asyncio
+async def test_unsafe_local_launch_rejects_a_resource_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A primary-process run cannot claim resource bounds nothing would enforce."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    monkeypatch.setattr(manager_module, "launch_supervised_script", AsyncMock(return_value=None))
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+
+    with pytest.raises(ScriptRunManagerError, match="Resource profiles require a worker backend"):
+        await manager.run(_context(tmp_path, mode="local"), source="print('ok')\n", resource_profile="small")
+
+    assert manager.store.list_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_source_limit_admits_exactly_the_limit_from_either_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source of exactly the limit launches, and a workspace file one byte over it is refused."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    context = _context(tmp_path, mode="local")
+    workspace = agent_workspace_root_path(context.runtime_paths.storage_root, "watcher")
+    workspace.mkdir(parents=True)
+    (workspace / "watch.py").write_bytes(b"#" * (launch_contract.MAX_SOURCE_BYTES + 1))
+    monkeypatch.setattr(manager_module, "launch_supervised_script", AsyncMock(return_value=None))
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+
+    with pytest.raises(ScriptRunManagerError, match=str(launch_contract.MAX_SOURCE_BYTES)):
+        await manager.run(context, path="watch.py")
+    run = await manager.run(context, source="#" * launch_contract.MAX_SOURCE_BYTES)
+
+    assert run.state is ScriptRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_a_refused_local_launch_fails_its_start_and_ends_its_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervisor that refuses the run's handle fails the start, and the run ends instead of waiting on a process."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+
+    async def refuse(*_args: object, **_kwargs: object) -> ShellRunResult:
+        return ShellRunResult(message="Error: handle is already in use")
+
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", refuse)
+    monkeypatch.setattr(
+        supervised_module,
+        "kill_command_via_supervisor",
+        lambda *_args, **_kwargs: "Error: Unknown handle",
+    )
+    monkeypatch.setattr(
+        supervised_module,
+        "check_command_via_supervisor",
+        lambda *_args, **_kwargs: "Error: Unknown handle",
+    )
+
+    with pytest.raises(ScriptRunManagerError, match="handle is already in use"):
+        await manager.run(_context(tmp_path, mode="local"), source="print('ok')\n")
+
+    [stored] = manager.store.list_runs()
+    assert stored.state is ScriptRunState.INTERRUPTED

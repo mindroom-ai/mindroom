@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.script_runs.launch_contract import MAX_TOKEN_BYTES
 from mindroom.script_sdk import MindRoomToolCallError, MindRoomTools
 
 if TYPE_CHECKING:
@@ -480,3 +481,12 @@ def test_script_sdk_rejects_unhashable_receipt_states(
         MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
 
     assert exc_info.value.kind == "invalid_response"
+
+
+def test_script_sdk_refuses_an_oversized_capability_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A capability file over the token limit is refused before any gateway request."""
+    _configure(monkeypatch, tmp_path)
+    (tmp_path / "capability").write_text("x" * (MAX_TOKEN_BYTES + 1), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="capability token is invalid"):
+        MindRoomTools()

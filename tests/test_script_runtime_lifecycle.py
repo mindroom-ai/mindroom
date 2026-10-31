@@ -481,7 +481,7 @@ def _stored_run_pinned_to_worker(
     runtime_paths: RuntimePaths,
     *,
     run_id: str,
-    worker_backend_locator: str = "locator-a",
+    worker_backend_locator: str | None = "locator-a",
     recovery_signature: str | None = None,
     state: ScriptRunState = ScriptRunState.RUNNING,
     started_at: str | None = None,
@@ -4246,3 +4246,78 @@ def test_run_without_a_recovery_signature_never_matches_an_unrecoverable_backend
         config=Config(),
         gateway_url="http://gateway.test/api/script-gateway",
     )
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_touches_only_workers_the_published_backend_owns(tmp_path: Path) -> None:
+    """Maintenance keeps alive only the workers of runs the current backend owns, not another's or an unrecorded one."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    owned = _stored_run_pinned_to_worker(store, runtime_paths, run_id=f"script-{'1' * 32}")
+    for run_id, locator in ((f"script-{'2' * 32}", "locator-b"), (f"script-{'3' * 32}", None)):
+        _stored_run_pinned_to_worker(store, runtime_paths, run_id=run_id, worker_backend_locator=locator)
+    backend = _Backend([])
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=_mock_broker(),
+        manager=_manager_stub(reconcile_durable=AsyncMock()),
+        resolver=SimpleNamespace(is_authorized=MagicMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda _locator: _Lease(backend),
+    )
+
+    await _reconcile_once(runtime)
+
+    assert backend.actions == [f"touch:{owned.worker_key}"]
+
+
+@pytest.mark.parametrize("worker_backend_locator", ["locator-b", None])
+def test_live_resolver_finds_no_worker_through_a_backend_that_does_not_own_the_run(
+    tmp_path: Path,
+    worker_backend_locator: str | None,
+) -> None:
+    """A run another backend owns, or one with no recorded backend, has no live worker in the published backend."""
+    runtime_paths = _runtime_paths(tmp_path)
+    run = replace(_run(runtime_paths), worker_backend_locator=worker_backend_locator)
+    runtime = build_script_runtime(
+        runtime_paths,
+        config_provider=_config,
+        bot_provider=lambda _name: None,
+        worker_lease_provider=lambda _locator: None,
+        api_enabled=True,
+    )
+    runtime.manager.worker_backend = _Backend([_worker(run)])
+    context = SimpleNamespace(agent_name="watcher", current_config=_config(), runtime_paths=runtime_paths)
+
+    authority = runtime.resolver.resolve_worker_authority(run, context=cast("ToolRuntimeContext", context))
+
+    assert authority.worker_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_pinned_to_another_locator_releases_every_lease_it_cannot_use(tmp_path: Path) -> None:
+    """Neither the held lease nor a newly acquired one of a different cleanup locator is published."""
+    runtime_paths = _runtime_paths(tmp_path)
+    leases = iter([_Lease(_Backend([])), _Lease(_Backend([]))])
+    acquired: list[_Lease] = []
+
+    def provide(_locator: str | None) -> _Lease:
+        acquired.append(next(leases))
+        return acquired[-1]
+
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=ScriptRunStore(runtime_paths),
+        broker=_mock_broker(),
+        manager=_manager_stub(),
+        resolver=SimpleNamespace(),
+        config_provider=_config,
+        worker_lease_provider=provide,
+    )
+    assert await runtime._refresh_worker_backend() is not None
+
+    assert await runtime._refresh_worker_backend(required_backend_locator="locator-b") is None
+
+    assert runtime.manager.worker_backend is None
+    assert [lease.released for lease in acquired] == [True, True]

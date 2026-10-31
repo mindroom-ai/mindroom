@@ -25,10 +25,13 @@ from mindroom.api.sandbox_worker_prep import prepare_worker_request
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.script_runs import launch_contract
+from mindroom.script_runs import supervised as supervised_module
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.script_runs.supervised import worker_script_namespace
 from mindroom.script_runs.wire import SCRIPT_PROTOCOL_VERSION, SandboxScriptRunRequest
 from mindroom.shell import supervisor as shell_supervisor_module
+from mindroom.shell.execution import ShellRunResult
 from mindroom.shell.supervisor import ShellSupervisorStartupError, _ShellSupervisorManager
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
@@ -1102,3 +1105,89 @@ def test_worker_script_rejects_invalid_config_snapshot(
 
     assert response.status_code == 400
     assert response.json()["detail"].startswith("Invalid config_snapshot:")
+
+
+def test_worker_script_launch_reports_a_supervisor_refusal(
+    runner_client: tuple[TestClient, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervisor that refuses the run's handle fails the launch with its refusal."""
+    client, workspace = runner_client
+    payload = _run_payload(workspace, run_id=f"script-{'9' * 32}", source="print('must not run')\n")
+
+    async def refuse(*_args: object, **_kwargs: object) -> ShellRunResult:
+        return ShellRunResult(message="Error: handle is already in use")
+
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", refuse)
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "error": "Error: handle is already in use"}
+
+
+def test_worker_script_launch_rejects_a_state_scope_that_does_not_own_its_worker(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """A state scope whose run-pinned key is not the launch's worker key cannot pick the run's workspace."""
+    client, workspace = runner_client
+    payload = _run_payload(workspace, run_id=f"script-{'a' * 32}", source="print('must not run')\n")
+    payload["state_scope_worker_key"] = "v1:test:user_agent:@alice:example.test:watcher"
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Script state scope does not own this run worker."
+
+
+@pytest.mark.parametrize("operation", ["status", "cancel"])
+def test_worker_script_controls_reject_path_like_run_id(
+    runner_client: tuple[TestClient, Path],
+    operation: str,
+) -> None:
+    """Status and cancel accept only the filesystem-safe run ID grammar."""
+    client, _workspace = runner_client
+
+    response = client.post(
+        f"/api/sandbox-runner/scripts/script-../{operation}",
+        headers=_HEADERS,
+        json={"worker_key": _WORKER_KEY},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "gateway_url",
+    ["ftp://primary:8765/api/script-gateway", "http://user:secret@primary:8765/api/script-gateway"],
+    ids=["scheme", "user_info"],
+)
+def test_worker_script_launch_rejects_an_unsafe_gateway_url(
+    runner_client: tuple[TestClient, Path],
+    gateway_url: str,
+) -> None:
+    """The shim only ever gets a plain HTTP(S) gateway URL without credentials."""
+    client, workspace = runner_client
+    payload = _run_payload(workspace, run_id=f"script-{'b' * 32}", source="print('must not run')\n")
+    payload["gateway_url"] = gateway_url
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Script gateway environment must contain a safe HTTP(S) URL."
+
+
+def test_worker_script_launch_rejects_an_oversized_capability_file(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """A capability file over the token limit is refused before launch."""
+    client, workspace = runner_client
+    run_id = f"script-{'c' * 32}"
+    payload = _run_payload(workspace, run_id=run_id, source="print('must not run')\n")
+    capability = workspace / ".mindroom" / "script-runs" / run_id / "capability"
+    capability.write_text("x" * (launch_contract.MAX_TOKEN_BYTES + 1), encoding="utf-8")
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Script capability file exceeds its supported size."
