@@ -2105,35 +2105,28 @@ class TestAWalkThatStoppedAboveTheReplyEdits:
         assert await bodies(alice, "$root") == ["the question, clarified", "second wording"]
         assert client.relation_calls == 3
 
-    async def test_a_depth_check_the_server_fails_fails_the_read(self, alice: PrincipalStore) -> None:
-        """Only a server saying it stopped above the edits sends the replies to their lookups.
+    @pytest.mark.parametrize("answered", [0, 1], ids=["thread walk", "depth check"])
+    async def test_a_relations_request_the_server_fails_fails_the_read(
+        self,
+        alice: PrincipalStore,
+        answered: int,
+    ) -> None:
+        """A failed thread walk, or a failed depth check after it, fails the read with the reason.
 
-        Any other failure of the request is a failure to answer, which fails
-        the read and leaves the thread for the next read, like a failed walk.
+        Only a server saying it stopped above the edits sends the replies to
+        their lookups; any other failure of the request is a failure to answer,
+        which leaves the thread for the next read.
         """
         client = FailingRecursiveRelations(
             events={"$root": raw("$root", "the question")},
             relations={"$root": [raw("$reply", "a reply", sender=BOB, ts=2_000, thread_id="$root")]},
+            answered=answered,
         )
 
         with pytest.raises(ConversationReadError, match=r"Could not fetch the relations of '\$root'.*M_UNKNOWN"):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
-        assert client.recursive_requests == 2
-        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
-
-    async def test_a_thread_walk_the_server_fails_fails_the_read(self, alice: PrincipalStore) -> None:
-        """A failed relations request fails the read with the conversation layer's own error, naming the reason."""
-        client = FailingRecursiveRelations(
-            events={"$root": raw("$root", "the question")},
-            relations={"$root": [raw("$reply", "a reply", sender=BOB, ts=2_000, thread_id="$root")]},
-            answered=0,
-        )
-
-        with pytest.raises(ConversationReadError, match=r"Could not fetch the relations of '\$root'.*M_UNKNOWN"):
-            await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
-
-        assert client.recursive_requests == 1
+        assert client.recursive_requests == answered + 1
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
     async def test_pages_reporting_varying_depths_hydrate_normally(self, alice: PrincipalStore) -> None:

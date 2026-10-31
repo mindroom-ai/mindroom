@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -16,8 +16,7 @@ from mindroom.commands.parsing import command_parser
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.event_journal import ConversationPage, RefreshRequest
-from mindroom.matrix.conversation_reads import ConversationReader
+from mindroom.matrix.conversation_hydration import ConversationReadError
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
@@ -38,6 +37,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
 
 ROOM_ID = "!test:server"
@@ -190,23 +190,6 @@ async def test_schedule_whose_room_state_cannot_be_read(tmp_path: Path) -> None:
     )
 
 
-def _stale_thread_reader() -> ConversationReader:
-    """Return a real reader whose strict read of the thread still has a message awaiting its refetch."""
-    pending = RefreshRequest(
-        room_id=ROOM_ID,
-        thread_id=THREAD_ID,
-        logical_event_id="$redacted",
-        revision_event_id="$redacted",
-        refresh_token=1,
-        membership_epoch=0,
-    )
-    page = ConversationPage(messages=(), refresh_pending=(pending,), next_cursor=None)
-    return ConversationReader(
-        store=cast("Any", SimpleNamespace(read_conversation=AsyncMock(return_value=page))),
-        hydrator=cast("Any", SimpleNamespace(ensure_hydrated=AsyncMock(), resolve_refreshes=AsyncMock())),
-    )
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("body", "prefix"),
@@ -219,13 +202,12 @@ async def test_schedule_or_edit_whose_thread_cannot_be_read(tmp_path: Path, body
     """A thread-scoped schedule or edit whose thread read fails says why, and saves nothing."""
     client = make_matrix_client_mock()
     _serve_task(client, _workflow())
+    reader = make_conversation_reader_mock()
+    reader.read_strict.side_effect = ConversationReadError("Could not fetch thread root '$thread': M_UNKNOWN")
     with patch("mindroom.scheduling.tasks.complete_prompt", new=AsyncMock()) as parse:
-        reply = await _reply(tmp_path, body, client=client, conversation_reader=_stale_thread_reader())
+        reply = await _reply(tmp_path, body, client=client, conversation_reader=reader)
 
-    assert reply == (
-        f"❌ {prefix}Could not read this thread's history: "
-        f"Conversation {ROOM_ID}/{THREAD_ID} has 1 message(s) awaiting a server refetch"
-    )
+    assert reply == f"❌ {prefix}Could not read this thread's history: Could not fetch thread root '$thread': M_UNKNOWN"
     parse.assert_not_awaited()
     client.room_put_state.assert_not_awaited()
 

@@ -162,7 +162,7 @@ export function useHomeData() {
       return {
         tasks: data.tasks,
         timezone: data.timezone,
-        unreadableRooms: data.unreadable_rooms.length,
+        unreadableRoomCount: data.unreadable_rooms.length,
       };
     },
     retry: false,

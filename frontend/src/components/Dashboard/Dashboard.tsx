@@ -169,7 +169,7 @@ function ComingUp({
 }) {
   const data = !schedules.isError ? schedules.data : undefined;
   const tasks = data ? upcomingSchedules(data.tasks) : [];
-  const unreadableRooms = data?.unreadableRooms ?? 0;
+  const unreadableRoomCount = data?.unreadableRoomCount ?? 0;
   return (
     <section className="home-upcoming" aria-labelledby="upcoming-heading">
       <div>
@@ -185,10 +185,8 @@ function ComingUp({
           <p className="home-section-empty" role="status">
             Loading schedules…
           </p>
-        ) : tasks.length === 0 ? (
-          unreadableRooms === 0 && (
-            <p className="home-section-empty">Nothing scheduled</p>
-          )
+        ) : tasks.length === 0 && unreadableRoomCount === 0 ? (
+          <p className="home-section-empty">Nothing scheduled</p>
         ) : (
           tasks.map(({ task, at }) => {
             const when = scheduleTime(at, data!.timezone);
@@ -223,10 +221,10 @@ function ComingUp({
             );
           })
         )}
-        {unreadableRooms > 0 && (
+        {unreadableRoomCount > 0 && (
           <p className="home-section-empty" role="status">
-            Schedules in {unreadableRooms}{" "}
-            {unreadableRooms === 1 ? "room" : "rooms"} could not be read
+            Schedules in {unreadableRoomCount}{" "}
+            {unreadableRoomCount === 1 ? "room" : "rooms"} could not be read
           </p>
         )}
       </div>

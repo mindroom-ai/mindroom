@@ -216,8 +216,8 @@ describe("Home", () => {
     expect(screen.queryByText("Nothing scheduled")).not.toBeInTheDocument();
   });
   it.each([
-    { timezone: "UTC", tasks: [null] },
-    { timezone: "not/a-zone", tasks: [] },
+    { timezone: "UTC", tasks: [null], unreadable_rooms: [] },
+    { timezone: "not/a-zone", tasks: [], unreadable_rooms: [] },
   ])(
     "contains malformed schedules or timezone without hiding usage (%j)",
     async (bad) => {

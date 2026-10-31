@@ -111,13 +111,6 @@ def test_list_schedules_reports_an_unreadable_room_beside_the_readable_ones(
     temp_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
     assert config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app).loaded
     stored = _stored()
-    stored["workflow"] = (
-        _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
-        .workflow.model_copy(
-            update={"room_id": "!readable:localhost"},
-        )
-        .model_dump_json()
-    )
 
     async def room_get_state(room_id: str) -> object:
         if room_id == "!unreadable:localhost":

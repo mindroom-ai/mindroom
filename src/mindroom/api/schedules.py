@@ -22,7 +22,6 @@ from mindroom.scheduling.errors import (
 )
 from mindroom.scheduling.tasks import (
     ScheduledTaskReadModel,
-    ScheduledTaskRecord,
     build_edited_scheduled_workflow,
     build_scheduled_task_read_model,
     cancel_scheduled_task,
@@ -151,7 +150,7 @@ async def list_schedules(
     try:
         for resolved_room_id in room_ids:
             try:
-                room_tasks: list[ScheduledTaskRecord] = await get_scheduled_tasks_for_room(
+                room_tasks = await get_scheduled_tasks_for_room(
                     client=client,
                     room_id=resolved_room_id,
                     runtime_paths=runtime_paths,
