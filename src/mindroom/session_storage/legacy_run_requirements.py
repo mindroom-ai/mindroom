@@ -46,9 +46,9 @@ if TYPE_CHECKING:
 #   a delegation call, the entry's id as its ``pause_id``: the row its id already took, else the first paused row
 #   under its call id that no entry took. A team row's member entries fold after the member's own, since only they hold the answers the driver
 #   recorded while the team waited. A resolved entry, which earlier releases kept across a resume beside a later
-#   waiting one that may reuse its call id, leaves its call as stored. An entry without an id or a call, one naming a
-#   run that is not paused, and one matching no paused call fold into nothing, as no release is known to write one
-#   that a resume could answer. Delegation state drops ``pending_requirements``, and every row's ``requirements`` column becomes
+#   waiting one that may reuse its call id, leaves its call as stored. An entry without an id or a call, one whose ids
+#   are not text, one naming a run that is not paused, and one matching no paused call fold into nothing, as no
+#   release is known to write one that a resume could answer. Delegation state drops ``pending_requirements``, and every row's ``requirements`` column becomes
 #   NULL. The Agno-layout conversion folds each paused row and the members a paused team row embeds the same way as it
 #   decodes them. A release at layout version 7 opens the folded database but cannot resume a run paused before or
 #   after the step, a cost accepted instead of writing both shapes.
@@ -56,6 +56,8 @@ if TYPE_CHECKING:
 #   tests/session_storage/test_legacy_run_requirements.py::test_the_paused_call_under_the_id_takes_the_requirement_and_a_delegation_call_its_id,
 #   tests/session_storage/test_legacy_run_requirements.py::test_a_resolved_requirement_never_takes_a_later_call_that_reuses_its_id,
 #   tests/session_storage/test_legacy_run_requirements.py::test_an_entry_no_paused_call_matches_folds_into_nothing,
+#   tests/session_storage/test_legacy_run_requirements.py::test_an_entry_whose_ids_are_not_text_folds_into_nothing,
+#   tests/session_storage/test_legacy_run_requirements.py::test_a_worker_written_entry_with_a_list_for_its_member_run_does_not_stop_the_upgrade,
 #   tests/session_storage/test_legacy_run_requirements.py::test_a_team_row_s_copy_of_a_member_call_folds_over_the_member_s_own,
 #   tests/session_storage/test_legacy_run_requirements.py::test_a_paused_agent_row_keeps_each_call_once,
 #   tests/session_storage/test_legacy_run_requirements.py::test_a_delegation_answered_only_on_its_requirement_stays_answered,
@@ -90,9 +92,16 @@ def fold_requirements(
     for entry in cast("list[Any]", entries):
         if not isinstance(entry, dict) or not isinstance(call := entry.get("tool_execution"), dict):
             continue
-        if not isinstance(entry.get("id"), str) or not call.get("tool_call_id") or not _paused_call(call):
-            continue
         member_run_id = entry.get("member_run_id")
+        # Worker code can write the row, so an entry whose ids are not text folds into nothing, as one without them.
+        if (
+            not isinstance(entry.get("id"), str)
+            or not isinstance(call.get("tool_call_id"), str)
+            or not call["tool_call_id"]
+            or not (member_run_id is None or isinstance(member_run_id, str))
+            or not _paused_call(call)
+        ):
+            continue
         owner = run if member_run_id in (None, run.get("run_id")) else members.get(member_run_id)
         if owner is not None:
             _fold_entry(entry, call, owner, claims.setdefault(id(owner), {}))

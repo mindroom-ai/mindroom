@@ -204,6 +204,35 @@ def test_an_entry_no_paused_call_matches_folds_into_nothing() -> None:
     assert member["tools"] == [{"tool_call_id": "c9", "tool_name": "add", "result": "1"}]
 
 
+@pytest.mark.parametrize(
+    "odd",
+    [
+        {"member_run_id": ["m"]},
+        {"member_run_id": {"m": 1}},
+        {"id": ["q"]},
+        {"tool_call_id": ["c1"]},
+        {"tool_call_id": ""},
+    ],
+    ids=["member-run-list", "member-run-object", "id-list", "call-id-list", "empty-call-id"],
+)
+def test_an_entry_whose_ids_are_not_text_folds_into_nothing(odd: dict[str, Any]) -> None:
+    """Worker code can write the row; an entry naming its run, itself, or its call by anything but text folds nowhere.
+
+    That holds even when a call of the run was stored under the same odd id.
+    """
+    waiting = {"tool_call_id": "c1", "tool_name": "run_subagent", "external_execution_required": True}
+    if "tool_call_id" in odd:
+        waiting["tool_call_id"] = odd["tool_call_id"]
+    entry: dict[str, Any] = {"id": "q", "tool_execution": dict(waiting), **odd}
+    entry.pop("tool_call_id", None)
+    member = {"run_id": "m", "tools": [dict(waiting)]}
+    run: dict[str, Any] = {"run_id": "r", "tools": [dict(waiting)], "requirements": [entry]}
+
+    fold_requirements(run, {"m": member}, {})
+
+    assert (run, member) == ({"run_id": "r", "tools": [waiting]}, {"run_id": "m", "tools": [waiting]})
+
+
 def test_a_team_row_s_copy_of_a_member_call_folds_over_the_member_s_own() -> None:
     """The driver recorded a member delegation's answer only on the team's copy, so the copy's call wins."""
     waiting = {"tool_call_id": "sub", "tool_name": "run_subagent", "external_execution_required": True}
@@ -246,6 +275,24 @@ def test_a_paused_agent_row_keeps_each_call_once(tmp_path: Path) -> None:
     assert _column(store, "requirements", row["run_id"]) is None
     with closing(sqlite3.connect(store.path)) as connection:
         assert layout_version(connection, TableNames.of_database(store.path)) == LOG_VERSION == 8
+
+
+def test_a_worker_written_entry_with_a_list_for_its_member_run_does_not_stop_the_upgrade(tmp_path: Path) -> None:
+    """The step finishes and the run keeps waiting on its call; a rolled-back step would fail every later open."""
+    row = _row("agent_paused")
+    [requirement] = row["requirements"]
+    row["requirements"].append({**requirement, "id": "planted", "member_run_id": ["someone"]})
+
+    store = _upgraded(create_agent_state_storage(_AGENT.scope_id, tmp_path), _AGENT, [row])
+
+    with closing(sqlite3.connect(store.path)) as connection:
+        assert layout_version(connection, TableNames.of_database(store.path)) == LOG_VERSION
+    run = store.get_run(row["run_id"])
+    assert run is not None
+    assert [item.tool_execution for item in run.requirements] == [
+        ToolExecution.from_dict(requirement["tool_execution"]),
+    ]
+    assert _column(store, "requirements", row["run_id"]) is None
 
 
 def test_a_delegation_answered_only_on_its_requirement_stays_answered(tmp_path: Path) -> None:
