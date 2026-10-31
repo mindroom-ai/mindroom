@@ -11,10 +11,10 @@ A router without a client still binds its own sender, because a hook context ret
 
 The sender and the snapshot reader read the bot's conversation reader when they run, not when the support was built, because a login that switched the bot's Matrix user rebuilds the reader while hook contexts bound earlier stay live.
 
-Scheduled hooks keep their own capability set on purpose: the firing operation's client, captured for that fire, and the scheduled-task runtime's hook lifetime, which outlives any bot generation.
+Scheduled hooks keep their own capability set on purpose: the scheduled-task runtime's hook lifetime, which outlives any bot generation, and a sender built from the client, config, and reader the fire was handed, because the scheduling executor receives exactly those values rather than a bot and is called that way by every scheduled fire and its tests; during a fire the operation lends the owner bot's client, so it sends as the bot's own sender would.
 
 Agent lifecycle emission stayed in the bot.
-The bot supplies the identity, the room lists, and the timing at every call, and stopped hooks must run before its hook lifetime ends; a hooks-side emitter would only move the payload and turn the bot's test patches into patches of its hook support.
+The bot supplies the identity, the room lists, and the timing at every call, and stopped hooks must run before its hook lifetime ends, so a hooks-side emitter would only move the payload.
 
 ## Bot adapters
 
