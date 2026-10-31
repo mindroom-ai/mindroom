@@ -405,12 +405,6 @@ def _seed(
     )
 
 
-def _stored_runs(store: ConversationStore, *, session_id: str = "session-1") -> list[AnyRunRecord]:
-    session = ConversationStore.load_session(store, session_id)
-    assert session is not None
-    return session.runs
-
-
 class _StaticQueuedState:
     def __init__(self, *, pending: bool) -> None:
         self.pending = pending
