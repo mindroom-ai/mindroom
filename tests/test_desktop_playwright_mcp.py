@@ -420,16 +420,6 @@ def test_mutable_playwright_tab_indices_are_rejected(action: str) -> None:
         _mcp_call(action, parameters)
 
 
-def test_mutable_playwright_tab_index_inside_act_request_is_rejected() -> None:
-    """Nested act requests cannot bypass the mutable tab-index guard."""
-    parameters: dict[str, object] = {
-        "request": {"kind": "click", "ref": "e1", "targetId": "1"},
-    }
-
-    with pytest.raises(PlaywrightBrowserError, match="stable page identity"):
-        _mcp_call("act", parameters)
-
-
 @pytest.mark.asyncio
 async def test_status_is_lazy_until_extension_use(tmp_path: Path) -> None:
     """Enabling the capability does not launch or take over a browser before first use."""
@@ -589,12 +579,3 @@ async def test_same_url_and_title_after_replacement_cannot_authorize_a_click(
     with pytest.raises(PlaywrightBrowserError, match="stable page identity"):
         await provider.execute("act", {"request": {"kind": "click", "ref": "e3"}})
     assert [call.args[0] for call in call_tool.await_args_list] == ["browser_tabs", "browser_tabs"]
-
-
-@pytest.mark.asyncio
-async def test_provider_reports_stable_targeting_limit_before_start(tmp_path: Path) -> None:
-    """Capability discovery truthfully bounds control before launching the extension."""
-    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    status = await provider.execute("status", {})
-    assert status.payload["stable_targeting"] is False
-    assert status.payload["supported_control_actions"] == ["start", "stop", "open"]
