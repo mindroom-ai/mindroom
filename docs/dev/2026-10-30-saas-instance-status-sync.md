@@ -29,7 +29,7 @@ An admin can still interrupt a provision in flight that way.
 
 A provision records its `provisioning` claim before Helm creates the deployment, and the sync cannot tell that window from a provision that died part-way.
 Marking such a row `error` showed a healthy new instance as failed until the provision overwrote it after its readiness wait.
-The provision records `error` on every failure it survives, so an orphaned `provisioning` row needs a backend that stopped before Helm ran.
+An orphaned `provisioning` row comes from a provision that stopped before Helm ran: a backend restart, or a failed step before the deployment that does not mark the row `error`.
 Such a row can still own volumes, because an admin provision from `error` and a lifecycle resume both redeploy instances whose deployment is gone, so Uninstall is not a safe recovery.
 The operator procedure in `docs/deployment/saas-platform.md` sets the row to `error` by hand and provisions it again, which keeps the volumes.
 Any other status without a deployment becomes `error`.
