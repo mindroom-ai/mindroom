@@ -593,7 +593,6 @@ class BrowserTools(Toolkit):
         self._file_access = file_access
         if self._configured_output_dir is not None:
             self._configured_output_dir.mkdir(parents=True, exist_ok=True)
-        self._close_task: asyncio.Task[None] | None = None
         self._startup_cleanup_tasks: set[asyncio.Task[None]] = set()
 
     def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
@@ -696,15 +695,6 @@ class BrowserTools(Toolkit):
         if errors:
             msg = "Failed to close browser profiles"
             raise ExceptionGroup(msg, errors)
-
-    def close(self) -> None:
-        """Close toolkit resources."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(self.aclose())
-            return
-        self._close_task = loop.create_task(self.aclose())
 
     @tool(name="browser_control")
     async def browser(  # noqa: C901, PLR0911, PLR0912, PLR0915
