@@ -43,8 +43,8 @@ _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
-# A running command reports the tail of its output at most this often, and only when it changed.
-_PROGRESS_INTERVAL_SECONDS = 2.0
+# A running command reports the tail of its output at most this often, and only when it changed; replies show it live.
+_PROGRESS_INTERVAL_SECONDS = 0.5
 _PROGRESS_TAIL_LINES = 20
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 
@@ -140,7 +140,7 @@ class ProcessRecord:
 
 
 class _OutputProgress:
-    """Report a running command's latest output, at most every few seconds and only when it changed."""
+    """Report a running command's latest output, at most twice a second and only when it changed."""
 
     def __init__(self, report: Callable[[str], None], stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer) -> None:
         self._report = report
