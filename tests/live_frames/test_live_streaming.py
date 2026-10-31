@@ -13,6 +13,7 @@ import mindroom.streaming as streaming_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, StreamingConfig
+from mindroom.live_frames.publisher import LivePublisher
 from mindroom.live_frames.transport import LiveSendOutcome
 from mindroom.llm.events import ReasoningDelta, ReportedCall, TextDelta, ToolCompleted, ToolStarted
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -304,3 +305,17 @@ async def test_a_checkpoint_clears_a_finished_worker_warmup(tmp_path: Path) -> N
     cleared = [content for content in edits.contents[warm[-1] + 1 :] if "io.mindroom.warmup_suffix" not in content]
     assert cleared
     assert cleared[0]["body"] == "Thinking..."
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("frames")
+async def test_a_frame_loop_error_ends_frames() -> None:
+    """A bug while building a frame ends frames for the reply, so its edits fall back to the ordinary cadence."""
+    publisher = LivePublisher(client=make_matrix_client_mock(), room_id=_ROOM_ID)
+
+    def broken() -> None:
+        raise RuntimeError
+
+    await publisher.run(current=broken, on_tick=lambda: None, on_too_large=lambda: None)
+
+    assert publisher.running is False
