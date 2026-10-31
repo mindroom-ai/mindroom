@@ -148,7 +148,7 @@ def _resolve_live_function(
         return f"`{tool_name}` is not one of this agent's tools in this conversation"
     if toolkit_name is not None and function.toolkit != toolkit_name:
         return f"`{tool_name}` now comes from another toolkit than the one the call was stored for"
-    if function.external_execution or function.stop_after_call:
+    if function.external_execution or function.controls_run:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
     return LiveFunction(
         function=function,

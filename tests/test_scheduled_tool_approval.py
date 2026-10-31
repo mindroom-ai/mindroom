@@ -27,6 +27,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.scheduler import SchedulerTools
+from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
     ApprovalCall,
@@ -2821,6 +2822,25 @@ async def test_scheduler_functions_are_never_scheduled_calls() -> None:
                     execute_at="2030-01-02T09:00:00-05:00",
                     description="Run the runner",
                 )
+
+
+@pytest.mark.asyncio
+async def test_a_model_switch_is_never_a_scheduled_call() -> None:
+    """A switch may stop the run that makes it, so it is conversation control, which a stored call cannot exercise."""
+    context = _tool_context(_gated_config())
+
+    with (
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(RuntimeError, match="needs live input or conversation control"),
+    ):
+        await _LiveRun(((ThreadModelTools(), "thread_model"),)).call(
+            "schedule_tool_call",
+            tool_name="switch_thread_model",
+            arguments_json='{"model_name": "default"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Switch later",
+        )
 
 
 @pytest.mark.asyncio

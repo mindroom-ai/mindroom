@@ -171,8 +171,11 @@ async def test_viewed_image_can_be_saved_and_explicitly_shared(tmp_path: Path) -
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entrypoint", ["view_file", "get_attachment"])
-async def test_unsupported_adapter_retains_artifact_and_reports_limitation(tmp_path: Path, entrypoint: str) -> None:
-    """An adapter that omits images must never report a successful view."""
+async def test_a_route_that_omits_images_gets_a_ready_view_and_a_retained_artifact(
+    tmp_path: Path,
+    entrypoint: str,
+) -> None:
+    """The tool returns the view as on any route; the request pipeline tells such a model it was not sent."""
     context = replace(
         _tool_context(tmp_path, process_env={"MINDROOM_EXECUTION_MODE": "off"}),
         active_model_name="text_only",
@@ -189,8 +192,8 @@ async def test_unsupported_adapter_retains_artifact_and_reports_limitation(tmp_p
             viewed = await tools.get_attachment(attachment_id, view=True)
     assert isinstance(viewed, ToolValue)
     receipt = json.loads(viewed.content)
-    assert receipt["view_status"] == "unsupported"
-    assert not viewed.images
+    assert receipt["view_status"] == "ready"
+    assert viewed.images
     retained = load_attachment(tmp_path, receipt["attachment_id"])
     assert retained is not None
     assert retained.local_path.read_bytes() == path.read_bytes() == image_bytes()

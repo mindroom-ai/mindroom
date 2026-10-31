@@ -44,7 +44,6 @@ from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, load_config
-from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     RETAINED_MEDIA_MAX_BYTES,
     RuntimePaths,
@@ -7911,9 +7910,8 @@ def test_proxy_composition_finalizes_decoded_media_and_returns_json_as_it_is(
     tmp_path: Path,
     tool_name: str,
 ) -> None:
-    """A worker's image view is finalized for the calling model; a JSON envelope's value comes back as it is."""
-    context = replace(_tool_context(tmp_path), active_model_name="text_only")
-    context.config.models["text_only"] = ModelConfig(provider="cerebras", id="test-model")
+    """A worker's image view is retained as an attachment; a JSON envelope's value comes back as it is."""
+    context = _tool_context(tmp_path)
     viewed = ToolValue(content='{"view_status": "ready"}', images=(Image(content=b"png", mime_type="image/png"),))
     ordinary = {"mindroom_tool_result": {"version": 777}}
     responses = iter([encode_media_result(viewed), encode_media_result(ordinary)])
@@ -7942,6 +7940,6 @@ def test_proxy_composition_finalizes_decoded_media_and_returns_json_as_it_is(
         plain = call()
 
     assert isinstance(media, ToolValue)
-    assert not media.images
-    assert json.loads(media.content)["view_status"] == "unsupported"
+    assert [image.content for image in media.images] == [b"png"]
+    assert json.loads(media.content)["attachment_id"].startswith("att_")
     assert plain == ordinary
