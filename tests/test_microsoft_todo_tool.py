@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from mindroom.custom_tools.microsoft_todo import MicrosoftTodoTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
@@ -350,15 +351,6 @@ def test_list_tasks_refuses_a_limit_outside_one_to_fifty(
     assert graph.requests == []
 
 
-def test_list_tasks_refuses_a_non_boolean_include_completed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
-
-    result = _payload(tools.microsoft_todo_list_tasks(LIST, include_completed="yes"))  # type: ignore[arg-type]
-
-    assert result["code"] == "invalid_argument"
-    assert graph.requests == []
-
-
 def test_ids_are_escaped_as_single_path_segments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
 
@@ -434,12 +426,11 @@ def test_create_task_sends_due_date_notes_and_importance(tmp_path: Path, monkeyp
         {"title": "   "},
         {"title": "x", "due_date": "2026-02-30"},
         {"title": "x", "due_date": "10/22/2026"},
+        {"title": "x", "due_date": "20261022"},
         {"title": "x", "due_date": "2026-10-22T00:00:00"},
         {"title": "x", "due_date": ""},
         {"title": "x", "due_date": "2026-10-22", "time_zone": "UTC "},
         {"title": "x", "due_date": "2026-10-22", "time_zone": "Europe/Berlin;x"},
-        {"title": "x", "importance": "urgent"},
-        {"title": "x", "notes": 5},
     ],
 )
 def test_create_task_refuses_malformed_arguments_before_any_request(
@@ -449,7 +440,7 @@ def test_create_task_refuses_malformed_arguments_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok(_task(), status=201))
 
-    assert _payload(tools.microsoft_todo_create_task(LIST, **arguments))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert _payload(tools.microsoft_todo_create_task(LIST, **arguments))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -495,9 +486,6 @@ def test_update_task_patches_only_the_given_fields(
         {"title": ""},
         {"due_date": "tomorrow"},
         {"due_date": "2026-11-01", "time_zone": ""},
-        {"importance": "urgent"},
-        {"completed": "yes"},
-        {"notes": 1},
     ],
 )
 def test_update_task_refuses_nothing_to_change_or_malformed_fields(
@@ -507,7 +495,36 @@ def test_update_task_refuses_nothing_to_change_or_malformed_fields(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok(_task()))
 
-    assert _payload(tools.microsoft_todo_update_task(LIST, TASK, **arguments))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert _payload(tools.microsoft_todo_update_task(LIST, TASK, **arguments))["code"] == "invalid_argument"
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("microsoft_todo_list_tasks", {"list_id": LIST, "include_completed": "maybe"}),
+        ("microsoft_todo_list_tasks", {"list_id": LIST, "limit": 2.5}),
+        ("microsoft_todo_create_task", {"list_id": LIST, "title": "x", "importance": "urgent"}),
+        ("microsoft_todo_create_task", {"list_id": LIST, "title": "x", "notes": 5}),
+        ("microsoft_todo_create_task", {"list_id": LIST, "title": 5}),
+        ("microsoft_todo_update_task", {"list_id": LIST, "task_id": TASK, "importance": "urgent"}),
+        ("microsoft_todo_update_task", {"list_id": LIST, "task_id": TASK, "completed": "maybe"}),
+        ("microsoft_todo_update_task", {"list_id": LIST, "task_id": TASK, "notes": 1}),
+        ("microsoft_todo_update_task", {"list_id": LIST, "task_id": TASK, "due_date": 20261101}),
+    ],
+)
+def test_malformed_arguments_fail_call_validation_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Arguments that disagree with a function's signature fail call validation before its body runs."""
+    tools, graph = _tools(tmp_path, monkeypatch, _ok(_task()))
+
+    with pytest.raises(ValidationError):
+        toolkit_offers(tools, name).entrypoint(**arguments)
+
     assert graph.requests == []
 
 
