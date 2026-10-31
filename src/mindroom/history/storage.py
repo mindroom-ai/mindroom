@@ -169,16 +169,24 @@ def remove_runs_answering(storage: ConversationStore, session_id: str, scope: Hi
     """Remove the first element of the scope's history that answered ``event_id`` and everything after it.
 
     Later model output may build on that reply, so the whole suffix goes; when a
-    compacted run answered the event, so does the summary that folded it.
+    compacted run answered the event, so does the summary that folded it. The seen
+    ids earlier releases preserved in metadata are dropped, as after a redaction, but
+    a row that holds none is left as it was.
     Returns True if anything was removed.
     """
-    return summary_rows.cut_at_event(
+    removed = summary_rows.cut_at_event(
         storage,
         session_id=session_id,
         scope_key=scope.key,
         event_id=event_id,
         match="answered",
     )
+    if removed and _preserved_seen_event_ids(storage.read_session_metadata(session_id)):
+        storage.update_metadata(
+            new_scope_session(session_id=session_id, scope=scope),
+            _without_preserved_seen_event_ids,
+        )
+    return removed
 
 
 def _remove_redacted_event_from_history(
@@ -212,7 +220,7 @@ def _remove_redacted_event_from_history(
         return False
     elif legacy_event_ids is not None:
         summary_rows.retire(storage, session=session, scope_key=scope.key)
-    storage.update_metadata(session, partial(_with_history_state, field=_SEEN_EVENT_IDS, value=[]))
+    storage.update_metadata(session, _without_preserved_seen_event_ids)
     return True
 
 
@@ -424,16 +432,23 @@ def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run
 # Legacy format: ``seen_event_ids`` in a session row's ``MINDROOM_HISTORY_METADATA_KEY`` value, into which team turns
 # merged the events each non-empty reply consumed, a copy of its stored run's ``matrix_seen_event_ids``; layout version 7
 # fills it from the older per-scope entry (``session_storage/legacy_scope_metadata.py``).
-# Last legacy release: v2026.10.759; replacement: the next release, where a team turn's stored run is the only record of
+# Last legacy release: v2026.10.760; replacement: v2026.10.761, where a team turn's stored run is the only record of
 # the events it consumed, as an agent turn's is.
-# Handling: The ids count as seen, beside the replayable runs' and the summary rows', until a redaction cut of the scope
-# drops them all (``_remove_redacted_event_from_history``); an edit's cut leaves them. Nothing writes them any more.
+# Handling: The ids count as seen, beside the replayable runs' and the summary rows', until a cut of the scope's history,
+# by an edit (``remove_runs_answering``) or a redaction (``_remove_redacted_event_from_history``), drops them all,
+# because they do not say which run read which event. Nothing writes them any more.
 # Coverage: tests/test_history_scope_state.py::test_seen_event_ids_match_model_history_visibility,
 # tests/test_compaction_redaction.py::test_redacting_a_loaded_only_event_keeps_the_summary,
-# tests/test_compaction_redaction.py::test_legacy_seen_ids_without_summary_keep_unrelated_runs, and
+# tests/test_compaction_redaction.py::test_legacy_seen_ids_without_summary_keep_unrelated_runs,
+# tests/test_compaction_redaction.py::test_an_edit_cut_forgets_seen_ids_only_the_removed_run_read, and
 # tests/test_compaction_redaction.py::test_rollback_forgets_seen_ids_of_the_removed_runs.
 def _preserved_seen_event_ids(metadata: dict[str, Any] | None) -> set[str]:
     raw_seen_ids = _history_state(metadata).get(_SEEN_EVENT_IDS)
     if not isinstance(raw_seen_ids, list):
         return set()
     return {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}
+
+
+def _without_preserved_seen_event_ids(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return session ``metadata`` without the preserved seen ids; ``metadata`` itself is left alone."""
+    return _with_history_state(metadata, _SEEN_EVENT_IDS, value=[])
