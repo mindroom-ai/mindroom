@@ -1083,29 +1083,12 @@
       },
       {
         "name": "view_file",
-        "description": "View an image in your own model context without posting or invoking another model.\nSupply exactly one source: a workspace path or an authorized attachment ID.\nPNG, JPEG, GIF and WebP images are supported, up to 20 MiB and 40 million pixels.\nLarge images are resized to 2048 pixels; animation uses its first frame, with disclosure.\nThe source path and a reusable attachment handle are retained when available.\nUse read_file for ordinary text/code; use matrix_message only when sharing is requested.",
+        "description": "View an image in your own model context without posting or invoking another model.\nTo view an attachment ID, use get_attachment with view instead.\nPNG, JPEG, GIF and WebP images are supported, up to 20 MiB and 40 million pixels.\nLarge images are resized to 2048 pixels; animation uses its first frame, with disclosure.\nThe source path and a reusable attachment handle are retained when available.\nUse read_file for ordinary text/code; use matrix_message only when sharing is requested.",
         "parameters": {
           "type": "object",
           "properties": {
             "path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "attachment_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1120,7 +1103,9 @@
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
             }
           },
-          "required": []
+          "required": [
+            "path"
+          ]
         },
         "strict": false,
         "requires_confirmation": false,

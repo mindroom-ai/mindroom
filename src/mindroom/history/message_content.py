@@ -88,7 +88,7 @@ def _content_with_viewed_image_omission(message: Message, omitted: int) -> str:
     notice = (
         f"[{omitted} historical viewed {noun} omitted from replay to keep history within the "
         f"{_MAX_HISTORY_VIEWED_IMAGES}-image, {_MAX_HISTORY_VIEWED_IMAGE_BYTES // (1024 * 1024)} MiB limit. "
-        "Reopen the original workspace path with view_file, or use an authorized attachment ID.]"
+        "Reopen the original workspace path with view_file, or an authorized attachment ID with get_attachment(view=True).]"
     )
     content = render_message_content(message)
     return f"{content}\n\n{notice}" if content else notice

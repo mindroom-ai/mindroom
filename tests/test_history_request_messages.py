@@ -381,7 +381,7 @@ def test_history_replays_only_the_newest_four_viewed_images_and_says_so() -> Non
     notice = (
         "The tool call above generated the attached media.\n\n"
         "[1 historical viewed image omitted from replay to keep history within the 4-image, 10 MiB limit. "
-        "Reopen the original workspace path with view_file, or use an authorized attachment ID.]"
+        "Reopen the original workspace path with view_file, or an authorized attachment ID with get_attachment(view=True).]"
     )
     assert _contents(history[:2]) == [notice, notice]
     assert all(message.images for message in stored)

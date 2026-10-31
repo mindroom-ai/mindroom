@@ -193,7 +193,6 @@ def _view_attachment(  # noqa: PLR0911
     attachment_id: str,
     *,
     metadata: dict[str, object],
-    images_only: bool,
 ) -> ToolValue:
     """Read authorized attachment bytes and use shared preparation for every image view."""
     attachment, error = _resolve_context_attachment_record(context, attachment_id)
@@ -209,7 +208,7 @@ def _view_attachment(  # noqa: PLR0911
     if not payload:
         return media_error("Attachment file is empty.", metadata=metadata)
     mime_type = resolve_image_mime_type(payload, attachment.mime_type).detected_mime_type
-    if images_only or attachment.kind == "image" or mime_type is not None:
+    if attachment.kind == "image" or mime_type is not None:
         allowed, _ = filter_attachments_for_context(
             [attachment],
             room_id=context.room_id,
@@ -413,35 +412,19 @@ class AttachmentTools(Toolkit):
             ],
         )
 
-    async def view_file(self, path: str | None = None, attachment_id: str | None = None) -> ToolValue:
+    async def view_file(self, path: str) -> ToolValue:
         """View an image in your own model context without posting or invoking another model.
 
-        Supply exactly one source: a workspace path or an authorized attachment ID.
+        To view an attachment ID, use get_attachment with view instead.
         PNG, JPEG, GIF and WebP images are supported, up to 20 MiB and 40 million pixels.
         Large images are resized to 2048 pixels; animation uses its first frame, with disclosure.
         The source path and a reusable attachment handle are retained when available.
         Use read_file for ordinary text/code; use matrix_message only when sharing is requested.
         """
-        metadata: dict[str, object] = {"tool": "view_file"}
-        if (path is None) == (attachment_id is None):
-            return media_error("Provide exactly one of path or attachment_id.", metadata=metadata)
-        source = path if path is not None else attachment_id
-        if not isinstance(source, str) or not source.strip():
-            return media_error("The source must be a non-empty string.", metadata=metadata)
         context = get_tool_runtime_context()
         if context is None:
-            return media_error("Tool runtime context is unavailable.", metadata=metadata)
-        if attachment_id is not None:
-            result = await asyncio.to_thread(
-                _view_attachment,
-                context,
-                attachment_id,
-                metadata={**metadata, "attachment_id": attachment_id},
-                images_only=True,
-            )
-        else:
-            assert path is not None
-            result = await self._view_path_image(context, path)
+            return media_error("Tool runtime context is unavailable.", metadata={"tool": "view_file"})
+        result = await self._view_path_image(context, path)
         return await asyncio.to_thread(finalize_tool_media, result)
 
     async def _view_path_image(self, context: ToolRuntimeContext, path: str) -> ToolValue:
@@ -575,7 +558,6 @@ class AttachmentTools(Toolkit):
                 context,
                 requested_attachment_ids[0],
                 metadata=metadata,
-                images_only=False,
             )
             receipt = json.loads(result.content)
             if receipt.get("view_status") == "error":

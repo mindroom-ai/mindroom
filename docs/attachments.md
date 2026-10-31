@@ -66,7 +66,7 @@ agents:
 |----------|--------------|
 | `list_attachments(target=None)` | List the attachment IDs available in the current context with their metadata, plus any `missing_attachment_ids`; `target` returns one attachment |
 | `get_attachment(attachment_id, mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
-| `view_file(path=None, attachment_id=None)` | Show an image from the workspace or an attachment to the model |
+| `view_file(path)` | Show an image from the workspace to the model |
 | `register_attachment(file_path)` | Turn a local file into a new attachment ID for this conversation |
 
 ```python
@@ -91,7 +91,7 @@ The model and its provider must support that media type and may have stricter li
 `view=True` cannot be combined with `mindroom_output_path`.
 If the model cannot take the media, the agent is told so and can save the file and use other extraction or transcription tools instead.
 
-`view_file` shows one image to the calling model in one call; supply exactly one of `path` or `attachment_id`, and use `read_file` for ordinary text and code.
+`view_file` shows one image to the calling model in one call; to view an attachment, use `get_attachment(attachment_id, view=True)`, and use `read_file` for ordinary text and code.
 Workspace paths resolve inside the agent's worker when it has one, otherwise inside its workspace.
 It accepts PNG, JPEG, GIF, and WebP images up to 20 MiB and 40 million pixels.
 Images larger than 2048 pixels on the longest edge or 5 MiB are scaled down, animated images show only the first frame, and the result metadata reports these changes.
