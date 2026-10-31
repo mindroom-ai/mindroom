@@ -947,16 +947,20 @@ def _read_runs(
 ) -> list[AnyRunRecord]:
     """Decode the runs whose rows meet ``condition``, in ``seq`` order, each in its replay view.
 
-    A paused team run's ``member_responses``, which its resume reads, are the member runs its requirements name, in
-    first-mention order, each decoded apart from the member's own record so the two share nothing.
+    A paused team run's ``member_responses``, whose calls it waits on and its resume continues, are its paused member
+    runs in ``seq`` order, the order their rows were first written, each decoded apart from the member's own record so
+    the two share nothing.
     """
     records = _decoded_runs(connection, names, f"{condition} ORDER BY run.seq", parameters)
     for record in records:
         if isinstance(record, TeamRunRecord) and record.status is RunStatus.paused:
-            named = list(dict.fromkeys(item.member_run_id for item in record.requirements or () if item.member_run_id))
-            members = _decoded_runs(connection, names, "run.parent_run_id = ?", (record.run_id,))
-            by_id = {member.run_id: cast("RunRecord", member) for member in members}
-            record.member_responses = [by_id[member_id] for member_id in named if member_id in by_id]
+            members = _decoded_runs(
+                connection,
+                names,
+                "run.parent_run_id = ? AND run.status = ? ORDER BY run.seq",
+                (record.run_id, RunStatus.paused.value),
+            )
+            record.member_responses = [cast("RunRecord", member) for member in members]
     return records
 
 
@@ -1098,7 +1102,7 @@ def store_fold(
     runs, now, seq = quote_identifier(names.log_runs), int(time()), _next_seq(connection, names)
     move = f"UPDATE {runs} SET seq = ? WHERE session_id = ? AND run_id = ?"  # noqa: S608
     if not connection.execute(move, (seq, session_id, run.run_id)).rowcount:
-        data = {**run.to_dict(), "status": RunStatus.cancelled.value, "tools": None, "requirements": None}
+        data = {**run.to_dict(), "status": RunStatus.cancelled.value, "tools": None}
         created_at, kind = run.created_at or now, run_kind(run)
         upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
     folded = [message.to_dict() for message in messages]

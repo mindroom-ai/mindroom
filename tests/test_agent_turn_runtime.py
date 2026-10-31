@@ -78,6 +78,7 @@ from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
+from tests.agent_tool_helpers import UnansweredCallTools
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import _hook_plugin, make_test_agent_bot, unique_room_send_responses
@@ -162,11 +163,13 @@ class _ProbeToolkit(Toolkit):
         return "remembered"
 
 
-class _ExternalProbeToolkit(_ProbeToolkit):
-    """The probe whose ``touch`` runs outside the loop, as a delegation's ``run_subagent`` does."""
+class _ExternalProbeToolkit(UnansweredCallTools):
+    """The probe whose ``touch`` pauses for an answer from outside the loop, which nothing gives."""
+
+    unanswered = frozenset({"touch"})
 
     def __init__(self) -> None:
-        Toolkit.__init__(self, name="probe", tools=[self.touch], external_execution_required_tools=["touch"])
+        super().__init__(name="probe", tools=[_ProbeToolkit().touch])
 
 
 @pytest.fixture

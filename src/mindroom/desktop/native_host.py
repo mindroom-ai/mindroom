@@ -2,7 +2,7 @@
 
 # Platform and optional runtime imports stay lazy so status works before desktop
 # extras are installed. The action dispatcher mirrors the finite wire action set.
-# ruff: noqa: ANN401, C901, EM101, PLC0415, PLR0911, PLR0912, PLR0915, SIM105, TRY003
+# ruff: noqa: C901, EM101, PLC0415, PLR0911, PLR0912, PLR0915, TRY003
 
 from __future__ import annotations
 
@@ -13,10 +13,11 @@ import stat
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast
+from typing import TYPE_CHECKING, BinaryIO, Protocol, cast
 
 from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
 from mindroom.desktop.local_dashboard import local_dashboard_configuration
+from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.desktop.native_config import (
     NativeConfigError,
     NativeDesktopConfig,
@@ -39,8 +40,12 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.bridge import DesktopBridge
+    from mindroom.desktop.bridge_session import DesktopBridgeSession, DesktopBridgeSessionDeps
+    from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
 
 
+_CAPABILITIES = ("observe", "control", "browser", "files", "shell")
 _MAX_REGULAR_NATIVE_REQUESTS = 4
 _MAX_STOP_NATIVE_REQUESTS = 1
 _IMMEDIATE_NATIVE_ACTIONS = frozenset(
@@ -143,7 +148,7 @@ class NativeDesktopHost:
             "type": "hello",
             "protocol_version": NATIVE_PROTOCOL_VERSION,
             "helper_version": self._helper_version,
-            "capabilities": ["observe", "control", "browser", "files", "shell"],
+            "capabilities": list(_CAPABILITIES),
         }
 
     def status(self) -> dict[str, object]:
@@ -223,7 +228,7 @@ class NativeDesktopHost:
                 {"id": app_id, "name": app_id, "installed": None, "running": None}
                 for app_id in (config.allowed_app_ids if config is not None else ())
             ],
-            "capabilities": ["observe", "control", "browser", "files", "shell"],
+            "capabilities": list(_CAPABILITIES),
         }
 
     async def handle(self, request: NativeRequest) -> dict[str, object]:
@@ -235,7 +240,7 @@ class NativeDesktopHost:
 
     async def _handle_guarded(self, request: NativeRequest) -> dict[str, object]:
         try:
-            return await self._handle_locked(request)
+            return await self._dispatch(request)
         except NativeProtocolError:
             raise
         except NativeConfigError as exc:
@@ -243,21 +248,16 @@ class NativeDesktopHost:
         except ValueError as exc:
             raise NativeProtocolError("invalid_request", str(exc)) from exc
         except Exception as exc:
-            message = str(exc) or "Native desktop operation failed."
-            self._last_error = _error_payload(
+            error = NativeProtocolError(
                 "internal_error",
-                message,
+                str(exc) or "Native desktop operation failed.",
                 recovery="Retry the operation or restart the helper.",
                 retryable=True,
             )
-            raise NativeProtocolError(
-                "internal_error",
-                message,
-                recovery="Retry the operation or restart the helper.",
-                retryable=True,
-            ) from exc
+            self._last_error = error.to_payload()
+            raise error from exc
 
-    async def _handle_locked(self, request: NativeRequest) -> dict[str, object]:
+    async def _dispatch(self, request: NativeRequest) -> dict[str, object]:
         action, parameters = request.action, request.parameters
         self._refresh_config()
         if action == "status":
@@ -452,10 +452,13 @@ class NativeDesktopHost:
                     return {"status": self.status()}
             runtime = self._require_runtime()
             self._helper_state = "stopping"
-            await runtime.stop()
-            if self._runtime is runtime:
-                self._runtime = None
-            self._helper_state = "running"
+            try:
+                await runtime.stop()
+            finally:
+                # A stopped runtime is retired even when a release failed; that failure is this stop's response.
+                if self._runtime is runtime:
+                    self._runtime = None
+                self._helper_state = "running"
             return {"status": self.status()}
         if action == "grant_control":
             _expect_keys(parameters, {"duration_seconds"})
@@ -615,85 +618,59 @@ class NativeDesktopHost:
 
 
 class NativeBridgeRuntime:
-    """Own the existing Python bridge, transport, provider, browser, and session."""
+    """Run one Desktop bridge session for the app, recording a worker failure for its status."""
 
-    def __init__(self, runtime_paths: RuntimePaths, config: NativeDesktopConfig) -> None:
+    def __init__(
+        self,
+        runtime_paths: RuntimePaths,
+        config: NativeDesktopConfig,
+        deps: DesktopBridgeSessionDeps | None = None,
+    ) -> None:
         self._runtime_paths, self._config = runtime_paths, config
-        self._owner: Any = None
-        self._bridge: Any = None
-        self._browser: Any = None
-        self._registration: Any = None
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._deps = deps
+        self._session: DesktopBridgeSession | None = None
         self._supervisor: asyncio.Task[None] | None = None
-        self._stopping = False
         self._fault: str | None = None
-        self._filesystem: Any = None
-        self._shell: Any = None
 
     async def start(self) -> None:
         """Open one observe-only bridge session."""
-        from nio import AuthenticatedToDeviceEvent
-
-        from mindroom.desktop.bridge_components import build_desktop_bridge
-        from mindroom.desktop.cloudflare_access import cloudflare_access_headers
-        from mindroom.desktop.session import (
-            desktop_session_path,
-            load_desktop_http_headers,
-            load_desktop_session,
-            open_desktop_client,
-            prepare_desktop_client,
-        )
-        from mindroom.desktop.transport import DesktopTransport
-        from mindroom.matrix.olm_to_device import resolve_pinned_device
+        from mindroom.desktop.bridge_session import start_desktop_bridge_session
+        from mindroom.desktop.session import desktop_http_headers, desktop_session_path, load_desktop_session
 
         session = load_desktop_session(desktop_session_path(self._runtime_paths))
-        headers_path = _optional_env_path(self._runtime_paths, "MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
-        http_headers = load_desktop_http_headers(headers_path)
-        if session.cloudflare_access:
-            http_headers = cloudflare_access_headers(session.homeserver, http_headers)
-        try:
-            self._owner = await open_desktop_client(
-                session,
-                runtime_paths=self._runtime_paths,
-                http_headers=http_headers,
-            )
-            # The builder closes its own providers if it fails; afterwards this runtime owns them.
-            components = await build_desktop_bridge(
-                self._config,
-                client=self._owner.client,
-                runtime_paths=self._runtime_paths,
-            )
-            self._bridge, self._browser = components.bridge, components.browser
-            self._filesystem, self._shell = components.filesystem, components.shell
-            self._owner.client.add_to_device_callback(self._bridge.on_to_device_event, AuthenticatedToDeviceEvent)
-            self._registration = self._owner.client.to_device_callbacks[-1]
-            await resolve_pinned_device(self._owner.client, self._config.controller)
-            await prepare_desktop_client(self._owner.client)
-            transport = DesktopTransport(self._owner.source, wait_for_capacity=self._bridge.wait_for_capacity)
-            self._tasks = {
-                asyncio.create_task(self._bridge.run(), name="native_desktop_workers"),
-                asyncio.create_task(transport.run(), name="native_desktop_transport"),
-            }
-            self._supervisor = asyncio.create_task(self._supervise(), name="native_desktop_supervisor")
-        except BaseException:
-            await self._cleanup()
-            raise
+        http_headers = desktop_http_headers(
+            session.homeserver,
+            _matrix_http_headers_path(self._runtime_paths),
+            cloudflare_access=session.cloudflare_access,
+        )
+        self._session = await start_desktop_bridge_session(
+            self._config,
+            session,
+            runtime_paths=self._runtime_paths,
+            http_headers=http_headers,
+            deps=self._deps,
+        )
+        self._supervisor = asyncio.create_task(self._supervise(self._session), name="native_desktop_supervisor")
 
     async def stop(self) -> None:
-        """Fence admission, drain the active action, and close resources."""
-        self._stopping = True
-        if self._bridge is not None:
-            await self._bridge.stop()
-        for task in self._tasks:
-            task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        if self._supervisor is not None and self._supervisor is not asyncio.current_task():
+        """Fence admission, drain the active action, and close resources; a requested stop is never a fault."""
+        # Cancelling the supervisor and starting the close both happen before the first yield, so admission is fenced at once.
+        if self._supervisor is not None:
             self._supervisor.cancel()
-            await asyncio.gather(self._supervisor, return_exceptions=True)
-        await self._cleanup()
+        try:
+            if self._session is not None:
+                # The close is shared, so this also waits for a close the cancelled supervisor began.
+                await self._session.close()
+        finally:
+            if self._supervisor is not None:
+                await asyncio.gather(self._supervisor, return_exceptions=True)
 
     def status(self) -> dict[str, object]:
-        """Return current local bridge authority."""
+        """Return current local bridge authority; a fault shows once the failed bridge has drained."""
+        session = self._live_session()
+        if session is not None:
+            browser = session.browser
+            return {**session.bridge.local_status(), "browser_connected": browser is not None and browser.running}
         if self._fault is not None:
             return {
                 "gui_mode": "faulted",
@@ -710,10 +687,7 @@ class NativeBridgeRuntime:
                 ),
                 "browser_connected": False,
             }
-        if self._bridge is None:
-            return {"gui_mode": "stopped", "control_available": False, "browser_connected": False}
-        browser_connected = self._browser is not None and self._browser.running
-        return {**self._bridge.local_status(), "browser_connected": browser_connected}
+        return {"gui_mode": "stopped", "control_available": False, "browser_connected": False}
 
     def grant_control(self, duration_seconds: int) -> dict[str, object]:
         """Grant a bounded local control lease."""
@@ -752,92 +726,44 @@ class NativeBridgeRuntime:
         return self._required_bridge().revoke_local_shell()
 
     def kill_shell_handle(self, handle: str) -> dict[str, object]:
-        """Kill one handle from any caller; its owner's next check reports it killed."""
+        """Kill one handle from any caller; its owner's check reports it killed."""
         return self._required_bridge().kill_local_shell_handle(handle)
 
     async def connect_browser(self) -> None:
         """Connect the configured installed-profile extension."""
-        if self._browser is None:
-            raise ValueError("Browser integration is not configured.")
-        await self._browser.execute("start", {})
+        await self._required_browser().execute("start", {})
 
     async def disconnect_browser(self) -> None:
         """Disconnect the installed-profile extension without stopping Matrix."""
-        if self._browser is None:
-            raise ValueError("Browser integration is not configured.")
-        await self._browser.execute("stop", {})
+        await self._required_browser().execute("stop", {})
 
-    def _required_bridge(self) -> Any:
-        if self._bridge is None:
+    def _live_session(self) -> DesktopBridgeSession | None:
+        return self._session if self._session is not None and self._session.live else None
+
+    def _required_bridge(self) -> DesktopBridge:
+        session = self._live_session()
+        if session is None:
             raise ValueError("The desktop bridge is not running.")
-        return self._bridge
+        return session.bridge
 
-    async def _supervise(self) -> None:
-        assert self._bridge is not None
-        failure = await supervise_native_tasks(self._tasks, self._bridge.stop)
-        if not self._stopping:
-            self._fault = str(failure)
-            await self._cleanup()
+    def _required_browser(self) -> PlaywrightMCPBrowserProvider:
+        session = self._live_session()
+        if session is None or session.browser is None:
+            raise ValueError("Browser integration is not configured.")
+        return session.browser
 
-    async def _cleanup(self) -> None:
-        self._tasks.clear()
-        if self._registration is not None and self._owner is not None:
-            try:
-                self._owner.client.to_device_callbacks.remove(self._registration)
-            except ValueError:
-                pass
-        self._registration = None
-        if self._shell is not None:
-            await self._shell.close()
-        self._shell = None
-        if self._bridge is not None:
-            self._bridge.close()
-        self._bridge = None
-        if self._filesystem is not None:
-            self._filesystem.close()
-        self._filesystem = None
-        if self._browser is not None:
-            await self._browser.close()
-        self._browser = None
-        if self._owner is not None:
-            await self._owner.close()
-        self._owner = None
-        if self._supervisor is asyncio.current_task():
-            self._supervisor = None
+    async def _supervise(self, session: DesktopBridgeSession) -> None:
+        from mindroom.desktop.bridge_session import first_worker_exit
 
-
-async def supervise_native_tasks(
-    tasks: set[asyncio.Task[None]],
-    fence: Callable[[], Awaitable[None]],
-) -> BaseException:
-    """Fence the bridge on first worker exit, then cancel and drain peers."""
-    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    failure: BaseException | None = None
-    for task in done:
-        try:
-            await task
-        except asyncio.CancelledError:
-            raise
-        except BaseException as exc:
-            failure = exc
-            break
-    if failure is None:
-        failure = RuntimeError("A native desktop worker stopped unexpectedly.")
-    await fence()
-    for task in tasks:
-        if task not in done:
-            task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-    return failure
+        self._fault = str(await first_worker_exit(session.workers))
+        await session.close()
 
 
 async def _login(runtime_paths: RuntimePaths, parameters: dict[str, object]) -> dict[str, object]:
-    from mindroom.desktop.cloudflare_access import cloudflare_access_headers
-    from mindroom.desktop.login_method import DesktopLoginMethod
     from mindroom.desktop.session import (
         client_ed25519_fingerprint,
+        desktop_http_headers,
         desktop_session_path,
-        load_desktop_http_headers,
         login_desktop_client,
         resolve_desktop_login_method,
         save_desktop_session,
@@ -876,11 +802,11 @@ async def _login(runtime_paths: RuntimePaths, parameters: dict[str, object]) -> 
                 "The saved Matrix session path is not a regular file.",
                 recovery="Move the directory, link, or special file aside before signing in again.",
             )
-    headers_path = _optional_env_path(runtime_paths, "MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
-    http_headers = load_desktop_http_headers(headers_path)
-    if cloudflare_access:
-        http_headers = cloudflare_access_headers(homeserver, http_headers)
-        await http_headers.prepare()
+    http_headers = desktop_http_headers(
+        homeserver,
+        _matrix_http_headers_path(runtime_paths),
+        cloudflare_access=cloudflare_access,
+    )
     method = await resolve_desktop_login_method(
         requested,
         homeserver=homeserver,
@@ -928,11 +854,10 @@ async def _pair(
     config: NativeDesktopConfig,
     parameters: dict[str, object],
 ) -> dict[str, object]:
-    from mindroom.desktop.cloudflare_access import cloudflare_access_headers
     from mindroom.desktop.pairing_client import send_desktop_pairing_claim
     from mindroom.desktop.session import (
+        desktop_http_headers,
         desktop_session_path,
-        load_desktop_http_headers,
         load_desktop_session,
         open_desktop_client,
         save_desktop_session,
@@ -950,11 +875,11 @@ async def _pair(
             )
     session_path = desktop_session_path(runtime_paths)
     session = load_desktop_session(session_path)
-    headers_path = _optional_env_path(runtime_paths, "MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
-    http_headers = load_desktop_http_headers(headers_path)
-    if cloudflare_access or session.cloudflare_access:
-        http_headers = cloudflare_access_headers(session.homeserver, http_headers)
-        await http_headers.prepare()
+    http_headers = desktop_http_headers(
+        session.homeserver,
+        _matrix_http_headers_path(runtime_paths),
+        cloudflare_access=cloudflare_access or session.cloudflare_access,
+    )
     owner = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
     try:
         if "expected_revision" in parameters:
@@ -1002,7 +927,7 @@ async def serve_native_stream(
             return
         last_status = rendered
         sequence += 1
-        await emit({"v": 1, "type": "status", "sequence": sequence, "status": status})
+        await emit({"v": NATIVE_PROTOCOL_VERSION, "type": "status", "sequence": sequence, "status": status})
 
     async def watch_status() -> None:
         while True:
@@ -1015,42 +940,40 @@ async def serve_native_stream(
     regular_tasks: set[asyncio.Task[None]] = set()
     stop_tasks: set[asyncio.Task[None]] = set()
 
+    async def respond_error(request_id: str | None, error: NativeProtocolError) -> None:
+        await emit(
+            {
+                "v": NATIVE_PROTOCOL_VERSION,
+                "type": "response",
+                "request_id": request_id,
+                "ok": False,
+                "error": error.to_payload(),
+            },
+        )
+
     async def answer(request: NativeRequest) -> None:
         try:
             result = await host.handle(request)
-            await emit({"v": 1, "type": "response", "request_id": request.request_id, "ok": True, "result": result})
+            await emit(
+                {
+                    "v": NATIVE_PROTOCOL_VERSION,
+                    "type": "response",
+                    "request_id": request.request_id,
+                    "ok": True,
+                    "result": result,
+                },
+            )
             if request.action != "status":
                 await emit_status_if_changed()
         except NativeProtocolError as exc:
-            await emit(
-                {
-                    "v": 1,
-                    "type": "response",
-                    "request_id": request.request_id,
-                    "ok": False,
-                    "error": exc.to_payload(),
-                },
-            )
-
-    async def reject_busy(request: NativeRequest) -> None:
-        error = NativeProtocolError(
-            "busy",
-            "The native desktop helper is handling its maximum number of local requests.",
-            recovery="Wait for the current operation to finish, then retry.",
-            retryable=True,
-        )
-        await emit(
-            {"v": 1, "type": "response", "request_id": request.request_id, "ok": False, "error": error.to_payload()},
-        )
+            await respond_error(request.request_id, exc)
 
     try:
         while line := await _read_native_line(input_stream):
             try:
                 request = parse_native_request(line.rstrip(b"\r\n"))
             except NativeProtocolError as exc:
-                await emit(
-                    {"v": 1, "type": "response", "request_id": None, "ok": False, "error": exc.to_payload()},
-                )
+                await respond_error(None, exc)
                 continue
             if request.action in _IMMEDIATE_NATIVE_ACTIONS:
                 await answer(request)
@@ -1061,7 +984,15 @@ async def serve_native_stream(
                 else (regular_tasks, _MAX_REGULAR_NATIVE_REQUESTS)
             )
             if len(tasks) >= limit:
-                await reject_busy(request)
+                await respond_error(
+                    request.request_id,
+                    NativeProtocolError(
+                        "busy",
+                        "The native desktop helper is handling its maximum number of local requests.",
+                        recovery="Wait for the current operation to finish, then retry.",
+                        retryable=True,
+                    ),
+                )
                 continue
             task = asyncio.create_task(answer(request), name=f"native_desktop_request_{request.action}")
             tasks.add(task)
@@ -1217,9 +1148,9 @@ def _error_payload(
     return {"code": code, "message": message, "recovery": recovery, "retryable": retryable}
 
 
-def _optional_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
-    value = runtime_paths.env_value(name)
-    return Path(value).expanduser() if value else None
+def _matrix_http_headers_path(runtime_paths: RuntimePaths) -> Path | None:
+    value = runtime_paths.env_value("MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
+    return Path(value) if value else None
 
 
 __all__ = [
@@ -1228,5 +1159,4 @@ __all__ = [
     "NativeHostDependencies",
     "run_native_stdio",
     "serve_native_stream",
-    "supervise_native_tasks",
 ]

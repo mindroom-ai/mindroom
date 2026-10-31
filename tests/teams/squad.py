@@ -31,6 +31,7 @@ from mindroom.teams.runtime import TeamDecisions, continue_team, run_team
 from mindroom.teams.spec import MemberBuild, TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.tool_function import ToolGate
 from tests.fakes.scripted_model import ScriptedModel
 from tests.run_record_helpers import PROVIDER
 from tests.session_storage.goldens import STORAGE, golden_stores
@@ -85,9 +86,7 @@ def calculator(*, gate_multiply: bool) -> AdaptedToolkit:
     return replace(
         adapted,
         functions=tuple(
-            replace(function, requires_confirmation=True, approval_type="mindroom_policy")
-            if function.name == "multiply"
-            else function
+            replace(function, gate=ToolGate.POLICY) if function.name == "multiply" else function
             for function in adapted.functions
         ),
     )
@@ -273,7 +272,7 @@ def resume_team(
 
     The members whose paused runs the resume continues are built first, as a saved approval's resume builds them.
     """
-    paused_members = {requirement.member_agent_id for requirement in paused.requirements or ()}
+    paused_members = {member.agent_id for member in paused.member_responses}
     for member in team.members:
         if member.id in paused_members and member.built is None:
             member.built = member.build()

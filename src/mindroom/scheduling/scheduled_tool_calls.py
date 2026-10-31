@@ -17,12 +17,12 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.approval import manager as approval_manager
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, resolve_tool_approval_approver
+from mindroom.approval.tool_approval import resolve_tool_approval_approver
 from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.tool_access import validate_tool_arguments
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
 
 if TYPE_CHECKING:
@@ -148,12 +148,11 @@ def _resolve_live_function(
         return f"`{tool_name}` is not one of this agent's tools in this conversation"
     if toolkit_name is not None and function.toolkit != toolkit_name:
         return f"`{tool_name}` now comes from another toolkit than the one the call was stored for"
-    if function.external_execution or function.controls_run:
+    if function.gate is ToolGate.DELEGATION or function.controls_run:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
     return LiveFunction(
         function=function,
-        authored_confirmation=function.requires_confirmation is True
-        and function.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE,
+        authored_confirmation=function.gate is ToolGate.CONFIRM,
     )
 
 

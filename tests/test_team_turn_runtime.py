@@ -79,6 +79,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.agent_tool_helpers import UnansweredCallTools
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
 from tests.approval_continuation_helpers import (
     carries_approval_receipt,
@@ -1061,16 +1062,14 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
     assert team.models["default"].requests[-1].messages[-1].content == "Touched."
 
 
-class _HandOffProbe(ProbeToolkit):
-    """The squad's probe toolkit plus ``hand_off``, a call executed outside the agent loop, which nothing answers."""
+class _HandOffProbe(UnansweredCallTools):
+    """The squad's probe functions plus ``hand_off``, which pauses for an answer from outside the loop that nothing gives."""
+
+    unanswered = frozenset({"hand_off"})
 
     def __init__(self) -> None:
-        Toolkit.__init__(
-            self,
-            name="probe",
-            tools=[self.touch, self.scope, self.dig, self.model, self.hand_off],
-            external_execution_required_tools=["hand_off"],
-        )
+        probe = ProbeToolkit()
+        super().__init__(name="probe", tools=[probe.touch, probe.scope, probe.dig, probe.model, self.hand_off])
 
     async def hand_off(self) -> str:
         """Hand the work to an external executor."""
@@ -2858,11 +2857,13 @@ async def test_a_team_turn_stopped_after_its_run_ended_records_the_finished_docu
     assert team.recorder.assistant_text == "**Checker**: Checker overloaded\n\n\n**Team Consensus**:\n\nDone."
 
 
-class _ExternalProbeToolkit(ProbeToolkit):
-    """The members' probe with ``touch`` executed outside the loop: a run paused on that call has nothing to resume it."""
+class _ExternalProbeToolkit(UnansweredCallTools):
+    """The members' probe with ``touch`` pausing for an answer from outside the loop: nothing resumes a run paused on it."""
+
+    unanswered = frozenset({"touch"})
 
     def __init__(self) -> None:
-        Toolkit.__init__(self, name="probe", tools=[self.touch], external_execution_required_tools=["touch"])
+        super().__init__(name="probe", tools=[ProbeToolkit().touch])
 
 
 @pytest.mark.asyncio

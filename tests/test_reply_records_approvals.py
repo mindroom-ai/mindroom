@@ -13,7 +13,7 @@ import pytest
 
 from mindroom import interactive
 from mindroom import reply_lifecycle as rl
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
+from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.event_journal import (
@@ -43,6 +43,7 @@ from mindroom.response_sources import Unclaimed, UnclaimedReason
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from tests.approval_continuation_helpers import dispatch_approval
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -82,12 +83,14 @@ def _paused(run_id: str = "run-1", text: str = "Reading document") -> PausedAtte
     return PausedAttempt(
         session_id=_target().session_id,
         run_id=run_id,
-        tools=(
-            ToolExecution(
-                tool_call_id=f"call-{run_id}",
-                tool_name="read_document",
-                requires_confirmation=True,
-                approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE,
+        requirements=(
+            RunRequirement(
+                ToolExecution(
+                    tool_call_id=f"call-{run_id}",
+                    tool_name="read_document",
+                    requires_confirmation=True,
+                    approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE,
+                ),
             ),
         ),
         response_text=text,

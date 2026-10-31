@@ -21,7 +21,7 @@ from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TurnCompleted
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, replay_basis
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.run_storage import RunStorage
@@ -114,7 +114,6 @@ def _paused_record(*, saved: dict[str, object] | None, portable: object = None) 
             ),
         ],
         tools=[tool],
-        requirements=[RunRequirement(tool)],
     )
 
 

@@ -9,7 +9,6 @@ import asyncio
 import json
 import os
 import sys
-import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,16 +21,12 @@ from mindroom.desktop.command_journal import DesktopCommandJournalError, check_c
 from mindroom.desktop.login_method import DesktopLoginMethod
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
-
-    import nio
-    from nio.client.base_client import ClientCallback
+    from collections.abc import Callable, Mapping
 
     from mindroom.constants import RuntimePaths
-    from mindroom.desktop.bridge_components import DesktopBridgeComponents
+    from mindroom.desktop.bridge_session import DesktopBridgeSessionDeps
     from mindroom.desktop.native_config import NativeDesktopConfig
-    from mindroom.desktop.session import DesktopMatrixSession, DesktopOwnedSession
-    from mindroom.matrix.device_identity import PinnedMatrixDevice
+    from mindroom.desktop.session import DesktopMatrixSession
 
 _console = Console()
 _error_console = Console(stderr=True)
@@ -240,14 +235,11 @@ def desktop_login(
 ) -> None:
     """Log in once, create an Olm device, and save its access token privately."""
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
-    from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
-        CloudflareAccessError,
-        cloudflare_access_headers,
-    )
+    from mindroom.desktop.cloudflare_access import CloudflareAccessError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
+        desktop_http_headers,
         desktop_session_path,
-        load_desktop_http_headers,
         resolve_desktop_login_method,
     )
     from mindroom.desktop.sso import DesktopSsoError, receive_sso_login_token  # noqa: PLC0415
@@ -259,9 +251,11 @@ def desktop_login(
         raise typer.Exit(1)
     try:
         resolved_homeserver = homeserver or runtime_matrix_homeserver(runtime_paths)
-        http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
-        if cloudflare_access:
-            http_headers = cloudflare_access_headers(resolved_homeserver, http_headers)
+        http_headers = desktop_http_headers(
+            resolved_homeserver,
+            matrix_http_headers_file,
+            cloudflare_access=cloudflare_access,
+        )
         requested_login_method = _login_method_for_sso_idp(login_method, sso_idp=sso_idp)
         resolved_login_method = asyncio.run(
             resolve_desktop_login_method(
@@ -336,8 +330,8 @@ async def _login_and_save(
     password: str | None,
     login_token: str | None,
     session_path: Path,
-    http_headers: Mapping[str, str] | None = None,
-    cloudflare_access: bool = False,
+    http_headers: Mapping[str, str] | None,
+    cloudflare_access: bool,
 ) -> None:
     from mindroom.desktop.session import (  # noqa: PLC0415
         client_ed25519_fingerprint,
@@ -388,24 +382,23 @@ def desktop_pair(
     storage_path: Path | None = _STORAGE_PATH_OPTION,
 ) -> None:
     """Claim one requester-agent pairing through authenticated Matrix E2EE."""
-    from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
-        CloudflareAccessError,
-        cloudflare_access_headers,
-    )
+    from mindroom.desktop.cloudflare_access import CloudflareAccessError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
+        desktop_http_headers,
         desktop_session_path,
-        load_desktop_http_headers,
         load_desktop_session,
     )
     from mindroom.matrix.olm_to_device import OlmToDeviceError  # noqa: PLC0415
 
     runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
     try:
-        http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
         session = load_desktop_session(desktop_session_path(runtime_paths))
-        if cloudflare_access or session.cloudflare_access:
-            http_headers = cloudflare_access_headers(session.homeserver, http_headers)
+        http_headers = desktop_http_headers(
+            session.homeserver,
+            matrix_http_headers_file,
+            cloudflare_access=cloudflare_access or session.cloudflare_access,
+        )
         verification = asyncio.run(
             _pair_desktop(
                 runtime_paths=runtime_paths,
@@ -590,7 +583,7 @@ async def _pair_desktop(
     controller_user_id: str,
     controller_device_id: str,
     controller_ed25519: str,
-    http_headers: Mapping[str, str] | None = None,
+    http_headers: Mapping[str, str] | None,
 ) -> str:
     from mindroom.desktop.pairing_client import send_desktop_pairing_claim  # noqa: PLC0415
     from mindroom.desktop.session import open_desktop_client  # noqa: PLC0415
@@ -831,15 +824,13 @@ def desktop_run(
 
     Flags override the saved setup for this run only.
     """
-    from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
-        CloudflareAccessError,
-        cloudflare_access_headers,
-    )
+    from mindroom.desktop.bridge_session import DesktopWorkerStoppedError  # noqa: PLC0415
+    from mindroom.desktop.cloudflare_access import CloudflareAccessError  # noqa: PLC0415
     from mindroom.desktop.provider import DesktopProviderError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
+        desktop_http_headers,
         desktop_session_path,
-        load_desktop_http_headers,
         load_desktop_session,
     )
     from mindroom.logging_config import setup_logging  # noqa: PLC0415
@@ -867,10 +858,12 @@ def desktop_run(
             executable_path=config.browser.executable_path if config.browser.enabled else browser_executable,
             user_data_dir=config.browser.user_data_dir if config.browser.enabled else browser_user_data_dir,
         )
-        http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
         session = load_desktop_session(desktop_session_path(runtime_paths))
-        if cloudflare_access or session.cloudflare_access:
-            http_headers = cloudflare_access_headers(session.homeserver, http_headers)
+        http_headers = desktop_http_headers(
+            session.homeserver,
+            matrix_http_headers_file,
+            cloudflare_access=cloudflare_access or session.cloudflare_access,
+        )
         # Folder and shell access need no GUI runtime or macOS GUI permissions.
         if config.allowed_app_ids:
             _ensure_desktop_dependencies(runtime_paths)
@@ -891,6 +884,7 @@ def desktop_run(
         CloudflareAccessError,
         DesktopCommandJournalError,
         DesktopProviderError,
+        DesktopWorkerStoppedError,
         ValueError,
         DesktopSessionError,
         OlmToDeviceError,
@@ -1017,36 +1011,12 @@ def _validate_browser_options(
         raise typer.Exit(2)
 
 
-async def _open_bridge_client(
-    session: DesktopMatrixSession,
-    runtime_paths: RuntimePaths,
-    http_headers: Mapping[str, str] | None,
-) -> DesktopOwnedSession:
-    """Adopt the saved device's crypto store and durable source for this run."""
-    from mindroom.desktop.session import open_desktop_client  # noqa: PLC0415
-
-    return await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
-
-
-async def _prepare_bridge_client(client: nio.AsyncClient, controller: PinnedMatrixDevice) -> None:
-    """Check the pinned controller's current identity before publishing this device's encryption keys."""
-    from mindroom.desktop.session import prepare_desktop_client  # noqa: PLC0415
-    from mindroom.matrix.olm_to_device import resolve_pinned_device  # noqa: PLC0415
-
-    await resolve_pinned_device(client, controller)
-    await prepare_desktop_client(client)
-
-
 @dataclass(frozen=True, slots=True)
 class _BridgeRunDeps:
     """macOS and Matrix collaborators of one terminal bridge run; the defaults import their modules on first call."""
 
     request_permissions: Callable[[], None] = _request_required_desktop_permissions
-    open_client: Callable[
-        [DesktopMatrixSession, RuntimePaths, Mapping[str, str] | None],
-        Awaitable[DesktopOwnedSession],
-    ] = _open_bridge_client
-    prepare_client: Callable[[nio.AsyncClient, PinnedMatrixDevice], Awaitable[None]] = _prepare_bridge_client
+    session: DesktopBridgeSessionDeps | None = None
 
 
 _DEFAULT_BRIDGE_RUN_DEPS = _BridgeRunDeps()
@@ -1063,108 +1033,48 @@ async def _run_bridge(
     http_headers: Mapping[str, str] | None = None,
     deps: _BridgeRunDeps = _DEFAULT_BRIDGE_RUN_DEPS,
 ) -> None:
-    """Run one terminal-owned bridge for the resolved configuration; control and auto-approval last this run only."""
-    from nio import AuthenticatedToDeviceEvent  # noqa: PLC0415
-
-    from mindroom.desktop.bridge_components import build_desktop_bridge  # noqa: PLC0415
-    from mindroom.desktop.transport import DesktopTransport  # noqa: PLC0415
+    """Run one terminal-owned bridge until a worker ends; control and auto-approval last this run only."""
+    from mindroom.desktop.bridge_session import first_worker_exit, start_desktop_bridge_session  # noqa: PLC0415
 
     # Folder and shell access need no GUI permissions.
     if config.allowed_app_ids:
         deps.request_permissions()
-    owner = None
-    components: DesktopBridgeComponents | None = None
-    registration = None
+    run = await start_desktop_bridge_session(
+        config,
+        session,
+        runtime_paths=runtime_paths,
+        http_headers=http_headers,
+        control_lease_seconds=lease_minutes * 60 if allow_control else None,
+        shell_auto_approve_seconds=None if shell_auto_approve_minutes is None else shell_auto_approve_minutes * 60,
+        deps=deps.session,
+    )
     approvals: asyncio.Task[None] | None = None
-    tasks: set[asyncio.Task[None]] = set()
     try:
-        owner = await deps.open_client(session, runtime_paths, http_headers)
-        client = owner.client
-        lease_expiry = round((time.time() + lease_minutes * 60) * 1000) if allow_control else None
-        # The builder closes its own providers if it fails; afterwards this function owns them.
-        components = await build_desktop_bridge(
-            config,
-            client=client,
-            runtime_paths=runtime_paths,
-            control_lease_expires_at_ms=lease_expiry,
-        )
-        bridge = components.bridge
-        if shell_auto_approve_minutes is not None:
-            bridge.grant_local_shell(shell_auto_approve_minutes * 60)
-        client.add_to_device_callback(bridge.on_to_device_event, AuthenticatedToDeviceEvent)
-        registration = client.to_device_callbacks[-1]
-        await deps.prepare_client(client, config.controller)
-
         _announce_bridge(
             config,
             allow_control=allow_control,
             lease_minutes=lease_minutes,
             shell_auto_approve_minutes=shell_auto_approve_minutes,
         )
-        transport = DesktopTransport(owner.source, wait_for_capacity=bridge.wait_for_capacity)
-        tasks.update(
-            (
-                asyncio.create_task(bridge.run(), name="desktop_workers"),
-                asyncio.create_task(transport.run(), name="desktop_transport"),
-            ),
-        )
+        workers = run.workers
         if config.shell.enabled:
-            # Terminal approval needs termios; the bridge builder already refused shell access without POSIX.
+            # Terminal approval needs termios; the session already refused shell access without POSIX.
             from mindroom.desktop.shell_prompt import serve_terminal_shell_approvals  # noqa: PLC0415
 
             approvals = asyncio.create_task(
-                serve_terminal_shell_approvals(bridge, input_fd=_terminal_input_fd(), output=sys.stdout),
+                serve_terminal_shell_approvals(run.bridge, input_fd=_terminal_input_fd(), output=sys.stdout),
                 name="desktop_shell_approvals",
             )
-            tasks.add(approvals)
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            await task
+            workers = (*workers, approvals)
+        raise await first_worker_exit(workers)
     finally:
-        await _close_bridge_run(
-            owner=owner,
-            components=components,
-            registration=registration,
-            tasks=tasks,
-            approvals=approvals,
-        )
-
-
-async def _close_bridge_run(
-    *,
-    owner: DesktopOwnedSession | None,
-    components: DesktopBridgeComponents | None,
-    registration: ClientCallback | None,
-    tasks: set[asyncio.Task[None]],
-    approvals: asyncio.Task[None] | None,
-) -> None:
-    """Stop the terminal approver, then drain the bridge before releasing workers, storage, and the session."""
-    # The terminal stops reading before stop settles pending approval.
-    if approvals is not None:
-        approvals.cancel()
-        await asyncio.gather(approvals, return_exceptions=True)
-    # Native input runs in threads; cancelling its worker cannot stop the input.
-    # Keep the journal and device lease until the active action has drained.
-    # Stopping also closes the shell: its grant ends, pending approval is rejected, and handles are killed.
-    if components is not None:
-        await components.bridge.stop()
-        if components.shell is not None:
+        # The terminal stops reading before stopping the bridge settles pending approval.
+        if approvals is not None:
+            approvals.cancel()
+            await asyncio.gather(approvals, return_exceptions=True)
+        await run.close()
+        if approvals is not None:
             _console.print("Shell access revoked; pending and running shell commands were stopped.")
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-    if registration is not None and owner is not None:
-        owner.client.to_device_callbacks.remove(registration)
-    try:
-        if components is not None:
-            components.bridge.close()
-    finally:
-        try:
-            if components is not None and components.browser is not None:
-                await components.browser.close()
-        finally:
-            if owner is not None:
-                await owner.close()
 
 
 def _terminal_input_fd() -> int | None:

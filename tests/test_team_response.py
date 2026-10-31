@@ -39,7 +39,7 @@ from mindroom.llm.media import Image
 from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
-from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.llm.runs import RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_inputs import MediaInputs
 from mindroom.mid_turn import QueuedMessage
@@ -1483,7 +1483,12 @@ async def test_a_resume_whose_history_cannot_be_opened_builds_no_member(
         pytest.raises(RuntimeError, match="scope load failed"),
     ):
         await team.resume(
-            PausedAttempt(session_id=SESSION_ID, run_id="run-1", tools=(), toolkit_owners={}),
+            PausedAttempt(
+                session_id=SESSION_ID,
+                run_id="run-1",
+                requirements=tuple(map(RunRequirement, ())),
+                toolkit_owners={},
+            ),
             approved=True,
             approvals=(_approval("call-touch", "dangerous"),),
         )

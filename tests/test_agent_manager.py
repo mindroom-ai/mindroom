@@ -14,6 +14,7 @@ from mindroom.custom_tools.agent_manager import AgentManagerTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.test_generated_agents import CO_OWNER, OWNER, STRANGER, _config, _created, _load, _register
@@ -78,7 +79,7 @@ def test_functions_follow_the_flags_and_changes_need_confirmation(
     functions = adapt_toolkit(tool).functions
 
     assert {function.name for function in functions} == offered
-    assert {function.name for function in functions if function.requires_confirmation} == offered & _CONFIRMED
+    assert {function.name for function in functions if function.gate is ToolGate.CONFIRM} == offered & _CONFIRMED
 
 
 def test_update_agent_schema_lets_a_model_send_text_and_name_lists() -> None:

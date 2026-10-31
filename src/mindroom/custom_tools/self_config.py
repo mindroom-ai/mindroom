@@ -19,6 +19,7 @@ from mindroom.custom_tools.config_manager import (
 )
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -48,7 +49,7 @@ class SelfConfigTools(Toolkit):
         # A human confirms every write, even under tool_approval.default: auto_approve,
         # because the model issuing the call also reads untrusted content.
         if function.name == "update_own_config":
-            return replace(function, requires_confirmation=True)
+            return replace(function, gate=ToolGate.CONFIRM)
         return function
 
     def get_own_config(self) -> str:

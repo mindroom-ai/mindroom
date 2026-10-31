@@ -1,6 +1,6 @@
 """Expected run records for tests that assert what a run stored, as the typed values the agent loop writes.
 
-A record's message and requirement ids are random, and its timestamps and run timings are clock readings, so a test
+A record's message ids are random, and its timestamps and run timings are clock readings, so a test
 compares the ``settled`` copies of the record it got and the record it expects; every other field compares exactly.
 """
 
@@ -105,15 +105,12 @@ def resumed[RecordT: AnyRunRecord](
     decided: ToolExecution,
     added: Sequence[Message],
     answered: tuple[str, MessageMetrics],
-    **requirement_fields: str | bool,
 ) -> RecordT:
     """Return ``paused`` resumed into a completed run.
 
-    Its one waiting call ends as ``decided``, its requirement records that call and ``requirement_fields``, ``added``
-    follows its messages, and ``answered`` is the final reply's text and usage, from the model that ran it; its content
-    is the paused content and that text, a blank line apart.
+    Its one waiting call ends as ``decided``, ``added`` follows its messages, and ``answered`` is the final reply's
+    text and usage, from the model that ran it; its content is the paused content and that text, a blank line apart.
     """
-    [requirement] = paused.requirements or ()
     text, metrics = answered
     assert paused.model is not None
     return replace(
@@ -122,7 +119,6 @@ def resumed[RecordT: AnyRunRecord](
         content="\n\n".join(part for part in (paused.content, text) if part),
         messages=[*paused.messages, *added, reply(text, model=paused.model, metrics=metrics)],
         tools=[decided],
-        requirements=[replace(requirement, tool_execution=decided, **requirement_fields)],
         metrics=run_metrics((paused.model, metrics), start=paused.metrics),
     )
 
@@ -138,8 +134,6 @@ def settled[RecordT: AnyRunRecord](record: RecordT) -> RecordT:
     copy.created_at = 0
     for message in copy.messages:
         message.id, message.created_at = "", 0
-    for requirement in copy.requirements or ():
-        requirement.id = ""
     if copy.metrics is not None:
         copy.metrics.duration = copy.metrics.time_to_first_token = None
     if isinstance(copy, TeamRunRecord):

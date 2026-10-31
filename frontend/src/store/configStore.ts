@@ -26,17 +26,17 @@ import {
   type ConfigValidationIssue,
 } from "@/lib/configValidation";
 import {
-  cloneToolEntries,
-  getToolOverrides as getToolOverridesFromEntries,
-  normalizeToolEntries,
-  rebuildToolEntries,
+  getToolOverrides,
   setToolOverridesInEntries,
+  toolEntryName,
   type ToolEntry,
   type ToolOverrides,
 } from "@/lib/toolEntry";
 
 const AGENT_POLICIES_ERROR_MESSAGE = "Failed to derive agent policies";
 const CONFIG_VALIDATION_FAILED_MESSAGE = "Configuration validation failed";
+const MISSING_GENERATION_MESSAGE =
+  "Missing committed configuration generation.";
 const CONFIG_CONFLICT_MESSAGE =
   "Configuration changed elsewhere. Your draft has not been saved. Copy any changes you want to keep, then refresh this page and reapply them.";
 
@@ -48,7 +48,8 @@ export type SaveConfigResult =
 type ConfigDiagnosticPath = Array<string | number>;
 
 // The save payload rebuilds these roots from the draft agent and team
-// collections; every other dirty root is copied from the draft config.
+// collections; every other dirty root is copied from the draft config, with
+// room names trimmed.
 const COLLECTION_ROOTS = new Set(["agents", "teams"]);
 
 // Schema-driven editors address roots by name, including roots the typed
@@ -62,11 +63,7 @@ function validationDiagnostics(
   options: { blocking: boolean },
 ): ConfigDiagnostic[] {
   return [
-    {
-      kind: "global",
-      message: CONFIG_VALIDATION_FAILED_MESSAGE,
-      blocking: options.blocking,
-    },
+    ...globalDiagnostics(CONFIG_VALIDATION_FAILED_MESSAGE, options.blocking),
     ...issues.map((issue) => ({
       kind: "validation" as const,
       issue,
@@ -211,7 +208,6 @@ function configWithValue(
     }
     nextConfig = setPathValue(nextConfig, block, undefined);
   }
-  preserveRawToolEntries(state.config as Config, nextConfig);
   return nextConfig;
 }
 
@@ -219,14 +215,14 @@ function nextDraftVersion(draftVersion: number): number {
   return draftVersion + 1;
 }
 
-function markDraftDirty<T extends object>(
+function markDraftDirty(
   state: Pick<ConfigState, "draftVersion" | "diagnostics" | "dirtyRoots">,
-  changes: T,
   touchedPaths: ConfigDiagnosticPath[] = [],
-): T &
-  Pick<ConfigState, "isDirty" | "diagnostics" | "draftVersion" | "dirtyRoots"> {
+): Pick<
+  ConfigState,
+  "isDirty" | "diagnostics" | "draftVersion" | "dirtyRoots"
+> {
   return {
-    ...changes,
     isDirty: true,
     diagnostics: retainedDraftDiagnostics(state.diagnostics, touchedPaths),
     draftVersion: nextDraftVersion(state.draftVersion),
@@ -256,11 +252,13 @@ function deriveRooms(
       .map((a) => a.id);
     const roomConfig = config.rooms?.[roomId];
     const roomModel = config.room_models?.[roomId];
+    // A draft name keeps the whitespace typed into it; saving trims it.
+    const displayName = roomConfig?.display_name;
     return {
       id: roomId,
-      display_name:
-        normalizedRoomDisplayName(roomConfig?.display_name) ??
-        defaultRoomDisplayName(roomId),
+      display_name: displayName?.trim()
+        ? displayName
+        : defaultRoomDisplayName(roomId),
       description: roomConfig?.description ?? "",
       agents: agentsInRoom,
       model: roomModel,
@@ -274,7 +272,7 @@ function deriveRooms(
 // touched, so config.yaml keeps its authored shape.
 function agentFieldDefaults() {
   return {
-    tools: [] as string[],
+    tools: [] as ToolEntry[],
     skills: [] as string[],
     instructions: [] as string[],
     rooms: [] as string[],
@@ -315,11 +313,7 @@ function withEdits<T extends object>(entity: T, edits: Partial<T>): T {
   if (filledFields) {
     untouchedFilledFields.set(
       edited,
-      new Set(
-        [...filledFields].filter(
-          (field) => !Object.prototype.hasOwnProperty.call(edits, field),
-        ),
-      ),
+      new Set([...filledFields].filter((field) => !hasUpdateKey(edits, field))),
     );
   }
   return edited;
@@ -391,7 +385,7 @@ function normalizedRoomConfigs(rooms: Config["rooms"]): Config["rooms"] {
 }
 
 function hasOwnRoomConfig(rooms: Config["rooms"], roomId: string): boolean {
-  return Object.prototype.hasOwnProperty.call(rooms ?? {}, roomId);
+  return hasUpdateKey(rooms ?? {}, roomId);
 }
 
 function roomConfigHasMetadata(roomConfig: RoomConfig): boolean {
@@ -422,7 +416,7 @@ function roomUpdateIsNoop(room: Room, updates: Partial<Room>): boolean {
   });
 }
 
-function hasUpdateKey<T extends object>(updates: T, key: keyof T): boolean {
+function hasUpdateKey(updates: object, key: PropertyKey): boolean {
   return Object.prototype.hasOwnProperty.call(updates, key);
 }
 
@@ -444,9 +438,8 @@ function updateDraftRoomMetadata(
   const hadAuthoredRoom = hasOwnRoomConfig(config.rooms, roomId);
   const nextRoomConfig = { ...(nextRooms[roomId] ?? {}) };
   if (hasUpdateKey(updates, "display_name")) {
-    const displayName = normalizedRoomDisplayName(updates.display_name);
-    if (displayName) {
-      nextRoomConfig.display_name = displayName;
+    if (normalizedRoomDisplayName(updates.display_name)) {
+      nextRoomConfig.display_name = updates.display_name;
     } else {
       delete nextRoomConfig.display_name;
     }
@@ -454,11 +447,10 @@ function updateDraftRoomMetadata(
   if (hasUpdateKey(updates, "description")) {
     nextRoomConfig.description = updates.description ?? "";
   }
-  const normalizedConfig = normalizedRoomConfig(nextRoomConfig);
-  if (!hadAuthoredRoom && !roomConfigHasMetadata(normalizedConfig)) {
+  if (!hadAuthoredRoom && !roomConfigHasMetadata(nextRoomConfig)) {
     return config;
   }
-  nextRooms[roomId] = normalizedConfig;
+  nextRooms[roomId] = nextRoomConfig;
   return {
     ...config,
     rooms: nextRooms,
@@ -470,6 +462,24 @@ function deleteDraftRoomMetadata(config: Config, roomId: string): Config {
   return {
     ...config,
     rooms: nextRooms,
+  };
+}
+
+// Sets or clears one room's model override; the block goes once it is empty.
+function configWithRoomModel(
+  config: Config,
+  roomId: string,
+  model: string | undefined,
+): Config {
+  const roomModels = { ...(config.room_models ?? {}) };
+  if (model) {
+    roomModels[roomId] = model;
+  } else {
+    delete roomModels[roomId];
+  }
+  return {
+    ...config,
+    room_models: Object.keys(roomModels).length > 0 ? roomModels : undefined,
   };
 }
 
@@ -499,153 +509,30 @@ function agentPolicyChanged(
   );
 }
 
-function agentPoliciesDiagnostic(blocking: boolean): ConfigDiagnostic {
+// Applies normalized updates to one draft agent, and reports whether they
+// change what its derived policy depends on.
+function editedAgentDraft(
+  state: ConfigState,
+  currentAgent: Agent,
+  updates: Partial<Agent>,
+) {
+  const agentId = currentAgent.id;
+  const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
+  const touchedPaths = Object.keys(normalizedUpdates).map(
+    (key) => ["agents", agentId, key] as ConfigDiagnosticPath,
+  );
+  const agents = state.agents.map((agent) =>
+    agent.id === agentId ? withEdits(agent, normalizedUpdates) : agent,
+  );
+  const nextAgent =
+    agents.find((agent) => agent.id === agentId) ?? currentAgent;
   return {
-    kind: "global",
-    message: AGENT_POLICIES_ERROR_MESSAGE,
-    blocking,
-  };
-}
-
-const rawToolEntriesByConfig = new WeakMap<Config, Map<string, ToolEntry[]>>();
-const rawDefaultToolEntriesByConfig = new WeakMap<
-  Config,
-  ToolEntry[] | undefined
->();
-
-function cloneRawToolEntriesByAgent(
-  rawEntriesByAgent: Map<string, ToolEntry[]>,
-): Map<string, ToolEntry[]> {
-  return new Map(
-    Array.from(rawEntriesByAgent.entries(), ([agentId, rawEntries]) => [
-      agentId,
-      cloneToolEntries(rawEntries),
-    ]),
-  );
-}
-
-function rememberRawToolEntries(
-  config: Config,
-  rawEntriesByAgent: Map<string, ToolEntry[]>,
-  rawDefaultToolEntries: ToolEntry[] | undefined,
-): void {
-  rawToolEntriesByConfig.set(
-    config,
-    cloneRawToolEntriesByAgent(rawEntriesByAgent),
-  );
-  rawDefaultToolEntriesByConfig.set(
-    config,
-    rawDefaultToolEntries === undefined
-      ? undefined
-      : cloneToolEntries(rawDefaultToolEntries),
-  );
-}
-
-function preserveRawToolEntries(
-  previousConfig: Config | null,
-  nextConfig: Config,
-): void {
-  if (previousConfig == null) {
-    return;
-  }
-  rememberRawToolEntries(
-    nextConfig,
-    rawToolEntriesByConfig.get(previousConfig) ??
-      new Map<string, ToolEntry[]>(),
-    rawDefaultToolEntriesByConfig.get(previousConfig),
-  );
-}
-
-function getRememberedRawToolEntries(
-  config: Config | null,
-  agentId: string,
-): ToolEntry[] {
-  if (config == null) {
-    return [];
-  }
-  return cloneToolEntries(rawToolEntriesByConfig.get(config)?.get(agentId));
-}
-
-function getRememberedRawDefaultToolEntries(
-  config: Config | null,
-): ToolEntry[] | undefined {
-  if (config == null) {
-    return undefined;
-  }
-  const rawDefaultToolEntries = rawDefaultToolEntriesByConfig.get(config);
-  return rawDefaultToolEntries === undefined
-    ? undefined
-    : cloneToolEntries(rawDefaultToolEntries);
-}
-
-function setRememberedRawToolEntries(
-  config: Config,
-  agentId: string,
-  rawEntries: ToolEntry[],
-): void {
-  const rememberedEntries = rawToolEntriesByConfig.get(config);
-  const nextEntriesByAgent =
-    rememberedEntries == null
-      ? new Map<string, ToolEntry[]>()
-      : cloneRawToolEntriesByAgent(rememberedEntries);
-  nextEntriesByAgent.set(agentId, cloneToolEntries(rawEntries));
-  rawToolEntriesByConfig.set(config, nextEntriesByAgent);
-}
-
-// Agents that omit `tools` keep omitting them in the saved config.
-function withRawToolEntries(
-  agentConfig: AgentConfig,
-  rawEntries: ToolEntry[] | undefined,
-): configService.RawAgentConfig {
-  return agentConfig.tools === undefined
-    ? agentConfig
-    : { ...agentConfig, tools: rawEntries ?? agentConfig.tools };
-}
-
-function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
-  normalizedConfig: Config;
-  rawEntriesByAgent: Map<string, ToolEntry[]>;
-  rawDefaultToolEntries: ToolEntry[] | undefined;
-} {
-  const {
-    agents: _rawAgents,
-    defaults: rawDefaults,
-    ...restConfig
-  } = rawConfig;
-  const rawEntriesByAgent = new Map<string, ToolEntry[]>();
-  const rawDefaultToolEntries =
-    rawDefaults?.tools === undefined
-      ? undefined
-      : cloneToolEntries(rawDefaults.tools);
-  const normalizedAgents = Object.fromEntries(
-    Object.entries(rawConfig.agents).map(([agentId, agentConfig]) => {
-      const rawEntries = cloneToolEntries(agentConfig.tools);
-      rawEntriesByAgent.set(agentId, rawEntries);
-      return [
-        agentId,
-        agentConfig.tools === undefined
-          ? agentConfig
-          : { ...agentConfig, tools: normalizeToolEntries(rawEntries) },
-      ];
-    }),
-  );
-  const normalizedDefaults = rawDefaults
-    ? {
-        ...rawDefaults,
-        ...(rawDefaultToolEntries === undefined
-          ? {}
-          : { tools: normalizeToolEntries(rawDefaultToolEntries) }),
-      }
-    : undefined;
-
-  return {
-    normalizedConfig: {
-      ...restConfig,
-      agents: normalizedAgents,
-      ...(normalizedDefaults ? { defaults: normalizedDefaults } : {}),
-    } as Config,
-    rawEntriesByAgent,
-    rawDefaultToolEntries,
+    policyChanged: agentPolicyChanged(currentAgent, nextAgent),
+    patch: {
+      agents,
+      rooms: roomsFromDraft(state.config, state.rooms, agents, state.teams),
+      ...markDraftDirty(state, touchedPaths),
+    },
   };
 }
 
@@ -712,9 +599,6 @@ interface ConfigState {
   updateRoom: (roomId: string, updates: Partial<Room>) => void;
   createRoom: (room: Omit<Room, "id">) => void;
   deleteRoom: (roomId: string) => void;
-  addAgentToRoom: (roomId: string, agentId: string) => void;
-  removeAgentFromRoom: (roomId: string, agentId: string) => void;
-  updateRoomModels: (roomModels: Record<string, string>) => void;
   updateMemoryConfig: (memoryConfig: Config["memory"]) => void;
   updateKnowledgeBase: (
     baseName: string,
@@ -740,17 +624,17 @@ interface ConfigState {
     agentId: string,
     toolName: string,
   ) => ToolOverrides | null;
+  /** Merge a patch into a listed tool's overrides; unlisted tools are left alone. */
   updateAgentToolOverrides: (
     agentId: string,
     toolName: string,
-    overrides: ToolOverrides | null,
+    overrides: ToolOverrides,
   ) => void;
   getDefaultToolOverrides: (toolName: string) => ToolOverrides | null;
   updateDefaultToolOverrides: (
     toolName: string,
-    overrides: ToolOverrides | null,
+    overrides: ToolOverrides,
   ) => void;
-  markDirty: () => void;
 }
 
 function clearedLoadedConfigState(
@@ -759,30 +643,7 @@ function clearedLoadedConfigState(
   draftVersion: number,
   recoveryConfigSource: string | null = null,
   committedGeneration: number | null = null,
-): Pick<
-  ConfigState,
-  | "committedGeneration"
-  | "loadedConfig"
-  | "config"
-  | "recoveryConfigSource"
-  | "recoveryConfigSourceOriginal"
-  | "draftVersion"
-  | "agents"
-  | "teams"
-  | "rooms"
-  | "agentPoliciesByAgent"
-  | "agentPoliciesStale"
-  | "agentPoliciesRequestId"
-  | "selectedAgentId"
-  | "selectedTeamId"
-  | "selectedRoomId"
-  | "isDirty"
-  | "dirtyRoots"
-  | "isLoading"
-  | "diagnostics"
-  | "syncStatus"
-  | "privateWorkerScopeBackups"
-> {
+) {
   return {
     committedGeneration,
     loadedConfig: null,
@@ -805,7 +666,18 @@ function clearedLoadedConfigState(
     diagnostics,
     syncStatus: "error",
     privateWorkerScopeBackups: {},
-  };
+  } satisfies Partial<ConfigState>;
+}
+
+// Records a failed save in the store and reports it to the caller.
+function failSave(
+  set: (partial: Partial<ConfigState>) => void,
+  diagnostics: ConfigDiagnostic[],
+  message: string,
+  extra: Partial<ConfigState> = {},
+): SaveConfigResult {
+  set({ diagnostics, isLoading: false, syncStatus: "error", ...extra });
+  return { status: "error", message, diagnostics };
 }
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
@@ -841,6 +713,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const currentState = get();
     const loadConfigRequestId = currentState.loadConfigRequestId + 1;
     const draftVersionAtStart = currentState.draftVersion;
+    const draftEdited = (state: ConfigState) =>
+      state.isDirty || state.draftVersion != draftVersionAtStart;
     set({
       isLoading: true,
       diagnostics: currentState.isDirty
@@ -850,26 +724,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
     try {
       const {
-        config: rawConfig,
+        config: loadedConfig,
         generation,
         usesIncludes,
         pendingRestart,
       } = await configService.loadConfig();
-      const {
-        normalizedConfig: loadedConfig,
-        rawEntriesByAgent,
-        rawDefaultToolEntries,
-      } = normalizeConfigToolEntries(rawConfig);
       const normalizedConfig: Config = {
         ...loadedConfig,
         rooms: normalizedRoomConfigs(loadedConfig.rooms),
         knowledge_bases: loadedConfig.knowledge_bases || {},
       };
-      rememberRawToolEntries(
-        normalizedConfig,
-        rawEntriesByAgent,
-        rawDefaultToolEntries,
-      );
       const { agents, teams, rooms } =
         deriveConfigCollections(normalizedConfig);
       let agentPoliciesByAgent: AgentPoliciesByAgent = {};
@@ -881,28 +745,23 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           agents,
         );
       } catch {
-        diagnostics = [agentPoliciesDiagnostic(false)];
+        diagnostics = globalDiagnostics(AGENT_POLICIES_ERROR_MESSAGE, false);
         agentPoliciesStale = true;
       }
       const latestState = get();
       if (latestState.loadConfigRequestId != loadConfigRequestId) {
         return;
       }
-      const shouldReplaceDirtyRecoveryDraft =
-        (latestState.config == null ||
-          latestState.recoveryConfigSource != null) &&
-        (latestState.isDirty ||
-          latestState.draftVersion != draftVersionAtStart);
+      // An edited structured draft stays; an edited recovery draft is replaced.
       if (
-        (latestState.isDirty ||
-          latestState.draftVersion != draftVersionAtStart) &&
-        !shouldReplaceDirtyRecoveryDraft
+        draftEdited(latestState) &&
+        latestState.config != null &&
+        latestState.recoveryConfigSource == null
       ) {
         set({
           committedGeneration: generation,
           loadedConfig: normalizedConfig,
           isLoading: false,
-          syncStatus: latestState.syncStatus,
           diagnostics: retainedDraftDiagnostics(latestState.diagnostics),
           configUsesIncludes: usesIncludes,
           configJournalPendingRestart: pendingRestart,
@@ -964,10 +823,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
               true,
             ),
           ];
-          if (
-            latestState.isDirty ||
-            latestState.draftVersion != draftVersionAtStart
-          ) {
+          if (draftEdited(latestState)) {
             set({
               isLoading: false,
               syncStatus: "error",
@@ -985,10 +841,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           );
           return;
         }
-        if (
-          latestState.isDirty ||
-          latestState.draftVersion != draftVersionAtStart
-        ) {
+        if (draftEdited(latestState)) {
           set({
             isLoading: false,
             syncStatus: "error",
@@ -1018,12 +871,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       set({
         diagnostics: [
           ...get().diagnostics.filter(isConfigConflictDiagnostic),
-          {
-            kind: "global",
-            message:
-              error instanceof Error ? error.message : "Failed to load config",
-            blocking: true,
-          },
+          ...globalDiagnostics(
+            error instanceof Error ? error.message : "Failed to load config",
+            true,
+          ),
         ],
         isLoading: false,
         syncStatus: "error",
@@ -1065,7 +916,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         agentPoliciesStale: true,
         diagnostics: [
           ...retainedDraftDiagnostics(get().diagnostics),
-          agentPoliciesDiagnostic(false),
+          ...globalDiagnostics(AGENT_POLICIES_ERROR_MESSAGE, false),
         ],
       });
     }
@@ -1096,23 +947,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       };
     }
     if (committedGeneration == null) {
-      const generationDiagnostics = globalDiagnostics(
-        "Missing committed configuration generation.",
-        false,
+      return failSave(
+        set,
+        globalDiagnostics(MISSING_GENERATION_MESSAGE, false),
+        MISSING_GENERATION_MESSAGE,
       );
-      set({
-        diagnostics: generationDiagnostics,
-        isLoading: false,
-        syncStatus: "error",
-      });
-      return {
-        status: "error",
-        message: "Missing committed configuration generation.",
-        diagnostics: generationDiagnostics,
-      };
     }
     const saveConfigRequestId = get().saveConfigRequestId + 1;
-    const savedDraftVersion = draftVersion;
 
     set({
       isLoading: true,
@@ -1121,44 +962,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       saveConfigRequestId,
     });
     try {
-      const currentRawEntriesByAgent = new Map(
-        agents.map((agent) => [
-          agent.id,
-          rebuildToolEntries(
-            agent.tools,
-            getRememberedRawToolEntries(config, agent.id),
-          ),
-        ]),
-      );
-      const currentRawDefaultToolEntries =
-        getRememberedRawDefaultToolEntries(config);
       const dirtyRootSet = new Set(dirtyRoots);
       const baseConfig = loadedConfig ?? config;
-      const baseCollections = deriveConfigCollections(baseConfig);
-      const baseRawDefaultToolEntries =
-        getRememberedRawDefaultToolEntries(baseConfig);
-
-      const currentAgentsObject = agents.reduce(
-        (acc, agent) => {
-          acc[agent.id] = authoredFields<AgentConfig>(agent);
-          return acc;
-        },
-        {} as Config["agents"],
-      );
-      const payloadAgentsObjectFromAgents = Object.fromEntries(
-        Object.entries(currentAgentsObject).map(([id, agentConfig]) => [
-          id,
-          withRawToolEntries(agentConfig, currentRawEntriesByAgent.get(id)),
-        ]),
-      );
-
-      const currentTeamsObject = teams.reduce(
-        (acc, team) => {
-          acc[team.id] = authoredFields<TeamConfig>(team);
-          return acc;
-        },
-        {} as NonNullable<Config["teams"]>,
-      );
 
       const updatedConfig: Config = {
         ...baseConfig,
@@ -1167,46 +972,34 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             .filter((root) => !COLLECTION_ROOTS.has(root))
             .map((root) => [root, readConfigRoot(config, root)]),
         ),
-        ...(dirtyRootSet.has("agents") ? { agents: currentAgentsObject } : {}),
-        ...(dirtyRootSet.has("teams") ? { teams: currentTeamsObject } : {}),
-        // Room model overrides disappear from config.yaml once the last one is removed.
-        ...(dirtyRootSet.has("room_models") &&
-        Object.keys(config.room_models ?? {}).length === 0
-          ? { room_models: undefined }
-          : {}),
-      };
-      const payloadAgentsObject = dirtyRootSet.has("agents")
-        ? payloadAgentsObjectFromAgents
-        : Object.fromEntries(
-            Object.entries(baseConfig.agents).map(([agentId, agentConfig]) => [
-              agentId,
-              withRawToolEntries(
-                agentConfig,
-                getRememberedRawToolEntries(baseConfig, agentId),
+        ...(dirtyRootSet.has("agents")
+          ? {
+              agents: Object.fromEntries(
+                agents.map((agent) => [
+                  agent.id,
+                  authoredFields<AgentConfig>(agent),
+                ]),
               ),
-            ]),
-          );
-      const defaultTools = updatedConfig.defaults?.tools;
-      const payloadDefaultTools = dirtyRootSet.has("defaults")
-        ? defaultTools &&
-          rebuildToolEntries(defaultTools, currentRawDefaultToolEntries)
-        : (baseRawDefaultToolEntries ?? defaultTools);
-      // Authored configs may omit defaults entirely.
-      const payload: configService.ConfigSavePayload = {
-        ...updatedConfig,
-        agents: payloadAgentsObject,
-        ...(updatedConfig.defaults == null
-          ? {}
-          : {
-              defaults: {
-                ...updatedConfig.defaults,
-                tools: payloadDefaultTools,
-              },
-            }),
+            }
+          : {}),
+        ...(dirtyRootSet.has("teams")
+          ? {
+              teams: Object.fromEntries(
+                teams.map((team) => [
+                  team.id,
+                  authoredFields<TeamConfig>(team),
+                ]),
+              ),
+            }
+          : {}),
+        // Draft room names keep the whitespace typed into them.
+        ...(dirtyRootSet.has("rooms")
+          ? { rooms: normalizedRoomConfigs(config.rooms) }
+          : {}),
       };
 
       const { generation } = await configService.saveConfig(
-        payload,
+        updatedConfig,
         committedGeneration,
       );
       if (get().saveConfigRequestId != saveConfigRequestId) {
@@ -1214,29 +1007,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
       const currentState = get();
       const draftChangedSinceSaveStarted =
-        currentState.draftVersion !== savedDraftVersion;
-      const updatedRawEntriesByAgent = dirtyRootSet.has("agents")
-        ? currentRawEntriesByAgent
-        : new Map(
-            Object.keys(baseConfig.agents).map((agentId) => [
-              agentId,
-              rebuildToolEntries(
-                baseCollections.agents.find((agent) => agent.id === agentId)
-                  ?.tools ??
-                  updatedConfig.agents[agentId]?.tools ??
-                  [],
-                getRememberedRawToolEntries(baseConfig, agentId),
-              ),
-            ]),
-          );
-      const updatedRawDefaultToolEntries = dirtyRootSet.has("defaults")
-        ? payloadDefaultTools
-        : baseRawDefaultToolEntries;
-      rememberRawToolEntries(
-        updatedConfig,
-        updatedRawEntriesByAgent,
-        updatedRawDefaultToolEntries,
-      );
+        currentState.draftVersion !== draftVersion;
       if (draftChangedSinceSaveStarted) {
         set({
           committedGeneration: generation,
@@ -1274,23 +1045,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
       const currentState = get();
       if (error instanceof configService.ConfigStaleError) {
-        const errorDiagnostics = configConflictDiagnostics(
-          currentState.diagnostics,
-          false,
+        return failSave(
+          set,
+          configConflictDiagnostics(currentState.diagnostics, false),
+          CONFIG_CONFLICT_MESSAGE,
         );
-        set({
-          diagnostics: errorDiagnostics,
-          isLoading: false,
-          syncStatus: "error",
-        });
-        return {
-          status: "error",
-          message: CONFIG_CONFLICT_MESSAGE,
-          diagnostics: errorDiagnostics,
-        };
       }
       const draftChangedSinceSaveStarted =
-        currentState.draftVersion !== savedDraftVersion;
+        currentState.draftVersion !== draftVersion;
       if (draftChangedSinceSaveStarted) {
         set({
           isLoading: false,
@@ -1299,59 +1061,27 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         return { status: "stale" };
       }
       if (error instanceof configService.ConfigComposedFromIncludesError) {
-        const errorDiagnostics = [
-          {
-            kind: "global" as const,
-            message: error.message,
-            blocking: false,
-          },
-        ];
-        set({
-          diagnostics: errorDiagnostics,
-          isLoading: false,
-          syncStatus: "error",
-          configUsesIncludes: true,
-        });
-        return {
-          status: "error",
-          message: error.message,
-          diagnostics: errorDiagnostics,
-        };
+        return failSave(
+          set,
+          globalDiagnostics(error.message, false),
+          error.message,
+          { configUsesIncludes: true },
+        );
       }
       if (error instanceof configService.ConfigValidationError) {
-        const errorDiagnostics = validationDiagnostics(error.issues, {
-          blocking: false,
-        });
-        set({
-          diagnostics: errorDiagnostics,
-          isLoading: false,
-          syncStatus: "error",
-        });
-        return {
-          status: "error",
-          message: "Configuration validation failed",
-          diagnostics: errorDiagnostics,
-        };
+        return failSave(
+          set,
+          validationDiagnostics(error.issues, { blocking: false }),
+          CONFIG_VALIDATION_FAILED_MESSAGE,
+        );
       }
       const errorMessage =
         error instanceof Error ? error.message : "Failed to save config";
-      const errorDiagnostics = [
-        {
-          kind: "global" as const,
-          message: errorMessage,
-          blocking: false,
-        },
-      ];
-      set({
-        diagnostics: errorDiagnostics,
-        isLoading: false,
-        syncStatus: "error",
-      });
-      return {
-        status: "error",
-        message: errorMessage,
-        diagnostics: errorDiagnostics,
-      };
+      return failSave(
+        set,
+        globalDiagnostics(errorMessage, false),
+        errorMessage,
+      );
     }
   },
 
@@ -1388,24 +1118,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       };
     }
     if (committedGeneration == null) {
-      const generationDiagnostics = globalDiagnostics(
-        "Missing committed configuration generation.",
-        true,
+      return failSave(
+        set,
+        globalDiagnostics(MISSING_GENERATION_MESSAGE, true),
+        MISSING_GENERATION_MESSAGE,
       );
-      set({
-        diagnostics: generationDiagnostics,
-        isLoading: false,
-        syncStatus: "error",
-      });
-      return {
-        status: "error",
-        message: "Missing committed configuration generation.",
-        diagnostics: generationDiagnostics,
-      };
     }
 
     const saveConfigRequestId = get().saveConfigRequestId + 1;
-    const savedDraftVersion = draftVersion;
     set({
       isLoading: true,
       diagnostics: retainedDraftDiagnostics(diagnostics),
@@ -1429,7 +1149,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
       const currentState = get();
       const draftChangedSinceSaveStarted =
-        currentState.draftVersion !== savedDraftVersion;
+        currentState.draftVersion !== draftVersion;
       if (draftChangedSinceSaveStarted) {
         set({
           isLoading: false,
@@ -1460,23 +1180,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
       const currentState = get();
       if (error instanceof configService.ConfigStaleError) {
-        const errorDiagnostics = configConflictDiagnostics(
-          currentState.diagnostics,
-          true,
+        return failSave(
+          set,
+          configConflictDiagnostics(currentState.diagnostics, true),
+          CONFIG_CONFLICT_MESSAGE,
         );
-        set({
-          diagnostics: errorDiagnostics,
-          isLoading: false,
-          syncStatus: "error",
-        });
-        return {
-          status: "error",
-          message: CONFIG_CONFLICT_MESSAGE,
-          diagnostics: errorDiagnostics,
-        };
       }
       const draftChangedSinceSaveStarted =
-        currentState.draftVersion !== savedDraftVersion;
+        currentState.draftVersion !== draftVersion;
       if (draftChangedSinceSaveStarted) {
         set({
           isLoading: false,
@@ -1485,41 +1196,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         return { status: "stale" };
       }
       if (error instanceof configService.ConfigValidationError) {
-        const errorDiagnostics = validationDiagnostics(error.issues, {
-          blocking: true,
-        });
-        set({
-          diagnostics: errorDiagnostics,
-          isLoading: false,
-          syncStatus: "error",
-        });
-        return {
-          status: "error",
-          message: CONFIG_VALIDATION_FAILED_MESSAGE,
-          diagnostics: errorDiagnostics,
-        };
+        return failSave(
+          set,
+          validationDiagnostics(error.issues, { blocking: true }),
+          CONFIG_VALIDATION_FAILED_MESSAGE,
+        );
       }
       const errorMessage =
         error instanceof Error
           ? error.message
           : "Failed to save raw configuration";
-      const errorDiagnostics = [
-        {
-          kind: "global" as const,
-          message: errorMessage,
-          blocking: true,
-        },
-      ];
-      set({
-        diagnostics: errorDiagnostics,
-        isLoading: false,
-        syncStatus: "error",
-      });
-      return {
-        status: "error",
-        message: errorMessage,
-        diagnostics: errorDiagnostics,
-      };
+      return failSave(set, globalDiagnostics(errorMessage, true), errorMessage);
     }
   },
 
@@ -1538,27 +1225,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         return state;
       }
 
-      const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
-      const touchedPaths = Object.keys(normalizedUpdates).map(
-        (key) => ["agents", agentId, key] as ConfigDiagnosticPath,
-      );
-      nextAgents = state.agents.map((agent) =>
-        agent.id === agentId ? withEdits(agent, normalizedUpdates) : agent,
-      );
-      const nextAgent =
-        nextAgents.find((agent) => agent.id === agentId) ?? currentAgent;
-      shouldRefreshAgentPolicies = agentPolicyChanged(currentAgent, nextAgent);
-
-      return {
-        agents: nextAgents,
-        rooms: roomsFromDraft(
-          state.config,
-          state.rooms,
-          nextAgents,
-          state.teams,
-        ),
-        ...markDraftDirty(state, {}, touchedPaths),
-      };
+      const edit = editedAgentDraft(state, currentAgent, updates);
+      nextAgents = edit.patch.agents;
+      shouldRefreshAgentPolicies = edit.policyChanged;
+      return edit.patch;
     });
     if (shouldRefreshAgentPolicies && get().config != null) {
       void get().refreshAgentPolicies(nextAgents);
@@ -1575,46 +1245,25 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
 
       const nextBackups = { ...state.privateWorkerScopeBackups };
-      const privateUpdates = enabled
-        ? (() => {
-            if (!(agentId in nextBackups)) {
-              nextBackups[agentId] = currentAgent.worker_scope ?? null;
-            }
-            return { private: getDefaultPrivateConfig(currentAgent) };
-          })()
-        : (() => {
-            const restoredWorkerScope = nextBackups[agentId];
-            delete nextBackups[agentId];
-            return restoredWorkerScope != null
-              ? { private: undefined, worker_scope: restoredWorkerScope }
-              : { private: undefined };
-          })();
+      let privateUpdates: Partial<Agent>;
+      if (enabled) {
+        if (!(agentId in nextBackups)) {
+          nextBackups[agentId] = currentAgent.worker_scope ?? null;
+        }
+        privateUpdates = { private: getDefaultPrivateConfig(currentAgent) };
+      } else {
+        const restoredWorkerScope = nextBackups[agentId];
+        delete nextBackups[agentId];
+        privateUpdates =
+          restoredWorkerScope != null
+            ? { private: undefined, worker_scope: restoredWorkerScope }
+            : { private: undefined };
+      }
 
-      const normalizedUpdates = normalizeAgentUpdates(
-        currentAgent,
-        privateUpdates,
-      );
-      const touchedPaths = Object.keys(normalizedUpdates).map(
-        (key) => ["agents", agentId, key] as ConfigDiagnosticPath,
-      );
-      nextAgents = state.agents.map((agent) =>
-        agent.id === agentId ? withEdits(agent, normalizedUpdates) : agent,
-      );
-      const nextAgent =
-        nextAgents.find((agent) => agent.id === agentId) ?? currentAgent;
-      shouldRefreshAgentPolicies = agentPolicyChanged(currentAgent, nextAgent);
-
-      return {
-        agents: nextAgents,
-        rooms: roomsFromDraft(
-          state.config,
-          state.rooms,
-          nextAgents,
-          state.teams,
-        ),
-        ...markDraftDirty(state, {}, touchedPaths),
-        privateWorkerScopeBackups: nextBackups,
-      };
+      const edit = editedAgentDraft(state, currentAgent, privateUpdates);
+      nextAgents = edit.patch.agents;
+      shouldRefreshAgentPolicies = edit.policyChanged;
+      return { ...edit.patch, privateWorkerScopeBackups: nextBackups };
     });
     if (shouldRefreshAgentPolicies && get().config != null) {
       void get().refreshAgentPolicies(nextAgents);
@@ -1637,10 +1286,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         state.teams,
       ),
       selectedAgentId: id,
-      ...markDraftDirty(state, {}, [["agents"]]),
+      ...markDraftDirty(state, [["agents"]]),
     }));
     if (get().config != null) {
-      void get().refreshAgentPolicies([...get().agents]);
+      void get().refreshAgentPolicies(get().agents);
     }
   },
 
@@ -1674,7 +1323,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       privateWorkerScopeBackups: remainingBackups,
       selectedAgentId:
         state.selectedAgentId === agentId ? null : state.selectedAgentId,
-      ...markDraftDirty(state, {}, [["agents"], ["teams"]]),
+      ...markDraftDirty(state, [["agents"], ["teams"]]),
     });
     if (get().config != null && deletedAgent != null) {
       void get().refreshAgentPolicies(nextAgents);
@@ -1709,7 +1358,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           state.agents,
           nextTeams,
         ),
-        ...markDraftDirty(state, {}, touchedPaths),
+        ...markDraftDirty(state, touchedPaths),
       };
     });
   },
@@ -1728,7 +1377,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         newTeam,
       ]),
       selectedTeamId: id,
-      ...markDraftDirty(state, {}, [["teams"]]),
+      ...markDraftDirty(state, [["teams"]]),
     }));
   },
 
@@ -1746,7 +1395,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ),
         selectedTeamId:
           state.selectedTeamId === teamId ? null : state.selectedTeamId,
-        ...markDraftDirty(state, {}, [["teams"]]),
+        ...markDraftDirty(state, [["teams"]]),
       };
     });
   },
@@ -1770,48 +1419,27 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       let updatedConfig = state.config;
       const modelUpdateProvided = hasUpdateKey(updates, "model");
-      const metadataUpdateProvided =
-        hasUpdateKey(updates, "display_name") ||
-        hasUpdateKey(updates, "description");
-      let roomMetadataTouchedPaths: ConfigDiagnosticPath[] = [];
-
-      // If model changed, update room_models in config
-      if (modelUpdateProvided && state.config) {
-        const currentRoomModels = state.config.room_models || {};
-        const newRoomModels = { ...currentRoomModels };
-
-        if (updates.model) {
-          // Set the room model
-          newRoomModels[roomId] = updates.model;
-        } else {
-          // Remove the room model if it's being unset
-          delete newRoomModels[roomId];
-        }
-
-        updatedConfig = {
-          ...state.config,
-          room_models:
-            Object.keys(newRoomModels).length > 0 ? newRoomModels : undefined,
-        };
+      if (modelUpdateProvided && updatedConfig) {
+        updatedConfig = configWithRoomModel(
+          updatedConfig,
+          roomId,
+          updates.model,
+        );
       }
 
-      if (metadataUpdateProvided && updatedConfig) {
-        const configBeforeMetadataUpdate = updatedConfig;
-        updatedConfig = updateDraftRoomMetadata(updatedConfig, roomId, updates);
-        if (updatedConfig !== configBeforeMetadataUpdate) {
-          roomMetadataTouchedPaths = (["display_name", "description"] as const)
-            .filter((key) => hasUpdateKey(updates, key))
-            .map((key) => ["rooms", roomId, key] as ConfigDiagnosticPath);
+      let roomMetadataTouchedPaths = (["display_name", "description"] as const)
+        .filter((key) => hasUpdateKey(updates, key))
+        .map((key) => ["rooms", roomId, key] as ConfigDiagnosticPath);
+      if (roomMetadataTouchedPaths.length > 0 && updatedConfig) {
+        const configWithMetadata = updateDraftRoomMetadata(
+          updatedConfig,
+          roomId,
+          updates,
+        );
+        if (configWithMetadata === updatedConfig) {
+          roomMetadataTouchedPaths = [];
         }
-      } else if (metadataUpdateProvided) {
-        roomMetadataTouchedPaths = (["display_name", "description"] as const)
-          .filter((key) => hasUpdateKey(updates, key))
-          .map((key) => ["rooms", roomId, key] as ConfigDiagnosticPath);
-      }
-
-      const previousConfig = state.config;
-      if (previousConfig && updatedConfig && updatedConfig !== previousConfig) {
-        preserveRawToolEntries(previousConfig, updatedConfig);
+        updatedConfig = configWithMetadata;
       }
 
       const roomModelTouchedPaths = modelUpdateProvided
@@ -1819,6 +1447,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         : [];
 
       // If agents changed, update the agents' rooms arrays
+      let updatedAgents = state.agents;
       if (updates.agents) {
         const oldAgents = existingRoom.agents;
         const newAgents = updates.agents;
@@ -1828,7 +1457,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         // Add room to new agents
         const addedAgents = newAgents.filter((id) => !oldAgents.includes(id));
 
-        const updatedAgents = state.agents.map((agent) => {
+        updatedAgents = state.agents.map((agent) => {
           if (removedAgents.includes(agent.id)) {
             return withEdits(agent, {
               rooms: agent.rooms.filter((r) => r !== roomId),
@@ -1839,49 +1468,23 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           }
           return agent;
         });
-
-        return {
-          config: updatedConfig,
-          agents: updatedAgents,
-          rooms: roomsFromDraft(
-            updatedConfig,
-            updatedRooms,
-            updatedAgents,
-            state.teams,
-          ),
-          ...markDraftDirty(state, {}, [
-            ["agents"],
-            ...roomMetadataTouchedPaths,
-            ...roomModelTouchedPaths,
-          ]),
-        };
       }
 
-      const touchedPaths = [
+      const touchedPaths: ConfigDiagnosticPath[] = [
+        ...(updates.agents ? [["agents"]] : []),
         ...roomMetadataTouchedPaths,
         ...roomModelTouchedPaths,
       ];
-      if (touchedPaths.length === 0) {
-        return {
-          config: updatedConfig,
-          rooms: roomsFromDraft(
-            updatedConfig,
-            updatedRooms,
-            state.agents,
-            state.teams,
-          ),
-        };
-      }
-
       return {
         config: updatedConfig,
+        agents: updatedAgents,
         rooms: roomsFromDraft(
           updatedConfig,
           updatedRooms,
-          state.agents,
+          updatedAgents,
           state.teams,
         ),
-        ...markDraftDirty(state, {}, touchedPaths),
+        ...(touchedPaths.length > 0 ? markDraftDirty(state, touchedPaths) : {}),
       };
     });
   },
@@ -1909,23 +1512,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ? updateDraftRoomMetadata(state.config, id, newRoom)
         : state.config;
       const touchedPaths: ConfigDiagnosticPath[] = [["rooms"]];
-      if (state.config && updatedConfig && updatedConfig !== state.config) {
-        preserveRawToolEntries(state.config, updatedConfig);
-      }
       if (roomData.model !== undefined && updatedConfig) {
-        const previousConfig = updatedConfig;
-        const nextRoomModels = { ...(updatedConfig.room_models ?? {}) };
-        if (roomData.model) {
-          nextRoomModels[id] = roomData.model;
-        } else {
-          delete nextRoomModels[id];
-        }
-        updatedConfig = {
-          ...updatedConfig,
-          room_models:
-            Object.keys(nextRoomModels).length > 0 ? nextRoomModels : undefined,
-        };
-        preserveRawToolEntries(previousConfig, updatedConfig);
+        updatedConfig = configWithRoomModel(updatedConfig, id, roomData.model);
         touchedPaths.push(["room_models", id]);
       }
       if (roomData.agents.length > 0) {
@@ -1942,7 +1530,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ),
         agents: updatedAgents,
         selectedRoomId: id,
-        ...markDraftDirty(state, {}, touchedPaths),
+        ...markDraftDirty(state, touchedPaths),
       };
     });
   },
@@ -1991,15 +1579,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         touchedPaths.push(["rooms"]);
       }
       if (updatedConfig?.room_models?.[roomId]) {
-        const { [roomId]: _, ...remainingModels } = updatedConfig.room_models;
-        updatedConfig = {
-          ...updatedConfig,
-          room_models: remainingModels,
-        };
+        updatedConfig = configWithRoomModel(updatedConfig, roomId, undefined);
         touchedPaths.push(["room_models", roomId]);
-      }
-      if (state.config && updatedConfig && updatedConfig !== state.config) {
-        preserveRawToolEntries(state.config, updatedConfig);
       }
 
       return {
@@ -2014,89 +1595,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ),
         selectedRoomId:
           state.selectedRoomId === roomId ? null : state.selectedRoomId,
-        ...markDraftDirty(state, {}, touchedPaths),
-      };
-    });
-  },
-
-  // Add agent to room
-  addAgentToRoom: (roomId, agentId) => {
-    set((state) => {
-      const updatedRooms = state.rooms.map((room) => {
-        if (room.id === roomId && !room.agents.includes(agentId)) {
-          return { ...room, agents: [...room.agents, agentId] };
-        }
-        return room;
-      });
-
-      const updatedAgents = state.agents.map((agent) => {
-        if (agent.id === agentId && !agent.rooms.includes(roomId)) {
-          return withEdits(agent, { rooms: [...agent.rooms, roomId] });
-        }
-        return agent;
-      });
-
-      return {
-        agents: updatedAgents,
-        rooms: roomsFromDraft(
-          state.config,
-          updatedRooms,
-          updatedAgents,
-          state.teams,
-        ),
-        ...markDraftDirty(state, {}, [["agents"]]),
-      };
-    });
-  },
-
-  // Remove agent from room
-  removeAgentFromRoom: (roomId, agentId) => {
-    set((state) => {
-      const updatedRooms = state.rooms.map((room) => {
-        if (room.id === roomId) {
-          return {
-            ...room,
-            agents: room.agents.filter((id) => id !== agentId),
-          };
-        }
-        return room;
-      });
-
-      const updatedAgents = state.agents.map((agent) => {
-        if (agent.id === agentId) {
-          return withEdits(agent, {
-            rooms: agent.rooms.filter((r) => r !== roomId),
-          });
-        }
-        return agent;
-      });
-
-      return {
-        agents: updatedAgents,
-        rooms: roomsFromDraft(
-          state.config,
-          updatedRooms,
-          updatedAgents,
-          state.teams,
-        ),
-        ...markDraftDirty(state, {}, [["agents"]]),
-      };
-    });
-  },
-
-  // Update room models
-  updateRoomModels: (roomModels) => {
-    set((state) => {
-      if (!state.config) return state;
-      const nextConfig = {
-        ...state.config,
-        room_models: roomModels,
-      };
-      preserveRawToolEntries(state.config, nextConfig);
-      return {
-        config: nextConfig,
-        rooms: deriveRooms(nextConfig, state.agents, state.teams),
-        ...markDraftDirty(state, {}, [["room_models"]]),
+        ...markDraftDirty(state, touchedPaths),
       };
     });
   },
@@ -2106,10 +1605,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set((state) => {
       if (!state.config) return state;
       const nextConfig = { ...state.config, memory: memoryConfig };
-      preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["memory"]]),
+        ...markDraftDirty(state, [["memory"]]),
       };
     });
   },
@@ -2129,10 +1627,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
       };
-      preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["knowledge_bases", baseName]]),
+        ...markDraftDirty(state, [["knowledge_bases", baseName]]),
       };
     });
   },
@@ -2154,31 +1651,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             })
           : agent,
       );
-      const configAgents = Object.fromEntries(
-        Object.entries(state.config.agents).map(([agentId, agentConfig]) => [
-          agentId,
-          {
-            ...agentConfig,
-            knowledge_bases: (agentConfig.knowledge_bases || []).filter(
-              (base) => base !== baseName,
-            ),
-          },
-        ]),
-      );
       const nextConfig = {
         ...state.config,
         knowledge_bases: knowledgeBases,
-        agents: configAgents,
       };
-      preserveRawToolEntries(state.config, nextConfig);
 
       return {
         config: nextConfig,
         agents,
-        ...markDraftDirty(state, {}, [
-          ["knowledge_bases", baseName],
-          ["agents"],
-        ]),
+        ...markDraftDirty(state, [["knowledge_bases", baseName], ["agents"]]),
       };
     });
   },
@@ -2192,10 +1673,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...state.config,
         models: remainingModels,
       };
-      preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["models"]]),
+        ...markDraftDirty(state, [["models"]]),
       };
     });
   },
@@ -2207,7 +1687,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         config: nextConfig,
         rooms: deriveRooms(nextConfig, state.agents, state.teams),
-        ...markDraftDirty(state, {}, [[...path]]),
+        ...markDraftDirty(state, [[...path]]),
       };
     });
   },
@@ -2242,58 +1722,31 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
   },
 
-  getAgentToolOverrides: (agentId, toolName) => {
-    const config = get().config;
-    return getToolOverridesFromEntries(
+  getAgentToolOverrides: (agentId, toolName) =>
+    getToolOverrides(
       toolName,
-      getRememberedRawToolEntries(config, agentId),
-    );
-  },
+      get().agents.find((agent) => agent.id === agentId)?.tools,
+    ),
 
   updateAgentToolOverrides: (agentId, toolName, overrides) => {
-    const config = get().config;
-    if (!config) {
-      return;
+    const tools = get().agents.find((agent) => agent.id === agentId)?.tools;
+    if (tools?.some((entry) => toolEntryName(entry) === toolName)) {
+      get().updateAgent(agentId, {
+        tools: setToolOverridesInEntries(toolName, overrides, tools),
+      });
     }
-    const nextRawEntries = setToolOverridesInEntries(
-      toolName,
-      overrides,
-      getRememberedRawToolEntries(config, agentId),
-    );
-    setRememberedRawToolEntries(config, agentId, nextRawEntries);
-    set((state) => ({
-      ...markDraftDirty(state, {}, [["agents", agentId, "tools"]]),
-    }));
   },
 
   getDefaultToolOverrides: (toolName) =>
-    getToolOverridesFromEntries(
-      toolName,
-      getRememberedRawDefaultToolEntries(get().config),
-    ),
+    getToolOverrides(toolName, get().config?.defaults?.tools),
 
   updateDefaultToolOverrides: (toolName, overrides) => {
-    const config = get().config;
-    if (!config) {
-      return;
+    const tools = get().config?.defaults?.tools;
+    if (tools?.some((entry) => toolEntryName(entry) === toolName)) {
+      get().updateConfigValue(
+        ["defaults", "tools"],
+        setToolOverridesInEntries(toolName, overrides, tools),
+      );
     }
-    rawDefaultToolEntriesByConfig.set(
-      config,
-      setToolOverridesInEntries(
-        toolName,
-        overrides,
-        getRememberedRawDefaultToolEntries(config),
-      ),
-    );
-    set((state) => ({
-      ...markDraftDirty(state, {}, [["defaults", "tools"]]),
-    }));
-  },
-
-  // Mark configuration as dirty
-  markDirty: () => {
-    set((state) => ({
-      ...markDraftDirty(state, {}),
-    }));
   },
 }));

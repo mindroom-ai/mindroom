@@ -39,6 +39,7 @@ from mindroom.tool_system.invocation import (
 )
 from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_access import search_tool_metadata, validate_tool_arguments
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
@@ -102,7 +103,7 @@ def _require_entry(context: AgentToolContext, name: str) -> EffectiveToolConfig:
 
 
 def _blocked(context: AgentToolContext, function: ToolFunction) -> bool:
-    return function.requires_confirmation is True or tool_may_require_approval(context.config, function.name)
+    return function.gate is ToolGate.CONFIRM or tool_may_require_approval(context.config, function.name)
 
 
 def _function(context: AgentToolContext, toolkit: AnyToolkit, name: str) -> ToolFunction:

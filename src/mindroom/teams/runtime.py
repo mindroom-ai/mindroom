@@ -3,10 +3,10 @@
 
 A team run is the leader's loop over its own tools plus the delegation tool for the team's mode. Members run as
 children of the team run, each ending in a record of its own with ``parent_run_id``, and their events reach the
-team's stream tagged with the member. A paused member pauses the team: its requirements sit on the team run naming
-the member, and ``continue_team`` resumes the members first, then the leader. The team record holds paused members in
-``member_responses``, every member run that ended while it ran in ``ended_member_runs``, and the leader's usage in
-``metrics``; ``team_usage`` adds the member runs' usage once.
+team's stream tagged with the member. A paused member pauses the team: the team run holds the paused member run in
+``member_responses`` and waits on its calls, naming the member, and ``continue_team`` resumes the members first, then
+the leader. The team record holds every member run that ended while it ran in ``ended_member_runs``, and the leader's
+usage in ``metrics``; ``team_usage`` adds the member runs' usage once.
 """
 
 from __future__ import annotations
@@ -32,15 +32,9 @@ from mindroom.agent_loop.tools import PreparedTools, sorted_specs
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
-from mindroom.teams.delegate_tools import (
-    DELEGATION_TOOLS,
-    answer_delegation,
-    delegate_functions,
-    member_requirement,
-    propagate_member_pause,
-)
+from mindroom.teams.delegate_tools import DELEGATION_TOOLS, answer_delegation, delegate_functions
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 
 if TYPE_CHECKING:
@@ -51,7 +45,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest, ReasoningDelta, ToolSpec
-    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.runs import AnyRunRecord, RunRequirement
     from mindroom.llm.usage import RunMetrics
     from mindroom.teams.delegate_tools import MemberRunner
     from mindroom.teams.spec import MemberBuild, TeamMember, TeamSpec
@@ -127,16 +121,15 @@ def continue_team(
     before anything runs.
     A member whose resumed run ends answers the delegation call that waited on it (``answer_delegation``), even while
     another member still waits, so the leader reads every member's result once none waits; a member that pauses
-    again keeps the team paused, with its new requirements on the team run, and the leader sends no request.
+    again keeps the team paused, waiting on its new calls, and the leader sends no request.
     """
     # A resume that fails or is cancelled stores this record over the paused team row on purpose, as an agent's does
     # (``_store_interrupted`` in ``agent_loop/run.py``): the resume ends its approval anyway.
     record = resumed_record(paused)
+    # The members resume first, each from its own record, so the leader's record waits only on its own calls.
     record.member_responses = []
-    leader_requirements = [r for r in record.requirements or () if r.member_agent_id is None]
-    record.requirements = leader_requirements
     plans = _plan_member_resumes(spec, paused, decisions)
-    leader = decisions.take(None, {r.tool_execution.tool_call_id for r in leader_requirements})
+    leader = decisions.take(None, {r.tool_execution.tool_call_id for r in record.requirements})
     decided = decide_requirements(
         record,
         approved=leader.approved,
@@ -150,7 +143,7 @@ def continue_team(
         for plan in plans:
             resumed = await members.resume(plan)
             if resumed.status is RunStatus.paused:
-                propagate_member_pause(record, plan.member, resumed)
+                record.member_responses.append(resumed)
             else:
                 _answer_delegation(record, messages, plan.member, resumed)
 
@@ -241,52 +234,28 @@ class _MemberResume:
 
 
 def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamDecisions) -> list[_MemberResume]:
-    """Plan one resume per paused member run, checking every member's decisions before any member runs.
-
-    The paused member runs are the ones the team run's requirements name.
-    """
-    members = {member.id: member for member in spec.members}
-    embedded = {member.run_id: member for member in paused.member_responses}
-    by_run: dict[tuple[str, str], list[RunRequirement]] = {}
-    for requirement in paused.requirements or ():
-        if requirement.member_agent_id is None:
-            continue
-        if requirement.member_run_id is None:
-            msg = f"Saved member approval of {requirement.member_agent_id!r} has no paused run identity; retry the request"
-            raise ValueError(msg)
-        by_run.setdefault((requirement.member_agent_id, requirement.member_run_id), []).append(requirement)
+    """Plan one resume per paused member run, in ``member_responses`` order, checking every member's decisions first."""
     plans: list[_MemberResume] = []
-    for (member_id, run_id), group in by_run.items():
-        member = members.get(member_id)
+    for member_record in paused.member_responses:
+        member_id, run_id = member_record.agent_id, member_record.run_id
+        member = next((member for member in spec.members if member.id == member_id), None)
         if member is None:
             msg = (
                 f"Paused member run {run_id!r} of team run {paused.run_id!r} belongs to "
                 f"{member_id!r}, which is not a member of team {spec.leader.id!r}"
             )
             raise ValueError(msg)
-        member_record = embedded.get(run_id)
-        if member_record is None:
-            msg = f"Paused team run {paused.run_id!r} no longer holds member run {run_id!r}"
-            raise ValueError(msg)
         build = member.built
         assert build is not None, f"paused member {member_id!r} of team run {paused.run_id!r} resumes unbuilt"
-        decided = decisions.take(member_id, {requirement.tool_execution.tool_call_id for requirement in group})
-        # The member resumes from its own record with its requirements naming the member and its run, as the team
-        # run's copies do, so the member row its resume stores names them too.
-        named = replace(
-            member_record,
-            requirements=[
-                member_requirement(requirement, member, run_id) for requirement in member_record.requirements or ()
-            ],
-        )
+        decided = decisions.take(member_id, {item.tool_execution.tool_call_id for item in member_record.requirements})
         plan = plan_resume(
             build.spec,
-            named,
+            member_record,
             approved=decided.approved,
             denied=decided.denied,
             external_results=decided.external_results,
         )
-        plans.append(_MemberResume(member, build, named, plan))
+        plans.append(_MemberResume(member, build, member_record, plan))
     return plans
 
 

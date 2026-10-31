@@ -69,11 +69,10 @@ def _room_user_ids_to_invite(
 
 def _root_space_user_ids_to_invite(config: Config) -> set[str]:
     """Collect Matrix users that should be invited to the private root Space."""
-    configured_room_keys = sorted(
-        room_key for room_key in config.get_all_configured_rooms() if not room_key.startswith(("!", "#"))
-    )
     user_ids = {
-        user_id for room_key in configured_room_keys for user_id in resolve_room_policy(config, room_key).invite_users
+        user_id
+        for room_key in config.managed_room_keys()
+        for user_id in resolve_room_policy(config, room_key).invite_users
     }
     return _filter_concrete_matrix_user_ids(
         user_ids,
@@ -84,11 +83,7 @@ def _root_space_user_ids_to_invite(config: Config) -> set[str]:
 def warn_about_foreign_homeserver_authorities(config: Config, runtime_paths: RuntimePaths) -> None:
     """Warn when administrators or managed-room invitees and admins live on another homeserver."""
     server_name = config.get_domain(runtime_paths)
-    room_policies = [
-        resolve_room_policy(config, room_key)
-        for room_key in config.get_all_configured_rooms()
-        if not room_key.startswith(("!", "#"))
-    ]
+    room_policies = [resolve_room_policy(config, room_key) for room_key in config.managed_room_keys()]
     user_ids = [
         *config.administrators,
         *(user_id for policy in room_policies for user_id in (*policy.invite_users, *policy.admins)),

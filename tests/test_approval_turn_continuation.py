@@ -31,7 +31,7 @@ from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.provider import ToolCallReady
-from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import Presentation, Segment, decode_presentation, encode_presentation
@@ -1338,7 +1338,12 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         yield TextDelta(" Next, publishing.")
         yield ToolStarted(gated.call)
         raise ResponsePausedForApproval(
-            PausedAttempt(session_id="session", run_id="run-fresh", tools=(gated,), toolkit_owners={}),
+            PausedAttempt(
+                session_id="session",
+                run_id="run-fresh",
+                requirements=(RunRequirement(gated),),
+                toolkit_owners={},
+            ),
         )
 
     monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)

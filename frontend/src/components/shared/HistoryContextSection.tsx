@@ -1,15 +1,17 @@
 import { useEffect, useState } from "react";
-import { Controller, type Control, type Path, useWatch } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { SchemaSection } from "@/components/SchemaForm";
 import { setObjectKey } from "@/lib/configSchema";
 import { FieldGroup } from "./FieldGroup";
+import { ParsedInput } from "./ParsedInput";
+import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
 import {
   resolveEffectiveCompactionEnabled,
   type CompactionConfig,
   type Config,
+  type Team,
 } from "@/types/config";
 
 // Compaction keys this section renders by hand; More compaction settings shows the rest.
@@ -22,48 +24,38 @@ const COMPACTION_EDITOR_FIELDS = [
   "model",
 ] as const;
 
-type HistoryFieldName =
-  "num_history_runs" | "num_history_messages" | "max_tool_calls_from_history";
+const THRESHOLD_TOKENS_HELPER_TEXT =
+  "Compaction trigger in tokens, counted over the whole request. Supported OpenAI and Claude routes compact natively at it; every other route runs text compaction before the reply.";
 
-type HistoryContextFormValues = {
-  num_history_runs?: number | null;
-  num_history_messages?: number | null;
-  max_tool_calls_from_history?: number | null;
-  compaction?: CompactionConfig | null;
-};
+/** The history and compaction fields agents and teams share. */
+type HistoryContextValues = Pick<
+  Team,
+  | "num_history_runs"
+  | "num_history_messages"
+  | "max_tool_calls_from_history"
+  | "compaction"
+>;
 
-interface HistoryContextSectionProps<T extends HistoryContextFormValues> {
-  control: Control<T>;
+interface HistoryContextSectionProps {
+  values: HistoryContextValues;
+  onChange: <K extends keyof HistoryContextValues>(
+    field: K,
+    value: HistoryContextValues[K],
+  ) => void;
   resetKey: string | null | undefined;
-  /** Where this entity's compaction lives in config.yaml, for validation errors. */
-  compactionPath: Array<string | number>;
+  /** Where this entity lives in config.yaml, for validation errors. */
+  path: Array<string | number>;
   defaults?: Config["defaults"];
-  onFieldChange: (fieldName: HistoryFieldName, value: number | null) => void;
-  updateCompaction: (
-    nextCompaction: CompactionConfig | null | undefined,
-  ) => void;
-  mutateCompaction: (
-    mutator: (
-      current: CompactionConfig | null | undefined,
-    ) => CompactionConfig | null | undefined,
-  ) => void;
+  /** Lead sentences; the section appends the inherited default. */
   historyRunsHelperText: string;
   historyMessagesHelperText: string;
   maxToolCallsHelperText: string;
   autoCompactionHelperText: string;
-  thresholdTokensHelperText: string;
   compactionModelPlaceholder: string;
-  numHistoryRunsError?: string;
-  numHistoryMessagesError?: string;
-  maxToolCallsFromHistoryError?: string;
-  compactionError?: string;
 }
 
 function parseOptionalInt(raw: string, min: number): number | null {
   const trimmed = raw.trim();
-  if (trimmed === "") {
-    return null;
-  }
   if (!/^-?\d+$/.test(trimmed)) {
     return null;
   }
@@ -75,48 +67,45 @@ function parseOptionalInt(raw: string, min: number): number | null {
 }
 
 function parseOptionalUnitFloat(raw: string): number | null {
-  const trimmed = raw.trim();
-  if (trimmed === "") {
-    return null;
-  }
-  const value = Number.parseFloat(trimmed);
+  const value = Number.parseFloat(raw.trim());
   if (!Number.isFinite(value) || value <= 0 || value >= 1) {
     return null;
   }
   return value;
 }
 
-export function HistoryContextSection<T extends HistoryContextFormValues>({
-  control,
+function isInvalidUnitFloatInput(raw: string): boolean {
+  return raw.trim() !== "" && parseOptionalUnitFloat(raw) == null;
+}
+
+function inheritedDefaultText(
+  value: number | null | undefined,
+  fallback: string,
+): string {
+  return ` Leave empty to use default (${value ?? fallback}).`;
+}
+
+export function HistoryContextSection({
+  values,
+  onChange,
   resetKey,
-  compactionPath,
+  path,
   defaults,
-  onFieldChange,
-  updateCompaction,
-  mutateCompaction,
   historyRunsHelperText,
   historyMessagesHelperText,
   maxToolCallsHelperText,
   autoCompactionHelperText,
-  thresholdTokensHelperText,
   compactionModelPlaceholder,
-  numHistoryRunsError,
-  numHistoryMessagesError,
-  maxToolCallsFromHistoryError,
-  compactionError,
-}: HistoryContextSectionProps<T>) {
-  const numHistoryRuns = useWatch({
-    name: "num_history_runs" as Path<T>,
-    control,
-  }) as number | null | undefined;
-  const numHistoryMessages = useWatch({
-    name: "num_history_messages" as Path<T>,
-    control,
-  }) as number | null | undefined;
-  const compactionConfig = useWatch({
-    name: "compaction" as Path<T>,
-    control,
-  }) as CompactionConfig | null | undefined;
+}: HistoryContextSectionProps) {
+  const {
+    num_history_runs: numHistoryRuns,
+    num_history_messages: numHistoryMessages,
+    max_tool_calls_from_history: maxToolCallsFromHistory,
+    compaction: compactionConfig,
+  } = values;
+  const validationErrorForPath = useScopedConfigValidation(path);
+  const patchCompaction = (patch: CompactionConfig) =>
+    onChange("compaction", { ...compactionConfig, ...patch });
   const [compactionThresholdPercentInput, setCompactionThresholdPercentInput] =
     useState("");
   const defaultCompaction = defaults?.compaction;
@@ -125,13 +114,14 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
     defaultCompaction,
   );
 
+  const storedThresholdPercentInput =
+    compactionConfig?.threshold_percent != null
+      ? String(compactionConfig.threshold_percent)
+      : "";
+
   useEffect(() => {
-    setCompactionThresholdPercentInput(
-      compactionConfig?.threshold_percent != null
-        ? String(compactionConfig.threshold_percent)
-        : "",
-    );
-  }, [compactionConfig?.threshold_percent, resetKey]);
+    setCompactionThresholdPercentInput(storedThresholdPercentInput);
+  }, [storedThresholdPercentInput, resetKey]);
 
   return (
     <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
@@ -142,35 +132,27 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
       <div className="space-y-4">
         <FieldGroup
           label="History Runs"
-          helperText={historyRunsHelperText}
+          helperText={
+            historyRunsHelperText +
+            inheritedDefaultText(defaults?.num_history_runs, "all")
+          }
           htmlFor="num_history_runs"
-          error={numHistoryRunsError}
+          error={validationErrorForPath(["num_history_runs"], true)}
         >
-          <Controller
-            name={"num_history_runs" as Path<T>}
-            control={control}
-            render={({ field }) => {
-              const fieldValue = field.value as number | null | undefined;
-              return (
-                <Input
-                  id="num_history_runs"
-                  type="number"
-                  min={1}
-                  value={fieldValue ?? ""}
-                  placeholder={
-                    defaults?.num_history_runs != null
-                      ? `Default: ${defaults.num_history_runs}`
-                      : "Default: all"
-                  }
-                  disabled={numHistoryMessages != null}
-                  onChange={(e) => {
-                    const value = parseOptionalInt(e.target.value, 1);
-                    field.onChange(value);
-                    onFieldChange("num_history_runs", value);
-                  }}
-                />
-              );
-            }}
+          <Input
+            id="num_history_runs"
+            type="number"
+            min={1}
+            value={numHistoryRuns ?? ""}
+            placeholder={
+              defaults?.num_history_runs != null
+                ? `Default: ${defaults.num_history_runs}`
+                : "Default: all"
+            }
+            disabled={numHistoryMessages != null}
+            onChange={(e) =>
+              onChange("num_history_runs", parseOptionalInt(e.target.value, 1))
+            }
           />
           {numHistoryMessages != null && (
             <p className="text-xs text-amber-600 dark:text-amber-400">
@@ -181,35 +163,30 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
 
         <FieldGroup
           label="History Messages"
-          helperText={historyMessagesHelperText}
+          helperText={
+            historyMessagesHelperText +
+            inheritedDefaultText(defaults?.num_history_messages, "all")
+          }
           htmlFor="num_history_messages"
-          error={numHistoryMessagesError}
+          error={validationErrorForPath(["num_history_messages"], true)}
         >
-          <Controller
-            name={"num_history_messages" as Path<T>}
-            control={control}
-            render={({ field }) => {
-              const fieldValue = field.value as number | null | undefined;
-              return (
-                <Input
-                  id="num_history_messages"
-                  type="number"
-                  min={1}
-                  value={fieldValue ?? ""}
-                  placeholder={
-                    defaults?.num_history_messages != null
-                      ? `Default: ${defaults.num_history_messages}`
-                      : "Default: all"
-                  }
-                  disabled={numHistoryRuns != null}
-                  onChange={(e) => {
-                    const value = parseOptionalInt(e.target.value, 1);
-                    field.onChange(value);
-                    onFieldChange("num_history_messages", value);
-                  }}
-                />
-              );
-            }}
+          <Input
+            id="num_history_messages"
+            type="number"
+            min={1}
+            value={numHistoryMessages ?? ""}
+            placeholder={
+              defaults?.num_history_messages != null
+                ? `Default: ${defaults.num_history_messages}`
+                : "Default: all"
+            }
+            disabled={numHistoryRuns != null}
+            onChange={(e) =>
+              onChange(
+                "num_history_messages",
+                parseOptionalInt(e.target.value, 1),
+              )
+            }
           />
           {numHistoryRuns != null && (
             <p className="text-xs text-amber-600 dark:text-amber-400">
@@ -220,34 +197,32 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
 
         <FieldGroup
           label="Max Tool Calls from History"
-          helperText={maxToolCallsHelperText}
+          helperText={
+            maxToolCallsHelperText +
+            inheritedDefaultText(
+              defaults?.max_tool_calls_from_history,
+              "no limit",
+            )
+          }
           htmlFor="max_tool_calls_from_history"
-          error={maxToolCallsFromHistoryError}
+          error={validationErrorForPath(["max_tool_calls_from_history"], true)}
         >
-          <Controller
-            name={"max_tool_calls_from_history" as Path<T>}
-            control={control}
-            render={({ field }) => {
-              const fieldValue = field.value as number | null | undefined;
-              return (
-                <Input
-                  id="max_tool_calls_from_history"
-                  type="number"
-                  min={0}
-                  value={fieldValue ?? ""}
-                  placeholder={
-                    defaults?.max_tool_calls_from_history != null
-                      ? `Default: ${defaults.max_tool_calls_from_history}`
-                      : "Default: no limit"
-                  }
-                  onChange={(e) => {
-                    const value = parseOptionalInt(e.target.value, 0);
-                    field.onChange(value);
-                    onFieldChange("max_tool_calls_from_history", value);
-                  }}
-                />
-              );
-            }}
+          <Input
+            id="max_tool_calls_from_history"
+            type="number"
+            min={0}
+            value={maxToolCallsFromHistory ?? ""}
+            placeholder={
+              defaults?.max_tool_calls_from_history != null
+                ? `Default: ${defaults.max_tool_calls_from_history}`
+                : "Default: no limit"
+            }
+            onChange={(e) =>
+              onChange(
+                "max_tool_calls_from_history",
+                parseOptionalInt(e.target.value, 0),
+              )
+            }
           />
         </FieldGroup>
 
@@ -255,7 +230,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
           label="Required Compaction"
           helperText={autoCompactionHelperText}
           htmlFor="compaction_enabled"
-          error={compactionError}
+          error={validationErrorForPath(["compaction"], true)}
         >
           <div className="space-y-3">
             <div className="flex items-center gap-3">
@@ -263,10 +238,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                 id="compaction_enabled"
                 checked={effectiveCompactionEnabled}
                 onCheckedChange={(checked) => {
-                  mutateCompaction((current) => ({
-                    ...(current ?? {}),
-                    enabled: checked === true,
-                  }));
+                  patchCompaction({ enabled: checked === true });
                 }}
               />
               <label
@@ -280,7 +252,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => updateCompaction(undefined)}
+                  onClick={() => onChange("compaction", undefined)}
                 >
                   Use inherited settings
                 </Button>
@@ -290,7 +262,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
             <div className="grid gap-4 md:grid-cols-2">
               <FieldGroup
                 label="Threshold Tokens"
-                helperText={thresholdTokensHelperText}
+                helperText={THRESHOLD_TOKENS_HELPER_TEXT}
                 htmlFor="compaction_threshold_tokens"
               >
                 <Input
@@ -305,14 +277,13 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   }
                   onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 1);
-                    mutateCompaction((current) => ({
-                      ...(current ?? {}),
+                    patchCompaction({
                       threshold_tokens: value ?? undefined,
                       threshold_percent:
                         value != null
                           ? null
-                          : (current?.threshold_percent ?? undefined),
-                    }));
+                          : (compactionConfig?.threshold_percent ?? undefined),
+                    });
                   }}
                 />
               </FieldGroup>
@@ -337,31 +308,24 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   onChange={(e) => {
                     const raw = e.target.value;
                     setCompactionThresholdPercentInput(raw);
-                    const value = parseOptionalUnitFloat(raw);
-                    if (raw.trim() !== "" && value == null) {
+                    if (isInvalidUnitFloatInput(raw)) {
                       return;
                     }
-                    mutateCompaction((current) => ({
-                      ...(current ?? {}),
+                    const value = parseOptionalUnitFloat(raw);
+                    patchCompaction({
                       threshold_percent: value ?? undefined,
                       threshold_tokens:
                         value != null
                           ? null
-                          : (current?.threshold_tokens ?? undefined),
-                    }));
+                          : (compactionConfig?.threshold_tokens ?? undefined),
+                    });
                   }}
                   onBlur={() => {
-                    const value = parseOptionalUnitFloat(
-                      compactionThresholdPercentInput,
-                    );
                     if (
-                      compactionThresholdPercentInput.trim() !== "" &&
-                      value == null
+                      isInvalidUnitFloatInput(compactionThresholdPercentInput)
                     ) {
                       setCompactionThresholdPercentInput(
-                        compactionConfig?.threshold_percent != null
-                          ? String(compactionConfig.threshold_percent)
-                          : "",
+                        storedThresholdPercentInput,
                       );
                     }
                   }}
@@ -385,10 +349,9 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   }
                   onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 1);
-                    mutateCompaction((current) => ({
-                      ...(current ?? {}),
+                    patchCompaction({
                       replay_window_tokens: value ?? undefined,
-                    }));
+                    });
                   }}
                 />
               </FieldGroup>
@@ -406,10 +369,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   placeholder={`Default: ${defaultCompaction?.reserve_tokens ?? 16384}`}
                   onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 0);
-                    mutateCompaction((current) => ({
-                      ...(current ?? {}),
-                      reserve_tokens: value ?? undefined,
-                    }));
+                    patchCompaction({ reserve_tokens: value ?? undefined });
                   }}
                 />
               </FieldGroup>
@@ -419,17 +379,13 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                 helperText="Optional model config name used only for summary generation during compaction. Leave blank to clear an inherited compaction model."
                 htmlFor="compaction_model"
               >
-                <Input
+                <ParsedInput
                   id="compaction_model"
-                  value={compactionConfig?.model ?? ""}
+                  value={compactionConfig?.model ?? null}
+                  format={(model) => model ?? ""}
+                  parse={(text) => text.trim() || null}
                   placeholder={compactionModelPlaceholder}
-                  onChange={(e) => {
-                    const value = e.target.value.trim();
-                    mutateCompaction((current) => ({
-                      ...(current ?? {}),
-                      model: value === "" ? null : value,
-                    }));
-                  }}
+                  onChange={(model) => patchCompaction({ model })}
                 />
               </FieldGroup>
             </div>
@@ -438,10 +394,13 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
               title="More compaction settings"
               definition="CompactionOverrideConfig"
               value={compactionConfig}
-              path={compactionPath}
+              path={[...path, "compaction"]}
               exclude={COMPACTION_EDITOR_FIELDS}
               onFieldChange={(key, next) =>
-                mutateCompaction((current) => setObjectKey(current, key, next))
+                onChange(
+                  "compaction",
+                  setObjectKey(compactionConfig, key, next),
+                )
               }
             />
           </div>

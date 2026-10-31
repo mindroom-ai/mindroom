@@ -19,7 +19,7 @@ import pytest
 
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import TOKEN_FIELDS, HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.schema import LOG_VERSION
@@ -110,13 +110,8 @@ def _team_run(run_id: str, status: RunStatus = RunStatus.completed, **fields: An
     )
 
 
-def _member_requirement(member_run_id: str, call_id: str) -> RunRequirement:
-    return RunRequirement(
-        ToolExecution(tool_call_id=call_id, tool_name="shell", requires_confirmation=True),
-        id=f"req-{call_id}",
-        member_agent_id="helper",
-        member_run_id=member_run_id,
-    )
+def _waiting(call_id: str) -> ToolExecution:
+    return ToolExecution(tool_call_id=call_id, tool_name="shell", requires_confirmation=True)
 
 
 def _save(
@@ -841,29 +836,31 @@ def test_a_new_database_reads_as_empty(store: ConversationStore) -> None:
     assert store.list_updated_sessions(since=0) == []
 
 
-def test_get_run_returns_a_paused_team_run_with_the_members_its_requirements_name(
-    team_store: ConversationStore,
-) -> None:
-    """The members come in first-mention order, each a copy of its own; a run another team run owns is no member."""
+def test_get_run_returns_a_paused_team_run_with_its_paused_member_runs(team_store: ConversationStore) -> None:
+    """The members are the team run's paused member rows in log order, each a copy of its own row.
+
+    A member that finished and a paused run another team run owns are no member, and the team waits on its members'
+    paused calls.
+    """
     team = _team()
     replying = Message(role="assistant", content="ok", id="m1-reply", provider_data={"k": ["v"]}, created_at=1)
-    m1 = _member("m1", "t0", RunStatus.paused)
+    m2 = _member("m2", "t0", RunStatus.paused, tools=[_waiting("c1"), _waiting("c3")])
+    m1 = _member("m1", "t0", RunStatus.paused, tools=[_waiting("c2")])
     m1.messages.append(replying)
-    _save(team_store, m1, _member("m2", "t0", RunStatus.paused), session=team)
+    _save(team_store, m2, _member("done", "t0"), m1, session=team)
     _save(team_store, _member("other", "t9", RunStatus.paused), _team_run("t9", RunStatus.paused), session=team)
-    requirements = [
-        _member_requirement("m2", "c1"),
-        _member_requirement("m1", "c2"),
-        _member_requirement("m2", "c3"),
-        _member_requirement("other", "c4"),
-    ]
-    _save(team_store, _team_run("t0", RunStatus.paused, requirements=requirements), session=team)
+    _save(team_store, _team_run("t0", RunStatus.paused), session=team)
 
     paused = team_store.get_run("t0")
 
     assert isinstance(paused, TeamRunRecord)
     assert [member.run_id for member in paused.member_responses] == ["m2", "m1"]
     assert [message.id for message in paused.member_responses[0].messages] == ["m2-system", "m2-user"]
+    assert [(item.member_run_id, item.tool_execution.tool_call_id) for item in paused.requirements] == [
+        ("m2", "c1"),
+        ("m2", "c3"),
+        ("m1", "c2"),
+    ]
     loaded = {run.run_id: run for run in _loaded(team_store).runs}
     loaded_team = loaded["t0"]
     assert isinstance(loaded_team, TeamRunRecord)
@@ -873,10 +870,10 @@ def test_get_run_returns_a_paused_team_run_with_the_members_its_requirements_nam
 
 
 def test_a_team_run_that_is_not_paused_reads_without_members(team_store: ConversationStore) -> None:
-    """Only a paused team run's resume reads its members from the team run."""
+    """Only a paused team run's resume reads its members from the team run, even a member that stayed paused."""
     team = _team()
-    _save(team_store, _member("m1", "t0"), session=team)
-    _save(team_store, _team_run("t0", requirements=[_member_requirement("m1", "c1")]), session=team)
+    _save(team_store, _member("m1", "t0", RunStatus.paused, tools=[_waiting("c1")]), session=team)
+    _save(team_store, _team_run("t0"), session=team)
 
     finished = team_store.get_run("t0")
 
@@ -1169,10 +1166,9 @@ def test_a_fold_moves_its_stored_run_after_its_summary_and_flags_what_it_took(st
 def test_a_fold_of_a_run_without_a_row_stores_it_cancelled_with_its_live_scalars_and_metadata(
     store: ConversationStore,
 ) -> None:
-    """A crash after the fold leaves a run that does not replay; its tools and requirements wait for its own save."""
+    """A crash after the fold leaves a run that does not replay; its tools wait for its own save."""
     live = _run("r0", RunStatus.running, content="so far", metadata={"matrix_event_id": "$asked"})
-    live.tools = [ToolExecution(tool_call_id="c1", tool_name="shell")]
-    live.requirements = [_member_requirement("m0", "c1")]
+    live.tools = [_waiting("c1")]
     folded = [Message(role="user", content="question", id="q", created_at=1)]
     seed_session_row(store, _session())
 
@@ -1185,7 +1181,7 @@ def test_a_fold_of_a_run_without_a_row_stores_it_cancelled_with_its_live_scalars
         "so far",
         {"matrix_event_id": "$asked"},
     )
-    assert (stored.tools, stored.requirements, stored.messages) == (None, None, [])
+    assert (stored.tools, stored.messages) == (None, [])
     assert [(row[0], row[2]) for row in _message_rows(store, "r0")] == [("q", summary_id)]
     assert _seqs(store) == {"r0": 1}
     assert _loaded_ids(store) == ["r0"]

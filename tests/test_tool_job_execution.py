@@ -68,7 +68,7 @@ from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
+from mindroom.tool_system.tool_function import ToolGate, ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import detached_policy
@@ -145,6 +145,26 @@ async def _managed_context(tmp_path: Path, config: Config | None = None) -> tupl
 
 def _job_controls(context: ToolRuntimeContext) -> JobTools:
     return JobTools(context.runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_a_delegation_call_runs_in_place_instead_of_as_a_job(tmp_path: Path) -> None:
+    """A delegation answers its own call where it is made, so it never becomes a managed job."""
+
+    def hand_off() -> str:
+        return "handed off"
+
+    context, runtime = await _managed_context(tmp_path)
+    plain = job_tool(hand_off)
+    actor = job_actor(replace(plain, function=replace(plain.function, gate=ToolGate.DELEGATION)))
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                outcome = await call_job_tool(actor, "hand_off")
+        assert (outcome.content, outcome.is_error) == ("handed off", False)
+        assert await runtime.list_jobs(owner=context.execution_identity, depth=0) == []
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
