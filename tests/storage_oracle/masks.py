@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, override
 from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_queued_notices
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, MINDROOM_HISTORY_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_STATE_KEY
+from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
@@ -89,6 +90,8 @@ MASKS: dict[str, str] = {
     "metadata value, not maps keyed by scope",
     "summary_requests_name_their_model": "#3109 item 6: a compaction summary's usage row names the model that answered "
     "its request, as its run does",
+    "resumes_leave_out_the_paused_reply_s_notice": "#3108: a paused run's resume request leaves out the queued-message "
+    "notice the paused run holds, which the reply that paused was given",
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()
@@ -825,6 +828,7 @@ class MaskedBackend(StoreBackend):
             view["ledger"] = {"error": f"OperationalError: no such table: {self.names.usage}"}
             self.used.add("tables_exist_at_open")
         readers_in_creation_order(view, self.used)
+        self._old_resume_requests(view, observed)
         if isinstance(view["loaded_runs"], list):
             view["loaded_runs"] = self._old_loaded(view["loaded_runs"])
         if isinstance(view["list_runs"], list):
@@ -848,6 +852,27 @@ class MaskedBackend(StoreBackend):
             row["updated_at"] = self.news_at[1]
             self.used.add("a_finished_interrupted_record_is_news")
         return view
+
+    def _old_resume_requests(self, view: dict[str, Any], observed: dict[str, Any]) -> None:
+        """Show each paused run's resume request with the queued-message notices its paused run holds, as it was sent.
+
+        Each notice goes back before the paused message that follows it, so after a scope summary placed after the
+        paused prompt, as the request held it.
+        """
+        requests, loaded = view["resume_requests"], observed["loaded_runs"]
+        if not (isinstance(requests, dict) and isinstance(loaded, list)):
+            return
+        for run in loaded:
+            if run["run_id"] not in requests:
+                continue
+            request = requests[run["run_id"]]["request"]
+            position = len(request)
+            for message in reversed([message for message in run["messages"] if message["role"] != "system"]):
+                if is_queued_notice_message(Message.from_dict(message)):
+                    request.insert(position, message)
+                    self.used.add("resumes_leave_out_the_paused_reply_s_notice")
+                    continue
+                position = next(index for index in range(position - 1, -1, -1) if request[index] == message)
 
     def _old_session_totals(self, view: dict[str, Any]) -> None:
         """Show the usage totals the Agno-layout store kept beside its ledger, the sum of the ledger's run rows."""
