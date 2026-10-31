@@ -28,7 +28,8 @@ Reasoning and finer progress the runtime already had never reached the user.
 - A frame too large to send (over 60000 bytes serialized) stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
 - Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms}` (sidecar-only for large messages).
   Its duration runs from the start of each reasoning segment to the model's next output.
-  OpenAI's Responses API streams a reasoning summary only after the model has finished reasoning, so its deltas carry when the reasoning item began; the other providers stream reasoning while the model produces it, so the first delta's arrival marks the start.
+  OpenAI's Responses API streams a reasoning summary only after the model has finished reasoning, so its deltas carry when the reasoning item began; Anthropic, Gemini, and Ollama stream reasoning while the model produces it, so the first delta's arrival marks the start.
+  Chat Completions carries no such start, so an OpenAI reasoning model reached that way, as through OpenRouter, still counts from the summary's arrival.
 
 ## Rejected alternatives
 
