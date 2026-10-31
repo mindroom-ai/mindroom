@@ -616,6 +616,42 @@ def content_fits_normal_event(content: dict[str, Any]) -> bool:
     return calculate_event_size(content) <= _NORMAL_MESSAGE_LIMIT
 
 
+def _fits_without_sidecar(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    room_encrypted: bool,
+) -> bool:
+    size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit_message(content) else _NORMAL_MESSAGE_LIMIT
+    delivery_size = _delivery_event_size_calculator(client, room_id=room_id, room_encrypted=room_encrypted)
+    return calculate_event_size(content) <= size_limit and delivery_size(content) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+def without_reasoning_that_forces_a_sidecar(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    room_encrypted: bool,
+) -> dict[str, Any]:
+    """Drop a reply's reasoning when it alone would push an ordinary-size reply into a sidecar or segments.
+
+    Clients that do not show reasoning would otherwise get an attachment or extra messages for an answer that fits one
+    event; an answer too large on its own keeps its reasoning in the sidecar.
+    """
+    new_content = content.get("m.new_content")
+    carries_reasoning = REASONING_CONTENT_KEY in content or (
+        isinstance(new_content, dict) and REASONING_CONTENT_KEY in new_content
+    )
+    if not carries_reasoning or _fits_without_sidecar(client, room_id, content, room_encrypted=room_encrypted):
+        return content
+    trimmed = {key: value for key, value in content.items() if key != REASONING_CONTENT_KEY}
+    if isinstance(new_content, dict):
+        trimmed["m.new_content"] = {key: value for key, value in new_content.items() if key != REASONING_CONTENT_KEY}
+    return trimmed if _fits_without_sidecar(client, room_id, trimmed, room_encrypted=room_encrypted) else content
+
+
 async def upload_json_sidecar(
     client: nio.AsyncClient,
     room_id: str,

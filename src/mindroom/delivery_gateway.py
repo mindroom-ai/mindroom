@@ -68,7 +68,11 @@ from mindroom.matrix.client_delivery import (
     send_message_outcome,
     send_room_event_result,
 )
-from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
+from mindroom.matrix.large_messages import (
+    MatrixEventTooLargeError,
+    prepare_large_message,
+    without_reasoning_that_forces_a_sidecar,
+)
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, build_reaction_content
 from mindroom.matrix.room_history_reads import (
@@ -2224,11 +2228,12 @@ class DeliveryGateway:
         )
         if isinstance(encryption_outcome, MatrixDeliveryFailure):
             return encryption_outcome
-        wire_content = matrix_delivery_payload(
-            self.deps.outbox.principal_id,
-            turn_id,
-            stage,
-            content,
+        # Durable rows are sized for encrypted delivery, as prepare_large_message sizes them below.
+        wire_content = without_reasoning_that_forces_a_sidecar(
+            client,
+            room_id,
+            matrix_delivery_payload(self.deps.outbox.principal_id, turn_id, stage, content),
+            room_encrypted=True,
         )
         segmented = (
             segment_matrix_content(
