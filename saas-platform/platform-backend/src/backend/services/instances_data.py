@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from supabase import Client
 
 _OWNED_INSTANCE_COLUMNS = "id,instance_id,subscription_id,account_id,lifecycle_stopped_at"
+# PostgREST returns at most this many rows per request.
+_PAGE_SIZE = 1000
 
 
 def get_instance(sb: Client, instance_id: int | str, columns: str = "*") -> dict[str, Any] | None:
@@ -47,8 +49,21 @@ def get_instances_for_account(sb: Client, account_id: str, *, newest_first: bool
 
 
 def list_instances(sb: Client, columns: str = "*") -> list[dict[str, Any]]:
-    """Return all instance rows, optionally restricted to a column subset."""
-    return sb.table("instances").select(columns).execute().data or []
+    """Return every instance row in instance_id order, paged past PostgREST's row limit."""
+    rows: list[dict[str, Any]] = []
+    while True:
+        page = (
+            sb.table("instances")
+            .select(columns)
+            .order("instance_id")
+            .range(len(rows), len(rows) + _PAGE_SIZE - 1)
+            .execute()
+            .data
+            or []
+        )
+        rows.extend(page)
+        if len(page) < _PAGE_SIZE:
+            return rows
 
 
 def create_instance(sb: Client, fields: dict[str, Any]) -> dict[str, Any] | None:

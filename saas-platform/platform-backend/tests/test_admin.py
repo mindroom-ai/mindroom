@@ -575,6 +575,8 @@ class TestAdminEndpoints:
                 # Create a mock that can handle the chained calls
                 mock.select = MagicMock(return_value=mock)
                 mock.eq = MagicMock(return_value=mock)
+                mock.order = MagicMock(return_value=mock)
+                mock.range = MagicMock(return_value=mock)
 
                 # Determine which result to return based on whether eq() was called
                 def execute_side_effect():
