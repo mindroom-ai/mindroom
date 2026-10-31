@@ -909,8 +909,6 @@ class BrowserTools(Toolkit):
                     compact=compact,
                     depth=depth,
                     selector=_clean_str(selector),
-                    frame=_clean_str(frame),
-                    labels=labels,
                 ),
                 sort_keys=True,
             )
@@ -1403,15 +1401,9 @@ class BrowserTools(Toolkit):
         compact: bool | None,
         depth: int | None,
         selector: str | None,
-        frame: str | None,
-        labels: bool | None,
     ) -> dict[str, Any]:
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
-        if frame is not None:
-            del frame  # Not implemented in local Playwright path yet.
-        if labels is not None:
-            del labels  # Label overlays are currently not implemented.
 
         fmt = "aria" if snapshot_format == "aria" else "ai"
         resolved_limit = limit if limit is not None and limit > 0 else _DEFAULT_SNAPSHOT_LIMIT
