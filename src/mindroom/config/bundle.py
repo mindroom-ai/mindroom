@@ -134,16 +134,25 @@ def _read_transaction(journal: Path) -> _Transaction:
     return _ActiveTransaction(pending=owned["pending"], retired=owned["retired"])
 
 
-def _write_transaction(journal: Path, owned: _Transaction) -> None:
-    """Publish complete bookkeeping atomically, retaining old state on write failure."""
-    descriptor, name = tempfile.mkstemp(prefix=f"{journal.name}-", dir=journal.parent)
+def _replace_json(path: Path, payload: object, *, temp_base: Path) -> None:
+    """Replace a JSON file atomically, retaining the old file on write failure.
+
+    The temporary file is created beside ``temp_base`` and named after it.
+    """
+    descriptor, name = tempfile.mkstemp(prefix=f"{temp_base.name}-", dir=temp_base.parent)
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "w") as stream:
-            json.dump(asdict(owned), stream)
-        temporary.replace(journal)
+            json.dump(payload, stream)
+            stream.write("\n")
+        temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _write_transaction(journal: Path, owned: _Transaction) -> None:
+    """Publish complete bookkeeping atomically, retaining old state on write failure."""
+    _replace_json(journal, asdict(owned), temp_base=journal)
 
 
 def _recovery_transaction(target: Path) -> _ActiveTransaction | None:
@@ -263,19 +272,6 @@ def _active_revision(target: Path) -> str | None:
     except ValueError:
         return None
     return revision
-
-
-def _replace_metadata(target: Path, digest: str, revision: str) -> None:
-    """Publish a revision change without exposing partial active metadata."""
-    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.metadata-", dir=target.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, "w") as stream:
-            json.dump({"digest": digest, "revision": revision}, stream)
-            stream.write("\n")
-        temporary.replace(target / _METADATA)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _validate_config(config: Path) -> None:
@@ -449,7 +445,11 @@ def install_config_bundle(
             active_revision = _active_revision(target) if target.exists() else None
             if unchanged:
                 if revision is not None and active_revision != revision:
-                    _replace_metadata(target, digest, revision)
+                    _replace_json(
+                        target / _METADATA,
+                        {"digest": digest, "revision": revision},
+                        temp_base=target.with_name(f".{target.name}.metadata"),
+                    )
                 return BundleInstallResult("unchanged", target / config, loaded.source_fingerprint, digest)
             installed_revision = revision if revision is not None else active_revision
             metadata = {"digest": digest}
