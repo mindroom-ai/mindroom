@@ -61,12 +61,14 @@ type FilterMode = "all" | "available" | "unconfigured" | "configured";
 
 const CATEGORIES = [
   { id: "email", name: "Email & Calendar" },
+  { id: "productivity", name: "Productivity" },
   { id: "communication", name: "Communication" },
   { id: "entertainment", name: "Entertainment" },
   { id: "social", name: "Social" },
   { id: "development", name: "Development" },
   { id: "research", name: "Research" },
   { id: "smart_home", name: "Smart Home" },
+  { id: "integrations", name: "Integrations" },
   { id: "information", name: "Information" },
 ];
 

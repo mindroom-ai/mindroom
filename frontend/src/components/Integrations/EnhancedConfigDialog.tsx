@@ -497,15 +497,13 @@ export function EnhancedConfigDialog({
     <Dialog open={open} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[600px]">
         <DialogHeader className="space-y-3">
-          <div className="flex items-center space-x-3">
-            <div>
-              <DialogTitle className="text-xl">
-                {isEditing ? "Edit" : "Configure"} {displayName}
-              </DialogTitle>
-              <DialogDescription className="mt-1">
-                {description}
-              </DialogDescription>
-            </div>
+          <div>
+            <DialogTitle className="text-xl">
+              {isEditing ? "Edit" : "Configure"} {displayName}
+            </DialogTitle>
+            <DialogDescription className="mt-1">
+              {description}
+            </DialogDescription>
           </div>
 
           {/* Security Notice */}

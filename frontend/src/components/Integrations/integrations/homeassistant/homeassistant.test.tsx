@@ -9,7 +9,7 @@ import { homeAssistantIntegration } from "./index";
 
 global.fetch = vi.fn();
 
-describe("HomeAssistantIntegrationProvider", () => {
+describe("homeAssistantIntegration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });

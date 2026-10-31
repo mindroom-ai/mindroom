@@ -1094,6 +1094,13 @@ describe("Integrations", () => {
         screen.getByRole("tab", { name: /Information/ }),
       ).toBeInTheDocument();
     });
+    // Google Calendar, Docs, Drive, and Tasks are productivity cards.
+    expect(
+      within(screen.getByRole("tab", { name: /Productivity/ })).getByText("4"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: /Integrations/ }),
+    ).toBeInTheDocument();
   });
 
   it("uses wrapping layout classes for narrow viewports", async () => {
