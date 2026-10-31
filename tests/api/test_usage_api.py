@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
+from mindroom.config.main import ConfigRuntimeValidationError
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 from tests.api.test_usage_service_auth import _install_manual_export_runner
 
@@ -119,11 +120,7 @@ def test_usage_dashboard_sanitizes_failed_committed_configuration(
         api_state.snapshot = replace(
             snapshot,
             generation=snapshot.generation + 1,
-            config_load_result=config_lifecycle.ConfigLoadResult(
-                success=False,
-                error_status_code=422,
-                error_detail={"diagnostic": sensitive_detail},
-            ),
+            load_error=ConfigRuntimeValidationError(sensitive_detail),
         )
 
     try:

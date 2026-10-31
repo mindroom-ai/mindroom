@@ -1239,8 +1239,7 @@ async def test_reload_that_loses_to_a_dashboard_save_adopts_nothing_and_stays_pe
     await lifecycle._apply_queued_config_reload()
 
     snapshot = api_config_lifecycle.require_api_state(api_app).snapshot
-    assert snapshot.config_load_result is not None
-    assert snapshot.config_load_result.success
+    assert snapshot.load_error is None
     assert snapshot.runtime_config.agents["agent1"].display_name == "Saved From Dashboard"
     lifecycle.apply_update_plan.assert_not_awaited()
     assert lifecycle.status == ConfigReloadStatus(status="pending")

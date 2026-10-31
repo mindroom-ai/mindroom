@@ -350,10 +350,9 @@ class TestEmptyDirectoryIncludes:
         if loader == "api":
             api_app = make_api_app(empty_include_runtime_paths)
             assert not config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app).loaded
-            result = api_snapshot(api_app).config_load_result
-            assert result is not None
-            assert result.error_status_code == 422
-            assert "does not support !include" in str(result.error_detail)
+            error = api_snapshot(api_app).load_error
+            assert isinstance(error, AccessMigrationError)
+            assert "does not support !include" in str(error)
             assert config_lifecycle.config_uses_includes(request_for(api_app)) is True
         else:
             with pytest.raises(AccessMigrationError, match="does not support !include"):
@@ -711,10 +710,9 @@ class TestIncludeAwareSnapshots:
 
         assert not config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
 
-        result = api_snapshot(api_app).config_load_result
-        assert result is not None
-        assert result.error_status_code == 422
-        assert "does not support !include" in str(result.error_detail)
+        error = api_snapshot(api_app).load_error
+        assert isinstance(error, AccessMigrationError)
+        assert "does not support !include" in str(error)
         assert config_path.read_text(encoding="utf-8") == config_source
         assert authorization_path.read_text(encoding="utf-8") == authorization_source
         assert not config_path.with_name(f"{config_path.name}.pre-membership-access").exists()

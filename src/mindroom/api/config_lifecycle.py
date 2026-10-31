@@ -15,7 +15,6 @@ from mindroom.api.app_state import app_state
 from mindroom.config.commit import ConfigCommit, ConfigComposedFromIncludesError, write_config_commit
 from mindroom.config.load_attempt import (
     ConfigLoad,
-    ConfigLoadResult,
     config_error_detail,
     load_config_attempt,
 )
@@ -60,7 +59,7 @@ class ApiSnapshot:
     runtime_paths: constants.RuntimePaths
     revision: int = 0
     runtime_config: Config | None = None
-    config_load_result: ConfigLoadResult | None = None
+    load_error: Exception | None = None
     source_fingerprint: str | None = None
     uses_includes: bool | None = None
 
@@ -155,7 +154,7 @@ def _published_snapshot(
     increment_generation: bool = True,
     runtime_paths: constants.RuntimePaths | _Keep = _Keep.FIELD,
     runtime_config: Config | None | _Keep = _Keep.FIELD,
-    config_load_result: ConfigLoadResult | None | _Keep = _Keep.FIELD,
+    load_error: Exception | None | _Keep = _Keep.FIELD,
     source_fingerprint: str | None | _Keep = _Keep.FIELD,
     uses_includes: bool | None | _Keep = _Keep.FIELD,
 ) -> ApiSnapshot:
@@ -166,7 +165,7 @@ def _published_snapshot(
         revision=snapshot.revision + 1,
         runtime_paths=snapshot.runtime_paths if runtime_paths is _Keep.FIELD else runtime_paths,
         runtime_config=snapshot.runtime_config if runtime_config is _Keep.FIELD else runtime_config,
-        config_load_result=snapshot.config_load_result if config_load_result is _Keep.FIELD else config_load_result,
+        load_error=snapshot.load_error if load_error is _Keep.FIELD else load_error,
         source_fingerprint=snapshot.source_fingerprint if source_fingerprint is _Keep.FIELD else source_fingerprint,
         uses_includes=snapshot.uses_includes if uses_includes is _Keep.FIELD else uses_includes,
     )
@@ -182,7 +181,7 @@ def publish_runtime_paths(state: ApiState, runtime_paths: constants.RuntimePaths
                 current,
                 runtime_paths=runtime_paths,
                 runtime_config=None,
-                config_load_result=None,
+                load_error=None,
                 source_fingerprint=None,
                 uses_includes=None,
             )
@@ -305,7 +304,7 @@ def _commit(
             state.snapshot = _published_snapshot(
                 state.snapshot,
                 runtime_config=commit.config,
-                config_load_result=ConfigLoadResult(success=True),
+                load_error=None,
                 source_fingerprint=commit.config.source_fingerprint,
                 uses_includes=commit.config.uses_includes,
             )
@@ -331,7 +330,6 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
     state = require_api_state(api_app)
     snapshot = state.snapshot
     attempt = load_config_attempt(runtime_paths)
-    result = attempt.result
     with state.config_lock:
         current = state.snapshot
         if current.revision != snapshot.revision or current.runtime_paths != runtime_paths:
@@ -344,14 +342,14 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
         same_source = (
             attempt.source_fingerprint is not None and attempt.source_fingerprint == current.source_fingerprint
         )
-        published_uses_includes = result.uses_includes if result.uses_includes is not None else current.uses_includes
-        if not result.success and current.uses_includes:
+        published_uses_includes = attempt.uses_includes if attempt.uses_includes is not None else current.uses_includes
+        if attempt.error is not None and current.uses_includes:
             published_uses_includes = True
         state.snapshot = _published_snapshot(
             current,
             increment_generation=not same_source,
             runtime_config=attempt.config if attempt.config is not None else current.runtime_config,
-            config_load_result=result,
+            load_error=attempt.error,
             source_fingerprint=attempt.source_fingerprint,
             uses_includes=published_uses_includes,
         )
@@ -360,13 +358,10 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
 
 def _loaded_runtime_config(snapshot: ApiSnapshot) -> tuple[Config, constants.RuntimePaths]:
     """Return the snapshot's validated runtime config and runtime, or raise its load failure or the missing-config error."""
-    result = snapshot.config_load_result
-    if result is not None and not result.success:
-        raise HTTPException(
-            status_code=result.error_status_code or 500,
-            detail=result.error_detail or "Failed to load configuration",
-        )
-    if snapshot.runtime_config is None:
+    error = snapshot.load_error
+    if isinstance(error, CONFIG_LOAD_USER_ERROR_TYPES):
+        raise HTTPException(status_code=422, detail=config_error_detail(error))
+    if error is not None or snapshot.runtime_config is None:
         raise HTTPException(status_code=500, detail="Failed to load configuration")
     return snapshot.runtime_config, snapshot.runtime_paths
 

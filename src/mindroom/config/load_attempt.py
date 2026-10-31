@@ -30,28 +30,19 @@ logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
-class ConfigLoadResult:
-    """Outcome of one config-file load attempt, as the API reports it."""
-
-    success: bool
-    error_status_code: int | None = None
-    error_detail: object | None = None
-    uses_includes: bool | None = False
-
-
-@dataclass(frozen=True)
 class ConfigLoad:
     """Everything one read of the config files produced, whether or not it validated.
 
+    ``uses_includes`` is None when the load failed before it could tell.
     ``error`` is the exception that failed the load, kept so the reload owner
     reports a failure exactly as a raising loader would. ``superseded`` marks a
     load the dashboard API discarded because a newer commit won.
     """
 
-    result: ConfigLoadResult
     config: Config | None
     source_fingerprint: str | None
     source_files: frozenset[Path] | None
+    uses_includes: bool | None
     error: Exception | None = None
     superseded: bool = False
 
@@ -121,29 +112,19 @@ def load_config_attempt(runtime_paths: RuntimePaths) -> ConfigLoad:
         if uses_includes is None:
             uses_includes = partial_source_uses_includes(exc)
         return ConfigLoad(
-            result=ConfigLoadResult(
-                success=False,
-                error_status_code=422,
-                error_detail=detail,
-                uses_includes=uses_includes,
-            ),
             config=None,
             source_fingerprint=source_fingerprint,
             source_files=source_files,
+            uses_includes=uses_includes,
             error=exc,
         )
     except Exception as exc:
         logger.exception("Failed to load config", config_path=str(runtime_paths.config_path))
         return ConfigLoad(
-            result=ConfigLoadResult(
-                success=False,
-                error_status_code=500,
-                error_detail="Failed to load configuration",
-                uses_includes=uses_includes,
-            ),
             config=None,
             source_fingerprint=source_fingerprint,
             source_files=source_files,
+            uses_includes=uses_includes,
             error=exc,
         )
     logger.info(
@@ -153,8 +134,8 @@ def load_config_attempt(runtime_paths: RuntimePaths) -> ConfigLoad:
     )
     logger.info("loaded_agent_configuration_count", agent_count=len(runtime_config.agents))
     return ConfigLoad(
-        result=ConfigLoadResult(success=True, uses_includes=uses_includes),
         config=runtime_config,
         source_fingerprint=source_fingerprint,
         source_files=source_files,
+        uses_includes=uses_includes,
     )

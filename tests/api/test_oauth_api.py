@@ -255,7 +255,7 @@ def _publish_config(
     context = main._app_context(api_app)
     runtime_config = Config.validate_with_runtime(payload, runtime_paths)
     context.runtime_config = runtime_config
-    context.config_load_result = config_lifecycle.ConfigLoadResult(success=True)
+    context.load_error = None
     config_lifecycle.app_state(api_app).api_auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
         settings=auth._ApiAuthSettings(

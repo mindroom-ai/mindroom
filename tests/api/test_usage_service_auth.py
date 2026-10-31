@@ -16,6 +16,7 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api.usage_export import UsageExportRunner
+from mindroom.config.main import ConfigRuntimeValidationError
 from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.schema import TableNames
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
@@ -349,11 +350,7 @@ def test_usage_export_sanitizes_failed_committed_configuration(
         api_state.snapshot = replace(
             snapshot,
             generation=snapshot.generation + 1,
-            config_load_result=config_lifecycle.ConfigLoadResult(
-                success=False,
-                error_status_code=422,
-                error_detail={"diagnostic": sensitive_detail},
-            ),
+            load_error=ConfigRuntimeValidationError(sensitive_detail),
         )
 
     try:
