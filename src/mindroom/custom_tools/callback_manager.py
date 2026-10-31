@@ -85,15 +85,16 @@ class CallbackManagerTools(Toolkit):
             workspace_root = context.agent_workspace_root(create=True)
             shell_workspace_root = _shell_workspace_root(context, workspace_root)
             token, token_hash = mint_trigger_capability()
+            thread_id = context.resolved_thread_id or context.thread_id
             record = store.create_single_use_capability_record(
                 trigger_id=f"callback_{secrets.token_hex(8)}",
                 owner_user_id=context.requester_id,
                 created_by_agent_name=context.agent_name,
                 created_in_room_id=context.room_id,
-                created_in_thread_id=context.resolved_thread_id or context.thread_id,
+                created_in_thread_id=thread_id,
                 target=ExternalTriggerTarget(
                     room_id=context.room_id,
-                    thread_id=context.resolved_thread_id or context.thread_id,
+                    thread_id=thread_id,
                     agent=context.agent_name,
                 ),
                 capability_token_hash=token_hash,
