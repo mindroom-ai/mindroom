@@ -541,7 +541,7 @@ export function Schedules() {
           <AlertDescription>
             <ul className="space-y-1">
               {unreadableRooms.map((room) => (
-                <li key={room.room_id}>
+                <li key={room.room_id} className="break-words">
                   <span className="font-medium">
                     {room.room_alias || room.room_id}
                   </span>
