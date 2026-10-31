@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
+from mindroom.constants import (
+    MATRIX_EVENT_ID_METADATA_KEY,
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    MINDROOM_HISTORY_METADATA_KEY,
+)
 from mindroom.history.interrupted_replay import (
     build_interrupted_replay_snapshot,
     is_interrupted_replay_run,
@@ -20,6 +24,7 @@ from mindroom.history.storage import (
     has_queued_force_compaction,
     read_scope_seen_event_ids,
     read_scope_state,
+    remove_runs_answering,
     set_force_compaction,
     with_force_compaction,
 )
@@ -160,13 +165,34 @@ def test_seen_event_ids_match_model_history_visibility(tmp_path: Path, *, is_tea
         session_id="session-1",
         owner_id=entity_id,
         runs=runs,
-        # Seen ids an earlier release preserved on the session row.
+        # Seen ids earlier releases copied onto the session row; no run or summary row holds them.
         metadata={MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["preserved-event"]}},
         created_at=1,
     )
 
-    assert read_scope_seen_event_ids(storage, session) == {"completed-event", "preserved-event", "running-event"}
+    assert read_scope_seen_event_ids(storage, session) == {"completed-event", "running-event"}
     assert [run.run_id for run in scope_visible_runs(session)] == ["completed", "running"]
+
+
+def test_an_edit_cut_returns_the_messages_only_the_removed_run_read(storage: ConversationStore) -> None:
+    """The context only an edited turn's removed run read returns, although earlier releases copied it onto the row."""
+    runs = [
+        replace(
+            _completed_run(run_id),
+            metadata={MATRIX_EVENT_ID_METADATA_KEY: f"${run_id}", MATRIX_SEEN_EVENT_IDS_METADATA_KEY: seen},
+        )
+        for run_id, seen in (("t1", ["$t1"]), ("t2", ["$t2", "$context-of-t2"]))
+    ]
+    copy = {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$t1", "$t2", "$context-of-t2"]}}
+    session = seed_session(storage, _session("session-1", runs=runs, metadata=copy))
+    assert read_scope_seen_event_ids(storage, session) == {"$t1", "$t2", "$context-of-t2"}
+
+    assert remove_runs_answering(storage, "session-1", HistoryScope(kind="agent", scope_id="test_agent"), "$t2")
+
+    stored = storage.load_session("session-1")
+    assert stored is not None
+    assert [run.run_id for run in stored.runs] == ["t1"]
+    assert read_scope_seen_event_ids(storage, stored) == {"$t1"}
 
 
 def test_queued_force_compaction_reads_the_session_row_without_its_runs(

@@ -22,9 +22,11 @@ from mindroom.constants import (
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history import storage as history_storage
+from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
+from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.participation import ParticipationGate
@@ -97,6 +99,7 @@ class _FakeTurnRecorder(TurnRecorder):
         completed_tools: Sequence[ToolTraceEntry],
         interrupted_tools: Sequence[ToolTraceEntry],
         original_status: RunStatus,
+        turn_input: TurnInput = NO_TURN_INPUT,
     ) -> None:
         self.interrupted_calls.append(
             {
@@ -113,6 +116,7 @@ class _FakeTurnRecorder(TurnRecorder):
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
             original_status=original_status,
+            turn_input=turn_input,
         )
 
 
@@ -1083,6 +1087,42 @@ def test_a_stop_between_continuation_attempts_records_the_turn_under_the_attempt
     assert first == "run-1"
     assert len({first, second, starting}) == 3
     assert stored == [starting]
+
+
+@pytest.mark.parametrize("spent", ["continuation", "empty"])
+def test_a_stop_before_the_next_attempt_keeps_the_thread_messages_no_stored_turn_holds(
+    persisted: list[tuple[str, InterruptedReplaySnapshot]],
+    spent: str,
+) -> None:
+    """A stop before the next attempt prepares keeps the spent attempt's thread messages only when its run is no turn.
+
+    A continuation's spent run is stored as a turn with them, so the stopped turn's record leaves them out; an empty
+    run is no turn, so the record keeps them.
+    """
+    context = Message(role="user", content='<msg event_id="$alice" from="@alice:hs"><![CDATA[Slot 7.]]></msg>')
+    attempts = 0
+
+    async def _attempt(run: TurnRunState, continuation: TurnContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            # Stopped while the next attempt prepares, before it starts.
+            raise asyncio.CancelledError
+        run.run_metadata = {MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$reply", "$alice"]}
+        run.turn_input = TurnInput(context=(context,))
+        run.attempt = _FixedAttempt()
+        if spent == "empty":
+            return CompletedAttempt(is_empty=True, attempt_run_id=continuation.active_run_id)
+        return CompletedAttempt(
+            attempt_run_id=continuation.active_run_id,
+            tool_executions=(_model_switch_execution("after-toolcall"),),
+        )
+
+    with pytest.raises(asyncio.CancelledError):
+        _run_turn(_streamed(_attempt), continuation=_continuation("original ask"))
+
+    [(_run_id, snapshot)] = persisted
+    assert snapshot.turn_input.context == (() if spent == "continuation" else (context,))
 
 
 def test_an_empty_run_s_retry_runs_under_a_run_id_of_its_own() -> None:

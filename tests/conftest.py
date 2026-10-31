@@ -153,6 +153,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
+from mindroom.matrix_rtc.call_manager import CallManager
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
@@ -221,7 +222,6 @@ if TYPE_CHECKING:
     from mindroom.history.request_messages import TurnMessages
     from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.orchestrator import _MultiAgentOrchestrator
     from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
@@ -508,7 +508,6 @@ __all__ = [
     "enforce_turn_authorization",
     "handle_card_response_for_test",
     "initialize_approval_store_for_test",
-    "install_call_manager_mock",
     "install_edit_message_mock",
     "install_edit_regeneration_mock",
     "install_generate_response_mock",
@@ -537,6 +536,7 @@ __all__ = [
     "runtime_paths_for",
     "serve_media_download",
     "serve_media_from_download",
+    "start_call_manager",
     "sync_bot_runtime_state",
     "test_runtime_paths",
     "unwrap_extracted_collaborator",
@@ -2345,9 +2345,12 @@ def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
     return bot
 
 
-def install_call_manager_mock(bot: RuntimeBot, call_manager: object | None) -> None:
-    """Install a call-manager fake through the shared test seam."""
-    bot._call_manager = cast("CallManager | None", call_manager)
+async def start_call_manager(bot: RuntimeBot) -> MagicMock:
+    """Start ``bot``'s call wiring as startup does, with a spec'd call-manager fake built for its config; return it."""
+    call_manager = MagicMock(spec=CallManager)
+    with patch("mindroom.bot.maybe_build_call_manager", new=AsyncMock(return_value=call_manager)):
+        await bot._register_call_manager_callbacks(MagicMock(spec=nio.AsyncClient))
+    return call_manager
 
 
 def normalize_console_output(text: str) -> str:

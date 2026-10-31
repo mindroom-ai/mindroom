@@ -6,7 +6,6 @@ import asyncio
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.background_tasks import create_background_task
 from mindroom.commands import config_confirmation
 from mindroom.hooks import (
     EVENT_ROOM_MEMBER_JOINED,
@@ -87,7 +86,7 @@ class RouterDuties:
 
     def invalidate_memberships(self, *, reason: str) -> None:
         """Fail closed when the router's view of Matrix membership is uncertain."""
-        self.deps.runtime.orchestrator.invalidate_agent_reply_memberships(reason=reason)
+        self._membership_sync.invalidate(self.deps.runtime.config, reason=reason)
 
     async def refresh_memberships_if_needed(self) -> None:
         """Rebuild room-backed reply grants after a receive-generation boundary."""
@@ -101,20 +100,7 @@ class RouterDuties:
     ) -> None:
         """Revoke uncertain control-room grants before the router admits more work."""
         runtime = self.deps.runtime
-        effects = self._membership_sync.pre_admit_ingestion(
-            runtime.config,
-            runtime.runtime_paths,
-            admission,
-            timeline_provenance,
-        )
-        if effects.invalidate_reason is not None:
-            self.invalidate_memberships(reason=effects.invalidate_reason)
-        if effects.authorization_changed:
-            create_background_task(
-                self.deps.runtime.orchestrator.revoke_reply_authorized_calls(),
-                name="matrix_rtc_reply_authorization_revoke",
-                owner=self.deps.runtime,
-            )
+        self._membership_sync.pre_admit_ingestion(runtime.config, runtime.runtime_paths, admission, timeline_provenance)
 
     async def live_membership_transition(self, room_id: str, event: nio.RoomMemberEvent) -> None:
         """Update reply grants from one durably admitted live Matrix membership transition."""
@@ -123,22 +109,6 @@ class RouterDuties:
             room_id,
             event,
             control_user_id=self.deps.matrix_id.full_id,
-            reconcile_effects=self._reconcile_membership_effects,
-        )
-
-    async def _reconcile_membership_effects(self) -> None:
-        """Run the effects that depend on one committed reply-membership change."""
-        orchestrator = self.deps.runtime.orchestrator
-        create_background_task(
-            orchestrator.reconcile_pending_invites(),
-            name="pending_invite_reconciliation",
-            owner=self.deps.runtime,
-        )
-        await orchestrator.revoke_reply_authorized_calls()
-        create_background_task(
-            orchestrator.reconcile_reply_authorized_calls(),
-            name="matrix_rtc_reply_authorization",
-            owner=self.deps.runtime,
         )
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:

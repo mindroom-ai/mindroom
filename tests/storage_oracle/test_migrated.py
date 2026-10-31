@@ -92,6 +92,8 @@ MASKS: dict[str, str] = {
     "(``ToolExecution.from_dict``)",
     "resumes_leave_out_the_paused_reply_s_notice": "#3108: a paused run's resume request leaves out the queued-message "
     "notice the paused run holds, which the reply that paused was given",
+    "preserved_seen_ids_not_read": "#3463: seen ids an older release preserved in session metadata no longer count as "
+    "seen (``mindroom.history.storage.read_scope_seen_event_ids``)",
 }
 # The masks each golden and legacy input uses; every other input compares unmasked.
 _PINS: dict[str, set[str]] = {
@@ -134,6 +136,7 @@ _PINS: dict[str, set[str]] = {
     },
     "legacy/captured__legacy_compaction_state__opening_storage_leaves_uncompacted_scopes_and_their_seen_ids_alone": {
         "history_state_is_the_owners_one_value",
+        "preserved_seen_ids_not_read",
         "row_ids_fill_the_record",
     },
     "legacy/captured__legacy_compaction_state__opening_storage_numbers_rows_an_old_writer_stored_without_an_index": {
@@ -150,6 +153,7 @@ _PINS: dict[str, set[str]] = {
     "goldens/team_panel": {"history_state_is_the_owners_one_value"},
     "legacy/captured__legacy_compaction_state__opening_storage_keeps_seen_ids_of_a_scope_without_a_summary": {
         "history_state_is_the_owners_one_value",
+        "preserved_seen_ids_not_read",
     },
 }
 # The masks each recorded end state uses; every other end state compares unmasked.
@@ -609,6 +613,20 @@ def _history_state_in_one_value(recorded: dict[str, Any], owner_key: str, used: 
     used.add("history_state_is_the_owners_one_value")
 
 
+def _preserved_seen_ids_not_read(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
+    """Show the recorded seen ids without the preserved ones the owner's history state holds and no history does."""
+    metadata = recorded["session"]["metadata"] if isinstance(recorded["session"], dict) else None
+    state = metadata.get(MINDROOM_HISTORY_METADATA_KEY, {}) if isinstance(metadata, dict) else {}
+    seen = recorded["seen_event_ids"]
+    if not isinstance(seen, list):
+        return
+    dropped = set(state.get("seen_event_ids", [])) - set(observed["seen_event_ids"])
+    if dropped:
+        assert dropped <= set(seen)
+        recorded["seen_event_ids"] = sorted(set(seen) - dropped)
+        used.add("preserved_seen_ids_not_read")
+
+
 def _session_columns_encoded_once(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
     """Show session data Agno 2 encoded twice, which a read of the row decodes to text, as the object stored once."""
     row, old = observed["row"], recorded["row"]
@@ -637,6 +655,7 @@ def _mask_session(
     _session_columns_encoded_once(recorded, observed, used)
     _force_requests_in_metadata(recorded, observed, used)
     _history_state_in_one_value(recorded, owner_key, used)
+    _preserved_seen_ids_not_read(recorded, observed, used)
     readers_in_creation_order(observed, used)
     _drop_history_copies(recorded, observed, used)
     _hide_folded(recorded, facts, used)

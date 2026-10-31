@@ -149,24 +149,8 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Handle a managed bot completing its first sync."""
         ...
 
-    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
-        """Revoke room-backed reply grants until the router refreshes them."""
-        ...
-
     def refresh_agent_reply_memberships(self) -> Awaitable[None]:
         """Rebuild room-backed reply grants from the router client."""
-        ...
-
-    async def reconcile_reply_authorized_calls(self) -> None:
-        """Revoke denied calls, then reconcile newly authorized joined rooms."""
-        ...
-
-    async def reconcile_pending_invites(self) -> None:
-        """Recheck cached room invites against each entity's invitation policy."""
-        ...
-
-    async def revoke_reply_authorized_calls(self) -> None:
-        """End active calls without running positive room reconciliation."""
         ...
 
     def send_approval_notice(

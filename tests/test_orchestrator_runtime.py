@@ -201,139 +201,6 @@ async def test_redacted_event_ids_read_only_synced_running_bots(tmp_path: Path) 
     assert await orchestrator.redacted_event_ids("unknown", "!room", ("$a",)) is None
 
 
-@pytest.mark.asyncio
-async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_reconciliation(
-    tmp_path: Path,
-) -> None:
-    """A refresh must finish its revoke pass without awaiting positive call starts."""
-    config = _runtime_bound_config(Config(), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
-    router_bot = MagicMock()
-    router_bot.client = AsyncMock(spec=nio.AsyncClient)
-    router_bot.reconcile_pending_invites = AsyncMock()
-    router_bot.revoke_reply_authorized_calls = AsyncMock()
-    router_bot.reconcile_reply_authorized_calls = AsyncMock(side_effect=AssertionError("must be scheduled"))
-    worker_bot = MagicMock()
-    worker_bot.client = AsyncMock(spec=nio.AsyncClient)
-    worker_bot.reconcile_pending_invites = AsyncMock()
-    worker_bot.revoke_reply_authorized_calls = AsyncMock()
-    worker_bot.reconcile_reply_authorized_calls = AsyncMock(side_effect=AssertionError("must be scheduled"))
-    install_bots(
-        orchestrator,
-        {
-            ROUTER_AGENT_NAME: router_bot,
-            "worker": worker_bot,
-        },
-    )
-
-    with (
-        patch.object(orchestrator.agent_reply_memberships, "refresh", new=AsyncMock()) as refresh,
-        patch.object(orchestrator.agent_reply_memberships, "needs_refresh", return_value=False),
-    ):
-        await orchestrator.refresh_agent_reply_memberships()
-
-    refresh.assert_awaited_once_with(config, orchestrator.runtime_paths, router_bot.client)
-    router_bot.revoke_reply_authorized_calls.assert_awaited_once_with()
-    worker_bot.revoke_reply_authorized_calls.assert_awaited_once_with()
-    router_bot.schedule_reply_authorized_call_reconciliation.assert_called_once_with()
-    worker_bot.schedule_reply_authorized_call_reconciliation.assert_called_once_with()
-    router_bot.reconcile_reply_authorized_calls.assert_not_awaited()
-    worker_bot.reconcile_reply_authorized_calls.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_successful_reply_membership_refresh_opens_new_revocation_gap(
-    tmp_path: Path,
-) -> None:
-    """A later invalidation must revoke calls again after an authoritative refresh."""
-    config = _runtime_bound_config(Config(), tmp_path)
-    config.router.access = ResponderAccessConfig(current_room_members=False, members_of_rooms=[])
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
-    router_bot = MagicMock()
-    router_bot.client = AsyncMock(spec=nio.AsyncClient)
-    router_bot.reconcile_pending_invites = AsyncMock()
-    router_bot.revoke_reply_authorized_calls = AsyncMock()
-    install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
-
-    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-    await orchestrator.refresh_agent_reply_memberships()
-    router_bot.schedule_reply_authorized_call_revocation.reset_mock()
-
-    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-
-    router_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
-
-
-@pytest.mark.asyncio
-async def test_invalidation_during_post_refresh_effects_skips_positive_reconciliation(
-    tmp_path: Path,
-) -> None:
-    """A new gap after refresh publication must revoke again and suppress positive starts."""
-    room_id = "!grant:localhost"
-    config = _runtime_bound_config(Config(), tmp_path)
-    config.router.access = ResponderAccessConfig(current_room_members=False, members_of_rooms=["grant"])
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
-    state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
-    state.add_room("grant", room_id, "#grant:localhost", "Grant")
-    save_matrix_state(state, orchestrator.runtime_paths)
-    client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
-    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
-    client.joined_members.return_value = nio.JoinedMembersResponse(
-        members=[nio.RoomMember("@mindroom_router:localhost", None, None)],
-        room_id=room_id,
-    )
-    effects_started = asyncio.Event()
-    release_effects = asyncio.Event()
-
-    async def block_post_refresh_effects() -> None:
-        effects_started.set()
-        await release_effects.wait()
-
-    router_bot = MagicMock()
-    router_bot.client = client
-    router_bot.reconcile_pending_invites = AsyncMock()
-    router_bot.revoke_reply_authorized_calls = AsyncMock(side_effect=block_post_refresh_effects)
-    install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
-    orchestrator.invalidate_agent_reply_memberships(reason="initial_gap")
-    router_bot.schedule_reply_authorized_call_revocation.reset_mock()
-
-    refresh_task = asyncio.create_task(orchestrator.refresh_agent_reply_memberships())
-    await asyncio.wait_for(effects_started.wait(), timeout=1.0)
-    try:
-        orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-    finally:
-        release_effects.set()
-        await refresh_task
-
-    router_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
-    router_bot.schedule_reply_authorized_call_reconciliation.assert_not_called()
-    router_bot.schedule_pending_invite_reconciliation.assert_called_once_with()
-
-
-def test_repeated_reply_membership_invalidation_schedules_one_revocation_wave(
-    tmp_path: Path,
-) -> None:
-    """Uncertain sync batches must not start overlapping positive call reconciliation."""
-    config = _runtime_bound_config(Config(), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
-    router_bot = MagicMock()
-    worker_bot = MagicMock()
-    install_bots(
-        orchestrator,
-        {
-            ROUTER_AGENT_NAME: router_bot,
-            "worker": worker_bot,
-        },
-    )
-    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-
-    router_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
-    worker_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
-    router_bot.schedule_reply_authorized_call_reconciliation.assert_not_called()
-    worker_bot.schedule_reply_authorized_call_reconciliation.assert_not_called()
-
-
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from contextlib import AbstractContextManager
@@ -5021,20 +4888,16 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True
         router_bot = MagicMock()
         router_bot.refresh_presence = AsyncMock()
-        router_bot.reconcile_pending_invites = AsyncMock(side_effect=RuntimeError("join failed"))
-        router_bot.schedule_pending_invite_reconciliation = MagicMock()
         install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-            patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
             updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
         router_bot.schedule_pending_invite_reconciliation.assert_called_once_with()
-        router_bot.reconcile_pending_invites.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_sync_runtime_support_services_rebinds_approval_cards(self, tmp_path: Path) -> None:
@@ -5780,7 +5643,59 @@ async def test_entity_changes_fence_room_grants_only_when_the_router_stops(
     """Room-backed reply grants are revoked before their only control client, the router, stops."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
 
-    with patch.object(orchestrator, "invalidate_agent_reply_memberships") as invalidate:
+    with patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as invalidate:
         await orchestrator._entities_changing(entities)
 
-    assert invalidate.call_args_list == ([call(reason="router_replacement")] if fenced else [])
+    assert invalidate.call_args_list == ([call(orchestrator.config, reason="router_replacement")] if fenced else [])
+
+
+@pytest.mark.asyncio
+async def test_shutdown_fails_room_grants_closed(tmp_path: Path) -> None:
+    """Once every bot stopped, room grants are revoked, so nothing left running can act on them."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+
+    with patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as invalidate:
+        await orchestrator.stop()
+
+    invalidate.assert_called_once_with(orchestrator.config, reason="shutdown")
+
+
+@pytest.mark.asyncio
+async def test_grant_refresh_without_a_router_fails_grants_closed(tmp_path: Path) -> None:
+    """Without the router's client no refresh can vouch for room grants, so they stay revoked and calls are revoked."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+
+    with (
+        patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as invalidate,
+        patch.object(orchestrator.agent_reply_memberships, "refresh") as refresh,
+    ):
+        await orchestrator.refresh_agent_reply_memberships()
+
+    invalidate.assert_called_once_with(orchestrator.config, reason="router_unavailable")
+    refresh.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reload_that_changes_reply_access_fails_room_grants_closed(tmp_path: Path) -> None:
+    """A reload that changes who may be answered revokes room grants under the published config until a refresh."""
+    current_config = _runtime_bound_config(Config(), tmp_path)
+    new_config = _runtime_bound_config(
+        Config(
+            router=RouterConfig(access=ResponderAccessConfig(current_room_members=False)),
+        ),
+        tmp_path,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=current_config)
+    orchestrator.running = True
+    router_bot = MagicMock()
+    router_bot.refresh_presence = AsyncMock()
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
+
+    with (
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as invalidate,
+    ):
+        await orchestrator.config_reload._update_config()
+
+    invalidate.assert_called_once_with(new_config, reason="config_reload")

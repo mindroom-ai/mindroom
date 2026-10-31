@@ -97,6 +97,8 @@ MASKS: dict[str, str] = {
     "notice the paused run holds, which the reply that paused was given",
     "queued_notices_stored_once": "#3108: a reply stores each queued-message notice once, as its run held it; nothing "
     "finalizes it after delivery or recovers it when a reply opens its scope",
+    "preserved_seen_ids_not_read": "#3463: seen ids earlier releases preserved in session metadata no longer count as "
+    "seen, so a redaction no longer rewrites the metadata to drop them",
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()
@@ -265,6 +267,13 @@ def drop_inert_session_totals(observed: dict[str, Any]) -> None:
         data.pop("session_metrics", None)
 
 
+def empty_missing_metadata(observed: dict[str, Any]) -> None:
+    """Show a session without metadata as one with empty metadata, which an old store's redaction rewrote it to."""
+    session = observed["session"]
+    if isinstance(session, dict) and session["metadata"] is None:
+        session["metadata"] = {}
+
+
 def readers_in_creation_order(observed: dict[str, Any], used: set[str]) -> None:
     """Show the turns readers list, which follow the log, in the creation order the old readers sorted them in."""
     turns, listed = observed["session_runs"], observed["list_runs"]
@@ -303,6 +312,9 @@ class MaskedBackend(StoreBackend):
         self.flag_restored = False
         # The update time an interrupted record's save moved the row to, and the one the old store left it at.
         self.news_at: tuple[int, int] | None = None
+        # When a redaction's cut made the old store rewrite a missing metadata value as an empty one, dropping the seen
+        # ids earlier releases preserved there, which no recorded sequence holds.
+        self.metadata_rewritten_at: int | None = None
         # The probe request, resume requests, and loaded runs of the old store's messages, when its notice rewrites set
         # them apart from the v2 store's at the latest observation.
         self.held_requests: tuple[object, object, list[dict[str, Any]]] | None = None
@@ -765,6 +777,8 @@ class MaskedBackend(StoreBackend):
     def redaction_cleanup(self, redacted: set[str]) -> object:
         removed = self._cut(partial(redaction_cut, redacted=redacted))
         assert isinstance(removed, list)
+        if removed and self.metadata_rewritten_at is None and self.store.read_session_metadata(SESSION_ID) is None:
+            self.metadata_rewritten_at = self.determinism.now
         if any(f"$reply-{run_id}" in removed for run_id in self.link_only):
             self._diverge("link_reaches_any_stored_run", "a redaction of a reply only the v2 store linked cut history")
         return removed
@@ -905,6 +919,7 @@ class MaskedBackend(StoreBackend):
         if untag_summary_requests(view["ledger"]):
             self.used.add("summary_requests_name_their_model")
         self._old_pending_view(view)
+        self._old_rewritten_metadata(view)
         self._old_history_metadata(view)
         self._old_session_totals(view)
         row = view["row"]
@@ -980,6 +995,18 @@ class MaskedBackend(StoreBackend):
         data = row["session_data"] if isinstance(row.get("session_data"), dict) else {}
         row["session_data"] = {**data, "session_metrics": totals}
         self.used.add("ledger_is_the_only_usage_owner")
+
+    def _old_rewritten_metadata(self, view: dict[str, Any]) -> None:
+        """Show the empty metadata a redaction left in the old store, and the update time its rewrite moved the row to."""
+        session, row = view["session"], view["row"]
+        if self.metadata_rewritten_at is None or not isinstance(session, dict):
+            return
+        if session["metadata"] is None:
+            session["metadata"] = {}
+            self.used.add("preserved_seen_ids_not_read")
+        if isinstance(row, dict) and row.get("updated_at", self.metadata_rewritten_at) < self.metadata_rewritten_at:
+            row["updated_at"] = self.metadata_rewritten_at
+            self.used.add("preserved_seen_ids_not_read")
 
     def _old_history_metadata(self, view: dict[str, Any]) -> None:
         """Show the owner's history state as the per-scope maps the Agno-layout store kept it in."""

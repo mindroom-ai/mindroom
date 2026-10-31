@@ -45,6 +45,7 @@ from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.server_fetch_url import ServerFetchUrlError
+from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -657,6 +658,61 @@ async def test_browser_opens_a_workspace_html_file_without_reaching_local_files(
         assert isinstance(screenshot, ToolValue)
     finally:
         await tool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_host_call_that_never_settles_stops_at_its_time_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page script that never settles fails its call at the time limit, and the shared browser keeps working."""
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"BROWSER_EXECUTABLE_PATH": _chromium_executable()},
+    )
+    tool, other_reply = BrowserTools(paths), BrowserTools(paths)
+
+    async def evaluate(toolkit: BrowserTools, fn: str) -> object:
+        return json.loads(await toolkit.browser(action="act", request={"kind": "evaluate", "fn": fn}))["result"]
+
+    try:
+        await tool.browser(action="start")
+        with monkeypatch.context() as patch:
+            patch.setattr("mindroom.custom_tools.browser._HOST_CALL_TIMEOUT_SECONDS", 0.5)
+            with pytest.raises(TimeoutError, match=r"^Browser action=act did not finish within 0\.5 seconds"):
+                async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                    await evaluate(tool, "() => new Promise(() => {})")
+        assert await evaluate(tool, "() => 1 + 1") == 2
+        assert await evaluate(other_reply, "() => 2 + 2") == 4
+    finally:
+        await tool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_jobs_host_call_stops_at_the_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A job's call stops at the time limit too, since the reply that started the job may wait for it."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    async def slow_act(**_kwargs: object) -> dict[str, str]:
+        await asyncio.sleep(0.2)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(tool, "_act", slow_act)
+    monkeypatch.setattr("mindroom.custom_tools.browser._HOST_CALL_TIMEOUT_SECONDS", 0.01)
+
+    with job_control_context(JobControl()), pytest.raises(TimeoutError, match=r"^Browser action=act did not finish"):
+        await tool.browser(action="act", request={"kind": "wait", "timeMs": 200})
+
+
+@pytest.mark.asyncio
+async def test_host_call_timeout_of_its_own_is_not_the_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timeout the call raises itself reaches the model unchanged, not as the call's time limit."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    monkeypatch.setattr(tool, "_act", AsyncMock(side_effect=TimeoutError("relay timed out")))
+
+    with pytest.raises(TimeoutError, match=r"^relay timed out$"):
+        await tool.browser(action="act", request={"kind": "click", "ref": "e1"})
 
 
 @pytest.mark.asyncio
