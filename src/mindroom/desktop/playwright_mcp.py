@@ -30,7 +30,9 @@ _OBSERVE_ACTIONS = frozenset({"status", "profiles", "tabs", "snapshot", "screens
 _CONTROL_ACTIONS = frozenset({"start", "stop", "open", "focus", "close", "navigate", "pdf", "upload", "dialog", "act"})
 _SUPPORTED_CONTROL_ACTIONS = ("start", "stop", "open")
 _UNBOUND_PAGE_ACTIONS = _CONTROL_ACTIONS - frozenset(_SUPPORTED_CONTROL_ACTIONS)
-BROWSER_ACTIONS = _OBSERVE_ACTIONS | _CONTROL_ACTIONS
+_BROWSER_ACTIONS = _OBSERVE_ACTIONS | _CONTROL_ACTIONS
+# The actions the extension serves; the rest need stable page identity, which Playwright MCP does not expose.
+SUPPORTED_BROWSER_ACTIONS = _OBSERVE_ACTIONS | frozenset(_SUPPORTED_CONTROL_ACTIONS)
 
 
 class PlaywrightBrowserError(RuntimeError):
@@ -127,7 +129,7 @@ class PlaywrightMCPBrowserProvider:
 
     async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:
         """Translate the stable MindRoom browser surface into Playwright MCP calls."""
-        if action not in BROWSER_ACTIONS:
+        if action not in _BROWSER_ACTIONS:
             msg = f"Unsupported Playwright browser action: {action}."
             raise PlaywrightBrowserError(msg)
         if action == "profiles":
@@ -142,20 +144,10 @@ class PlaywrightMCPBrowserProvider:
                     "status": "ok",
                 },
             )
-        if action == "status" and not self.running:
+        if action == "stop" or (action == "status" and not self.running):
             _reject_unexpected(parameters, frozenset())
-            return BrowserProviderResult(
-                {
-                    **_browser_capabilities(),
-                    "action": action,
-                    "provider": "playwright_mcp_extension",
-                    "running": False,
-                    "status": "ok",
-                },
-            )
-        if action == "stop":
-            _reject_unexpected(parameters, frozenset())
-            await self._stop_actor(permanent=False)
+            if action == "stop":
+                await self._stop_actor(permanent=False)
             return BrowserProviderResult(
                 {
                     **_browser_capabilities(),
@@ -166,27 +158,27 @@ class PlaywrightMCPBrowserProvider:
                 },
             )
 
-        calls, screenshot_output = self._calls_with_screenshot_output(action, parameters)
+        call, screenshot_output = self._call_with_screenshot_output(action, parameters)
         try:
-            last_result: CallToolResult | None = None
-            for call in calls:
-                last_result = await self._call_tool(
-                    call.tool_name,
-                    call.arguments,
-                    may_start=browser_action_requires_control(action),
-                )
-                _raise_result_error(action, last_result)
-            if last_result is None:
-                msg = f"Browser action {action} did not produce an MCP call."
-                raise PlaywrightBrowserError(msg)  # noqa: TRY301
-            provider_result = _provider_result(action, last_result, max_chars=_result_max_chars(parameters))
-            return _provider_result_with_screenshot(provider_result, screenshot_output)
+            result = await self._call_tool(
+                call.tool_name,
+                call.arguments,
+                may_start=browser_action_requires_control(action),
+            )
+            provider_result = _provider_result(action, result, max_chars=_result_max_chars(parameters))
+            if screenshot_output is None:
+                return provider_result
+            return BrowserProviderResult(
+                payload=provider_result.payload,
+                image=_browser_image_file(screenshot_output.path, screenshot_output.mime_type),
+            )
         except PlaywrightBrowserError as exc:
             if browser_action_requires_control(action):
                 raise PlaywrightActionOutcomeUnknownError(str(exc)) from exc
             raise
         finally:
-            _remove_screenshot_output(screenshot_output)
+            if screenshot_output is not None:
+                screenshot_output.path.unlink(missing_ok=True)
 
     @property
     def running(self) -> bool:
@@ -280,36 +272,32 @@ class PlaywrightMCPBrowserProvider:
             environment["PLAYWRIGHT_MCP_EXTENSION_TOKEN"] = self._extension_token
         return environment
 
-    def _calls_with_screenshot_output(
+    def _call_with_screenshot_output(
         self,
         action: str,
         parameters: dict[str, object],
-    ) -> tuple[list[_MCPCall], _ScreenshotOutput | None]:
-        calls = _mcp_calls(action, parameters)
+    ) -> tuple[_MCPCall, _ScreenshotOutput | None]:
+        call = _mcp_call(action, parameters)
         if action != "screenshot":
-            return calls, None
+            return call, None
         image_type = _optional_str(parameters, "type") or "png"
         path = self._output_dir / f"mindroom-screenshot-{uuid4().hex}.{image_type}"
-        screenshot_call = calls[-1]
-        calls[-1] = _MCPCall(
-            screenshot_call.tool_name,
-            {**screenshot_call.arguments, "filename": path.name},
-        )
-        return calls, _ScreenshotOutput(path=path, mime_type=f"image/{image_type}")
+        screenshot_call = _MCPCall(call.tool_name, {**call.arguments, "filename": path.name})
+        return screenshot_call, _ScreenshotOutput(path=path, mime_type=f"image/{image_type}")
 
 
 def browser_action_requires_control(action: str) -> bool:
     """Return whether one browser action mutates browser or page state."""
-    if action not in BROWSER_ACTIONS:
+    if action not in _BROWSER_ACTIONS:
         msg = f"Unsupported Playwright browser action: {action}."
         raise PlaywrightBrowserError(msg)
     return action in _CONTROL_ACTIONS
 
 
-def _mcp_calls(  # noqa: C901
+def _mcp_call(  # noqa: C901
     action: str,
     parameters: dict[str, object],
-) -> list[_MCPCall]:
+) -> _MCPCall:
     if parameters.get("targetId") is not None:
         msg = (
             "Playwright extension targetId is unsupported because MCP tab indices can change; "
@@ -327,10 +315,10 @@ def _mcp_calls(  # noqa: C901
         raise PlaywrightBrowserError(msg)
     if action in {"start", "status", "tabs"}:
         _reject_unexpected(parameters, frozenset())
-        return [_MCPCall("browser_tabs", {"action": "list"})]
+        return _MCPCall("browser_tabs", {"action": "list"})
     if action == "open":
         _reject_unexpected(parameters, frozenset({"targetUrl"}))
-        return [_MCPCall("browser_tabs", {"action": "new", "url": _required_str(parameters, "targetUrl")})]
+        return _MCPCall("browser_tabs", {"action": "new", "url": _required_str(parameters, "targetUrl")})
     if action == "snapshot":
         allowed = frozenset({"selector", "depth", "maxChars"})
         _reject_unexpected(parameters, allowed)
@@ -341,7 +329,7 @@ def _mcp_calls(  # noqa: C901
         depth = _optional_positive_int(parameters, "depth")
         if depth is not None:
             arguments["depth"] = depth
-        return [_MCPCall("browser_snapshot", arguments)]
+        return _MCPCall("browser_snapshot", arguments)
     if action == "screenshot":
         allowed = frozenset({"fullPage", "ref", "element", "type"})
         _reject_unexpected(parameters, allowed)
@@ -353,11 +341,11 @@ def _mcp_calls(  # noqa: C901
         }
         if target is not None:
             arguments.update({"element": target, "target": target})
-        return [_MCPCall("browser_take_screenshot", arguments)]
+        return _MCPCall("browser_take_screenshot", arguments)
     if action == "console":
         _reject_unexpected(parameters, frozenset({"level"}))
         level = _optional_str(parameters, "level") or "info"
-        return [_MCPCall("browser_console_messages", {"level": level})]
+        return _MCPCall("browser_console_messages", {"level": level})
     msg = f"Unsupported Playwright browser action: {action}."
     raise PlaywrightBrowserError(msg)
 
@@ -371,7 +359,9 @@ def _browser_capabilities() -> dict[str, object]:
 
 
 def _provider_result(action: str, result: CallToolResult, *, max_chars: int) -> BrowserProviderResult:
-    _raise_result_error(action, result)
+    if result.is_error:
+        error_text = _truncate_result_text(_result_text(result), max_chars=_MAX_RESULT_CHARS)
+        raise PlaywrightBrowserError(error_text or f"Playwright MCP action {action} failed.")
     text = _truncate_result_text(_result_text(result), max_chars=max_chars)
     images = [block for block in result.content if isinstance(block, ImageContent)]
     image = _browser_image(images[0]) if images else None
@@ -395,12 +385,6 @@ def _result_text(result: CallToolResult) -> str:
     return "\n\n".join(part for part in text_parts if part).strip()
 
 
-def _raise_result_error(action: str, result: CallToolResult) -> None:
-    if result.is_error:
-        text = _truncate_result_text(_result_text(result), max_chars=_MAX_RESULT_CHARS)
-        raise PlaywrightBrowserError(text or f"Playwright MCP action {action} failed.")
-
-
 def _browser_image(block: ImageContent) -> BrowserImage:
     try:
         content = base64.b64decode(block.data, validate=True)
@@ -417,24 +401,6 @@ def _browser_image_file(path: Path, mime_type: str) -> BrowserImage:
     with path.open("rb") as image_file:
         content = image_file.read(_MAX_IMAGE_BYTES + 1)
     return _validated_browser_image(content, mime_type)
-
-
-def _provider_result_with_screenshot(
-    provider_result: BrowserProviderResult,
-    screenshot_output: _ScreenshotOutput | None,
-) -> BrowserProviderResult:
-    if screenshot_output is None:
-        return provider_result
-    return BrowserProviderResult(
-        payload=provider_result.payload,
-        image=_browser_image_file(screenshot_output.path, screenshot_output.mime_type),
-    )
-
-
-def _remove_screenshot_output(screenshot_output: _ScreenshotOutput | None) -> None:
-    if screenshot_output is None:
-        return
-    screenshot_output.path.unlink(missing_ok=True)
 
 
 def _validated_browser_image(content: bytes, mime_type: str) -> BrowserImage:
@@ -522,8 +488,8 @@ def _json_string_size(value: str) -> int:
 
 
 __all__ = [
-    "BROWSER_ACTIONS",
     "PLAYWRIGHT_MCP_PACKAGE",
+    "SUPPORTED_BROWSER_ACTIONS",
     "BrowserImage",
     "BrowserProvider",
     "BrowserProviderResult",

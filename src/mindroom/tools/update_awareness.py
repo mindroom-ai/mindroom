@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     icon="RefreshCw",
     icon_color="text-cyan-500",
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/#mindroom-update-awareness",
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     function_names=("get_mindroom_update_status",),

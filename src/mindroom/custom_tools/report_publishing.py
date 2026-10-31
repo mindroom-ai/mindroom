@@ -13,6 +13,7 @@ from mindroom.custom_tools.dynamic_workflow_context import (
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.dynamic_workflows.spec import DynamicWorkflowError
+from mindroom.dynamic_workflows.store import AGENT_SCOPE
 from mindroom.report_publishing.store import (
     ARTIFACT_KIND_STATIC_SITE,
     PublishableReport,
@@ -26,7 +27,7 @@ from mindroom.workspaces import resolve_workspace_relative_path
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-_DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS = frozenset({"workflow_id", "run_id", "scope"})
+_DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS = frozenset({"workflow_id", "run_id"})
 _STATIC_SITE_SOURCE_KEYS = frozenset({"path", "title"})
 
 
@@ -155,11 +156,10 @@ def _resolve_dynamic_workflow_run_source(
     _reject_unsupported_source_fields(source, _DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS, "dynamic_workflow_run source")
     workflow_id = _required_source_text(source, "workflow_id", context="dynamic_workflow_run source")
     run_id = _required_source_text(source, "run_id", context="dynamic_workflow_run source")
-    scope = _optional_source_text(source, "scope", default="agent", context="dynamic_workflow_run source")
-    store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+    store, owner_id = dynamic_workflow_store_and_owner(context)
     run = store.get_workflow_run(
         workflow_id=workflow_id,
-        scope=scope,
+        scope=AGENT_SCOPE,
         owner_id=owner_id,
         run_id=run_id,
     )
@@ -172,7 +172,6 @@ def _resolve_dynamic_workflow_run_source(
         source={
             "workflow_id": workflow_id,
             "run_id": run_id,
-            "scope": scope,
         },
         artifact_path=store.run_report_html_artifact_path(run),
         title=store.run_report_title(run),
@@ -211,17 +210,7 @@ def _required_source_text(source: dict[str, object], key: str, *, context: str) 
     if key not in source:
         msg = f"{context} field '{key}' is missing."
         raise ReportPublishingError(msg)
-    return _optional_source_text(source, key, default="", context=context)
-
-
-def _optional_source_text(
-    source: dict[str, object],
-    key: str,
-    *,
-    default: str,
-    context: str,
-) -> str:
-    value = source.get(key, default)
+    value = source[key]
     if not isinstance(value, str) or not value.strip():
         msg = f"{context} field '{key}' must be a non-empty string."
         raise ReportPublishingError(msg)

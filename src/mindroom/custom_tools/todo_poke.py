@@ -22,10 +22,13 @@ from mindroom.custom_tools.todo_state import (
     PRIORITY_ORDER,
     TERMINAL_STATUSES,
     NoWriteResult,
+    TodoItemSnapshot,
     is_actionable,
     locked_update_json,
     no_write,
+    parse_todo_item,
     read_json,
+    require_string,
 )
 from mindroom.logging_config import get_logger
 
@@ -50,7 +53,6 @@ type _TodoScheduleQuery = Callable[[str, tuple[str, ...]], Awaitable[frozenset[s
 type _TodoPokeSender = Callable[[str, str, str, str | None, str | None], Awaitable[str | None]]
 type _StateWarningKey = tuple[str, str]
 
-_VALID_STATUSES = {"open", *TERMINAL_STATUSES}
 _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5
 _RETRY_BACKSTOP_SECONDS = 60 * 60
@@ -92,23 +94,11 @@ class TodoPokeDeps:
 
 
 @dataclass(frozen=True, slots=True)
-class _TodoItemSnapshot:
-    item_id: str
-    title: str
-    status: str
-    priority: str
-    depends_on: tuple[str, ...]
-    assigned_agent: str
-    requester_id: str | None
-    updated_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
 class _TodoThreadSnapshot:
     source_path: Path
     room_id: str
     thread_id: str | None
-    items: tuple[_TodoItemSnapshot, ...]
+    items: tuple[TodoItemSnapshot, ...]
     actionable_item_ids: frozenset[str]
 
 
@@ -125,7 +115,7 @@ class _TodoPokeScope:
     requester_id: str | None
     room_id: str
     thread_id: str | None
-    actionable_items: tuple[_TodoItemSnapshot, ...]
+    actionable_items: tuple[TodoItemSnapshot, ...]
     latest_actionable_update: datetime
     fingerprint: str
 
@@ -170,78 +160,11 @@ def todo_poke_policy(runtime_paths: RuntimePaths) -> TodoPokePolicy:
             defaults.interval_seconds,
             minimum_enabled_seconds=1,
         ),
-        cooldown_seconds=defaults.cooldown_seconds,
         quiet_seconds=_env_seconds(
             runtime_paths,
             "MINDROOM_TODO_POKE_QUIET_SECONDS",
             defaults.quiet_seconds,
         ),
-        max_pokes_per_scan=defaults.max_pokes_per_scan,
-    )
-
-
-def _require_string(data: Mapping[str, Any], key: str, *, allow_empty: bool = False) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or (not allow_empty and not value):
-        msg = f"{key} must be a {'string' if allow_empty else 'non-empty string'}"
-        raise ValueError(msg)
-    return value
-
-
-def _parse_updated_at(value: str) -> datetime:
-    try:
-        updated_at = datetime.fromisoformat(value)
-        if updated_at.tzinfo is None:
-            msg = "updated_at must include a timezone"
-            raise ValueError(msg)
-        return updated_at.astimezone(UTC)
-    except OverflowError as exc:
-        msg = "updated_at is outside the supported datetime range"
-        raise ValueError(msg) from exc
-
-
-def _parse_item(raw_item: object) -> _TodoItemSnapshot:
-    if not isinstance(raw_item, dict):
-        msg = "todo item must be an object"
-        raise TypeError(msg)
-    item_data = cast("dict[str, Any]", raw_item)
-
-    status = _require_string(item_data, "status")
-    if status not in _VALID_STATUSES:
-        msg = f"invalid todo status: {status}"
-        raise ValueError(msg)
-
-    raw_dependencies = item_data.get("depends_on")
-    if not isinstance(raw_dependencies, list) or not all(isinstance(value, str) for value in raw_dependencies):
-        msg = "depends_on must be a list of strings"
-        raise ValueError(msg)
-
-    priority = _require_string(item_data, "priority")
-    if priority not in PRIORITY_ORDER:
-        msg = f"invalid todo priority: {priority}"
-        raise ValueError(msg)
-
-    title = _require_string(item_data, "title").strip()
-    if not title:
-        msg = "title must be a non-empty string"
-        raise ValueError(msg)
-
-    # LEGACY_COMPAT: Todo items without a recorded requester_id.
-    # Legacy format: A native `todos.json` item with no `requester_id` key.
-    # Last legacy release: v2026.9.294 wrote every item without a requester; replacement: v2026.9.295 records the title author's `requester_id` on every item it writes.
-    # Handling: The item still parses so its thread's attributed work keeps poking, but it is never poked itself, because its title may come from a human the assignee refuses; its next write by an admitted requester records that requester.
-    # Coverage: tests/test_todo_poke.py::test_scan_never_pokes_items_without_a_recorded_requester, tests/test_todo_builtin.py::test_todo_write_records_requester_on_legacy_item.
-    requester_id = _require_string(item_data, "requester_id") if "requester_id" in item_data else None
-
-    return _TodoItemSnapshot(
-        item_id=_require_string(item_data, "id"),
-        title=title,
-        status=status,
-        priority=priority,
-        depends_on=tuple(raw_dependencies),
-        assigned_agent=_require_string(item_data, "assigned_agent", allow_empty=True),
-        requester_id=requester_id,
-        updated_at=_parse_updated_at(_require_string(item_data, "updated_at")),
     )
 
 
@@ -269,21 +192,21 @@ def _parse_thread_snapshot(
         raise TypeError(msg)
     thread_data = cast("dict[str, Any]", data)
 
-    room_id = _require_string(thread_data, "room_id")
-    stored_thread_id = _require_string(thread_data, "thread_id")
+    room_id = require_string(thread_data, "room_id")
+    stored_thread_id = require_string(thread_data, "thread_id")
     thread_id = None if stored_thread_id == "main" else stored_thread_id
     raw_items = thread_data.get("items")
     if not isinstance(raw_items, list):
         msg = "items must be a list"
         raise TypeError(msg)
 
-    parsed_items: list[_TodoItemSnapshot] = []
+    parsed_items: list[TodoItemSnapshot] = []
     item_ids: set[str] = set()
     skipped_item_ids: set[str] = set()
     for index, raw_item in enumerate(raw_items):
         try:
-            item = _parse_item(raw_item)
-        except (KeyError, TypeError, ValueError) as exc:
+            item = parse_todo_item(raw_item)
+        except (TypeError, ValueError) as exc:
             if isinstance(raw_item, dict):
                 skipped_item_id = cast("dict[str, Any]", raw_item).get("id")
                 if isinstance(skipped_item_id, str) and skipped_item_id:
@@ -357,7 +280,7 @@ def _read_thread_snapshots(
         except OSError as exc:
             _warn_state_once("todo_poke_state_file_skipped", path, str(exc), seen_warning_keys)
             had_io_failure = True
-        except (KeyError, TypeError, ValueError) as exc:
+        except (TypeError, ValueError) as exc:
             _warn_state_once("todo_poke_state_file_skipped", path, str(exc), seen_warning_keys)
         else:
             snapshots.append(snapshot)
@@ -366,7 +289,7 @@ def _read_thread_snapshots(
 
 def _fingerprint(
     snapshot: _TodoThreadSnapshot,
-    actionable_items: tuple[_TodoItemSnapshot, ...],
+    actionable_items: tuple[TodoItemSnapshot, ...],
 ) -> str:
     serialized_items = [
         {
@@ -389,14 +312,14 @@ def _fingerprint(
 
 
 def _poke_scopes(
-    snapshots: list[_TodoThreadSnapshot],
+    snapshots: tuple[_TodoThreadSnapshot, ...],
     seen_warning_keys: set[_StateWarningKey],
     requester_kind: Callable[[str, str, str], TodoPokeRequesterKind],
 ) -> list[_TodoPokeScope]:
     scopes: list[_TodoPokeScope] = []
     classify_requester = cache(requester_kind)
     for snapshot in snapshots:
-        items_by_owner: dict[tuple[str, str | None], list[_TodoItemSnapshot]] = {}
+        items_by_owner: dict[tuple[str, str | None], list[TodoItemSnapshot]] = {}
         for item in snapshot.items:
             if item.item_id not in snapshot.actionable_item_ids or not item.assigned_agent:
                 continue
@@ -421,9 +344,6 @@ def _poke_scopes(
                     assigned_agent=item.assigned_agent,
                 )
                 continue
-            # A human's work pokes as that human so the assignee applies its access policy to them.
-            # Work from internal senders shares one poke as the assignee's own turn.
-            poke_requester = None
             kind = classify_requester(item.requester_id, item.assigned_agent, snapshot.room_id)
             if kind is TodoPokeRequesterKind.REFUSED:
                 _warn_state_once(
@@ -435,8 +355,9 @@ def _poke_scopes(
                     assigned_agent=item.assigned_agent,
                 )
                 continue
-            if kind is TodoPokeRequesterKind.HUMAN:
-                poke_requester = item.requester_id
+            # A human's work pokes as that human so the assignee applies its access policy to them.
+            # Work from internal senders shares one poke as the assignee's own turn.
+            poke_requester = item.requester_id if kind is TodoPokeRequesterKind.HUMAN else None
             items_by_owner.setdefault((item.assigned_agent, poke_requester), []).append(item)
 
         for assigned_agent, requester_id in sorted(items_by_owner, key=lambda owner: (owner[0], owner[1] or "")):
@@ -456,7 +377,8 @@ def _poke_scopes(
 
 
 def _scope_key(scope: _TodoPokeScope) -> str:
-    # Internal scopes keep the key every earlier release used, so their dedup state survives upgrades.
+    # poke_state.json persists this key, so a new encoding would re-poke unchanged work once after an upgrade.
+    # Internal scopes have written this three-part form since todo pokes shipped; it is the current format, not a legacy one.
     key: list[str | None] = [scope.assigned_agent, scope.room_id, scope.thread_id]
     if scope.requester_id is not None:
         key.append(scope.requester_id)
@@ -572,7 +494,7 @@ def _format_poke_message(scope: _TodoPokeScope) -> str:
     lines = [f"@{scope.assigned_agent} Todo work is ready. Continue with these actionable items:"]
     ordered_items = sorted(
         scope.actionable_items,
-        key=lambda item: (PRIORITY_ORDER.get(item.priority, 9), item.item_id),
+        key=lambda item: (PRIORITY_ORDER[item.priority], item.item_id),
     )
     lines.extend(
         f"- {_literal_code_text(item.item_id)} [{item.priority}] {_literal_code_text(item.title)}"
@@ -730,7 +652,7 @@ async def scan_todo_pokes(
     todo_root = deps.state_root
     snapshot_batch = await asyncio.to_thread(_read_thread_snapshots, todo_root, remembered_warnings)
     try:
-        all_scopes = _poke_scopes(list(snapshot_batch.snapshots), remembered_warnings, deps.requester_kind)
+        all_scopes = _poke_scopes(snapshot_batch.snapshots, remembered_warnings, deps.requester_kind)
     except TodoPokeDeliveryUnavailableError:
         logger.debug("todo_poke_scan_skipped_runtime_unavailable")
         return 0

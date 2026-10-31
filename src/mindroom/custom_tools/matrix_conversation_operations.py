@@ -17,7 +17,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.custom_tools.attachments import (
-    resolve_send_attachments,
+    resolve_send_attachment,
     send_resolved_attachments,
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.message_extras import MessageExtraSection
+    from mindroom.matrix.message_extras import MatrixMessageExtra
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -113,7 +113,7 @@ class MatrixMessageOperations:
         text: str,
         thread_id: str | None,
         recipient_user_id: str | None,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         known_latest_thread_event_id: str | None = None,
         attachment_ids: list[str] | None = None,
         send_claim: MatrixMessageSendClaim | None = None,
@@ -218,7 +218,7 @@ class MatrixMessageOperations:
         recipient_user_id: str | None,
         room_mode: bool,
         new_thread: bool,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,
     ) -> MatrixMessageOperationResult:
@@ -235,7 +235,7 @@ class MatrixMessageOperations:
                     ),
                 ),
             )
-        text = message.strip() if message and message.strip() else None
+        text = (message or "").strip() or None
         if text is None and message_extras:
             return self._result("error", action="send", message="message_extras requires a non-empty message body.")
         if text is None and not attachments:
@@ -248,19 +248,19 @@ class MatrixMessageOperations:
         state = _MessageSendState(room_id=room_id, thread_id=thread_id)
         resolved: list[AttachmentRecord | RuntimeEncryptedMediaAttachment] = []
         for reference in attachments:
-            is_id = reference.startswith("att_")
-            files, ids, registered_ids, error = resolve_send_attachments(
+            resolution = resolve_send_attachment(
                 context,
-                attachment_ids=[reference] if is_id else [],
-                attachment_file_paths=[] if is_id else [reference],
+                reference,
                 workspace_root=self._tool_output_workspace_root,
                 file_access=self._file_access,
             )
-            if error is not None:
-                return self._result("error", action="send", message=error, **asdict(state))
-            resolved.extend(files)
-            state.resolved_attachment_ids.extend(ids)
-            state.newly_registered_attachment_ids.extend(registered_ids)
+            if isinstance(resolution, str):
+                return self._result("error", action="send", message=resolution, **asdict(state))
+            attachment, newly_registered = resolution
+            resolved.append(attachment)
+            state.resolved_attachment_ids.append(attachment.attachment_id)
+            if newly_registered:
+                state.newly_registered_attachment_ids.append(attachment.attachment_id)
 
         if (
             recipient_user_id is not None
@@ -334,7 +334,7 @@ class MatrixMessageOperations:
         if event_id is None:
             return self._result("error", action="react", message="event_id is required.")
 
-        reaction = message.strip() if message and message.strip() else "👍"
+        reaction = (message or "").strip() or "👍"
         response = await send_room_event_result(
             context.client,
             room_id,
@@ -371,7 +371,6 @@ class MatrixMessageOperations:
         if effective_thread_id is not None:
             return await self._thread_read_payload(
                 context,
-                action="read",
                 room_id=room_id,
                 thread_id=effective_thread_id,
                 read_limit=read_limit,
@@ -441,7 +440,6 @@ class MatrixMessageOperations:
         self,
         context: ToolRuntimeContext,
         *,
-        action: str,
         room_id: str,
         thread_id: str,
         read_limit: int,
@@ -450,7 +448,7 @@ class MatrixMessageOperations:
         recent_messages = thread_messages[-read_limit:]
         return self._result(
             "ok",
-            action=action,
+            action="read",
             room_id=room_id,
             thread_id=thread_id,
             limit=read_limit,
@@ -466,12 +464,12 @@ class MatrixMessageOperations:
         thread_id: str | None,
         event_id: str | None,
         message: str | None,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
     ) -> MatrixMessageOperationResult:
         if event_id is None:
             return self._result("error", action="edit", message="event_id is required for edit.")
-        new_text = message.strip() if isinstance(message, str) and message.strip() else None
-        if new_text is None:
+        new_text = (message or "").strip()
+        if not new_text:
             return self._result("error", action="edit", message="message is required for edit.")
 
         formatted_text = _format_direct_text(new_text)
@@ -523,7 +521,7 @@ class MatrixMessageOperations:
         recipient_user_id: str | None,
         room_mode: bool,
         new_thread: bool,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         read_limit: int,
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,

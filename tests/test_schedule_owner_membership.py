@@ -36,6 +36,7 @@ from tests.scheduling_helpers import (
     runnable_task,
     schedule_runtime_paths,
     scheduled_task_runtime,
+    scheduled_task_state_event,
     scheduling_bot,
     serve_full_room_state,
     serve_task_state_events,
@@ -109,7 +110,6 @@ def _owner_schedule(
         return nio.RoomPutStateResponse("$state", room_id)
 
     client = make_matrix_client_mock(user_id="@router:server")
-    client.homeserver = "https://matrix.example"
     client.user_id = "@router:server"
     client.device_id = "TEST"
     client.rooms = {}
@@ -360,10 +360,61 @@ async def test_edit_during_membership_lookup_survives_stale_departure(
 
 
 @pytest.mark.asyncio
+async def test_a_one_time_task_finishing_during_an_edit_write_stays_completed(tmp_path: Path) -> None:
+    """The final status waits for an edit that is still writing, so the task cannot run again after a restart."""
+    client, workflow, state = _owner_schedule([{"membership": "join"}])
+    runtime_paths = schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER)
+    existing = await scheduling.get_scheduled_task(client, "!test:server", "owner_task", runtime_paths)
+    assert existing is not None
+    edit_writing = asyncio.Event()
+    finish_edit = asyncio.Event()
+    executed = asyncio.Event()
+    write_state = client.room_put_state.side_effect
+
+    async def slow_edit_write(room_id: str, event_type: str, state_key: str, content: dict[str, Any]) -> object:
+        edit_writing.set()
+        await finish_edit.wait()
+        return await write_state(room_id, event_type, state_key, content)
+
+    api_client = make_matrix_client_mock(user_id="@router:server")
+    api_client.room_get_state_event.side_effect = client.room_get_state_event.side_effect
+    api_client.room_put_state.side_effect = slow_edit_write
+    serve_task_state_events(api_client, sender=_SCHEDULE_WRITER)
+
+    async def deliver(*_args: object, **_kwargs: object) -> ScheduledWorkflowOutcome:
+        executed.set()
+        return ScheduledWorkflowOutcome(status="delivered")
+
+    with patch("mindroom.scheduling.executor.execute_scheduled_workflow", side_effect=deliver):
+        async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
+            tasks.create_task(
+                scheduling.save_edited_scheduled_task(
+                    api_client,
+                    "!test:server",
+                    "owner_task",
+                    workflow.model_copy(update={"message": "Edited request"}),
+                    existing,
+                    runtime_paths,
+                    timezone="UTC",
+                ),
+            )
+            await edit_writing.wait()
+            tasks.create_task(
+                run_once_task(client, "owner_task", workflow, Config(), runtime_paths, make_conversation_reader_mock()),
+            )
+            await executed.wait()
+            finish_edit.set()
+
+    assert state["status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("canceller", ["departed_creator", "cancel", "cancel_all"])
 async def test_edit_cannot_resurrect_schedule_while_cancellation_is_persisting(
     owner_membership_runtime_paths: RuntimePaths,
+    canceller: str,
 ) -> None:
-    """Runtime cancellation and a separate API client must serialize their writes."""
+    """An edit from a separate API client waits for a cancellation that is still writing, so it cannot bring the task back."""
     client, workflow, state = _owner_schedule([{"membership": "leave"}])
     existing = await scheduling.get_scheduled_task(
         client,
@@ -385,7 +436,6 @@ async def test_edit_cannot_resurrect_schedule_while_cancellation_is_persisting(
 
     client.room_put_state.side_effect = blocked_write
     api_client = make_matrix_client_mock(user_id="@router:server")
-    api_client.homeserver = client.homeserver
     api_client.room_get_state_event.side_effect = client.room_get_state_event.side_effect
     api_client.room_put_state.side_effect = write_state
     serve_task_state_events(api_client, sender=_SCHEDULE_WRITER)
@@ -403,16 +453,28 @@ async def test_edit_cannot_resurrect_schedule_while_cancellation_is_persisting(
                 timezone="UTC",
             )
 
-    async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
-        tasks.create_task(
-            runnable_task(
+    async def cancel() -> object:
+        if canceller == "cancel":
+            return await scheduling.cancel_scheduled_task(
                 client,
                 "!test:server",
                 "owner_task",
-                config=Config(),
-                runtime_paths=owner_membership_runtime_paths,
-            ),
+                owner_membership_runtime_paths,
+            )
+        if canceller == "cancel_all":
+            return await scheduling.cancel_all_scheduled_tasks(client, "!test:server", owner_membership_runtime_paths)
+        return await runnable_task(
+            client,
+            "!test:server",
+            "owner_task",
+            config=Config(),
+            runtime_paths=owner_membership_runtime_paths,
         )
+
+    event = scheduled_task_state_event("owner_task", dict(state), sender=_SCHEDULE_WRITER)
+    serve_full_room_state(client, "!test:server", [event])
+    async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
+        tasks.create_task(cancel())
         await write_started.wait()
         tasks.create_task(edit())
         await edit_started.wait()

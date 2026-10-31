@@ -621,7 +621,7 @@ async def test_browser_primary_placement_binds_positional_arguments(
     agent, context = _context_agent(tmp_path, "browser", tool_config=_DESKTOP_CONFIG)
     function = offered_function(agent, "browser_control")
     with tool_runtime_context(context):
-        result = await function.entrypoint("snapshot", " desktop ")
+        result = await function.entrypoint("snapshot", "desktop")
 
     assert json.loads(result)["provider"] == "desktop"
     assert len(desktop_commands) == 1
@@ -632,7 +632,6 @@ async def test_browser_primary_placement_binds_positional_arguments(
 @pytest.mark.parametrize(
     ("arguments", "error"),
     [
-        ({"target": "sandbox"}, "does not support sandbox or node"),
         ({"target": "host", "node": "unsupported"}, "node parameter is not supported"),
         ({"target": "desktop"}, "configured Matrix desktop device identity"),
     ],
@@ -658,7 +657,7 @@ async def test_browser_discovery_keeps_existing_worker_behavior(
     worker_requests: list[dict[str, object]],
     action: str,
 ) -> None:
-    """Discovery ignores target/node hints as before, including a desktop default."""
+    """Discovery ignores target/node hints, including a desktop default."""
     agent, context = _context_agent(
         tmp_path / "primary",
         "browser",
@@ -668,7 +667,7 @@ async def test_browser_discovery_keeps_existing_worker_behavior(
         response = await run_offered(
             agent,
             "browser_control",
-            {"action": action, "target": "sandbox", "node": "ignored"},
+            {"action": action, "target": "desktop", "node": "ignored"},
         )
 
     assert not response.is_error
