@@ -586,11 +586,20 @@ async def test_gateway_calls_share_the_detached_session(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("public_url", ["https://assistant.example.org", "https://Assistant.example.org:443/"])
 async def test_missing_connection_is_redacted_with_portal_link(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
+    public_url: str,
 ) -> None:
-    """Missing connection is redacted with portal link."""
+    """Missing connection is redacted with a portal link at the normalized public origin."""
+    context = replace(
+        context,
+        runtime_paths=replace(
+            context.runtime_paths,
+            process_env={**context.runtime_paths.process_env, "MINDROOM_PUBLIC_URL": public_url},
+        ),
+    )
 
     def account() -> str:
         message = "secret backend diagnostics"
