@@ -97,12 +97,24 @@ def _append_queued_notice_if_needed(
     if notice_context is None or (notice_context.mid_turn_gate is not None and not judged):
         return
     response_turn_id = notice_context.response_turn_id
-    if any(message.from_history and _is_response_notice(message, response_turn_id) for message in messages):
+    waiting = notice_context.state is not None and notice_context.state.has_pending_human_messages()
+    stored = next(
+        (
+            index
+            for index, message in enumerate(messages)
+            if message.from_history and _is_response_notice(message, response_turn_id)
+        ),
+        None,
+    )
+    if stored is not None:
         # A model switch continued this response in a new run: the run it stopped stored the notice, which the new
-        # run's history replays, so the response's history keeps that one.
+        # run's history replays. That copy moves last while a newer message waits and stays history, so the response
+        # stores its notice once.
+        if waiting:
+            messages.append(messages.pop(stored))
         return
     messages[:] = [message for message in messages if not _is_response_notice(message, response_turn_id)]
-    if notice_context.state is None or not notice_context.state.has_pending_human_messages():
+    if not waiting:
         return
     messages.append(
         Message(

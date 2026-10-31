@@ -790,7 +790,10 @@ async def test_a_model_switch_continuation_keeps_the_one_notice_the_run_it_conti
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """The switched run stored the reply's notice, which the continuation replays; a later batch adds no second one."""
+    """The switched run stored the reply's notice, which the continuation replays; a later batch moves that copy last.
+
+    The copy stays replayed history, so the continuation stores no second notice.
+    """
     reply = _reply(
         tmp_path,
         monkeypatch,
@@ -810,6 +813,7 @@ async def test_a_model_switch_continuation_keeps_the_one_notice_the_run_it_conti
     assert probe.calls == ["a", "b"]
     *_, last = reply.model.requests
     assert [message.from_history for message in last.messages if is_queued_notice_message(message)] == [True]
+    assert is_queued_notice_message(last.messages[-1])
     session = reply.storage.load_session(SESSION_ID)
     assert session is not None
     assert [(run.run_id == "run-1", _notice_markers(run.messages)) for run in session.runs] == [

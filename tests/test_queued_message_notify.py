@@ -2693,6 +2693,20 @@ async def test_notice_hook_preserves_a_prior_replayed_notice() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("waiting", [True, False])
+async def test_a_replayed_notice_of_the_same_reply_moves_last_only_while_a_message_waits(*, waiting: bool) -> None:
+    """A run replaying its reply's stored notice moves that copy last while a newer message waits, and adds none."""
+    with queued_message_signal_context(_StaticQueuedState(pending=waiting)) as notice_context:
+        stored = _owned_notice(notice_context.response_turn_id, from_history=True)
+        messages = [stored, OwnedMessage(role="user", content="Continue the same task.")]
+        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
+
+    assert _notice_count(messages) == 1
+    assert (messages[-1] is stored) is waiting
+    assert stored.from_history
+
+
+@pytest.mark.asyncio
 async def test_notice_reinjects_at_end_across_multiple_tool_rounds() -> None:
     """Repeated tool rounds should keep exactly one queued notice at the end of the prompt."""
     with queued_message_signal_context(_StaticQueuedState(pending=True)):
