@@ -796,7 +796,7 @@ def config_validate(
     """Validate config.yaml and check for common issues.
 
     Parses the YAML config using Pydantic and reports errors in a friendly format.
-    Also warns about provider API keys and settings a model leaves unset; a key saved in the dashboard counts as set.
+    Also warns about provider API keys and settings a model leaves unset; a key or Ollama host saved in the dashboard counts as set.
     """
     runtime_paths = activate_cli_runtime(path)
     config_path = runtime_paths.config_path
@@ -975,22 +975,27 @@ class _MissingEnvVariable(NamedTuple):
 
 
 def _models_with_a_key(config: Config, runtime_paths: RuntimePaths) -> set[str]:
-    """Return the names of the models that need no key from the environment, by the dashboard's missing-key check.
+    """Return the names of the models that need no key from the environment, by the runtime's lookups.
 
-    That check asks the runtime's key lookup: a key of the model's own, or its route's shared key in the credential
-    store.
+    A model has a key of its own, or its route's shared key in the credential store, as the dashboard's missing-key
+    check asks; an Ollama model's "key" is the server saved in the credential store.
     """
-    # providers.credentials opens the credential store, which CLI startup must not import.
+    # The credential modules open the credential store, which CLI startup must not import.
+    from mindroom.credentials.sync import saved_ollama_host  # noqa: PLC0415
     from mindroom.providers.credentials import missing_model_api_key_provider  # noqa: PLC0415
 
     with_key: set[str] = set()
-    for name in config.models:
+    for name, model in config.models.items():
         try:
-            if missing_model_api_key_provider(config, runtime_paths, name) is None:
-                with_key.add(name)
+            if provider_route(model.provider) == "ollama":
+                found = saved_ollama_host(runtime_paths) is not None
+            else:
+                found = missing_model_api_key_provider(config, runtime_paths, name) is None
         except (OSError, ValueError):
-            # Without the credential store, the model's stored keys are unknown, so it needs its route's variable.
+            # Without the credential store, the model's stored values are unknown, so it needs its route's variable.
             continue
+        if found:
+            with_key.add(name)
     return with_key
 
 
@@ -1026,16 +1031,17 @@ def _variables_a_model_reads(route: str, model: ModelConfig, *, has_key: bool) -
             (env_key,) for setting, env_key in VERTEXAI_CLAUDE_ENV_BY_KEY.items() if not _model_sets(model, setting)
         ]
     env_key = constants.env_key_for_provider(route)
-    # OLLAMA_HOST is the server of an Ollama model that sets none, as ``host`` or ``client_params.host``; a key never
-    # replaces it.
-    needed = not (model.host or _model_sets(model, "host")) if route == "ollama" else not has_key
+    # OLLAMA_HOST is the server of an Ollama model that sets none, as ``host`` or ``client_params.host``, and the
+    # credential store saved none.
+    needed = not (has_key or (route == "ollama" and (model.host or _model_sets(model, "host"))))
     return [(env_key,)] if env_key and needed else []
 
 
 def find_missing_env_variables(config: Config, runtime_paths: RuntimePaths) -> list[_MissingEnvVariable]:
     """Return each environment variable a model reads for a value that neither the model nor the environment sets.
 
-    A key the credential store holds for the model or its route counts as set, as it does for the runtime.
+    A key the credential store holds for the model or its route, or an Ollama host it saved, counts as set, as it does for
+    the runtime.
     """
     from mindroom.credentials.environment import get_secret_from_env  # noqa: PLC0415
 

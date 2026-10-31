@@ -2394,6 +2394,28 @@ class TestConfigValidate:
             ("azure", "AZURE_OPENAI_API_KEY", ("dashboard",)),
         ]
 
+    def test_validate_takes_an_ollama_host_saved_in_the_dashboard(self, tmp_path: Path) -> None:
+        """An Ollama model without a host reaches the server the dashboard saved, so OLLAMA_HOST is not missing."""
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        )
+        config = Config(
+            models={"default": ModelConfig(provider="ollama", id="qwen3.8:27b")},
+            router=RouterConfig(model="default"),
+        )
+        assert config_cli.find_missing_env_variables(config, runtime_paths) == [
+            ("ollama", "OLLAMA_HOST", ("default",)),
+        ]
+
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            "ollama",
+            {"host": "http://gpu.example:11434", "_source": "ui"},
+        )
+
+        assert config_cli.find_missing_env_variables(config, runtime_paths) == []
+
     @pytest.mark.parametrize("service", ["openai", "OPENAI_API_KEY"])
     def test_validate_takes_a_shared_key_saved_in_the_dashboard(self, tmp_path: Path, service: str) -> None:
         """A shared key the dashboard saved, under the provider's name or its variable's, supplies that route only."""
