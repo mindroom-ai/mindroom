@@ -33,6 +33,7 @@ from mindroom.matrix.client_room_admin import (
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.personal_room_store import (
     PersonalRoomRecord,
+    personal_room_create_lock,
     personal_room_digest,
     personal_room_record_path,
     read_personal_room,
@@ -233,8 +234,9 @@ class PersonalRoomService:
                     record.resume_source_room_id = source_room_id
                     await run_blocking_until_complete(write_personal_room, path, record)
                 if record.room_id is None:
-                    record.room_id = await self._resolve_or_create(record, source_room_id)
-                    await run_blocking_until_complete(write_personal_room, path, record)
+                    async with personal_room_create_lock(path):
+                        record.room_id = await self._resolve_or_create(record, source_room_id)
+                        await run_blocking_until_complete(write_personal_room, path, record)
                 human_joined = await self._reconcile_membership(
                     record,
                     path,
