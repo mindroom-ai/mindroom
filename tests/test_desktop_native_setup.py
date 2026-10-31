@@ -100,6 +100,8 @@ def test_login_authenticates_with_configured_headers_and_saves_access_mode(
         assert headers["x-static-header"] == "static-value"
         if access:
             assert isinstance(headers, CloudflareAccessHeaders)
+            # The Matrix client prepares the token before every request.
+            await headers.prepare()
             assert headers["cf-access-token"] == "access-token"
         return DesktopLoginMethod.PASSWORD
 
@@ -142,6 +144,8 @@ def test_pair_preserves_or_upgrades_saved_access_only_after_claim(
         headers = kwargs["http_headers"]
         assert headers["x-static-header"] == "static-value"
         if saved_access or requested_access:
+            assert isinstance(headers, CloudflareAccessHeaders)
+            await headers.prepare()
             assert headers["cf-access-token"] == "access-token"
         return owner
 

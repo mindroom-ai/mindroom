@@ -175,7 +175,7 @@ def test_setup_remembers_cloudflare_access_after_a_successful_claim(
     """An older login upgraded through terminal setup also authenticates later app starts."""
     pair = AsyncMock(return_value="verification", side_effect=None if succeeds else ValueError("expired code"))
     monkeypatch.setattr(desktop_cli, "_pair_desktop", pair)
-    monkeypatch.setattr("mindroom.desktop.cloudflare_access.cloudflare_access_headers", lambda *_: {})
+    monkeypatch.setattr("mindroom.desktop.session.desktop_http_headers", lambda *_args, **_kwargs: {})
 
     result = CliRunner().invoke(desktop_cli.desktop_app, [*_setup_args(), "--cloudflare-access"])
 
@@ -197,7 +197,7 @@ def test_setup_does_not_overwrite_a_login_replaced_during_pairing(
         return "verification"
 
     monkeypatch.setattr(desktop_cli, "_pair_desktop", replace_login)
-    monkeypatch.setattr("mindroom.desktop.cloudflare_access.cloudflare_access_headers", lambda *_: {})
+    monkeypatch.setattr("mindroom.desktop.session.desktop_http_headers", lambda *_args, **_kwargs: {})
 
     result = CliRunner().invoke(desktop_cli.desktop_app, [*_setup_args(), "--cloudflare-access"])
 

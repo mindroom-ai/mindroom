@@ -25,8 +25,8 @@ from mindroom.desktop.session import (
     DesktopSessionError,
     _open_owned_session,
     _transport_binding,
+    desktop_http_headers,
     desktop_transport_binding_path,
-    load_desktop_http_headers,
     load_desktop_session,
     login_desktop_client,
     open_desktop_client,
@@ -299,7 +299,32 @@ def test_http_headers_file_loads_string_mapping(tmp_path: Path) -> None:
     path.write_text('{"X-Access-Client": "test-secret"}', encoding="utf-8")
     path.chmod(0o600)
 
-    assert load_desktop_http_headers(path) == {"X-Access-Client": "test-secret"}
+    assert desktop_http_headers("https://matrix.example.org", path, cloudflare_access=False) == {
+        "X-Access-Client": "test-secret",
+    }
+
+
+def test_cloudflare_access_adds_its_token_for_the_homeserver_to_the_file_headers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Choosing Access keeps the file's headers and authenticates against the given homeserver."""
+    path = tmp_path / "matrix-http-headers.json"
+    path.write_text('{"X-Access-Client": "test-secret"}', encoding="utf-8")
+    path.chmod(0o600)
+    applications: list[str] = []
+
+    def create(app_url: str) -> SimpleNamespace:
+        applications.append(app_url)
+        return SimpleNamespace(current_token=lambda: "access-token")
+
+    monkeypatch.setattr("mindroom.desktop.cloudflare_access.CloudflareAccessTokenProvider.create", create)
+
+    headers = desktop_http_headers("https://matrix.example.org", path, cloudflare_access=True)
+
+    assert applications == ["https://matrix.example.org"]
+    assert dict(headers or {}) == {"X-Access-Client": "test-secret", "cf-access-token": "access-token"}
+    assert desktop_http_headers("https://matrix.example.org", None, cloudflare_access=False) is None
 
 
 @pytest.mark.skipif(
@@ -313,7 +338,7 @@ def test_http_headers_file_refuses_group_readable_secrets(tmp_path: Path) -> Non
     path.chmod(0o640)
 
     with pytest.raises(DesktopSessionError, match="must not be readable"):
-        load_desktop_http_headers(path)
+        desktop_http_headers("https://matrix.example.org", path, cloudflare_access=False)
 
 
 @pytest.mark.parametrize("payload", ['["not-an-object"]', '{"X-Access-Client": 1}'])
@@ -327,7 +352,7 @@ def test_http_headers_file_requires_string_mapping(
     path.chmod(0o600)
 
     with pytest.raises(DesktopSessionError, match="JSON object of string values"):
-        load_desktop_http_headers(path)
+        desktop_http_headers("https://matrix.example.org", path, cloudflare_access=False)
 
 
 @pytest.mark.asyncio
