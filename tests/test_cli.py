@@ -21,11 +21,9 @@ from mindroom.cli import main as main_module
 from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.main import app
 from mindroom.config.main import Config
-from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
-from mindroom.orchestration.accounts import _prepare_internal_user
+from mindroom.matrix.users import _register_user
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 from tests.matrix_state_helpers import save_matrix_state
 
@@ -34,8 +32,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 runner = CliRunner()
-DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
-DEFAULT_INTERNAL_DISPLAY_NAME = MindRoomUserConfig().display_name
 
 
 def _runtime_paths(tmp_path: Path) -> constants_mod.RuntimePaths:
@@ -81,7 +77,6 @@ class TestUserAccountManagement:
             device_id="TEST_DEVICE",
             access_token=TEST_ACCESS_TOKEN,
         )
-        mock_client.set_displayname.return_value = AsyncMock()
 
         runtime_paths = _runtime_paths(tmp_path)
         with patch("mindroom.matrix.users.matrix_client", return_value=mock_context):
@@ -123,7 +118,6 @@ class TestUserAccountManagement:
             device_id="TEST_DEVICE",
             access_token=TEST_ACCESS_TOKEN,
         )
-        mock_client.set_displayname.return_value = AsyncMock()
 
         runtime_paths = _runtime_paths(tmp_path)
         with patch("mindroom.matrix.users.matrix_client", return_value=mock_context):
@@ -142,158 +136,6 @@ class TestUserAccountManagement:
             mock_client.register.assert_called_once()
             mock_client.login.assert_called_once_with("test_password")
             mock_client.set_displayname.assert_called_once_with("Existing User")
-
-    @pytest.mark.asyncio
-    async def test_internal_user_account_creates_new(
-        self,
-        tmp_path: Path,
-        mock_matrix_client: tuple[MagicMock, AsyncMock],
-    ) -> None:
-        """Test ensuring user account when none exists."""
-        mock_context, mock_client = mock_matrix_client
-
-        # Setup mocks for successful registration
-        mock_client.register.return_value = nio.RegisterResponse(
-            user_id=f"@{DEFAULT_INTERNAL_USERNAME}_test:localhost",
-            device_id="TEST_DEVICE",
-            access_token=TEST_ACCESS_TOKEN,
-        )
-        mock_client.login.return_value = nio.LoginResponse(
-            user_id=f"@{DEFAULT_INTERNAL_USERNAME}_test:localhost",
-            device_id="TEST_DEVICE",
-            access_token=TEST_ACCESS_TOKEN,
-        )
-        mock_client.set_displayname.return_value = AsyncMock()
-
-        with (
-            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-        ):
-            runtime_paths = _runtime_paths(tmp_path)
-            _config = Config(
-                mindroom_user={"username": DEFAULT_INTERNAL_USERNAME, "display_name": DEFAULT_INTERNAL_DISPLAY_NAME},
-            )
-            await _prepare_internal_user(_config.mindroom_user, runtime_paths, update_runtime_state=False)
-
-            # Check that user was created
-            state = MatrixState.load(runtime_paths=runtime_paths)
-
-            assert INTERNAL_USER_ACCOUNT_KEY in state.accounts
-            assert state.accounts[INTERNAL_USER_ACCOUNT_KEY].username == f"{DEFAULT_INTERNAL_USERNAME}_test"
-            generated_password = state.accounts[INTERNAL_USER_ACCOUNT_KEY].password
-            assert generated_password
-            assert generated_password != "user_secure_password"  # noqa: S105
-
-            # Verify registration was called
-            mock_client.register.assert_called_once()
-            mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
-
-    @pytest.mark.asyncio
-    async def test_internal_user_account_keeps_stored_credentials_without_login(
-        self,
-        tmp_path: Path,
-        mock_matrix_client: tuple[MagicMock, AsyncMock],
-    ) -> None:
-        """Existing stored credentials are kept without logging in or re-registering."""
-        mock_context, mock_client = mock_matrix_client
-
-        # Create existing config with internal user account
-        state = MatrixState()
-        state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "existing_password")
-
-        runtime_paths = _runtime_paths(tmp_path)
-        save_matrix_state(state, runtime_paths)
-
-        with (
-            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-        ):
-            _config = Config(
-                mindroom_user={
-                    "username": DEFAULT_INTERNAL_USERNAME,
-                    "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
-                },
-            )
-            await _prepare_internal_user(_config.mindroom_user, runtime_paths, update_runtime_state=False)
-
-            # Should use existing account
-            result_config = MatrixState.load(runtime_paths=runtime_paths)
-            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
-            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "existing_password"  # noqa: S105
-
-            mock_client.register.assert_not_called()
-            mock_client.login.assert_not_called()
-            mock_client.set_displayname.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_internal_user_account_uses_configured_identity(
-        self,
-        tmp_path: Path,
-        mock_matrix_client: tuple[MagicMock, AsyncMock],
-    ) -> None:
-        """Test ensuring user account uses configured username and display name."""
-        mock_context, mock_client = mock_matrix_client
-        custom_config = Config(mindroom_user={"username": "alice", "display_name": "Alice Smith"})
-
-        mock_client.register.return_value = nio.RegisterResponse(
-            user_id="@alice:localhost",
-            device_id="TEST_DEVICE",
-            access_token=TEST_ACCESS_TOKEN,
-        )
-        mock_client.set_displayname.return_value = AsyncMock()
-
-        with (
-            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-        ):
-            runtime_paths = _runtime_paths(tmp_path)
-            await _prepare_internal_user(custom_config.mindroom_user, runtime_paths, update_runtime_state=False)
-
-            state = MatrixState.load(runtime_paths=runtime_paths)
-            assert state.accounts[INTERNAL_USER_ACCOUNT_KEY].username == "alice"
-            generated_password = state.accounts[INTERNAL_USER_ACCOUNT_KEY].password
-            assert generated_password
-            assert generated_password != "user_secure_password"  # noqa: S105
-            mock_client.register.assert_called_once()
-            register_call_kwargs = mock_client.register.call_args.kwargs
-            assert register_call_kwargs["username"] == "alice"
-            assert register_call_kwargs["password"] == generated_password
-            assert register_call_kwargs["device_name"] == "mindroom_agent"
-            mock_client.set_displayname.assert_called_once_with("Alice Smith")
-
-    @pytest.mark.asyncio
-    async def test_internal_user_account_uses_existing_persisted_identity(
-        self,
-        tmp_path: Path,
-        mock_matrix_client: tuple[MagicMock, AsyncMock],
-    ) -> None:
-        """Internal user config username is only a proposal when no account exists yet."""
-        mock_context, mock_client = mock_matrix_client
-        state = MatrixState()
-        state.add_account(
-            INTERNAL_USER_ACCOUNT_KEY,
-            "actual_mindroom_user",
-            "existing_password",
-            requested_username="alice",
-            domain="matrix.example",
-        )
-
-        custom_config = Config(mindroom_user={"username": "alice", "display_name": "Alice Smith"})
-
-        runtime_paths = _runtime_paths(tmp_path)
-        save_matrix_state(state, runtime_paths)
-        with (
-            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-        ):
-            await _prepare_internal_user(custom_config.mindroom_user, runtime_paths, update_runtime_state=False)
-
-        persisted_state = MatrixState.load(runtime_paths=runtime_paths)
-        account = persisted_state.accounts[INTERNAL_USER_ACCOUNT_KEY]
-        assert account.username == "actual_mindroom_user"
-        assert account.domain == "matrix.example"
-        assert mindroom_user_id(custom_config, runtime_paths) == "@actual_mindroom_user:matrix.example"
-        mock_client.register.assert_not_called()
 
 
 def test_mindroom_user_username_normalizes_single_leading_at() -> None:

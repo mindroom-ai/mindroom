@@ -952,7 +952,6 @@ async def test_update_config_removes_and_stops_entities_before_publishing_and_sy
         _runtime_paths(tmp_path),
     )
     persist_entity_accounts(current_config, orchestrator.runtime_paths)
-    persist_entity_accounts(updated_config, orchestrator.runtime_paths)
     events: list[str] = []
 
     def record(event: str) -> None:

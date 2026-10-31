@@ -108,7 +108,6 @@ class TestDynamicConfigUpdate:
             },
             models={"default": {"provider": "openai", "id": "test-model"}},
         )
-        persist_entity_accounts(initial_config, orchestrator.runtime_paths)
         persist_entity_accounts(updated_config, orchestrator.runtime_paths)
 
         # Mock the explicit runtime-bound config loader used by update_config().
@@ -178,7 +177,6 @@ class TestDynamicConfigUpdate:
         )
 
         orchestrator = orchestrator_factory(initial_config)
-        persist_entity_accounts(initial_config, orchestrator.runtime_paths)
         persist_entity_accounts(updated_config, orchestrator.runtime_paths)
 
         general_bot = _mock_agent_bot()
@@ -683,11 +681,11 @@ class TestDynamicConfigUpdate:
         mock_setup.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
-    async def test_mindroom_user_username_change_is_rejected_without_partial_update(
+    async def test_mindroom_user_change_keeps_current_config_when_account_preparation_fails(
         self,
         orchestrator_factory: Callable[[Config], _MultiAgentOrchestrator],
     ) -> None:
-        """Reject changing mindroom_user.username and keep the current runtime config."""
+        """An internal-user change whose account preparation fails keeps the current runtime config and bots."""
         initial_config = Config(
             agents={
                 "general": {

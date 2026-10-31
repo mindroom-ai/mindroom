@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -203,13 +202,8 @@ class TestAgentBot(AgentBotTestBase):
         # either of the superseded public sync/admission engines.
         mock_client.add_event_admission_callback.assert_not_called()
         mock_client.add_response_callback.assert_not_called()
-        registered_event_types = [call.args[1] for call in mock_client.add_event_callback.call_args_list]
-        assert registered_event_types == [nio.InviteEvent]
+        mock_client.add_event_callback.assert_called_once_with(bot._room_lifecycle.on_invite, nio.InviteEvent)
         assert bot._journal_dispatcher.callbacks.on_room_lifecycle == bot._on_room_member
-        invite_callback = next(
-            call.args[0] for call in mock_client.add_event_callback.call_args_list if call.args[1] is nio.InviteEvent
-        )
-        assert invite_callback == bot._room_lifecycle.on_invite
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
@@ -802,41 +796,6 @@ class TestAgentBot(AgentBotTestBase):
         bot._journal_dispatcher.stop.assert_awaited_once()
         bot._ingestion_session.close.assert_awaited_once()
         bot.client.close.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(("accept_invites", "expected_join_calls"), [(True, 1), (False, 0)])
-    async def test_agent_bot_on_invite(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        accept_invites: bool,
-        expected_join_calls: int,
-    ) -> None:
-        """Test handling room invitations."""
-        config = self._config_for_storage(tmp_path)
-        config.agents[mock_agent_user.agent_name].accept_invites = accept_invites
-
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
-
-        mock_event = MagicMock()
-        mock_event.sender = "@user:localhost"
-        mock_room = nio.MatrixInvitedRoom("!test:localhost", bot.agent_user.user_id)
-        mock_room.inviter = mock_event.sender
-        bot.client.invited_rooms = {mock_room.room_id: mock_room}
-
-        change_membership = AsyncMock(return_value=True)
-        bot._room_lifecycle.deps = replace(
-            bot._room_lifecycle.deps,
-            change_membership=change_membership,
-        )
-        with (
-            patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room", return_value=True),
-        ):
-            await bot._room_lifecycle._record_pending_room_invite(mock_room.room_id, mock_event.sender)
-            await bot._room_lifecycle._handle_recorded_invite(mock_room, mock_event.sender)
-
-        assert change_membership.await_count == expected_join_calls
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_ignore_own(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
