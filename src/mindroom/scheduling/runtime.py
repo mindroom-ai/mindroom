@@ -38,8 +38,8 @@ from mindroom.scheduling.tasks import (
     ScheduledTaskStateReadError,
     get_scheduled_task,
     persist_scheduled_task_state,
-    schedule_edit_lock,
     scheduled_call_workflow_digest,
+    scheduled_task_state_lock,
     scheduled_task_timezone,
     task_records_with_writers,
     withdraw_scheduled_call,
@@ -200,7 +200,7 @@ class ScheduledTaskRuntime:
             if missed_by > _MISSED_TASK_MAX_AGE_SECONDS:
                 logger.warning("Skipping ancient missed task", task_id=task.task_id, missed_by_seconds=missed_by)
                 try:
-                    async with schedule_edit_lock(client, task.room_id, task.task_id):
+                    async with scheduled_task_state_lock(client, task.room_id, task.task_id):
                         current = await _get_pending_task_record(client, task.room_id, task.task_id, self.runtime_paths)
                         if current == task:
                             await _save_task_status(
@@ -263,7 +263,7 @@ class ScheduledTaskRuntime:
         client = bot.client
         assert client is not None
         try:
-            async with schedule_edit_lock(client, room_id, task_id):
+            async with scheduled_task_state_lock(client, room_id, task_id):
                 task = await _get_pending_task_record(client, room_id, task_id, self.runtime_paths)
                 if task is None:
                     return
@@ -418,7 +418,7 @@ class _TaskRunner:
                             return task
                         departed_task = task
 
-                    async with schedule_edit_lock(client, self.room_id, self.task_id):
+                    async with scheduled_task_state_lock(client, self.room_id, self.task_id):
                         current_task = await _get_pending_task_record(
                             client=client,
                             room_id=self.room_id,
@@ -519,12 +519,12 @@ class _TaskRunner:
     async def _save_status(self, task: ScheduledTaskRecord, status: str) -> None:
         """Persist a one-time task's final status; a write cut off by its owner's stop is retried once it runs again.
 
-        The write holds the task's edit lock, so an edit still writing cannot land after it and revive the task.
+        The write holds the task's state lock, so an edit still writing cannot land after it and revive the task.
         """
         while True:
             async with self.runtime.operation(self.owner) as (bot, client):
                 try:
-                    async with schedule_edit_lock(client, self.room_id, self.task_id):
+                    async with scheduled_task_state_lock(client, self.room_id, self.task_id):
                         await _save_task_status(
                             client,
                             task,
