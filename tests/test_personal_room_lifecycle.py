@@ -761,8 +761,12 @@ async def test_membership_change_retries_a_blocked_personal_room_at_once(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("clock")
-async def test_membership_change_during_an_attempt_retries_after_it(coordination: Coordination) -> None:
-    """An attempt may read the room before a change it races, so that change still earns one more attempt."""
+@pytest.mark.parametrize("racing_attempt_fails", [True, False])
+async def test_membership_change_during_an_attempt_retries_after_it(
+    coordination: Coordination,
+    racing_attempt_fails: bool,
+) -> None:
+    """An attempt may read the room before a change it races, so that change earns one more attempt either way."""
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
     mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
@@ -773,7 +777,7 @@ async def test_membership_change_during_an_attempt_retries_after_it(coordination
         attempts += 1
         if attempts == 2:
             lifecycle.membership_changed("!personal:localhost")
-        if attempts <= 2:
+        if attempts == 1 or (attempts == 2 and racing_attempt_fails):
             raise mismatch
 
     coordination.owner.ensure.side_effect = ensure

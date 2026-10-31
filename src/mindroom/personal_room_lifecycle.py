@@ -522,8 +522,12 @@ class PersonalRoomLifecycle:
         self._roster_mismatches.pop(candidate, None)
         if revision == self._config_revision:
             self._candidate_backoff.pop(candidate, None)
-            # A live trigger can fail during this attempt and ask for a re-invite it did not carry.
-            if self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner):
+            # A live trigger can fail during this attempt and ask for a re-invite it did not carry,
+            # and a membership change during it may come after the roster it checked.
+            if (
+                self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
+                and candidate not in self._membership_changed
+            ):
                 self._completed_candidates.add(candidate)
         return True
 
