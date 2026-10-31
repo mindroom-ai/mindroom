@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload, ToolJobRuntime
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -684,7 +685,7 @@ async def _collect_in_a_run(
     outcomes: dict[str, BackgroundOutcome | None],
     *,
     kind: str = "tool",
-) -> tuple[RunRecord, ToolJobRuntime, JobTools, ToolExecutionIdentity, object]:
+) -> tuple[RunRecord, ToolJobRuntime, JobTools, ToolExecutionIdentity, ToolRuntimeContext]:
     """Start jobs with the given outcomes (``None`` keeps one running), then collect them in one saved agent run."""
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
@@ -729,7 +730,7 @@ async def _collect_in_a_run(
 
     with tool_runtime_context(context):
         response = await run()
-    return response, runtime, tools, owner, (storage, context)
+    return response, runtime, tools, owner, context
 
 
 def _payload(text: str, *, error: str | None = None) -> EncodedResultPayload:
@@ -739,7 +740,7 @@ def _payload(text: str, *, error: str | None = None) -> EncodedResultPayload:
 @pytest.mark.asyncio
 async def test_collect_returns_every_ended_job_once(tmp_path: Path) -> None:
     """One collect returns every ended job's result, and acknowledging them makes a second collect find none."""
-    response, runtime, tools, owner, (_storage, context) = await _collect_in_a_run(
+    response, runtime, tools, owner, context = await _collect_in_a_run(
         tmp_path,
         {
             "job_a": BackgroundOutcome("completed", "result a", result_payload=_payload("result a")),
@@ -765,7 +766,7 @@ async def test_collect_reads_a_job_saved_failed_without_error_text_as_failed(tmp
     """Collect reports a failed job that older releases saved without error text as a failure that says so."""
     # Both shapes releases through v2026.10.512 saved: the runtime's empty result alone, and the executor's payload.
     call_failure = encode_result_payload(ToolResultPayload(value=None, error=""))
-    response, runtime, _tools, _owner, _rest = await _collect_in_a_run(
+    response, runtime, _tools, _owner, _context = await _collect_in_a_run(
         tmp_path,
         {
             "runtime_failure": BackgroundOutcome("failed", ""),
@@ -796,7 +797,7 @@ async def test_collect_reports_the_others_when_one_result_cannot_be_read(
         return await original(runtime, job)
 
     monkeypatch.setattr(consumption_module, "read_result_payload", read)
-    response, runtime, _tools, owner, (_storage, _context) = await _collect_in_a_run(
+    response, runtime, _tools, owner, _context = await _collect_in_a_run(
         tmp_path,
         {
             "job_a": BackgroundOutcome("completed", "result a", result_payload=_payload("result a")),
@@ -816,7 +817,7 @@ async def test_collect_reports_the_others_when_one_result_cannot_be_read(
 @pytest.mark.asyncio
 async def test_collect_acknowledges_a_cancelled_job_without_a_result(tmp_path: Path) -> None:
     """A cancelled job is reported as cancelled and acknowledged, though it has no result."""
-    response, runtime, _tools, owner, (_storage, _context) = await _collect_in_a_run(
+    response, runtime, _tools, owner, _context = await _collect_in_a_run(
         tmp_path,
         {"job_a": BackgroundOutcome("cancelled")},
     )
@@ -832,7 +833,7 @@ async def test_collect_acknowledges_a_cancelled_job_without_a_result(tmp_path: P
 @pytest.mark.asyncio
 async def test_collect_leaves_running_jobs_alone(tmp_path: Path) -> None:
     """A job still running is neither returned nor claimed."""
-    response, runtime, _tools, owner, (_storage, _context) = await _collect_in_a_run(tmp_path, {"running": None})
+    response, runtime, _tools, owner, _context = await _collect_in_a_run(tmp_path, {"running": None})
     try:
         assert response.tools[0].result == "No ended background jobs."
         job = await lookup(runtime, "running", owner=owner, depth=0)
@@ -844,7 +845,7 @@ async def test_collect_leaves_running_jobs_alone(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_collect_returns_a_background_subagents_answer(tmp_path: Path) -> None:
     """A finished background subagent's answer is collected like any other job's result."""
-    response, runtime, _tools, _owner, (_storage, _context) = await _collect_in_a_run(
+    response, runtime, _tools, _owner, _context = await _collect_in_a_run(
         tmp_path,
         {"child": delegation_outcome("completed", "the child's answer")},
         kind="delegation",
