@@ -123,27 +123,38 @@ class TestInstancesEndpoints:
     def test_list_user_instances_triggers_background_sync(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
-        """Test that stale instances trigger background sync."""
-        # Setup - instance with stale sync time
-        stale_time = datetime.now(UTC) - timedelta(minutes=5)
-        instances = [
-            {
-                "id": "1",
-                "instance_id": "123",
-                "subscription_id": "sub_123",
+        """Only rows whose Kubernetes status is missing or stale, and not already syncing, get a background sync."""
+        from backend.routes.instances import _syncing_instances
+
+        now = datetime.now(UTC)
+        stale = (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+
+        def row(instance_id: int, synced_at: str | None) -> dict:
+            return {
+                "id": str(instance_id),
+                "instance_id": instance_id,
+                "subscription_id": f"sub_{instance_id}",
                 "account_id": "acc_test_123",
                 "status": "running",
-                "kubernetes_synced_at": stale_time.isoformat(),
+                "kubernetes_synced_at": synced_at,
             }
-        ]
-        mock_supabase.table().select().eq().execute.return_value = Mock(data=instances)
 
-        # Make request
-        response = client.get("/my/instances")
+        mock_supabase.table().select().eq().execute.return_value = Mock(
+            data=[row(1, stale), row(2, None), row(3, now.isoformat()), row(4, stale)]
+        )
+        sync = AsyncMock()
 
-        # Verify
+        _syncing_instances.add("4")
+        try:
+            with patch("backend.routes.instances._background_sync_instance_status", sync):
+                response = client.get("/my/instances")
+        finally:
+            _syncing_instances.discard("4")
+
         assert response.status_code == 200
-        # Background task would be scheduled for stale instance
+        assert [call.args for call in sync.await_args_list] == [("1",), ("2",)]
+        hints = [instance["status_hint"] for instance in response.json()["instances"]]
+        assert hints == [None, "Running (awaiting initial Kubernetes health check).", None, None]
 
     def test_list_user_instances_no_instances(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
