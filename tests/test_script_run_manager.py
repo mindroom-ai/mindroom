@@ -30,18 +30,23 @@ from mindroom.script_runs.manager import (
     ScriptRunLimits,
     ScriptRunManager,
     ScriptRunManagerError,
+    ScriptRunStatus,
 )
 from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
+from mindroom.script_runs.reasons import SUPERVISOR_UNAVAILABLE
 from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore
 from mindroom.script_runs.worker_client import (
+    ScriptWorkerError,
     WorkerScriptCancel,
     WorkerScriptStatus,
 )
+from mindroom.shell import supervisor as shell_supervisor_module
 from mindroom.shell.execution import ShellRunResult
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
 from mindroom.workers.runtime import build_worker_launch_config
@@ -55,7 +60,7 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     import os
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 
 def _runtime_paths(
@@ -271,6 +276,7 @@ class _WorkerClient:
         default_factory=lambda: WorkerScriptStatus(state="exited", exit_code=-15),
     )
     status_results: list[WorkerScriptStatus] = field(default_factory=list)
+    status_failures: list[BaseException] = field(default_factory=list)
     cancel_failures: list[BaseException] = field(default_factory=list)
     launch_failure: BaseException | None = None
     launch_entered: asyncio.Event | None = None
@@ -323,6 +329,8 @@ class _WorkerClient:
         run_id: str,
     ) -> WorkerScriptStatus:
         del worker, run_id
+        if self.status_failures:
+            raise self.status_failures.pop(0)
         if self.status_results:
             return self.status_results.pop(0)
         return self.next_status
@@ -1244,6 +1252,52 @@ async def test_ambiguous_worker_launch_failure_retires_exact_worker_when_runner_
     assert client.cancel_handles == [f"shell:{stored.run_id.removeprefix('script-')}"]
     assert backend.handles == {}
     assert len(backend.retired_worker_keys) == 2
+
+
+@pytest.mark.xfail(strict=True, reason="Worker and backend errors escape the manager request boundary.")
+@pytest.mark.asyncio
+async def test_worker_launch_failure_fails_the_start_request_with_the_manager_error(tmp_path: Path) -> None:
+    """A worker that rejects or loses a launch fails the requester's start with the one script request error."""
+    manager, _backend, client = _manager(tmp_path)
+    client.launch_failure = ScriptWorkerError("Worker script request failed: connection reset", failure_kind="worker")
+
+    with pytest.raises(ScriptRunManagerError, match="connection reset"):
+        await manager.run(_context(tmp_path), source="print('ok')\n")
+
+
+@pytest.mark.xfail(strict=True, reason="Worker and backend errors escape the manager request boundary.")
+@pytest.mark.asyncio
+async def test_worker_backend_failure_fails_the_start_request_with_the_manager_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backend that cannot create the run's worker fails the requester's start with the one script request error."""
+    manager, backend, _client = _manager(tmp_path)
+
+    def refuse_worker(spec: WorkerSpec, **_kwargs: object) -> WorkerHandle:
+        del spec
+        msg = "Worker container could not be created."
+        raise WorkerBackendError(msg)
+
+    monkeypatch.setattr(backend, "ensure_worker", refuse_worker)
+
+    with pytest.raises(ScriptRunManagerError, match="could not be created"):
+        await manager.run(_context(tmp_path), source="print('ok')\n")
+
+    assert manager.store.list_runs()[0].state is ScriptRunState.FAILED
+
+
+@pytest.mark.xfail(strict=True, reason="Worker and backend errors escape the manager request boundary.")
+@pytest.mark.asyncio
+async def test_worker_status_failure_fails_the_status_request_with_the_manager_error(tmp_path: Path) -> None:
+    """An unreachable worker fails the requester's status poll with the one script request error."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    client.status_failures.append(ScriptWorkerError("Worker script request failed: timed out", failure_kind="worker"))
+
+    with pytest.raises(ScriptRunManagerError, match="timed out"):
+        await manager.status(context, run_id=run.run_id)
 
 
 @pytest.mark.asyncio
@@ -2932,3 +2986,65 @@ def test_snapshot_write_refuses_linked_workspace_directories(tmp_path: Path, pla
         manager_module._write_snapshot(workspace, f"script-{'a' * 32}", source=b"print('ok')\n", token="secret")  # noqa: S106
 
     assert list(elsewhere.iterdir()) == []
+
+
+async def _settled_status(
+    manager: ScriptRunManager,
+    context: ToolRuntimeContext,
+    run_id: str,
+    *,
+    until: Callable[[ScriptRunStatus], bool],
+) -> ScriptRunStatus:
+    deadline = asyncio.get_running_loop().time() + SETTLE_TIMEOUT_SECONDS
+    while True:
+        status = await manager.status(context, run_id=run_id)
+        if until(status) or asyncio.get_running_loop().time() >= deadline:
+            return status
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Background scripts need Linux process groups.")
+async def test_unsafe_local_runs_launch_report_and_stop_through_a_real_supervisor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsafe-local runs go through the real shim and supervisor for launch, status, cancellation, exit, and loss."""
+    supervisor = shell_supervisor_module._ShellSupervisorManager()
+    monkeypatch.setattr(shell_supervisor_module, "_manager", supervisor)
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    manager.cancellation_grace_seconds = SETTLE_TIMEOUT_SECONDS
+    manager.cancellation_poll_interval_seconds = 0.05
+    context = _context(tmp_path, mode="local")
+    try:
+        sleeper = await manager.run(context, source="import time\nprint('ready', flush=True)\ntime.sleep(60)\n")
+        assert sleeper.state is ScriptRunState.RUNNING
+        running = await _settled_status(manager, context, sleeper.run_id, until=lambda status: "ready" in status.output)
+        assert running.run.state is ScriptRunState.RUNNING
+        assert running.output.startswith("Status: RUNNING")
+        cancelled = await manager.cancel(context, run_id=sleeper.run_id)
+        assert cancelled.state is ScriptRunState.CANCELLED
+        assert cancelled.snapshot_locator is None
+
+        finisher = await manager.run(context, source="print('done', flush=True)\n")
+        exited = await _settled_status(
+            manager,
+            context,
+            finisher.run_id,
+            until=lambda status: status.run.state is not ScriptRunState.RUNNING,
+        )
+        assert exited.run.state is ScriptRunState.EXITED
+        assert exited.run.exit_code == 0
+        assert "done" in exited.output
+
+        orphan = await manager.run(context, source="import time\ntime.sleep(60)\n")
+        supervisor.shutdown()
+        replacement = shell_supervisor_module._ShellSupervisorManager()
+        monkeypatch.setattr(shell_supervisor_module, "_manager", replacement)
+        supervisor = replacement
+        lost = await manager.status(context, run_id=orphan.run_id)
+        assert lost.run.state is ScriptRunState.INTERRUPTED
+        assert lost.run.error == SUPERVISOR_UNAVAILABLE
+        assert lost.run.output.startswith("Error: Unknown handle")
+    finally:
+        supervisor.shutdown()

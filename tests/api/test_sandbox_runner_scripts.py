@@ -305,6 +305,78 @@ def test_worker_script_endpoint_launches_statuses_and_cancels_process(
     assert cancelled.json()["cancel_requested"] is True
 
 
+def test_worker_script_receipts_report_exit_and_unknown_handles(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """Status and cancellation receipts carry the supervisor's exit, finished, and unknown-handle facts."""
+    client, workspace = runner_client
+    run_id = f"script-{'d' * 32}"
+    launched = client.post(
+        "/api/sandbox-runner/scripts/run",
+        headers=_HEADERS,
+        json=_run_payload(workspace, run_id=run_id, source="print('done', flush=True)\n"),
+    )
+    assert launched.json() == {"ok": True, "error": None, "failure_kind": None}
+    deadline = time.monotonic() + 5
+    status = client.post(
+        f"/api/sandbox-runner/scripts/{run_id}/status",
+        headers=_HEADERS,
+        json={"worker_key": _WORKER_KEY},
+    )
+    while status.json()["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
+        status = client.post(
+            f"/api/sandbox-runner/scripts/{run_id}/status",
+            headers=_HEADERS,
+            json={"worker_key": _WORKER_KEY},
+        )
+    exited = status.json()
+    assert exited.pop("output").startswith("Status: FINISHED (exit code 0")
+    assert exited == {"ok": True, "state": "exited", "exit_code": 0, "error": None, "failure_kind": None}
+
+    finished = client.post(
+        f"/api/sandbox-runner/scripts/{run_id}/cancel",
+        headers=_HEADERS,
+        json={"worker_key": _WORKER_KEY},
+    )
+    assert finished.json() == {
+        "ok": True,
+        "cancel_requested": False,
+        "already_finished": True,
+        "unknown_handle": False,
+        "error": None,
+        "failure_kind": None,
+    }
+
+    unknown_run_id = f"script-{'e' * 32}"
+    unknown_status = client.post(
+        f"/api/sandbox-runner/scripts/{unknown_run_id}/status",
+        headers=_HEADERS,
+        json={"worker_key": _WORKER_KEY},
+    )
+    assert unknown_status.json() == {
+        "ok": True,
+        "state": "unknown",
+        "output": "",
+        "exit_code": None,
+        "error": None,
+        "failure_kind": None,
+    }
+    unknown_cancel = client.post(
+        f"/api/sandbox-runner/scripts/{unknown_run_id}/cancel",
+        headers=_HEADERS,
+        json={"worker_key": _WORKER_KEY, "force": True},
+    )
+    assert unknown_cancel.json() == {
+        "ok": True,
+        "cancel_requested": False,
+        "already_finished": False,
+        "unknown_handle": True,
+        "error": None,
+        "failure_kind": None,
+    }
+
+
 def test_worker_script_endpoint_applies_workspace_environment_overlay(
     runner_client: tuple[TestClient, Path],
 ) -> None:

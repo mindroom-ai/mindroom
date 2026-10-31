@@ -806,8 +806,10 @@ async def test_worker_gateway_dns_resolution_runs_off_event_loop(
 async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(tmp_path: Path) -> None:
     """Activation waits for both composition roots and shutdown clears the binding."""
     runtime_paths = _runtime_paths(tmp_path)
+    bound_managers: list[object | None] = []
+    bound_at_shutdown: list[list[object | None]] = []
     manager = SimpleNamespace(
-        begin_shutdown=AsyncMock(),
+        begin_shutdown=AsyncMock(side_effect=lambda: bound_at_shutdown.append(list(bound_managers))),
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
         gateway_url="",
@@ -822,7 +824,6 @@ async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(t
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
     )
-    bound_managers: list[object | None] = []
 
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(
@@ -838,9 +839,17 @@ async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(t
         assert bound_managers == [manager]
         assert manager.gateway_url == "http://primary.test/api/script-gateway"
 
+        await runtime.unbind_api()
+        assert bound_managers == [manager, None]
+        runtime.bind_api("http://primary.test/api/script-gateway/")
+        assert runtime._startup_task is not None
+        await asyncio.wait_for(runtime._startup_task, timeout=SETTLE_TIMEOUT_SECONDS)
+        assert bound_managers == [manager, None, manager]
+
         await runtime.shutdown()
 
-    assert bound_managers == [manager, None]
+    assert bound_managers == [manager, None, manager, None]
+    assert bound_at_shutdown == [[manager, None, manager, None]]
 
 
 @dataclass
