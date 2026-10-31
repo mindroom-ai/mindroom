@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.validation import CredentialServiceName  # noqa: TC001
 from mindroom.config.voice import SpeechServiceConfig  # noqa: TC001 - Pydantic needs the runtime model
-from mindroom.credentials.manager import validate_service_name
 
 
 class RealtimeCallProfile(BaseModel):
@@ -18,14 +18,10 @@ class RealtimeCallProfile(BaseModel):
 
     backend: Literal["realtime"] = Field(description="OpenAI realtime speech-to-speech session")
     model: str = Field(description="OpenAI realtime speech-to-speech model")
-    credentials_service: str = Field(description="Named credential service containing the realtime API key")
+    credentials_service: CredentialServiceName = Field(
+        description="Named credential service containing the realtime API key",
+    )
     voice: str = Field(description="Realtime model voice preset")
-
-    @field_validator("credentials_service")
-    @classmethod
-    def _validate_credentials_service(cls, value: str) -> str:
-        """Normalize the strict realtime credential binding."""
-        return validate_service_name(value)
 
 
 class LiveCallProfile(BaseModel):
@@ -35,19 +31,15 @@ class LiveCallProfile(BaseModel):
 
     backend: Literal["live"] = Field(description="OpenAI Live voice session that delegates tasks to the agent")
     model: str = Field(description="OpenAI Live speech-to-speech model")
-    credentials_service: str = Field(description="Named credential service containing the Live API key")
+    credentials_service: CredentialServiceName = Field(
+        description="Named credential service containing the Live API key",
+    )
     voice: str = Field(description="Live model voice preset")
     agent_model: str | None = Field(
         default=None,
         description="Configured LLM alias for delegated agent turns",
         json_schema_extra=dashboard_hint(reference="model"),
     )
-
-    @field_validator("credentials_service")
-    @classmethod
-    def _validate_credentials_service(cls, value: str) -> str:
-        """Normalize the strict Live credential binding."""
-        return validate_service_name(value)
 
 
 class CascadedCallProfile(BaseModel):

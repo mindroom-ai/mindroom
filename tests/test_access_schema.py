@@ -66,6 +66,14 @@ def test_room_without_metadata_inherits_all_defaults() -> None:
     assert policy.admins == ("@admin:example.com",)
 
 
+@pytest.mark.parametrize(("display_name", "expected"), [(" Project ", "Project"), ("   ", None), (None, None)])
+def test_room_display_name_is_trimmed_and_blank_means_unset(display_name: str | None, expected: str | None) -> None:
+    """A blank room display name, such as a cleared dashboard field, leaves the name unset."""
+    config = Config.model_validate({"rooms": {"project": {"display_name": display_name}}})
+
+    assert config.rooms["project"].display_name == expected
+
+
 def test_omitted_agent_access_uses_configured_rooms() -> None:
     """An agent without an access block must inherit its assigned rooms as grants."""
     config = Config.model_validate(
@@ -186,6 +194,7 @@ def test_router_and_agent_accept_invites_support_user_patterns(policy: list[str]
             },
             "members_of_rooms",
         ),
+        ({"router": {"access": {"users": ["@user:example.com", "@user:example.com"]}}}, "users"),
         (
             {
                 "agents": {
@@ -216,7 +225,7 @@ def test_router_and_agent_accept_invites_support_user_patterns(policy: list[str]
 )
 def test_membership_schema_rejects_duplicate_entries(payload: dict[str, object], duplicate: str) -> None:
     """Duplicate access entries must fail validation instead of changing policy silently."""
-    with pytest.raises(ValidationError, match=duplicate):
+    with pytest.raises(ValidationError, match=f"Duplicate {duplicate} are not allowed"):
         Config.model_validate(payload)
 
 
@@ -243,7 +252,7 @@ def test_membership_schema_rejects_duplicate_entries(payload: dict[str, object],
 )
 def test_matrix_identity_fields_require_concrete_user_ids(payload: dict[str, object], field_name: str) -> None:
     """Authority and invitation fields must contain concrete Matrix user IDs."""
-    with pytest.raises(ValidationError, match=field_name):
+    with pytest.raises(ValidationError, match=f"{field_name} must contain concrete Matrix user IDs"):
         Config.model_validate(payload)
 
 
@@ -305,13 +314,14 @@ def test_inferred_responder_access_ignores_unmanaged_room_identifiers(
 
 @pytest.mark.parametrize("room_reference", ["!external:example.com", "#external:example.com"])
 def test_explicit_responder_access_rejects_unmanaged_room_identifiers(room_reference: str) -> None:
-    """Explicit membership grants must name stable managed room keys."""
+    """Explicit membership grants must name stable managed room keys, even for configured room identifiers."""
     with pytest.raises(ValidationError, match=room_reference):
         Config.model_validate(
             {
                 "agents": {
                     "research": {
                         "display_name": "Research",
+                        "rooms": [room_reference],
                         "access": {"members_of_rooms": [room_reference]},
                     },
                 },
@@ -321,9 +331,13 @@ def test_explicit_responder_access_rejects_unmanaged_room_identifiers(room_refer
 
 def test_policy_resolvers_reject_unknown_targets() -> None:
     """Runtime callers must not receive permissive policies for unknown targets."""
-    config = Config.model_validate({})
+    config = Config.model_validate(
+        {"agents": {"research": {"display_name": "Research", "rooms": ["!external:example.com"]}}},
+    )
 
     with pytest.raises(ValueError, match="Unknown managed room"):
         resolve_room_policy(config, "missing")
+    with pytest.raises(ValueError, match="Unknown managed room"):
+        resolve_room_policy(config, "!external:example.com")
     with pytest.raises(ValueError, match="Unknown responder"):
         resolve_responder_access(config, "missing")

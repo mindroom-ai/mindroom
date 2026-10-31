@@ -15,16 +15,13 @@ from typing import TYPE_CHECKING
 
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.response import plan_approval_calls, timed_grant_operation
-from mindroom.approval.tool_approval import (
-    POLICY_CONFIRMATION_APPROVAL_TYPE,
-    BackgroundScriptToolOrigin,
-    resolve_tool_approval_approver,
-)
+from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, resolve_tool_approval_approver
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.event_journal import tool_job_run_id
 from mindroom.llm.runs import ToolExecution
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import BackgroundOutcome
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence

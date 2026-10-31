@@ -236,19 +236,18 @@ def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
     )
 
     plain, confirmation, external_call = (call.execution for call in batch.planned)
+    assert (plain.requires_confirmation, plain.external_execution_required, plain.approval_type) == (None, None, None)
     assert (
-        plain.requires_confirmation,
-        plain.external_execution_required,
-        plain.approval_type,
-        plain.external_execution_silent,
-    ) == (None, None, None, None)
-    assert (confirmation.requires_confirmation, confirmation.approval_type, confirmation.external_execution_silent) == (
+        confirmation.requires_confirmation,
+        confirmation.external_execution_required,
+        confirmation.approval_type,
+    ) == (
         True,
-        "mindroom_policy",
         None,
+        "mindroom_policy",
     )
-    assert (external_call.external_execution_required, external_call.external_execution_silent) == (True, True)
-    assert external_call.requires_confirmation is None
+    assert (external_call.requires_confirmation, external_call.external_execution_required) == (None, True)
+    assert external_call.approval_type is None
     assert batch.paused
 
 

@@ -279,8 +279,8 @@ def golden_entry(adapted: AdaptedToolkit) -> dict[str, object]:
     """Return the golden entry of one adapted toolkit: its texts for the model, then each function the adapter made.
 
     ``instructions`` is what the system prompt shows, and ``guidance`` what the agent CLI and minimal mode show, before
-    an agent drops the default ones that name a function it does not offer; the functions are in Agno's async-run
-    order, which the adapter keeps.
+    an agent drops the default ones that name a function it does not offer; the functions are in the order the toolkit
+    offers them, which the adapter keeps.
     """
     entry = {
         "instructions": adapted.instructions,
@@ -291,9 +291,7 @@ def golden_entry(adapted: AdaptedToolkit) -> dict[str, object]:
                 "description": function.description,
                 "parameters": function.parameters,
                 "strict": function.strict,
-                "requires_confirmation": function.requires_confirmation,
-                "external_execution": function.external_execution,
-                "approval_type": function.approval_type,
+                "gate": function.gate,
                 "stop_after_tool_call": function.stop_after_call,
             }
             for function in adapted.functions

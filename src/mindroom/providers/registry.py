@@ -31,14 +31,13 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import Capabilities, ModelProvider
+    from mindroom.llm.provider import ModelProvider
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 __all__ = [
     "build_model_provider",
     "check_extra_kwargs",
     "configured_model",
-    "model_capabilities",
     "stream_idle_timeout_seconds",
 ]
 
@@ -186,9 +185,3 @@ def check_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -
     else:
         allowed = _SETTINGS_KEYS[provider]
     reject_unsupported_extra_kwargs(model_config.extra_kwargs, allowed, provider=model_config.provider)
-
-
-def model_capabilities(config: Config, runtime_paths: RuntimePaths, model_name: str) -> Capabilities:
-    """Return what the route of the model configured as ``model_name`` supports; building its adapter sends nothing."""
-    model_config = configured_model(config, runtime_paths, model_name)
-    return _build_adapter(model_config, config, runtime_paths, execution_identity=None).capabilities

@@ -2401,7 +2401,10 @@
           ],
           "default": null,
           "description": "Model that writes a short context for each chunk of a multi-chunk file before it is indexed (contextual retrieval); costs one model call per chunk of each changed file",
-          "title": "Chunk Context Model"
+          "title": "Chunk Context Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "include_extensions": {
           "anyOf": [
@@ -2574,7 +2577,10 @@
           ],
           "default": null,
           "description": "Model alias that extracts entities and facts; required when any agent enables the graph",
-          "title": "Model"
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "extraction_instructions": {
           "default": "",
@@ -4581,7 +4587,10 @@
           ],
           "default": null,
           "description": "Review model alias; defaults to the model of the reviewed response",
-          "title": "Model"
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "review_interval": {
           "default": 10,
@@ -5212,7 +5221,10 @@
           ],
           "default": null,
           "description": "Model config that runs extraction instead of the agent's own model",
-          "title": "Model"
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "no_reply_token": {
           "default": "NO_REPLY",

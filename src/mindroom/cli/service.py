@@ -16,7 +16,13 @@ from rich.panel import Panel
 from mindroom.constants import PROVIDER_ENV_KEYS, resolve_primary_runtime_paths
 from mindroom.runtime_env_policy import is_unset_env_value
 
-from .config import DEFAULT_API_HOST, DEFAULT_API_PORT, warn_dashboard_without_key, worker_dashboard_api_key_needed
+from .config import (
+    DEFAULT_API_HOST,
+    DEFAULT_API_PORT,
+    activate_cli_runtime,
+    warn_dashboard_without_key,
+    worker_dashboard_api_key_needed,
+)
 from .env_file import upsert_env_values
 from .help_format import examples
 from .interactive import confirm, section
@@ -128,7 +134,7 @@ def install_service(
             raise typer.Exit(0)
 
     try:
-        result = _install_and_start_service(manager, resolve_primary_runtime_paths())
+        result = _install_and_start_service(manager, activate_cli_runtime())
     except ValueError as exc:
         _err_console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(1) from None

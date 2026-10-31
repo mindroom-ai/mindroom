@@ -15,6 +15,7 @@ import nio
 from nio.durable import DurableSync, DurableSyncConfig, open_durable_sync
 from nio.store import DefaultStore
 
+from mindroom.desktop.cloudflare_access import cloudflare_access_headers
 from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
@@ -87,13 +88,10 @@ class DesktopMatrixSession:
     @classmethod
     def from_payload(cls, raw: object) -> DesktopMatrixSession:
         """Parse one strict persisted session payload."""
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or cast("dict[str, object]", raw).get("v") != 1:
             msg = "Desktop Matrix session has an unsupported format."
             raise DesktopSessionError(msg)
         payload = cast("dict[str, object]", raw)
-        if payload.get("v") != 1:
-            msg = "Desktop Matrix session has an unsupported format."
-            raise DesktopSessionError(msg)
         values: dict[str, str] = {}
         for key in ("homeserver", "user_id", "device_id", "access_token"):
             value = payload.get(key)
@@ -164,7 +162,21 @@ def load_desktop_session(path: Path) -> DesktopMatrixSession:
     return DesktopMatrixSession.from_payload(raw)
 
 
-def load_desktop_http_headers(path: Path | None) -> dict[str, str] | None:
+def desktop_http_headers(
+    homeserver: str,
+    headers_path: Path | None,
+    *,
+    cloudflare_access: bool,
+) -> Mapping[str, str] | None:
+    """Return the headers every Desktop Matrix request to `homeserver` carries.
+
+    They are the owner-only headers file's, plus an interactive Cloudflare Access token when Access is chosen.
+    """
+    headers = _load_http_headers(headers_path)
+    return cloudflare_access_headers(homeserver, headers) if cloudflare_access else headers
+
+
+def _load_http_headers(path: Path | None) -> dict[str, str] | None:
     """Load optional secret HTTP headers for the desktop Matrix transport."""
     if path is None:
         return None
@@ -298,7 +310,6 @@ async def login_desktop_client(
 
 async def open_desktop_client(
     session: DesktopMatrixSession,
-    *,
     runtime_paths: RuntimePaths,
     http_headers: Mapping[str, str] | None = None,
 ) -> DesktopOwnedSession:
@@ -452,9 +463,9 @@ __all__ = [
     "DesktopSessionError",
     "DesktopSessionNotFoundError",
     "client_ed25519_fingerprint",
+    "desktop_http_headers",
     "desktop_session_path",
     "desktop_transport_binding_path",
-    "load_desktop_http_headers",
     "load_desktop_session",
     "login_desktop_client",
     "open_desktop_client",

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.tool_approval import (
-    POLICY_CONFIRMATION_APPROVAL_TYPE,
     evaluate_tool_approval,
     human_gate,
     resolve_tool_approval_approver,
@@ -24,6 +23,7 @@ from mindroom.event_journal import (
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.events import tool_markers_match_trace
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:

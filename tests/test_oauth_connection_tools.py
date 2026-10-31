@@ -140,7 +140,7 @@ def test_oauth_connections_exposes_only_browser_reset() -> None:
 
     assert list(tool.functions) == ["reset_oauth_connection"]
     function = toolkit_offers(tool, "reset_oauth_connection")
-    assert function.requires_confirmation is False
+    assert function.gate is None
     assert function.stop_after_call is False
 
 

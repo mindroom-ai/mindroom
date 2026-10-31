@@ -49,7 +49,7 @@ from mindroom.api.worker_responses import (
 )
 from mindroom.attachments.ids import normalize_attachment_id
 from mindroom.background_tasks import wait_for_future_until_complete
-from mindroom.config.main import Config, load_config, normalized_config_data
+from mindroom.config.main import Config, load_config
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access
@@ -291,10 +291,7 @@ def _primary_validated_config(data: object, runtime_paths: RuntimePaths, *, log_
     is authoritative for full authored tool validation; runners validate the
     requested tool at execution time with their local registry.
     """
-    config = Config.model_validate(
-        normalized_config_data(data),
-        context={"runtime_paths": runtime_paths},
-    )
+    config = Config.model_validate(data, context={"runtime_paths": runtime_paths})
     return _config_with_available_plugins(config, runtime_paths, log_skipped_plugins=log_skipped_plugins)
 
 

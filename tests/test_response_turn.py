@@ -1018,7 +1018,7 @@ def test_continuation_advances_and_resets_turn_state() -> None:
         if len(prompts) == 1:
             return CompletedAttempt(
                 attempt_run_id="run-1",
-                tool_executions=(_model_switch_execution("next-turn"),),
+                tool_executions=(_model_switch_execution("after-toolcall"),),
                 completed_tools=(first_trace,),
             )
         return CompletedAttempt(
@@ -1067,7 +1067,7 @@ def test_a_stop_between_continuation_attempts_records_the_turn_under_the_attempt
         run.attempt = _FixedAttempt()
         return CompletedAttempt(
             attempt_run_id=continuation.active_run_id,
-            tool_executions=(_model_switch_execution("next-turn"),),
+            tool_executions=(_model_switch_execution("after-toolcall"),),
         )
 
     monkeypatch.setattr(response_turn_module, "persist_interrupted_replay_snapshot", _persist)
@@ -1127,31 +1127,6 @@ def test_after_toolcall_switch_selects_new_continuation_model(hidden: bool) -> N
     assert active_models == [None, "large"]
 
 
-@pytest.mark.parametrize("hidden", [False, True])
-def test_next_turn_switch_keeps_current_model_for_continuation(hidden: bool) -> None:
-    """Re-reading the persisted override would apply a next-turn switch too early."""
-    active_models: list[str | None] = []
-
-    async def _attempt(
-        _run: TurnRunState,
-        continuation: TurnContinuationRunState,
-    ) -> CompletedAttempt:
-        active_models.append(continuation.active_model_name)
-        if len(active_models) == 1:
-            return CompletedAttempt(
-                attempt_run_id="run-1",
-                runtime_model_name="default",
-                tool_executions=() if hidden else (_model_switch_execution("next-turn"),),
-                control_calls=(_model_switch_execution("next-turn").call,) if hidden else (),
-            )
-        return CompletedAttempt(response_text="final", replayable_text="final", has_visible_content=True)
-
-    chunks = _run_turn(_streamed(_attempt), continuation=_continuation("original ask"))
-
-    assert chunks == ["notice:final"]
-    assert active_models == [None, "default"]
-
-
 def test_empty_run_grants_one_retry_then_notice() -> None:
     """The empty-run guard logs each empty run, drops the spent attempt, retries once, then falls back to the notice."""
     recorder = _FakeTurnRecorder()
@@ -1196,7 +1171,7 @@ def test_empty_retry_borrows_continuation_slot_within_shared_budget() -> None:
             return CompletedAttempt(is_empty=True, run_id="run-empty")
         return CompletedAttempt(
             attempt_run_id=f"run-{attempts}",
-            tool_executions=(_model_switch_execution("next-turn"),),
+            tool_executions=(_model_switch_execution("after-toolcall"),),
         )
 
     chunks = _run_turn(_streamed(_attempt))
@@ -1253,7 +1228,7 @@ def test_superseded_continuation_metadata_stays_out_of_collector() -> None:
         if attempts == 1:
             return CompletedAttempt(
                 attempt_run_id="run-1",
-                tool_executions=(_model_switch_execution("next-turn"),),
+                tool_executions=(_model_switch_execution("after-toolcall"),),
                 build_run_metadata=lambda: {"io.mindroom.ai_run": {"run_id": "run-1"}},
             )
         return CompletedAttempt(
@@ -1421,8 +1396,8 @@ def test_streaming_continuation_advances_then_finishes(hidden: bool) -> None:
             yield AttemptResolved(
                 CompletedAttempt(
                     attempt_run_id="run-1",
-                    tool_executions=() if hidden else (_model_switch_execution("next-turn"),),
-                    control_calls=(_model_switch_execution("next-turn").call,) if hidden else (),
+                    tool_executions=() if hidden else (_model_switch_execution("after-toolcall"),),
+                    control_calls=(_model_switch_execution("after-toolcall").call,) if hidden else (),
                 ),
             )
             return
@@ -1466,7 +1441,7 @@ def test_a_stop_before_the_next_attempt_starts_records_none_of_the_spent_attempt
         yield AttemptResolved(
             CompletedAttempt(
                 attempt_run_id="run-1",
-                tool_executions=(_model_switch_execution("next-turn"),),
+                tool_executions=(_model_switch_execution("after-toolcall"),),
                 completed_tools=(switch,),
             ),
         )
@@ -1489,7 +1464,7 @@ def test_streaming_continuation_limit_yields_limit_message() -> None:
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield AttemptResolved(
-            CompletedAttempt(attempt_run_id="run-1", tool_executions=(_model_switch_execution("next-turn"),)),
+            CompletedAttempt(attempt_run_id="run-1", tool_executions=(_model_switch_execution("after-toolcall"),)),
         )
 
     chunks = _run_turn(_attempt)
@@ -1511,13 +1486,13 @@ def test_resumed_continuation_uses_remaining_budget(saved_count: int, expected_a
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         prompts.append(continuation.active_prompt)
         yield AttemptResolved(
-            CompletedAttempt(attempt_run_id="fresh", tool_executions=(_model_switch_execution("next-turn"),)),
+            CompletedAttempt(attempt_run_id="fresh", tool_executions=(_model_switch_execution("after-toolcall"),)),
         )
 
     restored = CompletedAttempt(
         response_text="stale",
         attempt_run_id="saved",
-        tool_executions=(_model_switch_execution("next-turn"),),
+        tool_executions=(_model_switch_execution("after-toolcall"),),
     )
     chunks = _run_turn(
         attempt,
@@ -1551,7 +1526,7 @@ def test_resumed_continuation_preserves_count_on_next_pause() -> None:
             attempt,
             sinks=TurnSinks(on_completed=completed.append),
             resume=TurnResume(
-                attempt=CompletedAttempt(tool_executions=(_model_switch_execution("next-turn"),)),
+                attempt=CompletedAttempt(tool_executions=(_model_switch_execution("after-toolcall"),)),
                 continuation_count=2,
             ),
         )
@@ -1571,7 +1546,7 @@ def test_fresh_continuation_saves_count_before_first_approval() -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return CompletedAttempt(tool_executions=(_model_switch_execution("next-turn"),))
+            return CompletedAttempt(tool_executions=(_model_switch_execution("after-toolcall"),))
         return response_turn_module.PausedAttempt(session_id="session", run_id="fresh", tools=(), toolkit_owners={})
 
     with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
@@ -1649,7 +1624,7 @@ def test_the_attempt_a_continuation_drops_still_hands_its_scope_to_queued_notice
         if attempts == 1:
             run.attempt = _FixedAttempt()
             yield AttemptResolved(
-                CompletedAttempt(attempt_run_id="run-1", tool_executions=(_model_switch_execution("next-turn"),)),
+                CompletedAttempt(attempt_run_id="run-1", tool_executions=(_model_switch_execution("after-toolcall"),)),
             )
             return
         yield AttemptResolved(HandledAttempt(_FRIENDLY_ERROR))
@@ -1748,7 +1723,7 @@ def test_streaming_continuation_does_not_emit_first_attempt_terminal_text() -> N
                 CompletedAttempt(
                     response_text="stale first-attempt text",
                     attempt_run_id="run-1",
-                    tool_executions=(_model_switch_execution("next-turn"),),
+                    tool_executions=(_model_switch_execution("after-toolcall"),),
                 ),
             )
             return
@@ -1877,7 +1852,7 @@ def _terminal_record(
         (_terminal_record(), True),
         (_terminal_record(content=" \n"), True),
         (_terminal_record(content="Answer."), False),
-        (_terminal_record(tools=[_model_switch_execution("next-turn")]), False),
+        (_terminal_record(tools=[_model_switch_execution("after-toolcall")]), False),
         (_terminal_record(RunStatus.error), False),
         (_terminal_record(RunStatus.cancelled), False),
         (_terminal_record(RunStatus.paused), False),
