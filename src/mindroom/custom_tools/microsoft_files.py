@@ -316,13 +316,14 @@ class MicrosoftFilesTools(Toolkit):
 
         """
 
+        def build() -> int:
+            offset = page_offset(page_token, _MAX_SEARCH_OFFSET)
+            required_text(query, "query")
+            graph_int(limit, "limit", maximum=50)
+            return offset
+
         def operation(session: GraphSession, offset: int) -> Mapping[str, object]:
-            request = {
-                "entityTypes": ["driveItem"],
-                "query": {"queryString": required_text(query, "query")},
-                "from": offset,
-                "size": graph_int(limit, "limit", maximum=50),
-            }
+            request = {"entityTypes": ["driveItem"], "query": {"queryString": query}, "from": offset, "size": limit}
             payload = session.json("POST", "/search/query", json={"requests": [request]})
             containers = [
                 container for answer in graph_records(payload) for container in graph_records(answer, "hitsContainers")
@@ -336,7 +337,7 @@ class MicrosoftFilesTools(Toolkit):
             more = any(container.get("moreResultsAvailable") is True for container in containers)
             return {"files": files, "next_page_token": str(offset + len(files)) if more and files else None}
 
-        return graph_call(_TOOL_NAME, self._session, lambda: page_offset(page_token, _MAX_SEARCH_OFFSET), operation)
+        return graph_call(_TOOL_NAME, self._session, build, operation)
 
     def microsoft_files_list_folder(
         self,
@@ -359,6 +360,7 @@ class MicrosoftFilesTools(Toolkit):
                 return page_path(page_token, _CHILDREN_PAGES)
             if folder is not None:
                 _parse_file(folder, "folder")
+            graph_int(limit, "limit", maximum=200)
             return None
 
         def operation(session: GraphSession, next_page: str | None) -> Mapping[str, object]:
@@ -366,7 +368,7 @@ class MicrosoftFilesTools(Toolkit):
                 payload = session.json("GET", next_page)
             else:
                 parent = "/me/drive/root" if folder is None else _resolve(folder, session, "folder").path
-                params = {"$top": str(graph_int(limit, "limit", maximum=200)), "$select": _ITEM_SELECT}
+                params = {"$top": str(limit), "$select": _ITEM_SELECT}
                 payload = session.json("GET", f"{parent}/children", params=params)
             entries = [_summary(entry) for entry in graph_records(payload)]
             return {"files": entries, "next_page_token": next_page_token(payload)}
@@ -545,7 +547,8 @@ class MicrosoftFilesTools(Toolkit):
 
         """
 
-        def operation(session: GraphSession, _item: _Item | None) -> Mapping[str, object]:
+        def build() -> tuple[str, str]:
+            _parse_file(file)
             sheet = _worksheet(worksheet)
             if address is None:
                 target = "usedRange(valuesOnly=true)"
@@ -553,6 +556,10 @@ class MicrosoftFilesTools(Toolkit):
                 checked, shape = _address(address)
                 _checked_range_size(*shape)
                 target = f"range(address='{checked}')"
+            return sheet, target
+
+        def operation(session: GraphSession, checked: tuple[str, str]) -> Mapping[str, object]:
+            sheet, target = checked
             item = _resolve(file, session)
             payload = session.json(
                 "GET",
@@ -561,7 +568,7 @@ class MicrosoftFilesTools(Toolkit):
             )
             return {"range": _range(payload)}
 
-        return graph_call(_TOOL_NAME, self._session, lambda: _parse_file(file), operation)
+        return graph_call(_TOOL_NAME, self._session, build, operation)
 
     def microsoft_files_excel_update_range(
         self,

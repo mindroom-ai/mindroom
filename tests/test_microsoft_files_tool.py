@@ -390,10 +390,36 @@ def test_search_refuses_a_malformed_page_token(
     assert graph.requests == []
 
 
-def test_search_refuses_a_blank_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("limit", [0, 201])
+def test_list_folder_refuses_a_limit_before_redeeming_a_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit: int,
+) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert json.loads(tools.microsoft_files_search("  "))["code"] == "invalid_argument"
+    assert json.loads(tools.microsoft_files_list_folder(SHARE_LINK, limit=limit))["code"] == "invalid_argument"
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda tools: tools.microsoft_files_search(" "),
+        lambda tools: tools.microsoft_files_search("plan", limit=51),
+        lambda tools: tools.microsoft_files_list_folder(limit=0),
+        lambda tools: tools.microsoft_files_excel_read_range(ITEM_PATH, "a/b"),
+        lambda tools: tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget", "A1:"),
+    ],
+)
+def test_a_malformed_argument_is_refused_before_asking_for_a_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    call: Callable[[MicrosoftFilesTools], str],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph(), connected=False)
+
+    assert json.loads(call(tools))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
