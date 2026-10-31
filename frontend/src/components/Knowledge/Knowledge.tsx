@@ -292,9 +292,6 @@ export function Knowledge() {
     useState<KnowledgeGitConfig>(() => defaultGitSettings());
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);
-  const [settings, setSettings] = useState<KnowledgeBaseConfig>(
-    DEFAULT_BASE_SETTINGS,
-  );
   const [gitRepoUrlReplacement, setGitRepoUrlReplacement] = useState("");
   const [totalSize, setTotalSize] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -317,6 +314,25 @@ export function Knowledge() {
   const selectedBaseConfig = selectedBase
     ? knowledgeBases[selectedBase]
     : undefined;
+  const settings = useMemo<KnowledgeBaseConfig>(
+    () =>
+      selectedBaseConfig
+        ? {
+            description: selectedBaseConfig.description ?? "",
+            mode: selectedBaseConfig.mode ?? "semantic",
+            path: selectedBaseConfig.path,
+            watch: selectedBaseConfig.watch,
+            ...normalizeChunking(
+              selectedBaseConfig.chunk_size,
+              selectedBaseConfig.chunk_overlap,
+            ),
+            git: selectedBaseConfig.git
+              ? defaultGitSettings(selectedBaseConfig.git)
+              : undefined,
+          }
+        : DEFAULT_BASE_SETTINGS,
+    [selectedBaseConfig],
+  );
   const selectedBaseIsGitBacked = Boolean(selectedBaseConfig?.git);
   const selectedBaseMode: KnowledgeAccessMode =
     selectedBaseConfig?.mode ?? "semantic";
@@ -337,34 +353,6 @@ export function Knowledge() {
       setSelectedBase(baseNames.length === 1 ? baseNames[0] : "");
     }
   }, [baseNames, selectedBase]);
-
-  useEffect(() => {
-    if (!selectedBase) {
-      setSettings(DEFAULT_BASE_SETTINGS);
-      return;
-    }
-
-    const selectedConfig = knowledgeBases[selectedBase];
-    if (!selectedConfig) {
-      setSettings(DEFAULT_BASE_SETTINGS);
-      return;
-    }
-
-    const chunking = normalizeChunking(
-      selectedConfig.chunk_size,
-      selectedConfig.chunk_overlap,
-    );
-    setSettings({
-      description: selectedConfig.description ?? "",
-      mode: selectedConfig.mode ?? "semantic",
-      path: selectedConfig.path,
-      watch: selectedConfig.watch,
-      ...chunking,
-      git: selectedConfig.git
-        ? defaultGitSettings(selectedConfig.git)
-        : undefined,
-    });
-  }, [knowledgeBases, selectedBase]);
 
   const loadData = useCallback(async (baseId: string | null) => {
     const requestId = loadRequestIdRef.current + 1;
@@ -432,13 +420,9 @@ export function Knowledge() {
         return;
       }
 
-      setSettings((previous) => {
-        const next = { ...previous, ...updates };
-        updateKnowledgeBase(selectedBase, next);
-        return next;
-      });
+      updateKnowledgeBase(selectedBase, { ...settings, ...updates });
     },
-    [selectedBase, updateKnowledgeBase],
+    [selectedBase, settings, updateKnowledgeBase],
   );
 
   const settingsSourceType: KnowledgeSourceType = settings.git
@@ -531,7 +515,6 @@ export function Knowledge() {
         }
       : baseSettings;
 
-    setSettings(nextSettings);
     updateKnowledgeBase(selectedBase, nextSettings);
 
     setSavingSettings(true);

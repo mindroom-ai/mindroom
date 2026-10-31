@@ -155,6 +155,36 @@ function mockStore(
   });
 }
 
+/** Back the component with the real store so edits re-render, while recording writes and stubbing saves. */
+async function mockStatefulStore(
+  knowledgeBases: Record<string, KnowledgeBaseConfig>,
+  options: { isDirty?: boolean } = {},
+) {
+  const actual = await vi.importActual<typeof import("@/store/configStore")>(
+    "@/store/configStore",
+  );
+  const config = { knowledge_bases: knowledgeBases } as unknown as Config;
+  actual.useConfigStore.setState({
+    config,
+    loadedConfig: config,
+    isDirty: options.isDirty ?? false,
+  });
+  (useConfigStore as unknown as Mock).mockImplementation(() => ({
+    ...actual.useConfigStore(),
+    updateKnowledgeBase: (
+      baseName: string,
+      baseConfig: KnowledgeBaseConfig,
+    ) => {
+      mockUpdateKnowledgeBase(baseName, baseConfig);
+      actual.useConfigStore
+        .getState()
+        .updateKnowledgeBase(baseName, baseConfig);
+    },
+    saveConfig: mockSaveConfig,
+  }));
+  return actual.useConfigStore;
+}
+
 describe("Knowledge", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1305,7 +1335,7 @@ describe("Knowledge", () => {
   });
 
   it("switches source type in settings and toggles git fields", async () => {
-    mockStore({
+    await mockStatefulStore({
       docs: { path: "./knowledge_docs/docs", watch: true },
     });
     setKnowledgeApiMock({
@@ -1543,8 +1573,70 @@ describe("Knowledge", () => {
     );
   });
 
+  it("writes a description edit through the store and shows the store value", async () => {
+    const actual = await vi.importActual<typeof import("@/store/configStore")>(
+      "@/store/configStore",
+    );
+    const config = {
+      knowledge_bases: {
+        docs: {
+          description: "Old docs description",
+          path: "./knowledge_docs/docs",
+          watch: true,
+          chunk_size: 64,
+        },
+      },
+    } as unknown as Config;
+    actual.useConfigStore.setState({ config, loadedConfig: config });
+    (useConfigStore as unknown as Mock).mockImplementation(() =>
+      actual.useConfigStore(),
+    );
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: "docs",
+          description: "Old docs description",
+          folder_path: "./knowledge_docs/docs",
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: "docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    expect(screen.getByLabelText("Chunk Size (characters)")).toHaveValue(128);
+
+    const descriptionInput = screen.getByLabelText("Search Description");
+    fireEvent.change(descriptionInput, {
+      target: { value: "New docs description" },
+    });
+
+    expect(descriptionInput).toHaveValue("New docs description");
+    expect(
+      actual.useConfigStore.getState().config?.knowledge_bases?.docs,
+    ).toEqual({
+      description: "New docs description",
+      mode: "semantic",
+      path: "./knowledge_docs/docs",
+      watch: true,
+      chunk_size: 128,
+      chunk_overlap: 0,
+      git: undefined,
+    });
+    expect(actual.useConfigStore.getState().isDirty).toBe(true);
+  });
+
   it("saves updated git settings from base settings", async () => {
-    mockStore(
+    await mockStatefulStore(
       {
         docs: {
           path: "./knowledge_docs/docs",
@@ -1639,7 +1731,7 @@ describe("Knowledge", () => {
   });
 
   it("preserves a credential-bearing git URL when saving other git settings", async () => {
-    mockStore(
+    await mockStatefulStore(
       {
         docs: {
           path: "./knowledge_docs/docs",
@@ -1743,7 +1835,7 @@ describe("Knowledge", () => {
   });
 
   it("saves advanced git settings from base settings", async () => {
-    mockStore(
+    await mockStatefulStore(
       {
         docs: {
           path: "./knowledge_docs/docs",
