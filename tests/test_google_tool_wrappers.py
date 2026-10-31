@@ -1151,6 +1151,68 @@ def test_nested_google_wrapper_preserves_final_resource_401_for_outer_owner(
     assert "provider-controlled" not in result
 
 
+@pytest.mark.parametrize("nested", [False, True], ids=["direct", "nested"])
+@pytest.mark.parametrize("reason", ["refresh_rejected", "access_rejected"])
+def test_google_wrapper_answers_raised_auth_failure_at_outermost_call(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+    reason: str,
+    nested: bool,
+) -> None:
+    """A raised refresh rejection or final 401 propagates out of nested calls and becomes the outer connect prompt."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_scoped_oauth_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "valid-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    def fail_refresh(*_args: object, **_kwargs: object) -> None:
+        message = "refresh rejected"
+        raise RefreshError(message, {"error": "invalid_grant"})
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", fail_refresh)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    def raise_refresh_rejection() -> str:
+        tool.creds.refresh(object())
+        return "unexpected success"
+
+    def raise_final_401() -> str:
+        tool._mark_google_authorization_rejected()
+        raise HttpError(SimpleNamespace(status=401, reason="Unauthorized"), b"{}")
+
+    def outer_operation() -> str:
+        # Reshaping the nested result would drop a connect prompt the nested call answered itself.
+        return json.dumps({"error": json.loads(tool.failing_operation())["error"]})
+
+    failing_operation = raise_refresh_rejection if reason == "refresh_rejected" else raise_final_401
+    tool.functions = {
+        "failing_operation": Function(name="failing_operation", entrypoint=failing_operation),
+        "outer_operation": Function(name="outer_operation", entrypoint=outer_operation),
+    }
+    tool._wrap_oauth_function_entrypoints()
+
+    payload = json.loads(tool.outer_operation() if nested else tool.failing_operation())
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["reason"] == reason
+
+
 @pytest.mark.parametrize(
     ("token", "expires_at"),
     [
@@ -2521,6 +2583,83 @@ def test_google_wrapper_supplied_credentials_lock_is_reentrant_and_serializes_wo
         assert second.result(timeout=5) == "done"
 
     assert max_active_calls == 1
+
+
+def test_google_wrapper_supplied_credentials_authenticate_other_worker_threads(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """A worker thread that did not build the toolkit still calls with the supplied credentials."""
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_valid_credentials(),
+    )
+    tool.functions = {"read_token": Function(name="read_token", entrypoint=lambda: tool.creds.token)}
+    tool._wrap_oauth_function_entrypoints()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        assert executor.submit(tool.read_token).result(timeout=5) == "valid-access-token"
+
+
+def test_google_wrapper_keeps_supplied_credentials_final_401_as_tool_error(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """A final 401 on supplied credentials has no MindRoom connection to renew, so it stays the tool's error."""
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_valid_credentials(),
+    )
+    rejected = json.dumps({"error": "Google Drive request failed (HTTP 401)"})
+
+    def rejected_operation() -> str:
+        tool._mark_google_authorization_rejected()
+        return rejected
+
+    tool.functions = {"rejected_operation": Function(name="rejected_operation", entrypoint=rejected_operation)}
+    tool._wrap_oauth_function_entrypoints()
+
+    assert tool.rejected_operation() == rejected
+
+
+def test_google_drive_supplied_credentials_write_without_scope_upgrade_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Supplied credentials carry their own grant, so a read-only stored Drive grant does not block their writes."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    _save_scoped_oauth_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "readonly-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GOOGLE_DRIVE_READ_OAUTH_SCOPES),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    def upload(_self: GoogleDriveTools, *_args: object, **_kwargs: object) -> str:
+        return "uploaded"
+
+    monkeypatch.setattr(GoogleDriveTools, "_upload_file", upload)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        creds=_valid_credentials(),
+    )
+    entrypoint = tool.functions["google_drive_upload_file"].entrypoint
+    assert entrypoint is not None
+
+    assert entrypoint("unused") == "uploaded"
 
 
 @pytest.mark.parametrize(
