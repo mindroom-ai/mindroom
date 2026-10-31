@@ -418,23 +418,6 @@ def resolve_unscoped_worker_key(
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
 
 
-def require_worker_key_for_scope(
-    worker_scope: WorkerScope,
-    execution_identity: ToolExecutionIdentity | None,
-    *,
-    agent_name: str | None = None,
-    failure_message: str,
-) -> None:
-    """Raise ``ValueError`` with the caller's message when the scope resolves no worker key."""
-    worker_key = resolve_worker_execution_scope(
-        worker_scope,
-        execution_identity=execution_identity,
-        agent_name=agent_name,
-    ).worker_key
-    if worker_key is None:
-        raise ValueError(failure_message)
-
-
 def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
     """Return the parsed scope discriminator for one resolved worker key."""
     parts = worker_key.split(":")

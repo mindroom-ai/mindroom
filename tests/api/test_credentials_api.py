@@ -920,6 +920,17 @@ class TestCredentialsAPI:
         assert "OAuth client config credentials cannot be copied" in response.json()["detail"]
         assert manager.load_credentials("copied_service") is None
 
+    def test_regular_service_rejects_copy_into_oauth_client_config_service(self, client: TestClient) -> None:
+        """A copy must not write unvalidated fields into an OAuth client config service."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        manager.save_credentials("weather", {"api_key": "weather-key", "_source": "ui"})
+
+        response = client.post("/api/credentials/google_drive_oauth_client/copy-from/weather")
+
+        assert response.status_code == 400
+        assert "OAuth client config credentials cannot be copied" in response.json()["detail"]
+        assert manager.load_credentials("google_drive_oauth_client") is None
+
     def test_orphaned_oauth_client_config_service_redacts_and_rejects_copy(
         self,
         client: TestClient,
