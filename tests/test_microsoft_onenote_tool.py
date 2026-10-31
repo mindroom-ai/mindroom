@@ -71,8 +71,6 @@ BAD_CONTAINERS = [
     "sam?x@contoso.com",
     "sam#EXT#@contoso.com",
     "sam\x00@contoso.com",
-    5,
-    [PERSON],
 ]
 READ_FUNCTIONS = (
     "microsoft_onenote_list_notebooks",
@@ -408,6 +406,21 @@ def test_every_paged_function_refuses_a_foreign_page_token_before_any_request(
         ("microsoft_onenote_list_pages", {"section_id": SECTION, "limit": 2.5}),
         ("microsoft_onenote_list_notebooks", {"page_token": 5}),
         ("microsoft_onenote_get_page", {"page_id": PAGE, "page_token": 5}),
+        ("microsoft_onenote_list_notebooks", {"container": 5}),
+        ("microsoft_onenote_list_notebooks", {"container": [PERSON]}),
+        (
+            "microsoft_onenote_create_page",
+            {"section_id": SECTION, "title": 5, "content": "text", "expected_web_url": WEB_URL},
+        ),
+        (
+            "microsoft_onenote_create_page",
+            {"section_id": SECTION, "title": "Agenda", "content": 5, "expected_web_url": WEB_URL},
+        ),
+        (
+            "microsoft_onenote_create_page",
+            {"section_id": SECTION, "title": "Agenda", "content": None, "expected_web_url": WEB_URL},
+        ),
+        ("microsoft_onenote_append_to_page", {"page_id": PAGE, "content": 5, "expected_web_url": WEB_URL}),
     ],
 )
 def test_malformed_arguments_fail_call_validation_before_any_request(
@@ -525,17 +538,17 @@ def test_create_page_allows_a_page_with_only_a_title(tmp_path: Path, monkeypatch
 
 @pytest.mark.parametrize(
     ("title", "content"),
-    [("", "text"), ("   ", "text"), (5, "text"), ("Agenda", 5), ("Agenda", None)],
+    [("", "text"), ("   ", "text")],
 )
-def test_create_page_refuses_a_missing_title_or_non_text_content_before_any_request(
+def test_create_page_refuses_a_missing_title_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    title: object,
-    content: object,
+    title: str,
+    content: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok(_page(), status=201))
 
-    result = tools.microsoft_onenote_create_page(SECTION, title, content, WEB_URL)  # type: ignore[arg-type]
+    result = tools.microsoft_onenote_create_page(SECTION, title, content, WEB_URL)
 
     assert _payload(result)["code"] == "invalid_argument"
     assert graph.requests == []
@@ -563,15 +576,15 @@ def test_append_to_page_appends_the_escaped_text_to_the_page_body(
     assert result["appended"] == {"page_id": PAGE}
 
 
-@pytest.mark.parametrize("content", ["", "  \n ", 5, None])
-def test_append_to_page_refuses_empty_or_non_text_content_before_any_request(
+@pytest.mark.parametrize("content", ["", "  \n "])
+def test_append_to_page_refuses_empty_content_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    content: object,
+    content: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok(status=204))
 
-    assert _payload(tools.microsoft_onenote_append_to_page(PAGE, content, WEB_URL))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert _payload(tools.microsoft_onenote_append_to_page(PAGE, content, WEB_URL))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -757,17 +770,17 @@ def test_containers_are_escaped_as_single_path_segments(
 def test_every_function_refuses_a_container_of_no_known_kind_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    container: object,
+    container: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _any_call)
 
     results = [
-        tools.microsoft_onenote_list_notebooks(container=container),  # type: ignore[arg-type]
-        tools.microsoft_onenote_list_sections(NOTEBOOK, container=container),  # type: ignore[arg-type]
-        tools.microsoft_onenote_list_pages(SECTION, container=container),  # type: ignore[arg-type]
-        tools.microsoft_onenote_get_page(PAGE, container=container),  # type: ignore[arg-type]
-        tools.microsoft_onenote_create_page(SECTION, "Agenda", "text", WEB_URL, container=container),  # type: ignore[arg-type]
-        tools.microsoft_onenote_append_to_page(PAGE, "text", WEB_URL, container=container),  # type: ignore[arg-type]
+        tools.microsoft_onenote_list_notebooks(container=container),
+        tools.microsoft_onenote_list_sections(NOTEBOOK, container=container),
+        tools.microsoft_onenote_list_pages(SECTION, container=container),
+        tools.microsoft_onenote_get_page(PAGE, container=container),
+        tools.microsoft_onenote_create_page(SECTION, "Agenda", "text", WEB_URL, container=container),
+        tools.microsoft_onenote_append_to_page(PAGE, "text", WEB_URL, container=container),
     ]
 
     assert [(_payload(result)["code"], _payload(result)["message"]) for result in results] == [

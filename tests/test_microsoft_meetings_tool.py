@@ -243,8 +243,6 @@ def test_find_returns_missing_fields_as_none(tmp_path: Path, monkeypatch: pytest
     "join_url",
     [
         "",
-        7,
-        None,
         "teams.microsoft.com/l/meetup-join/19%3ameeting_x",
         "http://teams.microsoft.com/l/meetup-join/19%3ameeting_x",
         "https://evil.example/l/meetup-join/19%3ameeting_x",
@@ -264,11 +262,11 @@ def test_find_returns_missing_fields_as_none(tmp_path: Path, monkeypatch: pytest
 def test_find_refuses_anything_but_a_teams_meeting_link_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    join_url: object,
+    join_url: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": [_meeting()]}))
 
-    result = _payload(tools.microsoft_meetings_find(join_url))  # type: ignore[arg-type]
+    result = _payload(tools.microsoft_meetings_find(join_url))
 
     assert result["code"] == "invalid_argument"
     assert graph.requests == []
@@ -518,6 +516,8 @@ def test_get_transcript_refuses_a_malformed_page_token_before_any_request(
     ("name", "arguments"),
     [
         ("microsoft_meetings_get_transcript", {"meeting_id": MEETING, "transcript_id": TRANSCRIPT, "page_token": 5}),
+        ("microsoft_meetings_find", {"join_url": 7}),
+        ("microsoft_meetings_find", {"join_url": None}),
     ],
 )
 def test_malformed_arguments_fail_call_validation_before_any_request(

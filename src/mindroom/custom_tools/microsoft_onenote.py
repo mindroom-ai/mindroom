@@ -104,12 +104,12 @@ class _Request:
         )
 
 
-def _root(container: object) -> str:
+def _root(container: str | None) -> str:
     """Return the OneNote root of the notebooks a container names, or of the requester's own without one."""
     if container is None:
         return "/me/onenote"
     for shape, collection in _CONTAINERS:
-        if isinstance(container, str) and shape.fullmatch(container):
+        if shape.fullmatch(container):
             return f"/{collection}/{path_segment(container, 'container')}/onenote"
     raise MicrosoftGraphError(code="invalid_argument", message=_INVALID_CONTAINER)
 
@@ -118,11 +118,11 @@ def _notebook_path(root: str, notebook_id: object) -> str:
     return f"{root}/notebooks/{path_segment(notebook_id, 'notebook_id')}"
 
 
-def _section_path(root: str, section_id: object) -> str:
+def _section_path(root: str, section_id: str) -> str:
     return f"{root}/sections/{path_segment(section_id, 'section_id')}"
 
 
-def _page_path(root: str, page_id: object) -> str:
+def _page_path(root: str, page_id: str) -> str:
     return f"{root}/pages/{path_segment(page_id, 'page_id')}"
 
 
@@ -147,10 +147,9 @@ def _paragraph(text: str) -> str:
     return f"<p>{text_to_html(text).replace('<br>', '<br />')}</p>"
 
 
-def _text(value: object, field_name: str, *, required: bool) -> str:
-    if not isinstance(value, str) or (required and not value.strip()):
-        msg = f"{field_name} must not be empty." if required else f"{field_name} must be text."
-        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+def _text(value: str, field_name: str) -> str:
+    if not value.strip():
+        raise MicrosoftGraphError(code="invalid_argument", message=f"{field_name} must not be empty.")
     return value
 
 
@@ -410,10 +409,10 @@ class MicrosoftOneNoteTools(Toolkit):
             root = _root(container)
             section = _section_path(root, section_id)
             html = (
-                f"<!DOCTYPE html><html><head><title>{escape(_text(title, 'title', required=True))}</title></head>"
-                f"<body>{_paragraph(_text(content, 'content', required=False))}</body></html>"
+                f"<!DOCTYPE html><html><head><title>{escape(_text(title, 'title'))}</title></head>"
+                f"<body>{_paragraph(content)}</body></html>"
             )
-            target = _Target(root, section, _text(expected_web_url, "expected_web_url", required=True))
+            target = _Target(root, section, _text(expected_web_url, "expected_web_url"))
             return _Request(
                 "POST",
                 f"{section}/pages",
@@ -451,9 +450,9 @@ class MicrosoftOneNoteTools(Toolkit):
             change = {
                 "target": "body",
                 "action": "append",
-                "content": _paragraph(_text(content, "content", required=True)),
+                "content": _paragraph(_text(content, "content")),
             }
-            target = _Target(root, page, _text(expected_web_url, "expected_web_url", required=True))
+            target = _Target(root, page, _text(expected_web_url, "expected_web_url"))
             return _Request("PATCH", f"{page}/content", body=[change], target=target)
 
         return self._send(container, build, lambda _request, _payload: {"appended": {"page_id": page_id}})

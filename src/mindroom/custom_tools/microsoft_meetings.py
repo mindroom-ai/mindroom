@@ -89,16 +89,15 @@ class _Request:
     reads_transcripts: bool = False
 
 
-def _join_url(value: object) -> str:
+def _join_url(value: str) -> str:
     """Return a Teams meeting join URL, refusing anything else before it goes into an OData filter."""
     try:
-        parts = urlsplit(value) if isinstance(value, str) else None
-        port = parts.port if parts is not None else None
+        parts = urlsplit(value)
+        port = parts.port
     except ValueError:
         parts, port = None, None
     if (
-        not isinstance(value, str)
-        or parts is None
+        parts is None
         or len(value) > _MAX_JOIN_URL_CHARACTERS
         or any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value)
         or parts.scheme != "https"
@@ -112,7 +111,7 @@ def _join_url(value: object) -> str:
     return value
 
 
-def _meeting_path(meeting_id: object) -> str:
+def _meeting_path(meeting_id: str) -> str:
     return f"/me/onlineMeetings/{path_segment(meeting_id, 'meeting_id')}"
 
 

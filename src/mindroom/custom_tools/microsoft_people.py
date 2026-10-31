@@ -38,9 +38,9 @@ _SEARCH_HEADERS = {"ConsistencyLevel": "eventual", "Prefer": "legacySearch=false
 _USER_TYPE = "#microsoft.graph.user"
 
 
-def _search(query: object) -> str:
+def _search(query: str) -> str:
     """Return the `$search` that matches display name words in any order, or an email address by its beginning."""
-    text = query.strip() if isinstance(query, str) else ""
+    text = query.strip()
     if not text or len(text) > _MAX_QUERY_CHARACTERS:
         msg = f"query must be a name or email address of 1 to {_MAX_QUERY_CHARACTERS} characters."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)

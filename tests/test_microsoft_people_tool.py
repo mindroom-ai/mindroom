@@ -195,15 +195,15 @@ def test_search_returns_only_the_directory_fields(tmp_path: Path, monkeypatch: p
     assert all("mobile" not in json.dumps(person) for person in people)
 
 
-@pytest.mark.parametrize("query", ["", "   ", 5, None, "x" * 101])
+@pytest.mark.parametrize("query", ["", "   ", "x" * 101])
 def test_search_refuses_an_empty_or_overlong_query_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    query: object,
+    query: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    assert _payload(tools.microsoft_people_search(query))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert _payload(tools.microsoft_people_search(query))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -223,6 +223,8 @@ def test_search_refuses_a_limit_outside_one_to_fifty(
     ("name", "arguments"),
     [
         ("microsoft_people_search", {"query": "Dana", "limit": 2.5}),
+        ("microsoft_people_search", {"query": 5}),
+        ("microsoft_people_search", {"query": None}),
     ],
 )
 def test_malformed_arguments_fail_call_validation_before_any_request(
