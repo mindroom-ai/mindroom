@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from collections.abc import Set as AbstractSet
 
+    from mindroom.constants import RuntimePaths
     from mindroom.message_target import MessageTarget
     from mindroom.orchestration.entity_fleet import EntityFleet
 
@@ -286,32 +287,20 @@ def _write_plugin_removal_test_config(tmp_path: Path, *, with_plugin: bool) -> N
     )
 
 
-async def _noop_prepare_user_account(
-    self: _MultiAgentOrchestrator,
+async def _noop_prepare_managed_accounts(
     config: Config,
-    *,
-    update_runtime_state: bool,
-) -> None:
-    del self, config, update_runtime_state
-
-
-async def _noop_prepare_entity_accounts(
-    self: _MultiAgentOrchestrator,
-    config: Config,
+    runtime_paths: RuntimePaths,
     entity_names: Iterable[str],
+    *,
+    include_internal_user: bool,
+    update_runtime_state: bool,
 ) -> dict[str, AgentMatrixUser]:
-    del self
+    del runtime_paths, include_internal_user, update_runtime_state
     return {
         entity_name: AgentMatrixUser(
             agent_name=entity_name,
             user_id=f"@actual_{entity_name}:localhost",
-            display_name=(
-                "RouterAgent"
-                if entity_name == ROUTER_AGENT_NAME
-                else config.agents[entity_name].display_name
-                if entity_name in config.agents
-                else config.teams[entity_name].display_name
-            ),
+            display_name=config.entity_display_name(entity_name),
             password=TEST_PASSWORD,
         )
         for entity_name in entity_names
@@ -365,14 +354,7 @@ async def _noop_stop(self: AgentBot, *, shutdown_intent: object | None = None) -
 
 def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch bot and orchestrator runtime helpers unrelated to plugin teardown."""
-    monkeypatch.setattr(
-        "mindroom.orchestrator._MultiAgentOrchestrator._prepare_user_account",
-        _noop_prepare_user_account,
-    )
-    monkeypatch.setattr(
-        "mindroom.orchestrator._MultiAgentOrchestrator._prepare_entity_accounts",
-        _noop_prepare_entity_accounts,
-    )
+    monkeypatch.setattr("mindroom.orchestrator.prepare_managed_accounts", _noop_prepare_managed_accounts)
     monkeypatch.setattr(
         "mindroom.orchestrator._MultiAgentOrchestrator._sync_mcp_manager",
         _noop_sync_mcp_manager,
@@ -1328,13 +1310,19 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
 
     with (
         patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-        patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
+        patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
         await orchestrator.config_reload._update_config()
 
     assert orchestrator.config is current_config
-    prepare.assert_awaited_once_with(new_config, {"writer"})
+    prepare.assert_awaited_once_with(
+        new_config,
+        orchestrator.runtime_paths,
+        ["writer"],
+        include_internal_user=False,
+        update_runtime_state=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -1351,9 +1339,8 @@ async def test_update_config_starts_agent_added_only_by_personal_agent_roster(tm
 
     with (
         patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-        patch.object(
-            orchestrator,
-            "_prepare_entity_accounts",
+        patch(
+            "mindroom.orchestrator.prepare_managed_accounts",
             new=AsyncMock(side_effect=PermanentStartupError("stop")),
         ) as prepare,
         pytest.raises(PermanentStartupError, match="stop"),
@@ -1361,7 +1348,7 @@ async def test_update_config_starts_agent_added_only_by_personal_agent_roster(tm
         await orchestrator.config_reload._update_config()
 
     assert orchestrator.config is current_config
-    prepare.assert_awaited_once_with(new_config, {"mind_alice_smith"})
+    assert prepare.await_args.args[2] == ["mind_alice_smith"]
 
 
 @pytest.mark.asyncio
@@ -1388,13 +1375,13 @@ async def test_update_config_keeps_current_config_when_restarted_entity_account_
 
     with (
         patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-        patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
+        patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
         await orchestrator.config_reload._update_config()
 
     assert orchestrator.config is current_config
-    prepare.assert_awaited_once_with(new_config, {"general"})
+    assert prepare.await_args.args[2] == ["general"]
 
 
 @pytest.mark.asyncio
@@ -1411,8 +1398,7 @@ async def test_initialize_binds_nothing_when_entity_account_preparation_fails(tm
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
     with (
-        patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
-        patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)),
+        patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock(side_effect=account_error)),
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
         await orchestrator.initialize()
@@ -1458,64 +1444,14 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
 
     with (
         patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-        patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
-        patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock()) as prepare_entities,
+        patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()),
+        patch("mindroom.orchestration.accounts.create_agent_user", new=AsyncMock()) as create,
         pytest.raises(PermanentStartupError, match="internal user Matrix ID"),
     ):
         await orchestrator.config_reload._update_config()
 
     assert orchestrator.config is current_config
-    prepare_entities.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_prepare_entity_accounts_retries_transient_create_agent_user_failure(tmp_path: Path) -> None:
-    """Account preparation should retry transient Matrix provisioning failures."""
-    config = _runtime_bound_config(
-        Config(
-            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "openai", "id": "test-model"}},
-        ),
-        tmp_path,
-    )
-    runtime_paths = runtime_paths_for(config)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
-    calls: list[str] = []
-    test_paths = runtime_paths
-
-    async def flaky_user(
-        _homeserver: str,
-        entity_name: str,
-        display_name: str,
-        *,
-        runtime_paths: object,
-        username: str | None = None,
-    ) -> AgentMatrixUser:
-        del runtime_paths, username
-        calls.append(entity_name)
-        if len(calls) == 1:
-            msg = "temporary Matrix provisioning failure"
-            raise RuntimeError(msg)
-        state = MatrixState.load(runtime_paths=test_paths)
-        actual_username = f"actual_{entity_name}"
-        state.add_account(f"agent_{entity_name}", actual_username, TEST_PASSWORD, domain="localhost")
-        save_matrix_state(state, test_paths)
-        return AgentMatrixUser(
-            agent_name=entity_name,
-            user_id=f"@{actual_username}:localhost",
-            display_name=display_name,
-            password=TEST_PASSWORD,
-        )
-
-    with (
-        patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0.0),
-        patch("mindroom.orchestrator.create_agent_user", new=flaky_user),
-    ):
-        users = await orchestrator._prepare_entity_accounts(config, [ROUTER_AGENT_NAME, "general"])
-
-    assert calls == [ROUTER_AGENT_NAME, ROUTER_AGENT_NAME, "general"]
-    assert users[ROUTER_AGENT_NAME].user_id == "@actual_router:localhost"
-    assert users["general"].user_id == "@actual_general:localhost"
+    create.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1535,157 +1471,6 @@ async def test_ready_personal_agent_nudges_router_reconciliation(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_prepare_entity_accounts_requests_personal_agent_username(tmp_path: Path) -> None:
-    """A generated agent's stored Matrix username is requested, so a wiped matrix_state recreates the same ID."""
-    paths = test_runtime_paths(tmp_path)
-    _append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
-    config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
-    orchestrator = _MultiAgentOrchestrator(paths, config=config)
-    requested: dict[str, str | None] = {}
-
-    async def record_user(
-        _homeserver: str,
-        entity_name: str,
-        display_name: str,
-        *,
-        runtime_paths: object,
-        username: str | None = None,
-    ) -> AgentMatrixUser:
-        del runtime_paths
-        requested[entity_name] = username
-        actual_username = username or f"actual_{entity_name}"
-        state = MatrixState.load(runtime_paths=paths)
-        state.add_account(f"agent_{entity_name}", actual_username, TEST_PASSWORD, domain="localhost")
-        save_matrix_state(state, paths)
-        return AgentMatrixUser(
-            agent_name=entity_name,
-            user_id=f"@{actual_username}:localhost",
-            display_name=display_name,
-            password=TEST_PASSWORD,
-        )
-
-    with patch("mindroom.orchestrator.create_agent_user", new=record_user):
-        await orchestrator._prepare_entity_accounts(config, [ROUTER_AGENT_NAME, "mind_alice_smith"])
-
-    assert requested == {ROUTER_AGENT_NAME: None, "mind_alice_smith": "alice.mind"}
-
-
-def test_preflight_account_provisioning_checks_personal_agent_username(tmp_path: Path) -> None:
-    """The localpart collision check uses a generated agent's stored Matrix username."""
-    paths = test_runtime_paths(tmp_path)
-    _append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
-    config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
-    state = MatrixState.load(runtime_paths=paths)
-    state.add_account("agent_other", "alice.mind", TEST_PASSWORD, domain="localhost")
-    save_matrix_state(state, paths)
-    orchestrator = _MultiAgentOrchestrator(paths, config=config)
-
-    with pytest.raises(PermanentStartupError, match=r"'alice\.mind'"):
-        orchestrator._preflight_account_provisioning(
-            config,
-            entity_names=["mind_alice_smith"],
-            include_internal_user=False,
-        )
-
-
-@pytest.mark.asyncio
-async def test_prepare_entity_accounts_rejects_duplicate_persisted_matrix_ids(tmp_path: Path) -> None:
-    """Account preparation should fail permanently when persisted entity IDs are ambiguous."""
-    config = _runtime_bound_config(
-        Config(
-            agents={
-                "general": {"display_name": "GeneralAgent", "model": "default"},
-                "writer": {"display_name": "WriterAgent", "model": "default"},
-            },
-            models={"default": {"provider": "openai", "id": "test-model"}},
-        ),
-        tmp_path,
-    )
-    runtime_paths = runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_router", "actual_router", TEST_PASSWORD, domain="localhost")
-    state.add_account("agent_general", "shared_bot", TEST_PASSWORD, domain="localhost")
-    state.add_account("agent_writer", "shared_bot", TEST_PASSWORD, domain="localhost")
-    save_matrix_state(state, runtime_paths)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
-    calls: list[str] = []
-
-    async def existing_user(
-        _homeserver: str,
-        entity_name: str,
-        display_name: str,
-        *,
-        runtime_paths: object,
-        username: str | None = None,
-    ) -> AgentMatrixUser:
-        del runtime_paths, username
-        calls.append(entity_name)
-        return AgentMatrixUser(
-            agent_name=entity_name,
-            user_id="@shared_bot:localhost" if entity_name != ROUTER_AGENT_NAME else "@actual_router:localhost",
-            display_name=display_name,
-            password=TEST_PASSWORD,
-        )
-
-    with (
-        patch("mindroom.orchestrator.create_agent_user", new=existing_user),
-        pytest.raises(PermanentStartupError, match="shared_bot"),
-    ):
-        await orchestrator._prepare_entity_accounts(config, [ROUTER_AGENT_NAME, "general", "writer"])
-
-    assert calls == [ROUTER_AGENT_NAME, "general", "writer"]
-
-
-@pytest.mark.asyncio
-async def test_prepare_entity_accounts_rejects_internal_user_entity_id_collision(tmp_path: Path) -> None:
-    """Account preparation should fail when the internal user shares an entity Matrix ID."""
-    config = _runtime_bound_config(
-        Config(
-            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "openai", "id": "test-model"}},
-            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        ),
-        tmp_path,
-    )
-    runtime_paths = runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_router", "actual_router", TEST_PASSWORD, domain="localhost")
-    state.add_account("agent_general", "shared_actual", TEST_PASSWORD, domain="localhost")
-    state.add_account(
-        "agent_user",
-        "shared_actual",
-        TEST_PASSWORD,
-        requested_username="mindroom_user",
-        domain="localhost",
-    )
-    save_matrix_state(state, runtime_paths)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
-
-    async def existing_user(
-        _homeserver: str,
-        entity_name: str,
-        display_name: str,
-        *,
-        runtime_paths: object,
-        username: str | None = None,
-    ) -> AgentMatrixUser:
-        del runtime_paths, username
-        user_id = "@actual_router:localhost" if entity_name == ROUTER_AGENT_NAME else "@shared_actual:localhost"
-        return AgentMatrixUser(
-            agent_name=entity_name,
-            user_id=user_id,
-            display_name=display_name,
-            password=TEST_PASSWORD,
-        )
-
-    with (
-        patch("mindroom.orchestrator.create_agent_user", new=existing_user),
-        pytest.raises(PermanentStartupError, match="internal user Matrix ID"),
-    ):
-        await orchestrator._prepare_entity_accounts(config, [ROUTER_AGENT_NAME, "general"])
-
-
-@pytest.mark.asyncio
 async def test_initialize_creates_no_account_while_a_requested_localpart_is_taken(tmp_path: Path) -> None:
     """Startup checks every account it would create, the internal user's included, before it creates any."""
     paths = test_runtime_paths(tmp_path)
@@ -1699,7 +1484,7 @@ async def test_initialize_creates_no_account_while_a_requested_localpart_is_take
     create = AsyncMock()
 
     with (
-        patch("mindroom.orchestrator.create_agent_user", new=create),
+        patch("mindroom.orchestration.accounts.create_agent_user", new=create),
         pytest.raises(PermanentStartupError, match=r"'alice\.mind'"),
     ):
         await orchestrator.initialize()
@@ -1747,62 +1532,13 @@ async def test_initialize_checks_entity_accounts_against_the_internal_account_th
         )
 
     with (
-        patch("mindroom.orchestrator.create_agent_user", new=server_renames_internal_user),
+        patch("mindroom.orchestration.accounts.create_agent_user", new=server_renames_internal_user),
         pytest.raises(PermanentStartupError, match="localpart collision"),
     ):
         await orchestrator.initialize()
 
     assert created == ["user"]
     assert orchestrator.agent_bots == {}
-
-
-@pytest.mark.asyncio
-async def test_account_preparation_validates_again_after_a_transient_validation_failure(tmp_path: Path) -> None:
-    """A transient failure while validating identities retries the whole step, validation included."""
-    config = _runtime_bound_config(
-        Config(
-            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "openai", "id": "test-model"}},
-        ),
-        tmp_path,
-    )
-    runtime_paths = runtime_paths_for(config)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
-    validations: list[str] = []
-
-    def flaky_registry(*_args: object) -> object:
-        validations.append("validated")
-        if len(validations) == 1:
-            msg = "matrix_state.yaml briefly unreadable"
-            raise OSError(msg)
-        return object()
-
-    async def existing_user(
-        _homeserver: str,
-        entity_name: str,
-        display_name: str,
-        *,
-        runtime_paths: object,
-        username: str | None = None,
-    ) -> AgentMatrixUser:
-        del runtime_paths, username
-        return AgentMatrixUser(
-            agent_name=entity_name,
-            user_id=f"@actual_{entity_name}:localhost",
-            display_name=display_name,
-            password=TEST_PASSWORD,
-        )
-
-    with (
-        patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0.0),
-        patch("mindroom.orchestrator.create_agent_user", new=existing_user),
-        patch("mindroom.orchestrator.entity_identity_registry", new=flaky_registry),
-    ):
-        users = await orchestrator._prepare_entity_accounts(config, [ROUTER_AGENT_NAME, "general"])
-
-    assert validations == ["validated", "validated"]
-    assert users["general"].display_name == "GeneralAgent"
-    assert users[ROUTER_AGENT_NAME].display_name == "RouterAgent"
 
 
 @pytest.mark.asyncio
@@ -3518,7 +3254,6 @@ async def test_orchestrator_handles_config_reload(
 
     monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
-    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=initial_config)

@@ -666,7 +666,10 @@ class TestDynamicConfigUpdate:
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
-            patch.object(orchestrator, "_ensure_user_account", new=AsyncMock()) as mock_ensure_user,
+            patch(
+                "mindroom.orchestration.accounts.create_agent_user",
+                new=AsyncMock(return_value=MagicMock(user_id="@mindroom_user:localhost")),
+            ) as create_account,
             patch.object(orchestrator._rooms, "setup", new=AsyncMock()) as mock_setup,
         ):
             updated = await orchestrator.config_reload._update_config()
@@ -674,7 +677,9 @@ class TestDynamicConfigUpdate:
         assert updated is False
         assert orchestrator.config == updated_config
         router_bot.apply_published_config.assert_called_once_with()
-        mock_ensure_user.assert_awaited_once_with(updated_config)
+        create_account.assert_awaited_once()
+        assert create_account.await_args.args[1:] == ("user", "Alice Internal")
+        assert create_account.await_args.kwargs["username"] == "mindroom_user"
         mock_setup.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
@@ -717,11 +722,10 @@ class TestDynamicConfigUpdate:
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
-            patch.object(
-                orchestrator,
-                "_ensure_user_account",
+            patch(
+                "mindroom.orchestration.accounts.create_agent_user",
                 new=AsyncMock(side_effect=PermanentMatrixStartupError("mindroom_user.username cannot be changed")),
-            ) as mock_ensure_user,
+            ) as create_account,
             patch.object(orchestrator._rooms, "setup", new=AsyncMock()) as mock_setup,
             pytest.raises(PermanentMatrixStartupError, match="cannot be changed"),
         ):
@@ -730,5 +734,6 @@ class TestDynamicConfigUpdate:
         assert orchestrator.config == initial_config
         mock_bot.apply_published_config.assert_not_called()
         router_bot.apply_published_config.assert_not_called()
-        mock_ensure_user.assert_awaited_once_with(updated_config)
+        create_account.assert_awaited_once()
+        assert create_account.await_args.args[1:] == ("user", "Alice Internal")
         mock_setup.assert_not_awaited()

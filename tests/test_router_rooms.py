@@ -236,7 +236,6 @@ async def test_orchestrator_creates_router_with_all_rooms(
     """Test that the orchestrator properly initializes the router with all rooms."""
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
 
-    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
     # Create orchestrator
@@ -292,7 +291,6 @@ async def test_router_updates_rooms_on_config_change(
         },
     )
 
-    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     setup_rooms = AsyncMock()
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", setup_rooms)
 

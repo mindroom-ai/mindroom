@@ -587,7 +587,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     mock_config.teams = {}
     bind_mock_config_event_journal(mock_config)
 
-    with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+    with patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()):
         orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), config=mock_config)
         await orchestrator.initialize()
 

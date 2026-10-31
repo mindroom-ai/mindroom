@@ -73,7 +73,7 @@ class TestTeamRoomUpdates:
 
         config1 = Config.model_validate(initial_config_data)
 
-        with patch("mindroom.orchestrator.create_agent_user", new_callable=AsyncMock) as mock_ensure_users:
+        with patch("mindroom.orchestration.accounts.create_agent_user", new_callable=AsyncMock) as mock_ensure_users:
             mock_agent1_user = MagicMock(user_id="@agent1:localhost", agent_name="agent1")
             mock_team_user = MagicMock(user_id="@team1:localhost", agent_name="team1")
             mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
@@ -91,8 +91,7 @@ class TestTeamRoomUpdates:
             with (
                 patch("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai),
                 patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
-                patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
-                patch("mindroom.orchestrator._MultiAgentOrchestrator._validate_entity_accounts"),
+                patch("mindroom.orchestration.accounts.validate_entity_accounts"),
                 patch(
                     "mindroom.orchestration.rooms.RoomSetup.setup",
                     new=AsyncMock(),
@@ -186,7 +185,7 @@ class TestTeamRoomUpdates:
 
         config1 = Config.model_validate(initial_config_data)
 
-        with patch("mindroom.orchestrator.create_agent_user", new_callable=AsyncMock) as mock_ensure_users:
+        with patch("mindroom.orchestration.accounts.create_agent_user", new_callable=AsyncMock) as mock_ensure_users:
             mock_agent1_user = MagicMock(user_id="@agent1:localhost", agent_name="agent1")
             mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
             mock_ensure_users.return_value = {"agent1": mock_agent1_user, "router": mock_router_user}
@@ -199,7 +198,6 @@ class TestTeamRoomUpdates:
             with (
                 patch("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai),
                 patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
-                patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
                 patch(
                     "mindroom.orchestration.rooms.RoomSetup.setup",
                     new=AsyncMock(),
@@ -289,7 +287,7 @@ class TestTeamRoomUpdates:
 
         config = Config.model_validate(config_data)
 
-        with patch("mindroom.orchestrator.create_agent_user", new_callable=AsyncMock) as mock_ensure_users:
+        with patch("mindroom.orchestration.accounts.create_agent_user", new_callable=AsyncMock) as mock_ensure_users:
             mock_agent1_user = MagicMock(user_id="@agent1:localhost", agent_name="agent1")
             mock_team_user = MagicMock(user_id="@team1:localhost", agent_name="team1")
             mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
@@ -307,7 +305,6 @@ class TestTeamRoomUpdates:
             with (
                 patch("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai),
                 patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
-                patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
                 patch(
                     "mindroom.orchestration.rooms.RoomSetup.setup",
                     new=AsyncMock(),

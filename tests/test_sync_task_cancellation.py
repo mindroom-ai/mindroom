@@ -2300,8 +2300,23 @@ async def test_restart_stop_reports_failed_release_over_reply_drain_timeout() ->
 @pytest.mark.asyncio
 async def test_orchestrator_initialize_registers_router_and_agents_with_the_fleet(tmp_path: Path) -> None:
     """Initialization builds one fleet bot for the router and each configured agent."""
+    accounts = {
+        "router": AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="RouterAgent",
+            password=TEST_PASSWORD,
+        ),
+        "test_agent": AgentMatrixUser(
+            agent_name="test_agent",
+            user_id="@mindroom_test_agent:localhost",
+            display_name="Test Agent",
+            password=TEST_PASSWORD,
+        ),
+    }
     with (
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
+        patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock(return_value=accounts)),
     ):
         # Create mock bot
         mock_bot = AsyncMock()
@@ -2324,23 +2339,6 @@ async def test_orchestrator_initialize_registers_router_and_agents_with_the_flee
 
         # Create orchestrator
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
-        orchestrator._prepare_entity_accounts = AsyncMock(
-            return_value={
-                "router": AgentMatrixUser(
-                    agent_name="router",
-                    user_id="@mindroom_router:localhost",
-                    display_name="RouterAgent",
-                    password=TEST_PASSWORD,
-                ),
-                "test_agent": AgentMatrixUser(
-                    agent_name="test_agent",
-                    user_id="@mindroom_test_agent:localhost",
-                    display_name="Test Agent",
-                    password=TEST_PASSWORD,
-                ),
-            },
-        )
-
         assert orchestrator.runtime_paths.config_path == (tmp_path / "config.yaml").resolve()
 
         await orchestrator.initialize()
@@ -2813,9 +2811,8 @@ async def test_new_agent_not_started_twice(tmp_path: Path, fleet_sync: _FleetSyn
     """
     with (
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
-        patch.object(
-            _MultiAgentOrchestrator,
-            "_prepare_entity_accounts",
+        patch(
+            "mindroom.orchestrator.prepare_managed_accounts",
             new=AsyncMock(
                 return_value={
                     "router": AgentMatrixUser(
@@ -2972,7 +2969,7 @@ async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_dr
                 return_value={"general", "coach"},
             ),
             patch("mindroom.orchestrator.create_bot_for_entity", side_effect=make_bot),
-            patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(return_value=accounts)),
+            patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock(return_value=accounts)),
             patch.object(orchestrator._rooms, "setup", new=AsyncMock()),
         ):
             await orchestrator.config_reload._apply_queued_config_reload()

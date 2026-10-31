@@ -1555,7 +1555,7 @@ space_room_id: null
         orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
 
         with (
-            patch("mindroom.orchestrator.create_agent_user", new=recording_create_agent_user),
+            patch("mindroom.orchestration.accounts.create_agent_user", new=recording_create_agent_user),
             pytest.raises(PermanentMatrixStartupError, match="localpart collision"),
         ):
             await orchestrator.initialize()

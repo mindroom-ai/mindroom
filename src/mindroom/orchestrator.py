@@ -15,7 +15,6 @@ from uuid import uuid4
 
 import uvicorn
 
-from mindroom import constants
 from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
@@ -34,16 +33,11 @@ from mindroom.background_tasks import (
     wait_for_background_tasks,
 )
 from mindroom.budgets.monitor import BudgetMonitor
-from mindroom.constants import ROUTER_AGENT_NAME, ROUTER_DISPLAY_NAME, tracking_dir
+from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
 from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.embeddings.embedder_health import check_embedder_health, handle_embedder_config_reload
-from mindroom.entity_resolution import (
-    DuplicateManagedEntityIdentityError,
-    MissingManagedEntityAccountError,
-    entity_identity_registry,
-)
 from mindroom.event_loop_stall import (
     EventLoopStallDetector,
     shorten_gil_switch_interval,
@@ -70,12 +64,7 @@ from mindroom.knowledge_graph.runtime import KnowledgeGraphRuntime
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.provisioning_heartbeat import run_provisioning_heartbeat
 from mindroom.matrix.users import (
-    INTERNAL_USER_AGENT_NAME,
-    AgentMatrixUser,
-    ManagedAccountProvisioningRequest,
-    create_agent_user,
     load_agent_user,
-    preflight_managed_account_provisioning,
 )
 from mindroom.matrix_rtc.call_manager import preload_matrix_call_dependencies
 from mindroom.mcp.manager import MCPServerManager
@@ -119,6 +108,7 @@ from . import file_watcher
 from .bot import AgentBot, create_bot_for_entity
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
+from .orchestration.accounts import prepare_managed_accounts, validate_entity_accounts
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
 from .orchestration.config_updates import (
@@ -682,40 +672,6 @@ class _MultiAgentOrchestrator:
             recovery=self._approval_recovery,
         )
 
-    async def _ensure_user_account(self, config: Config) -> None:
-        """Ensure a user account exists, creating one if necessary.
-
-        This reuses the same `create_agent_user` flow that agents use,
-        treating the user as a special internal "agent" account.
-        Skipped when `mindroom_user` is not configured, such as hosted/public profiles.
-        """
-        if config.mindroom_user is None:
-            logger.debug("mindroom_user not configured, skipping user account creation")
-            return
-        # The user account is managed through the same Matrix account lifecycle as bots.
-        user_account = await create_agent_user(
-            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
-            INTERNAL_USER_AGENT_NAME,
-            config.mindroom_user.display_name,
-            username=config.mindroom_user.username,
-            runtime_paths=self.runtime_paths,
-        )
-        logger.info("user_account_ready", user_id=user_account.user_id)
-
-    async def _prepare_user_account(
-        self,
-        config: Config,
-        *,
-        update_runtime_state: bool,
-    ) -> None:
-        """Ensure the internal user account exists, retrying only transient failures."""
-        await run_with_retry(
-            "Preparing MindRoom user account",
-            lambda: self._ensure_user_account(config),
-            permanent_error_check=is_permanent_startup_error,
-            update_runtime_state=update_runtime_state,
-        )
-
     def _running_startup_maintenance_bots(self) -> list[AgentBot]:
         """Return currently running bots in startup-maintenance order."""
         return self._running_bots_for_entities(
@@ -792,95 +748,19 @@ class _MultiAgentOrchestrator:
                 degraded_entities=sorted(degraded_entities),
             )
 
-    @staticmethod
-    def _entity_display_name(config: Config, entity_name: str) -> str:
-        """Return the Matrix display name for one configured managed entity."""
-        if entity_name == ROUTER_AGENT_NAME:
-            return ROUTER_DISPLAY_NAME
-        if entity_name in config.agents:
-            return config.agents[entity_name].display_name
-        if entity_name in config.teams:
-            return config.teams[entity_name].display_name
-        return entity_name
-
-    @staticmethod
-    def _entity_requested_username(config: Config, entity_name: str) -> str | None:
-        """Return a generated agent's stored Matrix username, so a wiped matrix_state recreates the same ID."""
-        instance = config.personal_agent_instance(entity_name)
-        return None if instance is None else instance.matrix_username
-
-    async def _prepare_entity_accounts(
-        self,
-        config: Config,
-        entity_names: Iterable[str],
-    ) -> dict[str, AgentMatrixUser]:
-        """Ensure managed Matrix accounts exist before runtime bot construction."""
-        homeserver = constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths)
-        users: dict[str, AgentMatrixUser] = {}
-        entity_names = tuple(entity_names)
-        self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=False)
-
-        async def _prepare_accounts() -> None:
-            nonlocal users
-            prepared_users: dict[str, AgentMatrixUser] = {}
-            for entity_name in entity_names:
-                prepared_users[entity_name] = await create_agent_user(
-                    homeserver,
-                    entity_name,
-                    self._entity_display_name(config, entity_name),
-                    runtime_paths=self.runtime_paths,
-                    username=self._entity_requested_username(config, entity_name),
-                )
-            self._validate_entity_accounts(config)
-            users = prepared_users
-
-        await run_with_retry(
-            "Preparing managed Matrix accounts",
-            _prepare_accounts,
-            permanent_error_check=is_permanent_startup_error,
-            update_runtime_state=not self.running,
-        )
-        return users
-
-    def _validate_entity_accounts(self, config: Config) -> None:
-        """Validate persisted Matrix identities for all configured runtime entities."""
-        try:
-            entity_identity_registry(config, self.runtime_paths)
-        except (DuplicateManagedEntityIdentityError, MissingManagedEntityAccountError) as exc:
-            raise PermanentStartupError(str(exc)) from exc
-
-    def _preflight_account_provisioning(
-        self,
-        config: Config,
-        *,
-        entity_names: Iterable[str],
-        include_internal_user: bool,
-    ) -> None:
-        """Reject account localpart collisions before any missing account is created."""
-        requests: list[ManagedAccountProvisioningRequest] = []
-        if include_internal_user and config.mindroom_user is not None:
-            requests.append(
-                ManagedAccountProvisioningRequest(
-                    INTERNAL_USER_AGENT_NAME,
-                    username=config.mindroom_user.username,
-                ),
-            )
-        requests.extend(
-            ManagedAccountProvisioningRequest(
-                entity_name,
-                username=self._entity_requested_username(config, entity_name),
-            )
-            for entity_name in entity_names
-        )
-        preflight_managed_account_provisioning(requests, self.runtime_paths)
-
     def validate_managed_entity_identities(self) -> None:
         """Validate persisted managed Matrix identities for the live config."""
-        self._validate_entity_accounts(self.config)
+        validate_entity_accounts(self.config, self.runtime_paths)
 
     async def _create_bots(self, entity_names: set[str]) -> dict[str, AgentBot]:
         """Prepare Matrix accounts, then build bots for entities the published config configures."""
-        entity_users = await self._prepare_entity_accounts(self.config, sorted(entity_names))
+        entity_users = await prepare_managed_accounts(
+            self.config,
+            self.runtime_paths,
+            sorted(entity_names),
+            include_internal_user=False,
+            update_runtime_state=not self.running,
+        )
         return {
             entity_name: create_bot_for_entity(entity_name, entity_users[entity_name], self)
             for entity_name in sorted(entity_names)
@@ -1045,9 +925,13 @@ class _MultiAgentOrchestrator:
         generation = prepare_plugins(config, self.runtime_paths)
         try:
             entity_names = configured_entity_names(config)
-            self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
-            await self._prepare_user_account(config, update_runtime_state=True)
-            entity_users = await self._prepare_entity_accounts(config, entity_names)
+            entity_users = await prepare_managed_accounts(
+                config,
+                self.runtime_paths,
+                entity_names,
+                include_internal_user=True,
+                update_runtime_state=not self.running,
+            )
             self.agent_reply_memberships.invalidate(config, reason="initial_config")
             await self._bind_event_journal()
             await self._tool_job_runtime.initialize()
@@ -1216,7 +1100,7 @@ class _MultiAgentOrchestrator:
 
     async def _end_unconfigured_entity_replies(self, config: Config) -> None:
         """End the replies of entities removed while MindRoom was stopped; no bot finishes them."""
-        configured = {ROUTER_AGENT_NAME, *config.agents, *config.teams}
+        configured = set(configured_entity_names(config))
         await self.event_journal_store().end_entity_replies(
             lambda entity_name: entity_name not in configured,
             now_ns=time.time_ns(),
@@ -1449,21 +1333,6 @@ class _MultiAgentOrchestrator:
         elif plan.matrix_space_changed:
             await self._rooms.link_root_space(await self._rooms.ensure_rooms_exist())
 
-    async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
-        """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
-        entities_requiring_account_check = set(plan.start | plan.restart)
-        self._preflight_account_provisioning(
-            new_config,
-            entity_names=entities_requiring_account_check,
-            include_internal_user=plan.mindroom_user_changed,
-        )
-        if plan.mindroom_user_changed:
-            await self._prepare_user_account(new_config, update_runtime_state=not self.running)
-        if entities_requiring_account_check:
-            await self._prepare_entity_accounts(new_config, entities_requiring_account_check)
-        elif plan.mindroom_user_changed:
-            self._validate_entity_accounts(new_config)
-
     async def _finalize_config_reload(
         self,
         current_config: Config,
@@ -1480,7 +1349,15 @@ class _MultiAgentOrchestrator:
     async def _apply_config_update_plan(self, current_config: Config, plan: ConfigUpdatePlan) -> bool:
         """Apply one computed config update plan: stop what changes, publish the new config, then start."""
         new_config = plan.new_config
-        await self._prepare_accounts_for_config_update(new_config, plan)
+        # Accounts are ready, and their names checked, before anything stops or the config publishes.
+        if plan.start or plan.restart or plan.mindroom_user_changed:
+            await prepare_managed_accounts(
+                new_config,
+                self.runtime_paths,
+                sorted(plan.start | plan.restart),
+                include_internal_user=plan.mindroom_user_changed,
+                update_runtime_state=not self.running,
+            )
         await self._script_runtime.apply_update_plan(plan)
         try:
             async with self._paused_startup_maintenance():

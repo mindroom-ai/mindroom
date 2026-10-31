@@ -25,7 +25,7 @@ from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
-from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.orchestration.accounts import _prepare_internal_user
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 from tests.matrix_state_helpers import save_matrix_state
 
@@ -144,7 +144,7 @@ class TestUserAccountManagement:
             mock_client.set_displayname.assert_called_once_with("Existing User")
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_creates_new(
+    async def test_internal_user_account_creates_new(
         self,
         tmp_path: Path,
         mock_matrix_client: tuple[MagicMock, AsyncMock],
@@ -173,8 +173,7 @@ class TestUserAccountManagement:
             _config = Config(
                 mindroom_user={"username": DEFAULT_INTERNAL_USERNAME, "display_name": DEFAULT_INTERNAL_DISPLAY_NAME},
             )
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_config)
-            await orchestrator._ensure_user_account(_config)
+            await _prepare_internal_user(_config.mindroom_user, runtime_paths, update_runtime_state=False)
 
             # Check that user was created
             state = MatrixState.load(runtime_paths=runtime_paths)
@@ -190,7 +189,7 @@ class TestUserAccountManagement:
             mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_keeps_stored_credentials_without_login(
+    async def test_internal_user_account_keeps_stored_credentials_without_login(
         self,
         tmp_path: Path,
         mock_matrix_client: tuple[MagicMock, AsyncMock],
@@ -215,8 +214,7 @@ class TestUserAccountManagement:
                     "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
                 },
             )
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_config)
-            await orchestrator._ensure_user_account(_config)
+            await _prepare_internal_user(_config.mindroom_user, runtime_paths, update_runtime_state=False)
 
             # Should use existing account
             result_config = MatrixState.load(runtime_paths=runtime_paths)
@@ -228,7 +226,7 @@ class TestUserAccountManagement:
             mock_client.set_displayname.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_uses_configured_identity(
+    async def test_internal_user_account_uses_configured_identity(
         self,
         tmp_path: Path,
         mock_matrix_client: tuple[MagicMock, AsyncMock],
@@ -249,8 +247,7 @@ class TestUserAccountManagement:
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
             runtime_paths = _runtime_paths(tmp_path)
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=custom_config)
-            await orchestrator._ensure_user_account(custom_config)
+            await _prepare_internal_user(custom_config.mindroom_user, runtime_paths, update_runtime_state=False)
 
             state = MatrixState.load(runtime_paths=runtime_paths)
             assert state.accounts[INTERNAL_USER_ACCOUNT_KEY].username == "alice"
@@ -265,7 +262,7 @@ class TestUserAccountManagement:
             mock_client.set_displayname.assert_called_once_with("Alice Smith")
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_uses_existing_persisted_identity(
+    async def test_internal_user_account_uses_existing_persisted_identity(
         self,
         tmp_path: Path,
         mock_matrix_client: tuple[MagicMock, AsyncMock],
@@ -289,9 +286,7 @@ class TestUserAccountManagement:
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=custom_config)
-
-            await orchestrator._ensure_user_account(custom_config)
+            await _prepare_internal_user(custom_config.mindroom_user, runtime_paths, update_runtime_state=False)
 
         persisted_state = MatrixState.load(runtime_paths=runtime_paths)
         account = persisted_state.accounts[INTERNAL_USER_ACCOUNT_KEY]
