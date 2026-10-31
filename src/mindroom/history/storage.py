@@ -424,7 +424,7 @@ def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run
 # Legacy format: ``seen_event_ids`` in a session row's ``MINDROOM_HISTORY_METADATA_KEY`` value, into which team turns
 # merged the events each non-empty reply consumed, a copy of its stored run's ``matrix_seen_event_ids``; layout version 7
 # fills it from the older per-scope entry (``session_storage/legacy_scope_metadata.py``).
-# Last legacy release: v2026.10.747; replacement: the next release, where a team turn's stored run is the only record of
+# Last legacy release: v2026.10.756; replacement: the next release, where a team turn's stored run is the only record of
 # the events it consumed, as an agent turn's is.
 # Handling: The ids count as seen, beside the replayable runs' and the summary rows', until a redaction cut of the scope
 # drops them all (``_remove_redacted_event_from_history``); an edit's cut leaves them. Nothing writes them any more.
