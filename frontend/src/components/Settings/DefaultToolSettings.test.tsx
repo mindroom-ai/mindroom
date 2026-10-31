@@ -46,6 +46,26 @@ describe("DefaultToolSettings", () => {
     expect(screen.getByText("File — Default Settings")).toBeInTheDocument();
   });
 
+  it("lists default tools authored with overrides by name", () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      config: {
+        defaults: {
+          markdown: true,
+          tools: ["file", { gmail: { label: "support" } }],
+        },
+      },
+      getDefaultToolOverrides: vi.fn(() => null),
+      updateDefaultToolOverrides,
+    } as never);
+    render(<DefaultToolSettings tools={TOOLS} />);
+
+    expect(screen.getByRole("option", { name: "Gmail" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "Default tool" }), {
+      target: { value: "gmail" },
+    });
+    expect(screen.getByText("Gmail — Default Settings")).toBeInTheDocument();
+  });
+
   it("renders nothing without authored default tools", () => {
     vi.mocked(useConfigStore).mockReturnValue({
       config: { defaults: { markdown: true } },

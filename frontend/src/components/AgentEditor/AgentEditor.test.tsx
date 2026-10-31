@@ -592,6 +592,39 @@ describe("AgentEditor", () => {
     expect(screen.queryByText("Customized")).not.toBeInTheDocument();
   });
 
+  it("keeps the other tools' entries when a tool is checked", async () => {
+    const { store } = await loadRealStore({
+      display_name: "Test Agent",
+      tools: [{ shell: { extra_env_passthrough: ["TOKEN"] } }],
+    });
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: "shell",
+          display_name: "Shell Commands",
+          setup_type: "none",
+          status: "available",
+        },
+        {
+          name: "calculator",
+          display_name: "Calculator",
+          setup_type: "none",
+          status: "available",
+        },
+      ],
+      loading: false,
+      statusAuthoritative: true,
+    });
+
+    render(<AgentEditor />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Calculator" }));
+
+    expect(store.getState().agents[0].tools).toEqual([
+      { shell: { extra_env_passthrough: ["TOKEN"] } },
+      "calculator",
+    ]);
+  });
+
   it("keeps selected unsupported tools visible so they can be removed", async () => {
     const invalidToolAgent = { ...mockAgent, tools: ["gmail"] };
     (useConfigStore as any).mockReturnValue({
