@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { Brain } from "lucide-react";
 
 import type {
@@ -191,28 +190,17 @@ export function MemoryConfig() {
     isDirty,
     isLoading,
   } = useConfigStore();
-  const [localConfig, setLocalConfig] = useState<MemorySettings>(() =>
-    normalizeMemorySettings(config?.memory),
-  );
-
-  useEffect(() => {
-    setLocalConfig(normalizeMemorySettings(config?.memory));
-  }, [config]);
-
-  const applyMemoryConfig = (nextConfig: MemorySettings) => {
-    setLocalConfig(nextConfig);
-    updateMemoryConfig(nextConfig);
-  };
+  const memory = normalizeMemorySettings(config?.memory);
 
   const handleBackendChange = (backend: MemoryBackend) => {
-    applyMemoryConfig({ ...localConfig, backend });
+    updateMemoryConfig({ ...memory, backend });
   };
 
   const handleProviderChange = (provider: string) => {
-    applyMemoryConfig({
-      ...localConfig,
+    updateMemoryConfig({
+      ...memory,
       embedder: {
-        ...localConfig.embedder,
+        ...memory.embedder,
         provider,
         config: defaultEmbedderConfig(provider),
       },
@@ -222,12 +210,12 @@ export function MemoryConfig() {
   const updateEmbedderConfig = (
     updates: Partial<MemorySettings["embedder"]["config"]>,
   ) => {
-    applyMemoryConfig({
-      ...localConfig,
+    updateMemoryConfig({
+      ...memory,
       embedder: {
-        ...localConfig.embedder,
+        ...memory.embedder,
         config: {
-          ...localConfig.embedder.config,
+          ...memory.embedder.config,
           ...updates,
         },
       },
@@ -235,17 +223,17 @@ export function MemoryConfig() {
   };
 
   const handleCredentialsServiceChange = (credentialsService: string) => {
-    const config = { ...localConfig.embedder.config };
+    const config = { ...memory.embedder.config };
     const normalizedService = credentialsService.trim();
     if (normalizedService) {
       config.credentials_service = normalizedService;
     } else {
       delete config.credentials_service;
     }
-    applyMemoryConfig({
-      ...localConfig,
+    updateMemoryConfig({
+      ...memory,
       embedder: {
-        ...localConfig.embedder,
+        ...memory.embedder,
         config,
       },
     });
@@ -254,10 +242,10 @@ export function MemoryConfig() {
   const updateFile = (
     updates: Partial<NonNullable<MemorySettings["file"]>>,
   ) => {
-    applyMemoryConfig({
-      ...localConfig,
+    updateMemoryConfig({
+      ...memory,
       file: {
-        ...localConfig.file,
+        ...memory.file,
         ...updates,
       },
     });
@@ -266,10 +254,10 @@ export function MemoryConfig() {
   const updateSearch = (
     updates: Partial<NonNullable<MemorySettings["search"]>>,
   ) => {
-    applyMemoryConfig({
-      ...localConfig,
+    updateMemoryConfig({
+      ...memory,
       search: {
-        ...localConfig.search,
+        ...memory.search,
         ...updates,
       },
     });
@@ -278,10 +266,10 @@ export function MemoryConfig() {
   const updateAutoFlush = (
     updates: Partial<NonNullable<MemorySettings["auto_flush"]>>,
   ) => {
-    applyMemoryConfig({
-      ...localConfig,
+    updateMemoryConfig({
+      ...memory,
       auto_flush: {
-        ...localConfig.auto_flush,
+        ...memory.auto_flush,
         ...updates,
       },
     });
@@ -294,7 +282,7 @@ export function MemoryConfig() {
   ) => {
     updateAutoFlush({
       batch: {
-        ...localConfig.auto_flush?.batch,
+        ...memory.auto_flush?.batch,
         ...updates,
       },
     });
@@ -307,7 +295,7 @@ export function MemoryConfig() {
   ) => {
     updateAutoFlush({
       extractor: {
-        ...localConfig.auto_flush?.extractor,
+        ...memory.auto_flush?.extractor,
         ...updates,
       },
     });
@@ -324,7 +312,7 @@ export function MemoryConfig() {
   ) => {
     updateAutoFlushExtractor({
       include_memory_context: {
-        ...localConfig.auto_flush?.extractor?.include_memory_context,
+        ...memory.auto_flush?.extractor?.include_memory_context,
         ...updates,
       },
     });
@@ -358,7 +346,7 @@ export function MemoryConfig() {
             htmlFor="memory-backend"
           >
             <Select
-              value={localConfig.backend || "mem0"}
+              value={memory.backend || "mem0"}
               onValueChange={(value) =>
                 handleBackendChange(value as MemoryBackend)
               }
@@ -381,12 +369,12 @@ export function MemoryConfig() {
 
           <FieldGroup
             label="Embedder Provider"
-            helperText={providerHelperText(localConfig.embedder.provider)}
+            helperText={providerHelperText(memory.embedder.provider)}
             required
             htmlFor="provider"
           >
             <Select
-              value={localConfig.embedder.provider}
+              value={memory.embedder.provider}
               onValueChange={handleProviderChange}
             >
               <SelectTrigger
@@ -414,14 +402,14 @@ export function MemoryConfig() {
             <Input
               id="model"
               type="text"
-              value={localConfig.embedder.config.model}
+              value={memory.embedder.config.model}
               onChange={(e) => updateEmbedderConfig({ model: e.target.value })}
-              placeholder={modelPlaceholder(localConfig.embedder.provider)}
+              placeholder={modelPlaceholder(memory.embedder.provider)}
               className="transition-colors hover:border-ring focus:border-ring"
             />
           </FieldGroup>
 
-          {localConfig.embedder.provider === "openai" && (
+          {memory.embedder.provider === "openai" && (
             <FieldGroup
               label="Credential Service"
               helperText="Bind this embedder to a credential service. Leave empty for the legacy embedder-to-openai fallback."
@@ -430,7 +418,7 @@ export function MemoryConfig() {
               <Input
                 id="credentials-service"
                 type="text"
-                value={localConfig.embedder.config.credentials_service || ""}
+                value={memory.embedder.config.credentials_service || ""}
                 onChange={(e) => handleCredentialsServiceChange(e.target.value)}
                 placeholder="embedder"
                 className="transition-colors hover:border-ring focus:border-ring"
@@ -438,15 +426,15 @@ export function MemoryConfig() {
             </FieldGroup>
           )}
 
-          {localConfig.embedder.provider !== "sentence_transformers" && (
+          {memory.embedder.provider !== "sentence_transformers" && (
             <FieldGroup
               label={
-                localConfig.embedder.provider === "ollama"
+                memory.embedder.provider === "ollama"
                   ? "Ollama Host URL"
                   : "Base URL"
               }
               helperText={
-                localConfig.embedder.provider === "ollama"
+                memory.embedder.provider === "ollama"
                   ? "Empty uses OLLAMA_HOST, else http://localhost:11434. A configured OLLAMA_HOST also takes precedence over this URL."
                   : "Leave empty for official OpenAI API, or set for OpenAI-compatible servers"
               }
@@ -455,10 +443,10 @@ export function MemoryConfig() {
               <Input
                 id="host"
                 type="url"
-                value={localConfig.embedder.config.host || ""}
+                value={memory.embedder.config.host || ""}
                 onChange={(e) => updateEmbedderConfig({ host: e.target.value })}
                 placeholder={
-                  localConfig.embedder.provider === "ollama"
+                  memory.embedder.provider === "ollama"
                     ? "http://localhost:11434"
                     : "https://api.openai.com/v1"
                 }
@@ -479,7 +467,7 @@ export function MemoryConfig() {
             }
           />
 
-          {localConfig.backend === "file" && (
+          {memory.backend === "file" && (
             <>
               <FieldGroup
                 label="Entrypoint Max Lines"
@@ -490,7 +478,7 @@ export function MemoryConfig() {
                   id="entrypoint-max-lines"
                   type="number"
                   min={1}
-                  value={localConfig.file?.max_entrypoint_lines ?? 200}
+                  value={memory.file?.max_entrypoint_lines ?? 200}
                   onChange={(e) =>
                     updateFile({
                       max_entrypoint_lines: parseInteger(e.target.value, 200),
@@ -509,7 +497,7 @@ export function MemoryConfig() {
                   id="entrypoint-max-tokens"
                   type="number"
                   min={1}
-                  value={localConfig.file?.max_entrypoint_tokens ?? 50000}
+                  value={memory.file?.max_entrypoint_tokens ?? 50000}
                   onChange={(e) =>
                     updateFile({
                       max_entrypoint_tokens: parseInteger(
@@ -528,7 +516,7 @@ export function MemoryConfig() {
                 htmlFor="memory-search-mode"
               >
                 <Select
-                  value={localConfig.search?.mode ?? "keyword"}
+                  value={memory.search?.mode ?? "keyword"}
                   onValueChange={(value) =>
                     updateSearch({ mode: value as MemorySearchMode })
                   }
@@ -554,7 +542,7 @@ export function MemoryConfig() {
                 <Input
                   id="memory-search-include"
                   type="text"
-                  value={(localConfig.search?.include || []).join(", ")}
+                  value={(memory.search?.include || []).join(", ")}
                   onChange={(e) =>
                     updateSearch({
                       include: parseIncludePatterns(e.target.value),
@@ -571,9 +559,7 @@ export function MemoryConfig() {
                 htmlFor="memory-search-entrypoint"
               >
                 <Select
-                  value={String(
-                    localConfig.search?.include_entrypoint ?? false,
-                  )}
+                  value={String(memory.search?.include_entrypoint ?? false)}
                   onValueChange={(value) =>
                     updateSearch({ include_entrypoint: parseBoolean(value) })
                   }
@@ -597,7 +583,7 @@ export function MemoryConfig() {
                 htmlFor="auto-flush-enabled"
               >
                 <Select
-                  value={String(localConfig.auto_flush?.enabled ?? false)}
+                  value={String(memory.auto_flush?.enabled ?? false)}
                   onValueChange={(value) =>
                     updateAutoFlush({ enabled: parseBoolean(value) })
                   }
@@ -624,7 +610,7 @@ export function MemoryConfig() {
                   id="flush-interval-seconds"
                   type="number"
                   min={5}
-                  value={localConfig.auto_flush?.flush_interval_seconds ?? 300}
+                  value={memory.auto_flush?.flush_interval_seconds ?? 300}
                   onChange={(e) =>
                     updateAutoFlush({
                       flush_interval_seconds: parseInteger(e.target.value, 300),
@@ -643,7 +629,7 @@ export function MemoryConfig() {
                   id="idle-seconds"
                   type="number"
                   min={0}
-                  value={localConfig.auto_flush?.idle_seconds ?? 120}
+                  value={memory.auto_flush?.idle_seconds ?? 120}
                   onChange={(e) =>
                     updateAutoFlush({
                       idle_seconds: parseInteger(e.target.value, 120),
@@ -662,7 +648,7 @@ export function MemoryConfig() {
                   id="stale-ttl-seconds"
                   type="number"
                   min={60}
-                  value={localConfig.auto_flush?.stale_ttl_seconds ?? 86400}
+                  value={memory.auto_flush?.stale_ttl_seconds ?? 86400}
                   onChange={(e) =>
                     updateAutoFlush({
                       stale_ttl_seconds: parseInteger(e.target.value, 86400),
@@ -681,7 +667,7 @@ export function MemoryConfig() {
                   id="retry-cooldown-seconds"
                   type="number"
                   min={1}
-                  value={localConfig.auto_flush?.retry_cooldown_seconds ?? 30}
+                  value={memory.auto_flush?.retry_cooldown_seconds ?? 30}
                   onChange={(e) =>
                     updateAutoFlush({
                       retry_cooldown_seconds: parseInteger(e.target.value, 30),
@@ -700,9 +686,7 @@ export function MemoryConfig() {
                   id="max-retry-cooldown-seconds"
                   type="number"
                   min={1}
-                  value={
-                    localConfig.auto_flush?.max_retry_cooldown_seconds ?? 300
-                  }
+                  value={memory.auto_flush?.max_retry_cooldown_seconds ?? 300}
                   onChange={(e) =>
                     updateAutoFlush({
                       max_retry_cooldown_seconds: parseInteger(
@@ -724,9 +708,7 @@ export function MemoryConfig() {
                   id="max-sessions-per-cycle"
                   type="number"
                   min={1}
-                  value={
-                    localConfig.auto_flush?.batch?.max_sessions_per_cycle ?? 10
-                  }
+                  value={memory.auto_flush?.batch?.max_sessions_per_cycle ?? 10}
                   onChange={(e) =>
                     updateAutoFlushBatch({
                       max_sessions_per_cycle: parseInteger(e.target.value, 10),
@@ -746,7 +728,7 @@ export function MemoryConfig() {
                   type="number"
                   min={1}
                   value={
-                    localConfig.auto_flush?.batch
+                    memory.auto_flush?.batch
                       ?.max_sessions_per_agent_per_cycle ?? 3
                   }
                   onChange={(e) =>
@@ -771,8 +753,7 @@ export function MemoryConfig() {
                   type="number"
                   min={1}
                   value={
-                    localConfig.auto_flush?.extractor?.max_messages_per_flush ??
-                    20
+                    memory.auto_flush?.extractor?.max_messages_per_flush ?? 20
                   }
                   onChange={(e) =>
                     updateAutoFlushExtractor({
@@ -793,8 +774,7 @@ export function MemoryConfig() {
                   type="number"
                   min={1}
                   value={
-                    localConfig.auto_flush?.extractor?.max_chars_per_flush ??
-                    12000
+                    memory.auto_flush?.extractor?.max_chars_per_flush ?? 12000
                   }
                   onChange={(e) =>
                     updateAutoFlushExtractor({
@@ -815,8 +795,7 @@ export function MemoryConfig() {
                   type="number"
                   min={1}
                   value={
-                    localConfig.auto_flush?.extractor?.max_extraction_seconds ??
-                    30
+                    memory.auto_flush?.extractor?.max_extraction_seconds ?? 30
                   }
                   onChange={(e) =>
                     updateAutoFlushExtractor({
@@ -836,8 +815,7 @@ export function MemoryConfig() {
                   id="no-reply-token"
                   type="text"
                   value={
-                    localConfig.auto_flush?.extractor?.no_reply_token ??
-                    "NO_REPLY"
+                    memory.auto_flush?.extractor?.no_reply_token ?? "NO_REPLY"
                   }
                   onChange={(e) =>
                     updateAutoFlushExtractor({
@@ -858,7 +836,7 @@ export function MemoryConfig() {
                   type="number"
                   min={0}
                   value={
-                    localConfig.auto_flush?.extractor?.include_memory_context
+                    memory.auto_flush?.extractor?.include_memory_context
                       ?.memory_snippets ?? 5
                   }
                   onChange={(e) =>
@@ -880,7 +858,7 @@ export function MemoryConfig() {
                   type="number"
                   min={1}
                   value={
-                    localConfig.auto_flush?.extractor?.include_memory_context
+                    memory.auto_flush?.extractor?.include_memory_context
                       ?.snippet_max_chars ?? 400
                   }
                   onChange={(e) =>
@@ -912,57 +890,56 @@ export function MemoryConfig() {
             <div className="flex justify-between">
               <span className="text-muted-foreground">Backend:</span>
               <span className="font-mono text-foreground">
-                {localConfig.backend || "mem0"}
+                {memory.backend || "mem0"}
               </span>
             </div>
-            {localConfig.embedder.config.credentials_service && (
+            {memory.embedder.config.credentials_service && (
               <div className="flex justify-between">
                 <span className="text-muted-foreground">
                   Credential Service:
                 </span>
                 <span className="font-mono text-foreground">
-                  {localConfig.embedder.config.credentials_service}
+                  {memory.embedder.config.credentials_service}
                 </span>
               </div>
             )}
             <div className="flex justify-between">
               <span className="text-muted-foreground">Provider:</span>
               <span className="font-mono text-foreground">
-                {localConfig.embedder.provider}
+                {memory.embedder.provider}
               </span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Model:</span>
               <span className="font-mono text-foreground">
-                {localConfig.embedder.config.model}
+                {memory.embedder.config.model}
               </span>
             </div>
-            {localConfig.backend === "file" && (
+            {memory.backend === "file" && (
               <>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Auto Flush:</span>
                   <span className="font-mono text-foreground">
-                    {localConfig.auto_flush?.enabled ? "enabled" : "disabled"}
+                    {memory.auto_flush?.enabled ? "enabled" : "disabled"}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Batch Size:</span>
                   <span className="font-mono text-foreground">
-                    {localConfig.auto_flush?.batch?.max_sessions_per_cycle ||
-                      10}
+                    {memory.auto_flush?.batch?.max_sessions_per_cycle || 10}
                   </span>
                 </div>
               </>
             )}
-            {localConfig.embedder.config.host && (
+            {memory.embedder.config.host && (
               <div className="flex justify-between">
                 <span className="text-muted-foreground">
-                  {localConfig.embedder.provider === "ollama"
+                  {memory.embedder.provider === "ollama"
                     ? "Host:"
                     : "Base URL:"}
                 </span>
                 <span className="font-mono text-foreground">
-                  {localConfig.embedder.config.host}
+                  {memory.embedder.config.host}
                 </span>
               </div>
             )}

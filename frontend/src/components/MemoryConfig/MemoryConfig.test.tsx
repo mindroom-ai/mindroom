@@ -516,13 +516,14 @@ describe("MemoryConfig", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows provider description for ollama", async () => {
-    render(<MemoryConfig />);
+  const withEmbedderProvider = (provider: string) =>
+    mockStore({
+      memory: { embedder: { provider, config: { model: "embedder" } } },
+    });
 
-    const providerSelect = document.getElementById("provider");
-    fireEvent.click(providerSelect!);
-    const ollamaOption = await screen.findByText("Ollama");
-    fireEvent.click(ollamaOption);
+  it("shows provider description for ollama", async () => {
+    withEmbedderProvider("ollama");
+    render(<MemoryConfig />);
 
     await waitFor(() => {
       expect(
@@ -532,14 +533,8 @@ describe("MemoryConfig", () => {
   });
 
   it("shows provider description for sentence-transformers", async () => {
+    withEmbedderProvider("sentence_transformers");
     render(<MemoryConfig />);
-
-    const providerSelect = document.getElementById("provider");
-    fireEvent.click(providerSelect!);
-    const sentenceTransformersOption = await screen.findByText(
-      "Sentence Transformers",
-    );
-    fireEvent.click(sentenceTransformersOption);
 
     await waitFor(() => {
       expect(
