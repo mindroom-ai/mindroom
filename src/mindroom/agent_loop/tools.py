@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.llm.events import ToolProgress
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import ToolExecution
 from mindroom.logging_config import get_logger
@@ -17,6 +19,7 @@ from mindroom.tool_system.invocation import (
     execute_tool_call,
     parse_tool_arguments,
 )
+from mindroom.tool_system.progress import tool_progress_reporter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
@@ -233,8 +236,10 @@ async def dispatch_tool_calls(
     *,
     run: RunContext,
     middleware: Sequence[ToolMiddleware],
-) -> AsyncIterator[tuple[PlannedCall, Message]]:
+) -> AsyncIterator[ToolProgress | tuple[PlannedCall, Message]]:
     """Run the batch's unpaused calls concurrently and yield each with its result message as soon as it finishes.
+
+    The progress a running call reports comes as ``ToolProgress`` before that call's result.
 
     A call's execution is filled in place with its result, error flag, and stop flag as soon as that call finishes,
     whatever its siblings are doing, so a batch cut short leaves every call that finished recorded as finished. A
@@ -254,9 +259,9 @@ async def dispatch_tool_calls(
     finished = callback_event_stream(run_batch)
     async with closing_async_stream(finished):
         async for item in finished:
-            # The batch's own result, None, comes last; everything before it is a finished call.
+            # The batch's own result, None, comes last; everything before it is a call's progress or a finished call.
             if item is not None:
-                yield cast("tuple[PlannedCall, Message]", item)
+                yield cast("ToolProgress | tuple[PlannedCall, Message]", item)
 
 
 async def _run_call(
@@ -265,10 +270,30 @@ async def _run_call(
     middleware: Sequence[ToolMiddleware],
     emit: Callable[[object], None],
 ) -> None:
-    """Run one call, record its outcome on its execution, and hand the call over with its result message."""
+    """Run one call, hand over its progress while it runs, record its outcome, and hand it over with its result."""
     execution = call.execution
     context = run.call_context(execution.tool_call_id)
-    outcome = await execute_tool_call(call.function, execution.tool_args, context, middleware=middleware)
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    returned = False
+
+    def deliver(text: str) -> None:
+        # A thread that outlives the call cannot report for it.
+        if not returned:
+            emit(ToolProgress(execution.tool_call_id, text))
+
+    def report(text: str) -> None:
+        # A report made on the loop lands before the call can return; one from a thread lands in order on the loop.
+        if threading.get_ident() == loop_thread:
+            deliver(text)
+        else:
+            loop.call_soon_threadsafe(deliver, text)
+
+    try:
+        with tool_progress_reporter(report):
+            outcome = await execute_tool_call(call.function, execution.tool_args, context, middleware=middleware)
+    finally:
+        returned = True
     execution.result = outcome.content
     execution.is_error = outcome.is_error
     execution.stop_after_call = outcome.stop_after_call

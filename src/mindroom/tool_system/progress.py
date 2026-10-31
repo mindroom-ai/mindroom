@@ -34,8 +34,18 @@ def report_tool_progress(text: str) -> None:
 
 @contextmanager
 def tool_progress_reporter(reporter: Callable[[str], None]) -> Iterator[None]:
-    """Receive the progress of tool calls run in this context; the reporter may be called from any thread."""
-    token = _REPORTER.set(reporter)
+    """Receive the progress of tool calls run in this context; the reporter may be called from any thread.
+
+    The reporter this one shadows still receives every report, so a call waiting for a job sees the job's progress.
+    """
+    shadowed = _REPORTER.get()
+
+    def report(text: str) -> None:
+        reporter(text)
+        if shadowed is not None:
+            shadowed(text)
+
+    token = _REPORTER.set(report)
     try:
         yield
     finally:

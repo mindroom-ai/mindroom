@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -24,7 +26,9 @@ from mindroom.agent_loop.tools import (
     plan_tool_batch,
     toolkit_instructions,
 )
+from mindroom.llm.events import ToolProgress
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
+from mindroom.tool_system.progress import report_tool_progress
 from tests.agent_loop.helpers import add, boom, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import ScriptedModel, raw_tool_call, tool_call
 
@@ -259,6 +263,117 @@ def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
 async def _dispatch(calls: Sequence[PlannedCall], *, middleware: Sequence[ToolMiddleware] = ()) -> list[Message]:
     """Run ``calls`` and return the result messages of those that ran, in the order they finished."""
     return [result async for _, result in dispatch_tool_calls(calls, run=context(), middleware=middleware)]
+
+
+def _planned(functions: dict, *calls: object) -> list[PlannedCall]:
+    return plan_tool_batch(list(calls), functions, calls_so_far=0, max_tool_calls_per_turn=None, entity="code").planned
+
+
+@pytest.mark.asyncio
+async def test_a_running_call_streams_its_progress_before_it_finishes() -> None:
+    """Each report a call makes reaches the batch's stream, in order, before the call's result."""
+
+    def build(target: str) -> str:
+        """Report two steps, then finish.
+
+        Args:
+            target: What to build.
+
+        """
+        report_tool_progress(f"{target}: step 1")
+        report_tool_progress(f"{target}: step 2")
+        return f"{target} built"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(build)).functions, tool_call("build", "c1", target="app"))
+
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    assert items[:2] == [ToolProgress("c1", "app: step 1"), ToolProgress("c1", "app: step 2")]
+    [(call, result)] = items[2:]
+    assert (call.execution.tool_call_id, result.content) == ("c1", "app built")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_report_only_their_own_progress() -> None:
+    """Calls of one batch that report at the same time each report under their own call ID."""
+    started = {"one": asyncio.Event(), "two": asyncio.Event()}
+
+    async def step(who: str) -> str:
+        """Report this call's name once both calls run.
+
+        Args:
+            who: This call's name.
+
+        """
+        started[who].set()
+        await asyncio.wait_for(started["two" if who == "one" else "one"].wait(), timeout=5)
+        report_tool_progress(f"{who} working")
+        return who
+
+    planned = _planned(
+        spec(ScriptedModel([]), toolkit(step)).functions,
+        tool_call("step", "c1", who="one"),
+        tool_call("step", "c2", who="two"),
+    )
+
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    reports = sorted((item.tool_call_id, item.text) for item in items if isinstance(item, ToolProgress))
+    assert reports == [("c1", "one working"), ("c2", "two working")]
+
+
+@pytest.mark.asyncio
+async def test_progress_a_call_reports_after_it_returned_is_dropped() -> None:
+    """A thread a call leaves behind cannot report for it once the call has returned."""
+    report_later = threading.Event()
+    reported = threading.Event()
+    release_other = asyncio.Event()
+
+    def start(name: str) -> str:
+        """Leave a thread that reports after this call returned.
+
+        Args:
+            name: The work's name.
+
+        """
+        context_of_call = contextvars.copy_context()
+
+        def late() -> None:
+            report_later.wait(timeout=5)
+            context_of_call.run(report_tool_progress, f"{name} late")
+            reported.set()
+
+        threading.Thread(target=late, daemon=True).start()
+        return f"{name} started"
+
+    async def hold(name: str) -> str:
+        """Keep the batch running until released.
+
+        Args:
+            name: The work's name.
+
+        """
+        await asyncio.wait_for(release_other.wait(), timeout=5)
+        return f"{name} done"
+
+    planned = _planned(
+        spec(ScriptedModel([]), toolkit(start, hold)).functions,
+        tool_call("start", "c1", name="build"),
+        tool_call("hold", "c2", name="watch"),
+    )
+    stream = dispatch_tool_calls(planned, run=context(), middleware=())
+
+    first = await anext(stream)
+    report_later.set()
+    await asyncio.to_thread(reported.wait, 5)
+    await asyncio.sleep(0)
+    release_other.set()
+    rest = [item async for item in stream]
+
+    assert isinstance(first, tuple)
+    assert first[1].content == "build started"
+    assert [item for item in rest if isinstance(item, ToolProgress)] == []
+    assert [result.content for _, result in rest] == ["watch done"]
 
 
 @pytest.mark.asyncio
