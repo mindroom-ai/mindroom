@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 from collections.abc import Iterator  # noqa: TC003 - Agno reads tool annotations at runtime.
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -1128,21 +1127,24 @@ async def test_script_broker_offloads_blocking_sync_toolkit_connect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A synchronous toolkit connect cannot block unrelated event-loop timers."""
+    """A synchronous toolkit connect runs off the event loop, so it cannot block other event-loop work."""
+    loop = asyncio.get_running_loop()
+    connect_saw_loop_running: list[bool] = []
 
     class BlockingConnectToolkit(_ConnectedCalculator):
         def connect(self) -> None:
-            time.sleep(0.1)
+            # The loop runs this callback during the connect only when the connect leaves the loop free.
+            loop_kept_running = threading.Event()
+            loop.call_soon_threadsafe(loop_kept_running.set)
+            connect_saw_loop_running.append(loop_kept_running.wait(timeout=5))
 
     _replace_calculator_toolkit(monkeypatch, BlockingConnectToolkit)
     broker, token = _broker(tmp_path, events=[])
-    started = time.monotonic()
-    submission = asyncio.create_task(_call_through_gateway(broker, _request(call_id="blocking-connect"), token))
 
-    await asyncio.sleep(0.01)
+    receipt = await _call_through_gateway(broker, _request(call_id="blocking-connect"), token)
 
-    assert time.monotonic() - started < 0.07
-    assert (await submission).state is ScriptCallState.COMPLETED
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert connect_saw_loop_running == [True]
 
 
 @pytest.mark.asyncio
@@ -1249,24 +1251,27 @@ async def test_script_broker_offloads_blocking_sync_toolkit_close(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A synchronous toolkit close cannot block unrelated event-loop timers."""
+    """A synchronous toolkit close runs off the event loop, so it cannot block other event-loop work."""
+    loop = asyncio.get_running_loop()
+    close_saw_loop_running: list[bool] = []
 
     class BlockingCloseToolkit(_ConnectedCalculator):
         def close(self) -> None:
-            time.sleep(0.1)
+            # The loop runs this callback during the close only when the close leaves the loop free.
+            loop_kept_running = threading.Event()
+            loop.call_soon_threadsafe(loop_kept_running.set)
+            close_saw_loop_running.append(loop_kept_running.wait(timeout=5))
 
         async def add(self, a: int, b: int) -> int:
             return a + b
 
     _replace_calculator_toolkit(monkeypatch, BlockingCloseToolkit)
     broker, token = _broker(tmp_path, events=[])
-    started = time.monotonic()
-    submission = asyncio.create_task(_call_through_gateway(broker, _request(call_id="blocking-close"), token))
 
-    await asyncio.sleep(0.01)
+    receipt = await _call_through_gateway(broker, _request(call_id="blocking-close"), token)
 
-    assert time.monotonic() - started < 0.07
-    assert (await submission).state is ScriptCallState.COMPLETED
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert close_saw_loop_running == [True]
 
 
 @pytest.mark.asyncio
