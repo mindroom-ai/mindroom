@@ -159,7 +159,7 @@ def test_declared_revision_preserves_hot_install_and_rollback(tmp_path: Path) ->
 
 
 def test_new_revision_validates_and_updates_identical_tree_without_rotation(tmp_path: Path) -> None:
-    """A metadata-only revision change leaves authored files and backups untouched."""
+    """A metadata-only revision change leaves authored files and backups untouched, and a repeat rewrites nothing."""
     source = _bundle(tmp_path / "source")
     target = tmp_path / "active"
     install_config_bundle(source, target, revision="one", process_env={})
@@ -172,6 +172,9 @@ def test_new_revision_validates_and_updates_identical_tree_without_rotation(tmp_
     metadata = (target / ".mindroom-bundle.json").read_text()
     assert json.loads(metadata)["revision"] == "two"
     assert metadata.endswith("\n")
+    metadata_identity = _untouched_identity(target / ".mindroom-bundle.json")
+    assert install_config_bundle(source, target, revision="two", process_env={}).status == "unchanged"
+    assert _untouched_identity(target / ".mindroom-bundle.json") == metadata_identity
 
 
 def test_new_revision_replaces_changed_managed_tree(tmp_path: Path) -> None:

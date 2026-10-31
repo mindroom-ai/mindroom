@@ -14,7 +14,7 @@ import time
 from dataclasses import asdict, dataclass
 from itertools import chain
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.config.main import load_config
 from mindroom.config.yaml_includes import load_yaml_config_source
@@ -238,11 +238,7 @@ def _replaceable_digest(target: Path, candidate_digest: str, *, force: bool, req
     active_digest = _tree_digest(target)
     if active_digest == candidate_digest and not require_managed:
         return active_digest
-    try:
-        metadata = json.loads((target / _METADATA).read_text())
-    except (OSError, ValueError):
-        metadata = None
-    baseline = metadata.get("digest") if isinstance(metadata, dict) else None
+    baseline = _active_metadata(target).get("digest")
     if not force and active_digest != baseline:
         msg = "Target contains authored edits or is unmanaged; use install-bundle --force to replace it explicitly."
         raise ValueError(msg)
@@ -261,12 +257,17 @@ def _validate_revision(revision: str | None) -> None:
         raise ValueError(msg)
 
 
-def _active_revision(target: Path) -> str | None:
+def _active_metadata(target: Path) -> dict[str, Any]:
+    """Return the active tree's installer metadata, or an empty dict when it is missing or unreadable."""
     try:
         metadata = json.loads((target / _METADATA).read_text())
     except (OSError, ValueError):
-        return None
-    revision = metadata.get("revision") if isinstance(metadata, dict) else None
+        return {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _active_revision(target: Path) -> str | None:
+    revision = _active_metadata(target).get("revision")
     try:
         _validate_revision(revision)
     except ValueError:
@@ -442,19 +443,19 @@ def install_config_bundle(
                 _require_source_only(target, stage, config)
             if unchanged and revision is None:
                 return BundleInstallResult("unchanged", target / config, loaded.source_fingerprint, digest)
-            active_revision = _active_revision(target) if target.exists() else None
-            if unchanged:
-                if revision is not None and active_revision != revision:
-                    _replace_json(
-                        target / _METADATA,
-                        {"digest": digest, "revision": revision},
-                        temp_base=target.with_name(f".{target.name}.metadata"),
-                    )
-                return BundleInstallResult("unchanged", target / config, loaded.source_fingerprint, digest)
+            active_revision = _active_revision(target)
             installed_revision = revision if revision is not None else active_revision
             metadata = {"digest": digest}
             if installed_revision is not None:
                 metadata["revision"] = installed_revision
+            if unchanged:
+                if active_revision != revision:
+                    _replace_json(
+                        target / _METADATA,
+                        metadata,
+                        temp_base=target.with_name(f".{target.name}.metadata"),
+                    )
+                return BundleInstallResult("unchanged", target / config, loaded.source_fingerprint, digest)
             (stage / _METADATA).write_text(json.dumps(metadata) + "\n")
             # The existing runtime watcher polls mtimes. Reproducible bundles
             # can change bytes while preserving every source timestamp.
