@@ -69,7 +69,6 @@ if TYPE_CHECKING:
 
 _TOOL_NAME = "slack"
 _WRITE_FUNCTIONS = frozenset({"slack_post", "slack_react", "slack_edit", "slack_delete", "slack_upload"})
-_SEARCH_KINDS = ("messages", "conversations", "people")
 _MAX_LIMIT = 100
 # Slack's search pages stop at page 100.
 _MAX_SEARCH_PAGE = 100
@@ -143,8 +142,8 @@ def _api_error_text(exc: SlackApiError, *, personal: bool) -> str:
     return f"Slack refused the request: {exc}"
 
 
-def _limit(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_LIMIT:
+def _limit(value: int) -> int:
+    if not 1 <= value <= _MAX_LIMIT:
         msg = f"limit must be an integer from 1 to {_MAX_LIMIT}"
         raise _SlackRefusalError(msg)
     return value
@@ -157,8 +156,8 @@ def _optional_ts(value: str | None, field_name: str) -> str | None:
     return value
 
 
-def _days(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_DAYS:
+def _days(value: int) -> int:
+    if not 1 <= value <= _MAX_DAYS:
         msg = f"days must be an integer from 1 to {_MAX_DAYS}"
         raise _SlackRefusalError(msg)
     return value
@@ -609,9 +608,6 @@ class SlackTools(Toolkit):
 
         async def operation(session: _Session) -> Mapping[str, object]:
             size = _limit(limit)
-            if kind not in _SEARCH_KINDS:
-                msg = "kind must be messages, conversations, or people"
-                raise _SlackRefusalError(msg)
             if self.project_channels is not None:
                 if kind != "conversations":
                     raise _SlackRefusalError(_PERSONAL_SEARCH_ONLY)
@@ -700,9 +696,6 @@ class SlackTools(Toolkit):
             if self.project_channels is not None:
                 raise _SlackRefusalError(_PERSONAL_RECENT_ONLY)
             size = _limit(limit)
-            if kind not in _RECENT_TYPES:
-                msg = "kind must be dms or channels"
-                raise _SlackRefusalError(msg)
             oldest = time.time() - _days(days) * 86_400
             listed, rest = await self._recent_conversations(session, kind, cursor)
             reads = await _latest_messages(session, [channel["id"] for _, channel in listed])

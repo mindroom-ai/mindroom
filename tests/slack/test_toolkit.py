@@ -15,6 +15,7 @@ from urllib.parse import parse_qs
 import httpx
 import nio
 import pytest
+from pydantic import ValidationError
 
 from mindroom import constants
 from mindroom.api.config_lifecycle import ApiSnapshot
@@ -33,6 +34,7 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit, with_offered_instr
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.slack.room_state import room_state_client
 
@@ -875,11 +877,11 @@ async def test_recent_returns_the_newest_limit_conversations(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("days", [0, -1, 366, True, 1.5])
+@pytest.mark.parametrize("days", [0, -1, 366])
 async def test_recent_refuses_a_window_it_cannot_read(
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
-    days: Any,  # noqa: ANN401
+    days: int,
 ) -> None:
     _connect_alice(paths)
     fake = FakeSlack().install(monkeypatch)
@@ -887,6 +889,34 @@ async def test_recent_refuses_a_window_it_cannot_read(
     result = json.loads(await _tools(paths).slack_recent(days=days))
 
     assert result["message"] == "days must be an integer from 1 to 365"
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("slack_recent", {"days": 1.5}),
+        ("slack_recent", {"kind": "groups"}),
+        ("slack_recent", {"limit": "many"}),
+        ("slack_search", {"query": "launch", "kind": "files"}),
+        ("slack_search", {"query": "launch", "limit": 2.5}),
+        ("slack_search", {"query": None}),
+    ],
+)
+async def test_malformed_arguments_fail_call_validation_before_any_request(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Arguments that disagree with a function's signature fail call validation before its body runs."""
+    _connect_alice(paths)
+    fake = FakeSlack().install(monkeypatch)
+
+    with pytest.raises(ValidationError):
+        await toolkit_offers(_tools(paths), name).entrypoint(**arguments)
+
     assert fake.requests == []
 
 
