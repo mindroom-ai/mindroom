@@ -590,9 +590,10 @@ class TestAdminEndpoints:
                         result = Mock()
                         result.count = 45
                         return result
-                    else:
-                        # Otherwise return all instances
+                    elif mock.range.call_args[0][0] == 0:
+                        # Otherwise return all instances, in one page
                         return Mock(data=[{"status": "running"}, {"status": "stopped"}])
+                    return Mock(data=[])
 
                 mock.execute = MagicMock(side_effect=execute_side_effect)
                 return mock

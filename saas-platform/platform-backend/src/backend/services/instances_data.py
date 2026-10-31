@@ -61,9 +61,9 @@ def list_instances(sb: Client, columns: str = "*") -> list[dict[str, Any]]:
             .data
             or []
         )
-        rows.extend(page)
-        if len(page) < _PAGE_SIZE:
+        if not page:
             return rows
+        rows.extend(page)
 
 
 def create_instance(sb: Client, fields: dict[str, Any]) -> dict[str, Any] | None:

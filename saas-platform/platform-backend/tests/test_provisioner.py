@@ -1386,7 +1386,7 @@ class TestProvisionerEndpoints:
     def test_sync_instances_no_instances(self, client: TestClient, mock_supabase: MagicMock, valid_auth_header: dict):
         """Test syncing with no instances."""
         # Setup
-        mock_supabase.table().select().execute.return_value = Mock(data=[])
+        mock_supabase.table().select().order().range().execute.return_value = Mock(data=[])
 
         # Make request
         response = client.post("/system/sync-instances", headers=valid_auth_header)
