@@ -49,6 +49,7 @@ from mindroom.script_runs.broker import (
     ScriptToolCallRequest,
     drain_script_tool_cleanup,
 )
+from mindroom.script_runs.launch_contract import digest_arguments
 from mindroom.script_runs.models import (
     ScriptCallClaim,
     ScriptCallRecord,
@@ -663,6 +664,16 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3.0}'
     assert events == ["tool:before_call", "tool:environment:calculator.add", "tool:after_call"]
+
+
+@pytest.mark.asyncio
+async def test_script_broker_receipt_carries_the_sdk_argument_digest(tmp_path: Path) -> None:
+    """A receipt carries the digest the SDK computes for the same JSON-wire arguments, which the SDK requires."""
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(), token)
+
+    assert receipt.arguments_digest == digest_arguments({"a": 1, "b": 2})
 
 
 @pytest.mark.asyncio
