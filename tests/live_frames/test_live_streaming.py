@@ -14,7 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, StreamingConfig
 from mindroom.live_frames.transport import LiveSendOutcome, LiveSendResult
-from mindroom.llm.events import ReasoningDelta, TextDelta
+from mindroom.llm.events import ReasoningDelta, ReportedCall, TextDelta, ToolCompleted, ToolStarted
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import send_streaming_response
@@ -113,15 +113,15 @@ def _records() -> FakeReplyRecords:
     return FakeReplyRecords(send=send, edit=edit)
 
 
-async def _stream(*chunks: str | ReasoningDelta | float) -> AsyncIterator[TextDelta | ReasoningDelta]:
-    """Yield text and reasoning, pausing for each float as a model between tokens or a tool call would."""
+async def _stream(*chunks: str | float | ReasoningDelta | ToolStarted | ToolCompleted) -> AsyncIterator[Any]:
+    """Yield text, reasoning, and tool events, pausing for each float as a model or a tool call would."""
     for chunk in chunks:
         if isinstance(chunk, float):
             await asyncio.sleep(chunk)
-        elif isinstance(chunk, ReasoningDelta):
-            yield chunk
-        else:
+        elif isinstance(chunk, str):
             yield TextDelta(chunk)
+        else:
+            yield chunk
 
 
 async def _run(config: Config, stream: AsyncIterator[Any], records: FakeReplyRecords, edits: _Edits) -> None:
@@ -147,7 +147,9 @@ def _terminal(records: FakeReplyRecords) -> dict[str, Any]:
 async def test_frames_carry_progress_and_durable_edits_wait_for_the_checkpoint(tmp_path: Path, frames: _Frames) -> None:
     """Text after the first message goes out as frames, and the terminal edit names the last frame it covers."""
     records, edits = _records(), _Edits()
-    await _run(_config(tmp_path), _stream("Hello", 0.05, " world", 0.05, "!", 0.05), records, edits)
+    # Without frames, this ramp would edit the message after every chunk.
+    config = _config(tmp_path, min_update_interval=0.01, interval_ramp_seconds=60)
+    await _run(config, _stream("Hello", 0.05, " world", 0.05, "!", 0.05), records, edits)
 
     assert edits.contents == []
     assert frames.sent[0]["seq"] == 0
@@ -225,3 +227,18 @@ async def test_a_frame_too_large_to_send_stops_frames_and_edits_at_once(tmp_path
     assert len(frames.sent) == 2
     assert edits.contents[0]["body"].startswith("Hello world")
     assert edits.contents[0]["io.mindroom.live_checkpoint"] == {"sid": frames.sent[0]["sid"], "seq": 1}
+
+
+@pytest.mark.asyncio
+async def test_tool_calls_ride_in_frames_until_the_checkpoint(tmp_path: Path, frames: _Frames) -> None:
+    """A tool start, which edits at once without frames, shows in frames and waits for the checkpoint."""
+    records, edits = _records(), _Edits()
+    started = ReportedCall(tool_call_id="call-1", tool_name="web_search", tool_args={"query": "matrix"})
+    completed = ReportedCall(tool_call_id="call-1", tool_name="web_search", tool_args={"query": "matrix"}, result="ok")
+    stream = _stream("Looking", 0.05, ToolStarted(started), 0.05, ToolCompleted(completed), 0.05, " done", 0.05)
+    await _run(_config(tmp_path), stream, records, edits)
+
+    assert edits.contents == []
+    tools = [frame["delta"]["tools"] for frame in frames.sent if "tools" in frame.get("delta", {})]
+    assert [change["set"][0][1]["type"] for change in tools] == ["tool_call_started", "tool_call_completed"]
+    assert _terminal(records)["io.mindroom.tool_trace"]["events"][0]["type"] == "tool_call_completed"
