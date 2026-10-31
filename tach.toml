@@ -5310,7 +5310,6 @@ visibility = ["mindroom.cli.main"]
 path = "mindroom.cli.migrate"
 depends_on = [
     "mindroom.cli.config",
-    "mindroom.constants",
 ]
 visibility = ["mindroom.cli.main"]
 
@@ -5318,7 +5317,6 @@ visibility = ["mindroom.cli.main"]
 path = "mindroom.cli.plugins"
 depends_on = [
     "mindroom.cli.config",
-    "mindroom.constants",
     "mindroom.plugin_check",
     "mindroom.plugin_install",
 ]
