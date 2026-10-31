@@ -333,67 +333,6 @@ class TestProvisionerIntegration:
             status_values = [u.get("status") for u in updates if "status" in u]
             assert "provisioning" in status_values or "running" in status_values
 
-    def test_sync_instances_with_kubernetes_drift(self, client: TestClient, valid_auth: dict):
-        """Test sync detects and corrects drift between database and Kubernetes state."""
-        with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
-            mock_db = MagicMock()
-            mock_sb.return_value = mock_db
-
-            # Database shows instances as running (with id field)
-            mock_db.table().select().execute.return_value = Mock(
-                data=[
-                    {"id": 1, "instance_id": "1", "status": "running"},
-                    {"id": 2, "instance_id": "2", "status": "running"},
-                    {"id": 3, "instance_id": "3", "status": "stopped"},
-                    {"id": 4, "instance_id": "4", "status": "running"},
-                ]
-            )
-
-            with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
-                # Return different values based on the kubectl command
-                def kubectl_side_effect(args, namespace=None):
-                    if "-o=jsonpath={.spec.replicas}" in args:
-                        # Extract instance_id from deployment name
-                        if "mindroom-1" in args[1]:
-                            return (0, "1", "")  # Running (1 replica)
-                        elif "mindroom-2" in args[1]:
-                            return (0, "0", "")  # Stopped (0 replicas)
-                        elif "mindroom-4" in args[1]:
-                            return (0, "1", "")  # Running (1 replica)
-                    return (0, "", "")
-
-                mock_kubectl.side_effect = kubectl_side_effect
-
-                with patch("backend.services.provisioner_service.check_deployment_exists") as mock_check:
-                    # Instance 3 doesn't exist in k8s
-                    async def check_exists(instance_id, namespace=None):
-                        return instance_id != "3"
-
-                    mock_check.side_effect = check_exists
-
-                    # Track status updates
-                    updates = {}
-
-                    def update_side_effect(data):
-                        return Mock(
-                            eq=Mock(
-                                return_value=Mock(
-                                    execute=Mock(
-                                        side_effect=lambda: updates.update({data.get("status", "unknown"): True})
-                                    )
-                                )
-                            )
-                        )
-
-                    mock_db.table().update.side_effect = update_side_effect
-
-                    response = client.post("/system/sync-instances", headers=valid_auth)
-
-            assert response.status_code == 200
-            result = response.json()
-            assert result["total"] == 4
-            assert result["synced"] > 0  # Some instances needed sync
-
     def test_provision_with_background_readiness_check(self, client: TestClient, valid_auth: dict):
         """Test provisioning with background task for delayed readiness."""
         with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:

@@ -1193,76 +1193,76 @@ async def uninstall_instance(instance_id: int) -> dict[str, Any]:
     return {"success": True, "message": f"Instance {instance_id} uninstalled successfully", "instance_id": instance_id}
 
 
+def _deployment_status(deployment: Mapping[str, Any]) -> str:
+    """Return the instance status a deployment shows: running only once every desired pod is ready."""
+    desired = int(deployment["spec"]["replicas"])
+    if desired == 0:
+        return "stopped"
+    # Kubernetes omits replica counts that are zero.
+    counts = deployment.get("status") or {}
+    ready = min(int(counts.get(key) or 0) for key in ("readyReplicas", "availableReplicas", "updatedReplicas"))
+    return "running" if ready >= desired else "provisioning"
+
+
+async def _get_deployment(instance_id: int | str) -> dict[str, Any] | None:
+    """Return the instance's MindRoom deployment as Kubernetes reports it, or None when it does not exist."""
+    deployment_ref = instance_deployment_ref(instance_id)
+    code, out, err = await run_kubectl(
+        ["get", deployment_ref, "-o=json", "--ignore-not-found"], namespace=_INSTANCES_NAMESPACE
+    )
+    if code != 0:
+        msg = f"kubectl get {deployment_ref} failed: {err or out}"
+        raise RuntimeError(msg)
+    return json.loads(out) if out.strip() else None
+
+
+async def sync_instance_status(sb: Any, instance_id: int | str, stored_status: str) -> SyncUpdateOut | None:
+    """Record the status Kubernetes shows for an instance, unless its row left `stored_status` meanwhile.
+
+    Returns the change it recorded, or None when the status stayed or another writer changed the row first.
+    Raises when kubectl fails, before stamping the row, so the next dashboard poll checks again.
+    """
+    deployment = await _get_deployment(instance_id)
+    if deployment is not None:
+        status, reason = _deployment_status(deployment), "status_mismatch"
+    elif stored_status in ("provisioning", "deprovisioned"):
+        # A provision records its row before Helm creates the deployment, and teardown deletes it.
+        status, reason = stored_status, "deployment_not_found"
+    else:
+        status, reason = "error", "deployment_not_found"
+    recorded = update_instance(
+        sb,
+        instance_id,
+        {"status": status, "kubernetes_synced_at": datetime.now(UTC).isoformat()},
+        expected_status=stored_status,
+    )
+    if not recorded or status == stored_status:
+        return None
+    logger.info("Instance %s status changed from %s to %s (%s)", instance_id, stored_status, status, reason)
+    return SyncUpdateOut(instance_id=instance_id, old_status=stored_status, new_status=status, reason=reason)
+
+
 async def sync_instances(sb: Any) -> dict[str, Any]:
-    """Sync instance states between database and Kubernetes cluster."""
+    """Record the status Kubernetes shows for every instance and summarize the changes."""
     logger.info("Starting instance sync")
-
     try:
-        instances = list_instances(sb)
-
-        sync_results: dict[str, Any] = {"total": len(instances), "synced": 0, "errors": 0, "updates": []}
-
-        for instance in instances:
-            instance_id = instance.get("instance_id") or instance.get("subdomain")
-            if not instance_id:
-                logger.warning("Instance %s has no instance_id or subdomain", instance.get("id"))
-                sync_results["errors"] += 1
-                continue
-
-            exists = await check_deployment_exists(instance_id)
-            current_status = instance.get("status", "unknown")
-
-            if not exists:
-                if current_status not in ["error", "deprovisioned"]:
-                    logger.info("Instance %s not found in cluster, marking as error", instance_id)
-                    now = datetime.now(UTC).isoformat()
-                    sb.table("instances").update(
-                        {"status": "error", "kubernetes_synced_at": now, "updated_at": now}
-                    ).eq("id", instance["id"]).execute()
-
-                    sync_results["updates"].append(
-                        SyncUpdateOut(
-                            instance_id=instance_id,
-                            old_status=current_status,
-                            new_status="error",
-                            reason="deployment_not_found",
-                        ).model_dump()
-                    )
-                    sync_results["synced"] += 1
-            else:
-                try:
-                    code, out, _ = await run_kubectl(
-                        ["get", instance_deployment_ref(instance_id), "-o=jsonpath={.spec.replicas}"],
-                        namespace=_INSTANCES_NAMESPACE,
-                    )
-                    if code == 0:
-                        replicas = int(out.strip() or "0")
-                        actual_status = "running" if replicas > 0 else "stopped"
-
-                        if current_status != actual_status:
-                            logger.info(
-                                "Instance %s status mismatch: DB=%s, K8s=%s", instance_id, current_status, actual_status
-                            )
-                            now = datetime.now(UTC).isoformat()
-                            sb.table("instances").update(
-                                {"status": actual_status, "kubernetes_synced_at": now, "updated_at": now}
-                            ).eq("id", instance["id"]).execute()
-
-                            sync_results["updates"].append(
-                                SyncUpdateOut(
-                                    instance_id=instance_id,
-                                    old_status=current_status,
-                                    new_status=actual_status,
-                                    reason="status_mismatch",
-                                ).model_dump()
-                            )
-                            sync_results["synced"] += 1
-                except Exception:
-                    logger.exception("Error checking instance %s state", instance_id)
-                    sync_results["errors"] += 1
-
-        logger.info("Instance sync completed: %s", sync_results)
-        return sync_results  # noqa: TRY300
+        instances = list_instances(sb, columns="instance_id,status")
     except Exception as e:
         logger.exception("Failed to sync instances")
         raise HTTPException(status_code=500, detail=f"Failed to sync instances: {e}") from e
+
+    updates: list[dict[str, Any]] = []
+    errors = 0
+    for instance in instances:
+        try:
+            update = await sync_instance_status(sb, instance["instance_id"], instance["status"])
+        except Exception:
+            logger.exception("Error checking instance %s state", instance["instance_id"])
+            errors += 1
+            continue
+        if update is not None:
+            updates.append(update.model_dump())
+
+    sync_results = {"total": len(instances), "synced": len(updates), "errors": errors, "updates": updates}
+    logger.info("Instance sync completed: %s", sync_results)
+    return sync_results
