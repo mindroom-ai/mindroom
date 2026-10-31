@@ -1,3 +1,14 @@
+import { isValidElement } from "react";
+import {
+  SiGmail,
+  SiGooglecalendar,
+  SiGooglecloud,
+  SiGoogledocs,
+  SiGoogledrive,
+  SiGooglesheets,
+  SiGoogletasks,
+  SiHomeassistant,
+} from "react-icons/si";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { integrationProviders } from "./index";
 
@@ -19,9 +30,20 @@ describe("Generic OAuth integration provider", () => {
   it("lists the built-in provider cards in display order", () => {
     expect(
       Object.values(integrationProviders).map((provider) => {
-        const { id, name, description, category, setup_type } =
+        const { id, name, description, category, setup_type, icon } =
           provider.getConfig().integration;
-        return { id, name, description, category, setup_type };
+        if (!isValidElement<{ className: string }>(icon)) {
+          throw new Error(`${id} has no icon element`);
+        }
+        return {
+          id,
+          name,
+          description,
+          category,
+          setup_type,
+          icon: icon.type,
+          iconClass: icon.props.className,
+        };
       }),
     ).toEqual([
       {
@@ -31,6 +53,8 @@ describe("Generic OAuth integration provider", () => {
           "View and schedule meetings with your connected Google Calendar",
         category: "productivity",
         setup_type: "oauth",
+        icon: SiGooglecalendar,
+        iconClass: "h-5 w-5 text-blue-600",
       },
       {
         id: "google_cloud",
@@ -39,6 +63,8 @@ describe("Generic OAuth integration provider", () => {
           "Connect Google Cloud with read-only access for Google Cloud tools",
         category: "development",
         setup_type: "oauth",
+        icon: SiGooglecloud,
+        iconClass: "h-5 w-5 text-blue-600",
       },
       {
         id: "google_docs",
@@ -46,6 +72,8 @@ describe("Generic OAuth integration provider", () => {
         description: "Create, read, and edit documents with Google Docs",
         category: "productivity",
         setup_type: "oauth",
+        icon: SiGoogledocs,
+        iconClass: "h-5 w-5 text-blue-600",
       },
       {
         id: "google_drive",
@@ -54,6 +82,8 @@ describe("Generic OAuth integration provider", () => {
           "Search, read, upload, and organize files in your connected Google Drive",
         category: "productivity",
         setup_type: "oauth",
+        icon: SiGoogledrive,
+        iconClass: "h-5 w-5 text-green-600",
       },
       {
         id: "google_gmail",
@@ -61,6 +91,8 @@ describe("Generic OAuth integration provider", () => {
         description: "Read, search, and manage Gmail emails",
         category: "email",
         setup_type: "oauth",
+        icon: SiGmail,
+        iconClass: "h-5 w-5 text-red-500",
       },
       {
         id: "google_sheets",
@@ -68,6 +100,8 @@ describe("Generic OAuth integration provider", () => {
         description: "Read, create, and update Google Sheets spreadsheets",
         category: "development",
         setup_type: "oauth",
+        icon: SiGooglesheets,
+        iconClass: "h-5 w-5 text-green-600",
       },
       {
         id: "google_tasks",
@@ -76,6 +110,8 @@ describe("Generic OAuth integration provider", () => {
           "List, create, update, complete, and delete tasks with Google Tasks",
         category: "productivity",
         setup_type: "oauth",
+        icon: SiGoogletasks,
+        iconClass: "h-5 w-5 text-blue-600",
       },
       {
         id: "homeassistant",
@@ -83,6 +119,8 @@ describe("Generic OAuth integration provider", () => {
         description: "Control and monitor your smart home devices",
         category: "smart_home",
         setup_type: "special",
+        icon: SiHomeassistant,
+        iconClass: "h-5 w-5",
       },
     ]);
   });

@@ -662,10 +662,13 @@ describe("Integrations", () => {
     });
   });
 
-  it("shows built-in provider cards before any tools are listed", async () => {
+  it.each([
+    ["while tools load", true],
+    ["when no tools are listed", false],
+  ])("shows built-in provider cards %s", async (_label, loading) => {
     mockUseTools.mockReturnValue({
       tools: [],
-      loading: true,
+      loading,
       refetch: vi.fn(),
       statusAuthoritative: true,
     });
@@ -723,6 +726,189 @@ describe("Integrations", () => {
       });
     });
   });
+
+  const acmeTool = (name: string, displayName: string) => ({
+    name,
+    display_name: displayName,
+    description: `${displayName} on the Acme connection`,
+    icon: "AcmeIcon",
+    icon_color: "text-cyan-600",
+    category: "productivity",
+    status: "requires_config",
+    setup_type: "oauth",
+    auth_provider: "acme",
+    config_fields: [{ name: `${name}_field`, label: "Field", type: "text" }],
+    helper_text: null,
+    docs_url: null,
+    dependencies: null,
+  });
+
+  it("groups a discovered provider shared by several tools into one card and keeps each tool's card", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        acmeTool("acme_files", "Acme Files"),
+        acmeTool("acme_mail", "Acme Mail"),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    const panel = await screen.findByRole("tabpanel");
+    await waitFor(() => {
+      expect(
+        within(panel)
+          .getAllByRole("heading", { level: 2 })
+          .map((heading) => heading.textContent)
+          .slice(-3),
+      ).toEqual(["Acme", "Acme Files", "Acme Mail"]);
+    });
+    expect(
+      screen.getByText("Connect Acme OAuth for this tool."),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Requires Acme")).toHaveLength(2);
+    expect(mockGenericOAuthLoadStatus).toHaveBeenCalledWith("acme");
+  });
+
+  it("gives a discovered provider with a same-named tool one card for all its tools", async () => {
+    mockGenericOAuthLoadStatus.mockResolvedValue({
+      status: "connected",
+      connected: true,
+    });
+    mockUseTools.mockReturnValue({
+      tools: [
+        acmeTool("acme", "Acme Suite"),
+        acmeTool("acme_mail", "Acme Mail"),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    const acmeCard = (await screen.findByText("Acme Suite")).closest(
+      ".h-full",
+    ) as HTMLElement;
+    expect(screen.queryByText("Acme Mail")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Connect Acme Suite OAuth for Acme Suite."),
+    ).toBeInTheDocument();
+    fireEvent.click(within(acmeCard).getByRole("button", { name: "Edit" }));
+
+    await waitFor(() => {
+      expect(mockEnhancedConfigDialogProps).toHaveBeenLastCalledWith({
+        service: "acme",
+        configFields: [expect.objectContaining({ name: "acme_field" })],
+      });
+    });
+  });
+
+  const acmeDriveTool = {
+    name: "acme_drive",
+    display_name: "Acme Drive",
+    description: "Search Acme Drive files",
+    icon: "AcmeIcon",
+    icon_color: "text-cyan-600",
+    category: "productivity",
+    status: "requires_config",
+    setup_type: "oauth",
+    auth_provider: "acme_drive",
+    config_fields: null,
+    helper_text: "Acme tool helper text.",
+    docs_url: null,
+    dependencies: null,
+  };
+  const providerCardSources = [
+    {
+      source: "built-in",
+      name: "Google Drive",
+      tools: [
+        {
+          ...acmeDriveTool,
+          name: "google_drive",
+          display_name: "Google Drive",
+          auth_provider: "google_drive",
+          helper_text: "Drive tool helper text.",
+        },
+      ],
+      toolHelperText: "Drive tool helper text.",
+      setStatus: (status: Record<string, unknown>) =>
+        mockGoogleDriveLoadStatus.mockResolvedValue(status),
+    },
+    {
+      source: "discovered",
+      name: "Acme Drive",
+      tools: [acmeDriveTool],
+      toolHelperText: "Acme tool helper text.",
+      setStatus: (status: Record<string, unknown>) =>
+        mockGenericOAuthLoadStatus.mockResolvedValue(status),
+    },
+  ];
+
+  it.each(providerCardSources)(
+    "shows a $source card's status error over its tool helper text",
+    async ({ name, tools, setStatus }) => {
+      setStatus({
+        status: "not_connected",
+        connected: false,
+        oauth_client_configured: true,
+        status_error: "Requester binding failed.",
+        helper_text: "Requester binding failed.",
+      });
+      mockUseTools.mockReturnValue({
+        tools,
+        loading: false,
+        refetch: vi.fn(),
+        statusAuthoritative: true,
+      });
+
+      render(<Integrations />);
+
+      const card = (await screen.findByText(name)).closest(
+        ".h-full",
+      ) as HTMLElement;
+      await waitFor(() => {
+        expect(
+          within(card).getByText("Status error: Requester binding failed."),
+        ).toBeInTheDocument();
+      });
+      expect(within(card).getByText("Status error")).toBeInTheDocument();
+      expect(
+        within(card).getByRole("button", { name: "Retry status" }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it.each(providerCardSources)(
+    "offers a $source card's reset with the status helper text, else its tool's",
+    async ({ name, tools, toolHelperText, setStatus }) => {
+      setStatus({
+        status: "not_connected",
+        connected: false,
+        oauth_client_configured: true,
+        oauth_reset_required: true,
+      });
+      mockUseTools.mockReturnValue({
+        tools,
+        loading: false,
+        refetch: vi.fn(),
+        statusAuthoritative: true,
+      });
+
+      render(<Integrations />);
+
+      const card = (await screen.findByText(name)).closest(
+        ".h-full",
+      ) as HTMLElement;
+      expect(
+        await within(card).findByRole("button", { name: "Reset connection" }),
+      ).toBeInTheDocument();
+      expect(within(card).getByText(toolHelperText)).toBeInTheDocument();
+    },
+  );
 
   it("merges the Home Assistant tool into the Home Assistant card", async () => {
     mockUseTools.mockReturnValue({

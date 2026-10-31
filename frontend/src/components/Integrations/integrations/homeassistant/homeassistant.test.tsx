@@ -1,4 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render } from "@testing-library/react";
+
+const { mockHomeAssistantComponent } = vi.hoisted(() => ({
+  mockHomeAssistantComponent: vi.fn(),
+}));
+
+vi.mock(
+  "@/components/HomeAssistantIntegration/HomeAssistantIntegration",
+  () => ({
+    HomeAssistantIntegration: (props: unknown) => {
+      mockHomeAssistantComponent(props);
+      return null;
+    },
+  }),
+);
 
 vi.mock("@/lib/api", () => ({
   API_BASE_URL: "https://backend.example.test",
@@ -37,6 +52,22 @@ describe("HomeAssistantIntegrationProvider", () => {
       expect(config.integration.category).toBe("smart_home");
       expect(config.integration.setup_type).toBe("special");
       expect(config.ConfigComponent).toBeDefined();
+    });
+
+    it("binds the setup component to the selected scope", () => {
+      const onSuccess = vi.fn();
+      const Setup = homeAssistantIntegration.getConfig({
+        agentName: "code",
+        executionScope: "shared",
+      }).ConfigComponent!;
+
+      render(<Setup onClose={vi.fn()} onSuccess={onSuccess} />);
+
+      expect(mockHomeAssistantComponent).toHaveBeenCalledWith({
+        onSuccess,
+        agentName: "code",
+        executionScope: "shared",
+      });
     });
   });
 
