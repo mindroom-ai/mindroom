@@ -112,8 +112,7 @@ def _write_minimal_runtime_config(path: Path) -> None:
         "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
         "agents:\n  general:\n    display_name: General Agent\n    model: default\n"
         "router:\n  model: default\n"
-        "matrix_space:\n  enabled: false\n"
-        "administrators: []\n",
+        "matrix_space:\n  enabled: false\n",
         encoding="utf-8",
     )
 
@@ -285,7 +284,6 @@ class TestConfigInit:
         result = runner.invoke(
             app,
             ["config", "init", "--path", str(target), "--provider", provider, "--matrix-server", matrix_server],
-            input="\n",
             terminal_width=200,
         )
 
@@ -3314,11 +3312,14 @@ class TestRunErrorHandling:
 
         with patch("mindroom.orchestrator.main", AsyncMock(side_effect=OSError("Connection refused"))):
             refused = _invoke_with_runtime(["run"], cfg)
+        with patch("mindroom.orchestrator.main", AsyncMock(side_effect=ConnectionResetError("peer hung up"))):
+            reset = _invoke_with_runtime(["run"], cfg)
         with patch("mindroom.orchestrator.main", AsyncMock(side_effect=OSError("No space left on device"))):
             other = _invoke_with_runtime(["run"], cfg)
 
-        assert refused.exit_code == 1
-        assert "Could not connect to the Matrix homeserver" in refused.output
+        for explained in (refused, reset):
+            assert explained.exit_code == 1
+            assert "Could not connect to the Matrix homeserver" in explained.output
         assert isinstance(other.exception, OSError)
         assert "Could not connect to the Matrix homeserver" not in other.output
 
@@ -3373,13 +3374,7 @@ class TestRunErrorHandling:
     ) -> None:
         """Avatar generation should exit cleanly when generation fails."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n"
-            "administrators: []\n",
-        )
+        _write_minimal_runtime_config(cfg)
 
         with patch(
             "mindroom.avatar_generation.run_avatar_generation",
@@ -4268,35 +4263,6 @@ class TestDoctor:
         assert "anthropic: ANTHROPIC_API_KEY valid" in output
         assert "1 failed" in output
 
-    def test_warns_about_the_environment_a_model_reads_but_nothing_sets(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Doctor warns about a missing Bedrock region and Azure endpoint, as `config validate` does."""
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n"
-            "  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-5\n"
-            "  azure:\n    provider: azure\n    id: gpt-6-astra\n"
-            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
-            "router:\n  model: default\n",
-        )
-        storage = tmp_path / "storage"
-        for variable in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AZURE_OPENAI_ENDPOINT"):
-            monkeypatch.delenv(variable, raising=False)
-            monkeypatch.delenv(f"{variable}_FILE", raising=False)
-        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "azure-key")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        _patch_homeserver_ok(monkeypatch)
-
-        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
-
-        output = normalize_console_output(result.output)
-        assert result.exit_code == 0, output
-        assert "bedrock_claude: Set AWS_REGION (models: default)" in output
-        assert "azure: Set AZURE_OPENAI_ENDPOINT (models: azure)" in output
-
     @pytest.mark.parametrize("key_source", ["config", "dashboard"])
     def test_model_with_own_api_key_does_not_need_provider_key(
         self,
@@ -4977,6 +4943,12 @@ class TestDoctor:
 # ---------------------------------------------------------------------------
 
 
+# A config whose only owner placeholder is in administrators, which pairing replaces.
+_OWNER_PLACEHOLDER_CONFIG = (
+    f"models: {{}}\nagents: {{}}\nrouter:\n  model: default\nadministrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+)
+
+
 class TestConnect:
     """Tests for `mindroom connect` pairing command."""
 
@@ -5172,10 +5144,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
         assert "MINDROOM_NAMESPACE=a1b2c3d4" in env_content
         assert f"{OWNER_MATRIX_USER_ID_ENV}=@alice:mindroom.chat" in env_content
-        updated_config = cfg.read_text()
-        assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_config
-        assert "@alice:mindroom.chat" in updated_config
-        parsed_config = yaml.safe_load(updated_config)
+        parsed_config = yaml.safe_load(cfg.read_text())
         assert parsed_config["administrators"] == ["@alice:mindroom.chat"]
         assert parsed_config["room_defaults"] == {
             "invite_users": ["@alice:mindroom.chat"],
@@ -5190,18 +5159,10 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         """--path should control where .env is written and which config gets placeholder updates."""
         default_cfg = tmp_path / "default" / "config.yaml"
         default_cfg.parent.mkdir(parents=True, exist_ok=True)
-        default_cfg.write_text(
-            "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "administrators:\n"
-            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
-        )
+        default_cfg.write_text(_OWNER_PLACEHOLDER_CONFIG)
         target_cfg = tmp_path / "custom" / "config.yaml"
         target_cfg.parent.mkdir(parents=True, exist_ok=True)
-        target_cfg.write_text(
-            "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "administrators:\n"
-            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
-        )
+        target_cfg.write_text(_OWNER_PLACEHOLDER_CONFIG)
         responses = self._device_flow_responses()
         monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
         monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
@@ -5363,11 +5324,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
     ) -> None:
         """Malformed owner_user_id should warn and skip placeholder replacement."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "administrators:\n"
-            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
-        )
+        cfg.write_text(_OWNER_PLACEHOLDER_CONFIG)
         responses = [
             httpx.Response(
                 200,
@@ -5669,10 +5626,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
     ) -> None:
         """A terminal saves the approving account on yes or a bare Enter; no saves nothing and fails."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "agents: {}\nmodels: {}\nrouter:\n  model: default\n"
-            f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
-        )
+        cfg.write_text(_OWNER_PLACEHOLDER_CONFIG)
         responses = self._device_flow_responses()
         monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: True)
         monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))

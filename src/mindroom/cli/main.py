@@ -367,16 +367,11 @@ async def _run(
         )
     except KeyboardInterrupt:
         console.print("\nStopped")
-    except ConnectionError as exc:
-        _print_connection_error(exc, runtime_paths)
-        raise typer.Exit(1) from None
     except (PermanentStartupError, EventJournalLostError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
     except OSError as exc:
-        if _is_connection_os_error(exc):
-            _print_connection_error(exc, runtime_paths)
-            raise typer.Exit(1) from None
+        _exit_if_connection_error(exc, runtime_paths)
         raise
 
 
@@ -440,13 +435,8 @@ def avatars_sync(
     except AvatarSyncError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
-    except ConnectionError as exc:
-        _print_connection_error(exc, runtime_paths)
-        raise typer.Exit(1) from None
     except OSError as exc:
-        if _is_connection_os_error(exc):
-            _print_connection_error(exc, runtime_paths)
-            raise typer.Exit(1) from None
+        _exit_if_connection_error(exc, runtime_paths)
         raise
 
 
@@ -624,16 +614,11 @@ def _print_thread_export_stats(stats: ThreadExportStats) -> None:
         console.print(f"[red]Failed:[/red] {failure.room_key} {target}: {failure.error}")
 
 
-def _handle_thread_export_error(exc: RuntimeError | OSError, *, watch: bool) -> None:
-    """Print one top-level export error and exit unless watch mode can retry."""
-    console.print(f"[red]Error:[/red] {exc}")
-    if not watch:
+def _exit_if_connection_error(exc: OSError, runtime_paths: RuntimePaths) -> None:
+    """Explain an OS error that looks like a Matrix connection failure and exit; return for any other."""
+    if isinstance(exc, ConnectionError) or "connect" in str(exc).lower() or "refused" in str(exc).lower():
+        _print_connection_error(exc, runtime_paths)
         raise typer.Exit(1) from None
-
-
-def _is_connection_os_error(exc: OSError) -> bool:
-    """Return whether an OS error looks like a Matrix connection failure."""
-    return "connect" in str(exc).lower() or "refused" in str(exc).lower()
 
 
 async def _threads_export(
@@ -674,7 +659,9 @@ async def _threads_export(
             console.print(f"[red]Error:[/red] {exc}")
             raise typer.Exit(1) from None
         except (OSError, RuntimeError) as exc:
-            _handle_thread_export_error(exc, watch=watch)
+            console.print(f"[red]Error:[/red] {exc}")
+            if not watch:
+                raise typer.Exit(1) from None
         else:
             _print_thread_export_stats(stats)
             if not watch:
@@ -891,7 +878,7 @@ def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 
 
-def _print_connection_error(exc: BaseException, runtime_paths: RuntimePaths) -> None:
+def _print_connection_error(exc: OSError, runtime_paths: RuntimePaths) -> None:
     from mindroom import constants  # noqa: PLC0415
 
     console.print("[red]Error:[/red] Could not connect to the Matrix homeserver.\n")

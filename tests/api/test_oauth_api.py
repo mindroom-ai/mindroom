@@ -68,7 +68,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     resolve_worker_target,
 )
-from tests.api.conftest import trusted_upstream_env, trusted_upstream_headers
+from tests.api.conftest import publish_api_config, trusted_upstream_env, trusted_upstream_headers
 from tests.conftest import publish_test_plugins
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 from tests.runtime_fakes import bind_test_embedded_runtime
@@ -252,10 +252,7 @@ def _publish_config(
     runtime_paths: constants.RuntimePaths,
     payload: dict[str, Any],
 ) -> None:
-    context = main._app_context(api_app)
-    runtime_config = Config.validate_with_runtime(payload, runtime_paths)
-    context.runtime_config = runtime_config
-    context.load_error = None
+    publish_api_config(api_app, Config.validate_with_runtime(payload, runtime_paths))
     config_lifecycle.app_state(api_app).api_auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
         settings=auth._ApiAuthSettings(

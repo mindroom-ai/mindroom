@@ -304,9 +304,7 @@ def resolve_runtime_paths(
     """
     resolved_config_arg = Path(config_path).expanduser().resolve() if config_path is not None else None
     resolved_process_env = _copy_process_env(process_env)
-    resolved_config_path = (
-        Path(resolved_config_arg or find_config_path(process_env=resolved_process_env)).expanduser().resolve()
-    )
+    resolved_config_path = resolved_config_arg or find_config_path(process_env=resolved_process_env)
     config_dir = resolved_config_path.parent
     env_path = config_dir / ".env"
     env_file_values = _runtime_env_file_values_for_path(env_path)
@@ -993,17 +991,13 @@ def resolve_avatar_path(
 
 
 def find_config_path(*, process_env: Mapping[str, str]) -> Path:
-    """Find the first existing config file, or fall back to ~/.mindroom/config.yaml.
-
-    Returns the original (possibly relative) path, not a resolved one,
-    so CLI-facing defaults still display cleanly.
-    """
+    """Return the resolved first existing config file, or ~/.mindroom/config.yaml, without reading any `.env`."""
     if configured_path := _configured_config_path(process_env):
-        return configured_path
+        return configured_path.resolve()
     for path in _CONFIG_SEARCH_PATHS:
         if path.exists():
-            return path
-    return _CONFIG_SEARCH_PATHS[-1]  # default to ~/.mindroom/config.yaml for creation
+            return path.resolve()
+    return _CONFIG_SEARCH_PATHS[-1].resolve()  # default to ~/.mindroom/config.yaml for creation
 
 
 # Other constants

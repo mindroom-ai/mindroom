@@ -240,6 +240,30 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
     assert "openai: Set OPENAI_API_KEY (models: default)" in capsys.readouterr().out
 
 
+def test_doctor_warns_about_the_environment_a_model_reads_but_nothing_sets(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A missing Bedrock region and Azure endpoint are warnings, as `config validate` reports them."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"AZURE_OPENAI_API_KEY": "azure-key"},
+    )
+    config = Config(
+        models={
+            "default": ModelConfig(provider="bedrock_claude", id="anthropic.claude-opus-5"),
+            "azure": ModelConfig(provider="azure", id="gpt-6-astra"),
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    # The third warning is the Azure key's: Azure has no key check, so its key is never probed.
+    assert _check_providers(config, runtime_paths) == (0, 0, 3)
+    output = " ".join(capsys.readouterr().out.split())
+    assert "bedrock_claude: Set AWS_REGION (models: default)" in output
+    assert "azure: Set AZURE_OPENAI_ENDPOINT (models: azure)" in output
+
+
 @pytest.mark.parametrize(
     ("provider", "url", "headers"),
     [

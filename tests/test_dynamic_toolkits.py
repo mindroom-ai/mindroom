@@ -260,7 +260,7 @@ _PRESET_MESSAGE = (
 def _only_validation_error(tmp_path: Path, raw: dict[str, object]) -> tuple[tuple[str | int, ...], str]:
     with pytest.raises(ValidationError) as exc_info:
         _validated_config(tmp_path, raw)
-    [error] = exc_info.value.errors(include_context=False)
+    [error] = exc_info.value.errors()
     return tuple(error["loc"]), error["msg"]
 
 

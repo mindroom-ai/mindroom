@@ -505,8 +505,8 @@ def test_replace_owner_placeholders_reaches_included_files(tmp_path: Path) -> No
     """Placeholders living in !include files are replaced too."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("room_defaults: !include room_defaults.yaml\n", encoding="utf-8")
-    auth_path = tmp_path / "room_defaults.yaml"
-    auth_path.write_text(
+    include_path = tmp_path / "room_defaults.yaml"
+    include_path.write_text(
         f"admins:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         encoding="utf-8",
     )
@@ -518,7 +518,7 @@ def test_replace_owner_placeholders_reaches_included_files(tmp_path: Path) -> No
 
     assert replaced is True
     assert config_path.read_text(encoding="utf-8") == "room_defaults: !include room_defaults.yaml\n"
-    updated = auth_path.read_text(encoding="utf-8")
+    updated = include_path.read_text(encoding="utf-8")
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated
     assert yaml.safe_load(updated)["admins"] == ["@alice:mindroom.chat"]
 

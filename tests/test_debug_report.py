@@ -775,8 +775,7 @@ def _write_config(path: Path) -> None:
         "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5-5\n"
         "agents:\n  general:\n    display_name: General Agent\n    model: default\n"
         "router:\n  model: default\n"
-        "matrix_space:\n  enabled: false\n"
-        "administrators: []\n",
+        "matrix_space:\n  enabled: false\n",
         encoding="utf-8",
     )
 

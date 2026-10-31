@@ -535,8 +535,8 @@ def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, 
     failed = 0
     warnings = 0
     # A variable a model reads but nothing sets is reported once, as `config validate` reports it.
-    for route, env_key, model_names in find_missing_env_variables(config, runtime_paths):
-        console.print(f"[yellow]![/yellow] {route}: Set {env_key} (models: {', '.join(model_names)})")
+    for variable in find_missing_env_variables(config, runtime_paths):
+        console.print(f"[yellow]![/yellow] {variable.message}")
         warnings += 1
 
     for provider in sorted(provider_models):
@@ -607,12 +607,12 @@ def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths
     not checked, and checks the key unless every model that reads it was skipped. A provider without a key check is
     never probed, so it gets one "no key check" warning whatever its settings.
     """
-    # Models with their own credential never read the shared key.
-    shared_key_models = _models_reading_shared_key(config, env_key, runtime_paths)
     api_key, key_name = _shared_key(provider, env_key, runtime_paths)
     if not api_key:
         # `_check_providers` already warned about the missing variable.
         return 0, 0, 0
+    # Models with their own credential never read the shared key.
+    shared_key_models = _models_reading_shared_key(config, env_key, runtime_paths)
     if _report_key_not_checked(provider, provider, key_name, _endpoint_variables(env_key, runtime_paths)):
         return 0, 0, 1
     skipped: list[str] = []

@@ -400,7 +400,7 @@ class TestFindConfig:
         _patch_config_globals(monkeypatch, env="~/my_config.yaml")
 
         result = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
-        assert result == Path("~/my_config.yaml").expanduser()
+        assert result == Path("~/my_config.yaml").expanduser().resolve()
         assert "~" not in str(result)
 
 
@@ -842,7 +842,12 @@ class TestResolveConfigRelativePath:
             storage_path=storage_path,
         )
 
-        assert constants_mod.find_config_path(process_env=constants_mod.exported_process_env()) == Path("config.yaml")
+        assert (
+            constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
+            == Path(
+                "config.yaml",
+            ).resolve()
+        )
         assert constants_mod.resolve_primary_runtime_paths().config_path == Path("config.yaml").resolve()
         assert runtime_paths.config_path == config_path.resolve()
         assert runtime_paths.storage_root == storage_path.resolve()

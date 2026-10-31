@@ -411,7 +411,7 @@ def _print_local_model_commands(selected_preset: _ProviderPreset) -> None:
         )
 
 
-def _config_discovery_env(path: Path | None = None) -> dict[str, str]:
+def _config_discovery_env(path: Path | None) -> dict[str, str]:
     """Return the exported env snapshot used for config discovery and display."""
     process_env = constants.exported_process_env()
     if path is not None:
@@ -437,11 +437,6 @@ def print_config_search_locations(process_env: Mapping[str, str], *, title: str)
 def _yaml_syntax(content: str, *, line_numbers: bool, word_wrap: bool) -> Syntax:
     """Return the shared Rich YAML renderer used by config display commands."""
     return Syntax(content, "yaml", theme="monokai", line_numbers=line_numbers, word_wrap=word_wrap)
-
-
-def _resolve_config_path(process_env: Mapping[str, str]) -> Path:
-    """Return the config file that discovery picks in ``process_env``, without reading the `.env` beside it."""
-    return constants.find_config_path(process_env=process_env).resolve()
 
 
 def activate_cli_runtime(
@@ -595,15 +590,13 @@ def create_first_run_config(
 
     Without a terminal nothing is asked, so `provider` is required and a missing key is skipped.
     """
-    config_path = runtime_paths.config_path
-    env_path = runtime_paths.env_path
     if provider is None:
         selected_preset = None
     elif (selected_preset := _normalize_provider_preset(provider)) is None:
         msg = f"Invalid --provider value. Use: {_PROVIDER_CHOICES_TEXT}."
         raise ValueError(msg)
     console.print(
-        f"\n[bold]Welcome to MindRoom![/bold] Let's create your config at {escape(str(config_path))} "
+        f"\n[bold]Welcome to MindRoom![/bold] Let's create your config at {escape(str(runtime_paths.config_path))} "
         "for MindRoom Chat (mindroom.chat).",
     )
     console.print(
@@ -622,7 +615,7 @@ def create_first_run_config(
     )
     if (setup := _PROVIDER_PRESETS[selected_preset].setup) is not None:
         console.print("\nMindRoom keeps starting; your agents can answer once you:")
-        console.print(f"  {setup.first_run.format(env_path=env_path)}")
+        console.print(f"  {setup.first_run.format(env_path=runtime_paths.env_path)}")
         _print_local_model_commands(selected_preset)
 
 
@@ -635,14 +628,14 @@ def _prompt_provider_key(
     """Ask a terminal for the preset's API key with hidden input; return None when none was typed or none is needed."""
     from mindroom.credentials.environment import get_secret_from_env  # noqa: PLC0415
 
+    preset = _PROVIDER_PRESETS[selected_preset]
     env_key = _preset_api_key_env(selected_preset)
-    if _PROVIDER_PRESETS[selected_preset].setup is not None or env_key is None:
+    if preset.setup is not None or env_key is None:
         return None
     if get_secret_from_env(env_key, runtime_paths):
         console.print(f"Using {env_key} from your environment.")
         return None
-    label = _PROVIDER_PRESETS[selected_preset].label
-    value = secret(f"{label} API key (input hidden, press Enter to skip)").strip() if interactive else ""
+    value = secret(f"{preset.label} API key (input hidden, press Enter to skip)").strip() if interactive else ""
     if not value:
         console.print(
             f"Skipped. Connect your provider in the dashboard once MindRoom is running, "
@@ -732,7 +725,7 @@ def config_show(
 ) -> None:
     """Display the current config file with syntax highlighting."""
     process_env = _config_discovery_env(path)
-    config_file = _resolve_config_path(process_env)
+    config_file = constants.find_config_path(process_env=process_env)
 
     if not config_file.exists():
         console.print(f"[yellow]No config file found at:[/yellow] {config_file}")
@@ -762,7 +755,7 @@ def config_edit(
 
     Editor preference: $EDITOR -> $VISUAL -> nano -> vim -> vi.
     """
-    config_file = _resolve_config_path(_config_discovery_env(path))
+    config_file = constants.find_config_path(process_env=_config_discovery_env(path))
 
     if not config_file.exists():
         console.print("[yellow]No config file found.[/yellow]")
@@ -882,7 +875,7 @@ def config_path_cmd(
 ) -> None:
     """Show the resolved config file path and search locations."""
     process_env = _config_discovery_env(path)
-    resolved = _resolve_config_path(process_env)
+    resolved = constants.find_config_path(process_env=process_env)
     exists = resolved.exists()
     status = "[green]exists[/green]" if exists else "[red]not found[/red]"
     console.print(f"Resolved config path: {resolved} ({status})")
@@ -900,7 +893,7 @@ def _call_quietly[T](call: Callable[[], T]) -> T:
 
     structlog's default PrintLogger bypasses stdlib log levels, so we
     route it through stdlib with the root level at WARNING for the
-    duration of the load then restore the default so later callers
+    duration of the call then restore the default so later callers
     (e.g. the bot) can configure structlog themselves.
     """
     import structlog  # noqa: PLC0415
@@ -977,6 +970,11 @@ class _MissingEnvVariable(NamedTuple):
     route: str
     env_key: str
     model_names: tuple[str, ...]
+
+    @property
+    def message(self) -> str:
+        """Return the warning `config validate` and `doctor` print for this variable."""
+        return f"{self.route}: Set {self.env_key} (models: {', '.join(self.model_names)})"
 
 
 def _models_with_a_key(config: Config, runtime_paths: RuntimePaths) -> set[str]:
@@ -1095,8 +1093,8 @@ def check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
     missing = find_missing_env_variables(config, runtime_paths)
     if missing:
         console.print("\n[yellow]Warning:[/yellow] Missing environment variables:\n")
-        for route, env_key, model_names in missing:
-            console.print(f"  [yellow]*[/yellow] {route}: Set {env_key} (models: {', '.join(model_names)})")
+        for variable in missing:
+            console.print(f"  [yellow]*[/yellow] {variable.message}")
         console.print("\nYou can set these in a .env file or export them in your shell.")
 
 
