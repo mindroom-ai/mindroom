@@ -1003,16 +1003,22 @@ async def test_template_join_provisions_and_settles_without_holding_the_lane(
 
 
 @pytest.mark.asyncio
-async def test_template_join_by_someone_no_longer_in_the_lobby_gets_no_agent(
+@pytest.mark.parametrize("lobby", ["left", "unavailable"])
+async def test_template_join_gets_no_agent_unless_its_sender_is_still_in_the_lobby(
     template_coordination: TemplateCoordination,
+    lobby: str,
 ) -> None:
-    """A join seen after its sender left the lobby registers no agent and requests no reload."""
+    """A join seen after its sender left the lobby settles without an agent; an unknown lobby retries it."""
     lifecycle = template_coordination.lifecycle
-    set_lobby_members(lifecycle)
+    if lobby == "left":
+        set_lobby_members(lifecycle)
+    else:
+        lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersError("unavailable")
     await lifecycle.baseline_join(_ALICE_JOIN)
     template_coordination.provision.assert_not_awaited()
     template_coordination.config_reload.request_reload.assert_not_called()
-    assert lifecycle._retry_candidates == {}
+    retried = {} if lobby == "left" else {("@alice:localhost", "!lobby:localhost"): False}
+    assert lifecycle._retry_candidates == retried
 
 
 @pytest.mark.asyncio
