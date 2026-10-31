@@ -145,17 +145,16 @@ describe("ToolConfigPanel", () => {
       shell_path_prepend: ["/run/wrappers/bin"],
     });
 
+    // Removing the last value stores the empty list the field shows.
     fireEvent.click(screen.getByLabelText("Remove Env Passthrough value 1"));
     expect(agentOverrides()).toEqual({
+      extra_env_passthrough: [],
       shell_path_prepend: ["/run/wrappers/bin"],
     });
-    // Removing the last value keeps the override open for a new one.
     expect(
       screen.getByRole("checkbox", { name: "Override Env Passthrough" }),
     ).toBeChecked();
-    expect(
-      screen.getByText("No values. Add one to create an override."),
-    ).toBeInTheDocument();
+    expect(screen.getByText("No values.")).toBeInTheDocument();
 
     fireEvent.click(
       screen.getByRole("checkbox", { name: "Override Env Passthrough" }),
@@ -220,7 +219,7 @@ describe("ToolConfigPanel", () => {
     fireEvent.change(screen.getByDisplayValue("GITEA_TOKEN"), {
       target: { value: "" },
     });
-    expect(agentOverrides()).toBeNull();
+    expect(agentOverrides()).toEqual({ extra_env_passthrough: [] });
     expect(envInputs().map((input) => input.value)).toEqual([""]);
     expect(
       screen.getByRole("checkbox", { name: "Override Env Passthrough" }),
@@ -251,6 +250,61 @@ describe("ToolConfigPanel", () => {
     expect(agentOverrides()).toEqual({ enable_run_shell_command: false });
     expect(screen.getByText("Disabled")).toBeInTheDocument();
   });
+
+  it("stores the state a ticked boolean without a default shows", () => {
+    seedStore();
+    renderShellPanel();
+
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Override Run Shell Command" }),
+    );
+    expect(screen.getByText("Disabled")).toBeInTheDocument();
+    expect(agentOverrides()).toEqual({ enable_run_shell_command: false });
+  });
+
+  it.each([
+    [
+      "an agent",
+      { kind: "agent", agentId: "openclaw", lazyLoading: true } as const,
+    ],
+    ["the defaults", { kind: "defaults" } as const],
+  ])(
+    "keeps a stored empty list for %s while a value is added and left blank",
+    (_owner, target) => {
+      const tools = [{ docker: { include_tools: [] } }];
+      seedStore({ agentTools: tools, defaultTools: tools });
+      const stored = () =>
+        target.kind === "agent"
+          ? agentOverrides("docker")
+          : useConfigStore.getState().getDefaultToolOverrides("docker");
+      render(
+        <ToolConfigPanel
+          target={target}
+          toolName="docker"
+          configFields={[
+            {
+              name: "include_tools",
+              label: "Exposed Docker Commands",
+              type: "string[]",
+            },
+          ]}
+        />,
+      );
+
+      expect(
+        screen.getByRole("checkbox", {
+          name: "Override Exposed Docker Commands",
+        }),
+      ).toBeChecked();
+      expect(screen.getByText("No values.")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByText("Add value"));
+      expect(
+        screen.getAllByPlaceholderText("Exposed Docker Commands"),
+      ).toHaveLength(1);
+      expect(stored()).toEqual({ include_tools: [] });
+    },
+  );
 
   it("shows a value stored from elsewhere in place of the draft", () => {
     seedStore({
