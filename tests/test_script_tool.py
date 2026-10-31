@@ -123,9 +123,8 @@ class _Manager:
         *,
         run_id: str,
         force: bool = False,
-        reason: str = "",
     ) -> ScriptRunRecord:
-        del context, run_id, force, reason
+        del context, run_id, force
         self.calls.append("cancel")
         return _run(state=ScriptRunState.CANCELLED)
 
@@ -178,13 +177,13 @@ async def test_script_tool_requires_live_room_context() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("serving", [False, True])
+@pytest.mark.parametrize("has_script_runtime", [False, True])
 async def test_script_tool_waits_for_the_runtime_to_serve_tools(
     script_context: ToolRuntimeContext,
-    serving: bool,
+    has_script_runtime: bool,
 ) -> None:
     """Controls answer only while the primary's script runtime serves tools."""
-    context = _serving(script_context, None) if serving else script_context
+    context = _serving(script_context, None) if has_script_runtime else script_context
     with tool_runtime_context(context):
         payload = json.loads(await ScriptTools().list_scripts())
 
@@ -204,32 +203,18 @@ async def test_script_tool_shows_exact_resources_before_launch(
         payload = json.loads(await ScriptTools().get_script_resource_profiles())
 
     assert payload == {
+        **_Manager().resource_profiles(),
         "action": "resource_profiles",
-        "default_profile": "small",
-        "profiles": {
-            "small": {
-                "limits": {"cpu": "500m", "memory": "1Gi"},
-                "requests": {"cpu": "100m", "memory": "256Mi"},
-            },
-            "standard": {
-                "limits": {"cpu": "1", "memory": "2Gi"},
-                "requests": {"cpu": "250m", "memory": "512Mi"},
-            },
-            "large": {
-                "limits": {"cpu": "2", "memory": "8Gi"},
-                "requests": {"cpu": "500m", "memory": "2Gi"},
-            },
-        },
         "status": "ok",
         "tool": "script",
     }
 
 
 @pytest.mark.asyncio
-async def test_script_tool_public_run_uses_derived_execution_mode_without_redundant_fields(
+async def test_script_tool_launch_applies_toolkit_limits_and_reports_only_public_run_fields(
     script_context: ToolRuntimeContext,
 ) -> None:
-    """Toolkit config becomes durable launch limits without exposing capability material."""
+    """Toolkit config becomes durable launch limits, and the run payload exposes no capability or worker material."""
     manager = _Manager()
     toolkit = ScriptTools(
         max_concurrent_runs=2,
@@ -240,18 +225,30 @@ async def test_script_tool_public_run_uses_derived_execution_mode_without_redund
         payload = json.loads(await toolkit.start_script(source="print('ok')", name="watcher"))
 
     assert payload["status"] == "ok"
+    assert set(payload["run"]) == {
+        "run_id",
+        "agent_name",
+        "name",
+        "state",
+        "execution_mode",
+        "local_unsafe",
+        "resource_profile",
+        "resource_requests",
+        "resource_limits",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "exit_code",
+        "error",
+        "cancel_requested_at",
+        "cancellation_reason",
+        "max_tool_calls_per_minute",
+        "max_runtime_seconds",
+        "grants",
+    }
     assert payload["run"]["run_id"] == "script-1"
-    assert "token_hash" not in payload["run"]
-    assert "execution_identity" not in payload["run"]
-    assert "worker_key" not in payload["run"]
-    assert "worker_id" not in payload["run"]
-    assert "worker_backend_generation" not in payload["run"]
-    assert "supervisor_handle" not in payload["run"]
-    assert "snapshot_locator" not in payload["run"]
     assert payload["run"]["execution_mode"] == "worker"
     assert payload["run"]["local_unsafe"] is False
-    assert "entity_kind" not in payload["run"]
-    assert "call_count" not in payload["run"]
     assert manager.limits == ScriptRunLimits(
         max_concurrent_runs=2,
         max_tool_calls_per_minute=7,

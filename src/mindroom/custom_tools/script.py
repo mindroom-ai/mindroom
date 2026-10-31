@@ -47,10 +47,10 @@ class ScriptTools(Toolkit):
 
     async def get_script_resource_profiles(self) -> str:
         """Return the exact CPU and memory reservations available to background scripts."""
-        resolved = _runtime()
-        if isinstance(resolved, str):
-            return resolved
-        manager, _ = resolved
+        try:
+            manager, _ = _runtime()
+        except ScriptRunManagerError as exc:
+            return _payload("error", message=str(exc))
         return _payload("ok", action="resource_profiles", **manager.resource_profiles())
 
     async def start_script(
@@ -73,11 +73,8 @@ class ScriptTools(Toolkit):
                 exact resources, or omit it to use the configured default.
 
         """
-        resolved = _runtime()
-        if isinstance(resolved, str):
-            return resolved
-        manager, context = resolved
         try:
+            manager, context = _runtime()
             run = await manager.run(
                 context,
                 source=source,
@@ -97,11 +94,8 @@ class ScriptTools(Toolkit):
             run_id: Identifier returned by `start_script`.
 
         """
-        resolved = _runtime()
-        if isinstance(resolved, str):
-            return resolved
-        manager, context = resolved
         try:
+            manager, context = _runtime()
             status = await manager.status(context, run_id=run_id)
         except ScriptRunManagerError as exc:
             return _payload("error", message=str(exc))
@@ -115,11 +109,8 @@ class ScriptTools(Toolkit):
             force: Force-kill the supervised process instead of requesting graceful termination.
 
         """
-        resolved = _runtime()
-        if isinstance(resolved, str):
-            return resolved
-        manager, context = resolved
         try:
+            manager, context = _runtime()
             run = await manager.cancel(context, run_id=run_id, force=force)
         except ScriptRunManagerError as exc:
             return _payload("error", message=str(exc))
@@ -132,21 +123,23 @@ class ScriptTools(Toolkit):
             include_finished: Include terminal runs in addition to active runs.
 
         """
-        resolved = _runtime()
-        if isinstance(resolved, str):
-            return resolved
-        manager, context = resolved
+        try:
+            manager, context = _runtime()
+        except ScriptRunManagerError as exc:
+            return _payload("error", message=str(exc))
         runs = await manager.list(context, include_finished=include_finished)
         return _payload("ok", action="list", runs=[_public_run(run) for run in runs])
 
 
-def _runtime() -> tuple[ScriptRunManager, ToolRuntimeContext] | str:
+def _runtime() -> tuple[ScriptRunManager, ToolRuntimeContext]:
     context = get_tool_runtime_context()
     if context is None:
-        return _payload("error", message="Background script controls require an active room context.")
+        msg = "Background script controls require an active room context."
+        raise ScriptRunManagerError(msg)
     manager = None if context.orchestrator is None else context.orchestrator.script_runtime.tool_manager
     if manager is None:
-        return _payload("error", message="Background script runtime is not ready.")
+        msg = "Background script runtime is not ready."
+        raise ScriptRunManagerError(msg)
     return manager, context
 
 

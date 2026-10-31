@@ -66,12 +66,12 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from mindroom.bot import AgentBot
-    from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import BackgroundApprovalDecision
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
@@ -178,7 +178,7 @@ class _WorkerLeaseDelivery:
         if failure is not None and abandoned:
             logger.warning(
                 "script_worker_backend_pending_acquire_failed",
-                exc_info=(type(failure), failure, failure.__traceback__),
+                exc_info=failure,
             )
 
 
@@ -217,10 +217,7 @@ class _LiveScriptRuntimeResolver:
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
         """Rebuild a context only from the exact durable Matrix execution identity."""
-        identity = parse_tool_execution_identity_payload(
-            run.execution_identity,
-            error_prefix="Background script execution_identity",
-        )
+        identity = _run_execution_identity(run)
         if (
             identity.channel != "matrix"
             or identity.agent_name != run.agent_name
@@ -274,10 +271,7 @@ class _LiveScriptRuntimeResolver:
             context.agent_name,
             context.current_config,
             context.runtime_paths,
-            execution_identity=parse_tool_execution_identity_payload(
-                run.execution_identity,
-                error_prefix="Background script execution_identity",
-            ),
+            execution_identity=_run_execution_identity(run),
         ).worker_target
         return ScriptRuntimeWorkerAuthority(
             worker_id=worker_id,
@@ -416,7 +410,9 @@ class ScriptRuntimeLifecycle:
             if not self._start_requested or (self.api_enabled and not self._api_ready.is_set()):
                 return
             self.broker.close_call_admission()
-            await self.manager.begin_startup_reconciliation()
+            # A startup cleanup still pending from an earlier activation holds its fence until it succeeds.
+            if not self._startup_cleanup_pending:
+                await self.manager.begin_startup_reconciliation()
             self._started = True
             self._startup_cleanup_pending = True
             try:
@@ -451,9 +447,7 @@ class ScriptRuntimeLifecycle:
             if not self._started:
                 return
             try:
-                await self._run_complete_pass(timeout_event="script_maintenance_pass_timeout")
-            except asyncio.CancelledError:
-                raise
+                await self._run_complete_pass()
             except Exception:
                 logger.exception("script_maintenance_cycle_failed")
 
@@ -490,8 +484,6 @@ class ScriptRuntimeLifecycle:
         pending = self._get_or_create_worker_lease_acquisition(required_backend_locator)
         try:
             lease = await asyncio.shield(pending.task)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             if self._pending_worker_lease is pending:
                 self._pending_worker_lease = None
@@ -600,7 +592,7 @@ class ScriptRuntimeLifecycle:
         isolation_changes = {
             agent_name
             for agent_name in continuing_agents
-            if _agent_isolation_changed(current_config.agents[agent_name], new_config.agents[agent_name])
+            if current_config.agents[agent_name].private != new_config.agents[agent_name].private
         }
         script_tool_removals = {
             agent_name
@@ -708,15 +700,6 @@ class ScriptRuntimeLifecycle:
             msg = "Config reload did not stop every background script whose worker access it changed."
             raise _ScriptRuntimeLifecycleError(msg)
 
-    def _run_matches_recovery_contract(self, run: ScriptRunRecord, *, config: Config) -> bool:
-        """Return whether the current backend advertises this run as recoverable."""
-        return run_matches_recovery_signature(
-            run=run,
-            backend=self.manager.worker_backend_for(run),
-            config=config,
-            gateway_url=self.manager.gateway_url,
-        )
-
     async def _interrupt_runs(
         self,
         runs: Sequence[ScriptRunRecord],
@@ -724,20 +707,15 @@ class ScriptRuntimeLifecycle:
         reason_for: Callable[[ScriptRunRecord], str],
     ) -> None:
         """Durably revoke, close broker work, and reconcile selected processes in phases."""
-        durably_revoked = await run_coroutine_until_complete(
-            self._durably_revoke_runs(runs, reason_for=reason_for),
-        )
-        await self._interrupt_durably_revoked_runs(
-            durably_revoked,
-            reason_for=reason_for,
-        )
+        await run_coroutine_until_complete(self._durably_revoke_runs(runs, reason_for=reason_for))
+        await self._interrupt_durably_revoked_runs(runs, reason_for=reason_for)
 
     async def _durably_revoke_runs(
         self,
         runs: Sequence[ScriptRunRecord],
         *,
         reason_for: Callable[[ScriptRunRecord], str],
-    ) -> Sequence[ScriptRunRecord]:
+    ) -> None:
         """Persist cancellation intent for every selected run before later cleanup."""
         semaphore = asyncio.Semaphore(self.pass_concurrency)
 
@@ -763,7 +741,6 @@ class ScriptRuntimeLifecycle:
         if not all(durable_results):
             msg = "Background script cleanup did not durably revoke every active run."
             raise _ScriptRuntimeLifecycleError(msg)
-        return runs
 
     async def _interrupt_durably_revoked_runs(
         self,
@@ -790,7 +767,7 @@ class ScriptRuntimeLifecycle:
                         "script_reload_process_reconciliation_pending",
                         run_id=run.run_id,
                         agent_name=run.agent_name,
-                        exc_info=(type(process_result), process_result, process_result.__traceback__),
+                        exc_info=process_result,
                     )
                 final_broker_result = broker_result
                 if process_reconciled and isinstance(broker_result, BaseException):
@@ -799,23 +776,19 @@ class ScriptRuntimeLifecycle:
                         return_exceptions=True,
                     )
                 broker_revoked = not isinstance(final_broker_result, BaseException)
-                if isinstance(final_broker_result, BaseException):
+                if not broker_revoked:
                     logger.warning(
                         "script_reload_broker_revocation_pending",
                         run_id=run.run_id,
                         agent_name=run.agent_name,
-                        exc_info=(
-                            type(final_broker_result),
-                            final_broker_result,
-                            final_broker_result.__traceback__,
-                        ),
+                        exc_info=final_broker_result,
                     )
-                    if final_broker_result is not broker_result and isinstance(broker_result, BaseException):
+                    if final_broker_result is not broker_result:
                         logger.warning(
                             "script_reload_initial_broker_revocation_failed",
                             run_id=run.run_id,
                             agent_name=run.agent_name,
-                            exc_info=(type(broker_result), broker_result, broker_result.__traceback__),
+                            exc_info=broker_result,
                         )
                 if not broker_revoked or not process_reconciled:
                     return
@@ -828,11 +801,7 @@ class ScriptRuntimeLifecycle:
                         "script_reload_resource_finalization_pending",
                         run_id=run.run_id,
                         agent_name=run.agent_name,
-                        exc_info=(
-                            type(finalization_result),
-                            finalization_result,
-                            finalization_result.__traceback__,
-                        ),
+                        exc_info=finalization_result,
                     )
 
         await asyncio.gather(*(interrupt_run(run) for run in runs))
@@ -886,15 +855,9 @@ class ScriptRuntimeLifecycle:
         inherited = await asyncio.to_thread(self.store.list_runs, include_finished=False)
         recoverable = [run for run in inherited if self._preserves_process(run)]
         recoverable_ids = {run.run_id for run in recoverable}
-        durably_revoked = await self._durably_revoke_runs(
-            [run for run in inherited if run.run_id not in recoverable_ids],
-            reason_for=lambda _run: RUNTIME_RESTARTED,
-        )
-        if durably_revoked:
-            await self._interrupt_runs_through_owning_backends(
-                durably_revoked,
-                reason_for=lambda _run: RUNTIME_RESTARTED,
-            )
+        retired = [run for run in inherited if run.run_id not in recoverable_ids]
+        await self._durably_revoke_runs(retired, reason_for=lambda _run: RUNTIME_RESTARTED)
+        await self._interrupt_runs_through_owning_backends(retired, reason_for=lambda _run: RUNTIME_RESTARTED)
         adopted_ids = await self._recover_startup_runs(recoverable)
         unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
         pending = [run for run in unfinished if run.run_id not in adopted_ids]
@@ -932,7 +895,12 @@ class ScriptRuntimeLifecycle:
                 recoverable=(
                     config is not None
                     and self._preserves_process(run)
-                    and self._run_matches_recovery_contract(run, config=config)
+                    and run_matches_recovery_signature(
+                        run=run,
+                        backend=self.manager.worker_backend_for(run),
+                        config=config,
+                        gateway_url=self.manager.gateway_url,
+                    )
                     and self.resolver.is_authorized(run, config=config) is True
                 ),
             )
@@ -999,12 +967,10 @@ class ScriptRuntimeLifecycle:
         reason_for: Callable[[ScriptRunRecord], str],
     ) -> None:
         """Reconcile each worker-backed run only through its durable cleanup locator."""
-        local_runs = [run for run in runs if run.local_unsafe]
-        if local_runs:
-            await self._interrupt_durably_revoked_runs(
-                local_runs,
-                reason_for=reason_for,
-            )
+        await self._interrupt_durably_revoked_runs(
+            [run for run in runs if run.local_unsafe],
+            reason_for=reason_for,
+        )
         grouped: dict[str | None, list[ScriptRunRecord]] = {}
         for run in runs:
             if not run.local_unsafe:
@@ -1081,11 +1047,11 @@ class ScriptRuntimeLifecycle:
         await self._reconcile_pass()
         await self._prune_pass()
 
-    async def _run_complete_pass(self, *, timeout_event: str) -> None:
+    async def _run_complete_pass(self) -> None:
         try:
             await asyncio.wait_for(self._complete_pass(), timeout=self.pass_timeout_seconds)
         except TimeoutError:
-            logger.warning(timeout_event, timeout_seconds=self.pass_timeout_seconds)
+            logger.warning("script_maintenance_pass_timeout", timeout_seconds=self.pass_timeout_seconds)
 
     async def shutdown(self, *, timeout_seconds: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS) -> None:
         """Stop serving script tools, then run bounded final reconciliation."""
@@ -1102,14 +1068,12 @@ class ScriptRuntimeLifecycle:
             runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
             preserved = [run for run in runs if self._preserves_process(run)]
             preserved_ids = {run.run_id for run in preserved}
-            durably_revoked = await run_coroutine_until_complete(
-                self._durably_revoke_runs(
-                    [run for run in runs if run.run_id not in preserved_ids],
-                    reason_for=lambda _run: RUNTIME_SHUTDOWN,
-                ),
+            revoked = [run for run in runs if run.run_id not in preserved_ids]
+            await run_coroutine_until_complete(
+                self._durably_revoke_runs(revoked, reason_for=lambda _run: RUNTIME_SHUTDOWN),
             )
             await self._run_shutdown_cleanup(
-                durably_revoked,
+                revoked,
                 preserved_runs=preserved,
                 deadline=shutdown_deadline,
                 timeout_seconds=timeout_seconds,
@@ -1163,13 +1127,10 @@ class ScriptRuntimeLifecycle:
             pending_lease = pending.delivery.abandon()
             if pending_lease is not None:
                 leases.append(pending_lease)
-        if pending is not None and pending.task.done() and not pending.task.cancelled():
-            pending_failure = pending.task.exception()
-            if pending_failure is not None:
-                logger.warning(
-                    "script_worker_backend_pending_acquire_failed",
-                    exc_info=(type(pending_failure), pending_failure, pending_failure.__traceback__),
-                )
+            if pending.task.done() and not pending.task.cancelled():
+                pending_failure = pending.task.exception()
+                if pending_failure is not None:
+                    logger.warning("script_worker_backend_pending_acquire_failed", exc_info=pending_failure)
         self._pending_worker_lease = None
         self._publish_worker_lease(None)
         return leases
@@ -1223,7 +1184,6 @@ def build_script_runtime(
         worker_backend=None,
         gateway_url="",
     )
-    retention_seconds = _script_retention_seconds(runtime_paths)
     return ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
@@ -1233,13 +1193,16 @@ def build_script_runtime(
         config_provider=config_provider,
         worker_lease_provider=worker_lease_provider,
         api_enabled=api_enabled,
-        retention_seconds=retention_seconds,
+        retention_seconds=_script_retention_seconds(runtime_paths),
     )
 
 
-def _agent_isolation_changed(current: AgentConfig, updated: AgentConfig) -> bool:
-    """Return whether one agent's process isolation contract changed."""
-    return current.private != updated.private
+def _run_execution_identity(run: ScriptRunRecord) -> ToolExecutionIdentity:
+    """Parse the durable Matrix execution identity a run was launched with."""
+    return parse_tool_execution_identity_payload(
+        run.execution_identity,
+        error_prefix="Background script execution_identity",
+    )
 
 
 def _agent_has_script_tool(config: Config, agent_name: str) -> bool:
@@ -1280,8 +1243,7 @@ def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:
     try:
         value = float(raw)
     except ValueError:
-        msg = f"{_SCRIPT_RETENTION_SECONDS_ENV} must be a positive number"
-        raise ValueError(msg) from None
+        value = math.nan
     if not math.isfinite(value) or value <= 0:
         msg = f"{_SCRIPT_RETENTION_SECONDS_ENV} must be a positive number"
         raise ValueError(msg)
