@@ -170,11 +170,7 @@ class ToolJobRuntimeCoordinator:
         )
 
     def _grant(self, job: BackgroundJob) -> JobGrant:
-        """Recheck current delegation, team membership, and requester reply access.
-
-        Access opens only on a proven grant and execution stops only on a proven denial; unresolved membership is
-        neither.
-        """
+        """Recheck current delegation, team membership, and requester reply access."""
         config = self.config_provider()
         owner = job.owner
         if owner.channel != "matrix" or owner.requester_id is None or owner.room_id is None:

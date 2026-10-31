@@ -29,7 +29,7 @@ Rejected: a base exception shared by the manager, the wire, and backend errors, 
 ## Why the claim rechecks the run first
 
 A call claim checks that its run still accepts calls before it looks up a retried call of the same ID.
-The broker verifies a capability once, and a cancellation can land while the owner's live authority is checked; checking the run inside the claim's transaction refuses both a new call and a retry for that run, which a second token verification used to catch.
+A cancellation can land while the owner's live authority is checked; checking the run inside the claim's transaction refuses both a new call and a retry for that run, so the broker verifies the capability only once.
 
 ## Rejected alternatives
 

@@ -1893,7 +1893,7 @@ _BOUNDED_PROFILE = {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"
         dict.fromkeys(("small", "standard", "large", "huge"), _BOUNDED_PROFILE),
     ],
 )
-def test_kubernetes_backend_config_rejects_partial_script_resource_profiles(
+def test_kubernetes_backend_config_rejects_profiles_other_than_exactly_the_three(
     tmp_path: Path,
     profiles: dict[str, object],
 ) -> None:

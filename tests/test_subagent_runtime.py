@@ -90,10 +90,10 @@ def test_completion_authority_uses_latest_config_and_team_membership(tmp_path: P
     job = completed_delegation_job()
     assert coordinator._grant(job) == "allowed"
     config.agents["lead"].delegate_to = []
-    assert coordinator._grant(job) != "allowed"
+    assert coordinator._grant(job) == "denied"
     config.agents["lead"].delegate_to = ["worker"]
     config.teams["team"].agents = ["worker"]
-    assert coordinator._grant(job) != "allowed"
+    assert coordinator._grant(job) == "denied"
 
 
 def test_completion_authority_checks_requester_for_target_and_recipient(tmp_path: Path) -> None:
@@ -107,9 +107,9 @@ def test_completion_authority_checks_requester_for_target_and_recipient(tmp_path
         journal_provider=partial(tool_job_journal, test_runtime_paths(tmp_path).storage_root),
     )
     job = completed_delegation_job()
-    assert coordinator._grant(replace(job, owner=replace(job.owner, requester_id="@stranger:localhost"))) != "allowed"
+    assert coordinator._grant(replace(job, owner=replace(job.owner, requester_id="@stranger:localhost"))) == "denied"
     config.agents["worker"].access = ResponderAccessConfig(current_room_members=False)
-    assert coordinator._grant(job) != "allowed"
+    assert coordinator._grant(job) == "denied"
 
 
 class _ResolvingMembership(AgentReplyMembershipIndex):
@@ -165,9 +165,14 @@ async def test_revocation_waits_for_resolving_room_membership(tmp_path: Path) ->
     try:
         membership.state = "member"
         await start_delegation_job(runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
-        for state, running in (("pending", True), ("member", True), ("pending", True), ("stranger", False)):
+        for state, grant, running in (
+            ("pending", "pending", True),
+            ("member", "allowed", True),
+            ("pending", "pending", True),
+            ("stranger", "denied", False),
+        ):
             membership.state = state
-            assert (coordinator._grant(fixture) == "allowed") is (state == "member")
+            assert coordinator._grant(fixture) == grant, state
             await runtime.cancel_revoked()
             status = runtime._entries[fixture.job_id].job.status
             assert (status == "running") is running, state
@@ -323,7 +328,7 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
     )
     assert coordinator._grant(job) == "allowed"
     config.agents["lead"].tools = []
-    assert coordinator._grant(job) != "allowed"
+    assert coordinator._grant(job) == "denied"
 
 
 @pytest.mark.asyncio
@@ -604,7 +609,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
                 replace_test_tool_factory(monkeypatch, "shell", replaced_factory)
                 with pytest.raises(JobAccessError):
                     coordinator._authorize_execution(owner, tool)
-                assert coordinator._grant(stored) != "allowed"
+                assert coordinator._grant(stored) == "denied"
     finally:
         await coordinator.stop()
 
@@ -656,7 +661,7 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
         ):
             with pytest.raises(JobAccessError):
                 coordinator._authorize_execution(owner, tool)
-            assert coordinator._grant(stored) != "allowed"
+            assert coordinator._grant(stored) == "denied"
     finally:
         await coordinator.stop()
 
