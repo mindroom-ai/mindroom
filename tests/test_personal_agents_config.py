@@ -254,6 +254,16 @@ def test_generated_agent_never_gets_self_config(tmp_path: Path) -> None:
     assert config.agents["mind_alice_smith"].allow_self_config is False
 
 
+def test_template_key_in_delegate_to_names_each_users_own_agent(tmp_path: Path) -> None:
+    """The template key in delegate_to lets each user's agent run copies of itself, and validates before onboarding."""
+    data = deepcopy(BASE) | {"agents": {"research": {"display_name": "Research", "model": "default"}}}
+    data["personal_agents"]["mind"]["agent"]["delegate_to"] = ["mind", "research"]
+    assert "mind" not in _runtime_config(tmp_path / "empty", deepcopy(data)).agents
+    config = _runtime_config(tmp_path, data, roster=(_entry(),))
+    assert config.agents["mind_alice_smith"].delegate_to == ["mind_alice_smith", "research"]
+    assert config.authored_model_dump()["personal_agents"]["mind"]["agent"]["delegate_to"] == ["mind", "research"]
+
+
 def test_broken_template_fails_without_any_user(tmp_path: Path) -> None:
     """A template that would generate an invalid agent fails before anyone is onboarded."""
     data = deepcopy(BASE)

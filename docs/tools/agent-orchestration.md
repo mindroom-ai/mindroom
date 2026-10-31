@@ -36,6 +36,7 @@ Set `delegate_to` on the calling agent to the agent names it may run as subagent
 MindRoom adds the `delegate` tool automatically when `delegate_to` is non-empty, so you do not list it in `tools:`.
 Every target must be a configured agent, or the config fails to load.
 An agent may run a fresh copy of itself only when its own name is in `delegate_to`.
+In a [personal agent template](../personal-agents.md#configuration), the template key in `delegate_to` names each user's own agent.
 Subagents may delegate further through their own `delegate_to`, up to a maximum depth of 3.
 
 ```yaml
