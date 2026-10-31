@@ -215,17 +215,26 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
         tool_args={"value": 1},
         requires_confirmation=True,
     )
-    requirement = RunRequirement(tool)
-    requirement.member_agent_id = "member-id"
-    requirement.member_display_name = "researcher"
-    requirement.member_run_id = "member-run"
+    member = RunRecord(
+        run_id="member-run",
+        agent_id="member-id",
+        agent_display_name="researcher",
+        status=RunStatus.paused,
+        tools=[tool],
+    )
     response = TeamRunRecord(
         run_id="team-run",
         session_id="team-session",
         status=RunStatus.paused,
         tools=[],
-        requirements=[requirement],
+        member_responses=[member],
         team_id=None,
+    )
+    requirement = RunRequirement(
+        tool,
+        member_agent_id="member-id",
+        member_display_name="researcher",
+        member_run_id="member-run",
     )
 
     paused = response_turn_module.paused_attempt_from_response(
@@ -243,7 +252,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
 def test_a_paused_run_without_a_session_fails_instead_of_losing_its_pause() -> None:
     """The pause is resumed from the session its record names, so a record that names none cannot pause a reply."""
     tool = ToolExecution(tool_call_id="call", tool_name="dangerous", requires_confirmation=True)
-    record = RunRecord(run_id="run-1", status=RunStatus.paused, tools=[tool], requirements=[RunRequirement(tool)])
+    record = RunRecord(run_id="run-1", status=RunStatus.paused, tools=[tool])
 
     with pytest.raises(RuntimeError, match="names no session"):
         response_turn_module.paused_attempt_from_response(record, toolkit_owners={})
@@ -277,7 +286,6 @@ def test_a_paused_child_s_toolkit_owners_are_the_toolkits_its_sources_recorded(
     state = DelegationState(
         pending_tools=[tool.to_dict()],
         pending_tool_sources={"child-card": DelegationPendingTool(child, "child-call", toolkit_name=recorded)},
-        pending_requirements=[RunRequirement(tool).to_dict()],
         pending_child_id="delegation",
     )
     response = RunRecord(
@@ -310,7 +318,6 @@ def test_a_denial_is_recorded_with_the_reason_given_or_the_default_note(reason: 
         answered_calls(["call"], approved=False, reason=reason),
     )
 
-    assert decided.confirmation_note == note
     assert decided.tool_execution.confirmation_note == note
 
 
@@ -339,7 +346,7 @@ def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
         run_id="run-1",
         session_id="session-1",
         status=RunStatus.paused,
-        requirements=requirements,
+        tools=[requirement.tool_execution for requirement in requirements],
     )
 
     with pytest.raises(RuntimeError, match="duplicate tool-call IDs"):
@@ -364,7 +371,7 @@ async def test_streaming_paused_attempt_escapes_without_recording_terminal_inter
     paused = response_turn_module.PausedAttempt(
         session_id="session-1",
         run_id="run-stream",
-        tools=(tool,),
+        requirements=(RunRequirement(tool),),
         toolkit_owners={("general", "dangerous"): "test_toolkit"},
     )
 
@@ -1518,7 +1525,12 @@ def test_resumed_continuation_preserves_count_on_next_pause() -> None:
         _continuation: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield AttemptResolved(
-            response_turn_module.PausedAttempt(session_id="session", run_id="fresh", tools=(), toolkit_owners={}),
+            response_turn_module.PausedAttempt(
+                session_id="session",
+                run_id="fresh",
+                requirements=(),
+                toolkit_owners={},
+            ),
         )
 
     with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
@@ -1547,7 +1559,12 @@ def test_fresh_continuation_saves_count_before_first_approval() -> None:
         calls += 1
         if calls == 1:
             return CompletedAttempt(tool_executions=(_model_switch_execution("after-toolcall"),))
-        return response_turn_module.PausedAttempt(session_id="session", run_id="fresh", tools=(), toolkit_owners={})
+        return response_turn_module.PausedAttempt(
+            session_id="session",
+            run_id="fresh",
+            requirements=(),
+            toolkit_owners={},
+        )
 
     with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
         _run_turn(_streamed(attempt), sinks=TurnSinks(on_completed=completed.append))

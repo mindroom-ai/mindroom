@@ -89,7 +89,10 @@ def test_an_agent_row_that_stored_the_paused_notice_hands_over_none(name: str, t
 
     assert (run.status, run.content, run.handover_content) == (RunStatus(stored["status"]), None, None)
     assert "content" not in run.to_dict()
-    assert run.requirements == RunRecord.from_dict(stored).requirements
+    # Layout version 8 keeps each paused call once, with its requirement's id as its pause id.
+    assert [replace(item.tool_execution, pause_id=None) for item in run.requirements] == [
+        item.tool_execution for item in RunRecord.from_dict(stored).requirements
+    ]
 
 
 def test_a_team_row_and_its_member_row_lose_their_paused_notices(tmp_path: Path) -> None:
@@ -395,14 +398,15 @@ def test_a_row_the_rewrite_cannot_decode_stays_as_stored(damaged: str, tmp_path:
 
     upgrade_from_layout_4(store, _SQUAD)
 
-    def stored(sql: str, *values: object) -> str:
+    def stored(sql: str, *values: object) -> str | None:
         with closing(sqlite3.connect(store.path)) as connection:
             [(text,)] = connection.execute(sql, values).fetchall()
         return text
 
     runs, messages = quote_identifier(names.log_runs), quote_identifier(names.log_messages)
     record = f"SELECT record FROM {runs} WHERE run_id = ?"  # noqa: S608
-    assert stored(damaged_row, *parameters) == damage
+    # Layout version 8 clears every row's requirements, which no reader reads since.
+    assert stored(damaged_row, *parameters) == (None if damaged == "team_requirements" else damage)
     with closing(sqlite3.connect(store.path)) as connection:
         assert layout_version(connection, names) == LOG_VERSION
     if damaged != "member_record":

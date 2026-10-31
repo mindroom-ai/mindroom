@@ -300,7 +300,9 @@ describe("SchemaFields", () => {
     const { lastValue } = renderFixture();
     fireEvent.change(
       screen.getByRole("combobox", { name: "Large message strategy" }),
-      { target: { value: "split" } },
+      {
+        target: { value: "split" },
+      },
     );
     expect(lastValue()).toEqual({ large_message_strategy: "split" });
 
@@ -415,6 +417,17 @@ describe("SchemaFields", () => {
     expect(lastValue()).toEqual({ tools: [] });
   });
 
+  it("edits tool entries by name and keeps the entries of listed tools", () => {
+    const { lastValue } = renderFixture({
+      tools: ["browser", { shell: { sandbox: "tight" } }],
+    });
+    expect(screen.getByText("shell")).toBeInTheDocument();
+    expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove browser" }));
+    expect(lastValue()).toEqual({ tools: [{ shell: { sandbox: "tight" } }] });
+  });
+
   it("edits string maps with referenced values", () => {
     const { lastValue } = renderFixture();
     fireEvent.change(
@@ -493,7 +506,9 @@ describe("SchemaFields", () => {
     expect(lastValue()).toEqual({ accept_invites: [] });
     fireEvent.change(
       screen.getByRole("textbox", { name: "New accept invites entry" }),
-      { target: { value: "@alice:example.org" } },
+      {
+        target: { value: "@alice:example.org" },
+      },
     );
     fireEvent.click(
       screen.getByRole("button", { name: "Add accept invites entry" }),
@@ -578,7 +593,9 @@ describe("SchemaFields", () => {
     });
     fireEvent.change(
       screen.getByRole("combobox", { name: "Call profile type" }),
-      { target: { value: "1" } },
+      {
+        target: { value: "1" },
+      },
     );
     // A realtime model ID is not a configured model name.
     expect(lastValue()).toEqual({ call_profile: { backend: "cascaded" } });

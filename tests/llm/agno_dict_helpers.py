@@ -7,12 +7,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.runs import RunRecord, TeamRunRecord
+from mindroom.delegation.state import DELEGATION_FUNCTIONS
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.runs import AnyRunRecord, ToolExecution
 
 # Keys Agno wrote that the owned ``ToolExecution`` does not model: Agno's user-input HITL variants, the call's
 # timing and timestamp, and the silence flag of a call executed outside the run, which nothing read.
@@ -48,15 +49,15 @@ TOOL_EXECUTION_DEFAULTS: dict[str, object] = {
     ),
     "stop_after_tool_call": False,
 }
-# Keys Agno wrote on requirement dicts that the owned ``RunRequirement`` does not model; nothing read its timestamp.
-DROPPED_REQUIREMENT_KEYS = frozenset({"created_at"})
 # Keys Agno wrote on usage dicts that the owned metrics do not model: ``additional_metrics``, which only tests ever
 # filled in, a provider-reported ``cost``, and ``provider_metrics``, of which only a request's ``context_usage`` was
 # read (``expected_request_metrics_dict``).
 DROPPED_METRICS_KEYS = frozenset({"additional_metrics", "cost", "provider_metrics"})
-# Keys Agno wrote on run dicts that the owned records do not model; nothing in MindRoom reads them.
+# Keys Agno wrote on run dicts that the owned records do not model; nothing in MindRoom reads them, except
+# ``requirements``, which a paused run's conversion folds into its tool executions (``legacy_run_requirements``).
 DROPPED_RUN_KEYS = frozenset(
     {
+        "requirements",
         "content_type",
         "input",
         "session_state",
@@ -135,18 +136,22 @@ def expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
         result["messages"] = [expected_message_dict(message) for message in result["messages"]]
     if "tools" in result:
         result["tools"] = [expected_tool_dict(tool) for tool in result["tools"]]
-    if "requirements" in result:
-        result["requirements"] = [expected_requirement_dict(item) for item in result["requirements"]]
     if "member_responses" in result:
         result["member_responses"] = [expected_run_dict(member) for member in result["member_responses"]]
     return result
 
 
-def expected_requirement_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Agno's requirement dict minus the requirement keys the owned type dropped, its tool execution as written."""
-    result = without(data, DROPPED_REQUIREMENT_KEYS)
-    result["tool_execution"] = expected_tool_dict(result["tool_execution"])
-    return result
+def stored_requirement(tool: ToolExecution, requirement_id: str, **fields: object) -> dict[str, Any]:
+    """Return the ``requirements`` entry a release up to v2026.10.752 stored for the paused call ``tool``.
+
+    ``fields`` are its other keys, such as a team row's ``member_agent_id`` and ``member_run_id``.
+    """
+    return {"id": requirement_id, **fields, "tool_execution": tool.to_dict()}
+
+
+def with_requirements(record: AnyRunRecord, *entries: dict[str, Any]) -> dict[str, Any]:
+    """Return ``record``'s stored dict with the ``requirements`` an earlier release stored beside its tools."""
+    return {**record.to_dict(), "requirements": list(entries)}
 
 
 def stored_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
@@ -154,19 +159,46 @@ def stored_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
     return TeamRunRecord.from_dict(data) if "team_id" in data else RunRecord.from_dict(data)
 
 
-def upgraded_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
-    """Decode a run dict an earlier release stored as the store reads it once layout version 6 rewrote it.
+def _take_pause_ids(record: AnyRunRecord, stored: Mapping[str, Any]) -> None:
+    """Give each paused delegation call of ``record`` the id of the waiting requirement ``stored`` holds for it.
 
-    A paused notice is no longer its content or its members', and a paused team run's waiting delegation call names
-    the paused run of the member it names (see the ``LEGACY_COMPAT`` marker in
-    ``mindroom.session_storage.legacy_paused_runs``).
+    The waiting requirements under one call id take its paused calls in call order; a resolved one, or one of a call
+    that is not a delegation call, leaves its call as stored.
+    """
+    ids: dict[str, list[str]] = {}
+    for entry in stored.get("requirements") or ():
+        call = entry["tool_execution"]
+        waits = call.get("requires_confirmation") or call.get("external_execution_required")
+        if entry.get("member_run_id") in (None, record.run_id) and waits:
+            ids.setdefault(call["tool_call_id"], []).append(entry["id"])
+    for tool in record.tools or ():
+        if tool.is_paused and ids.get(tool.tool_call_id):
+            pause_id = ids[tool.tool_call_id].pop(0)
+            if tool.tool_name in DELEGATION_FUNCTIONS and tool.external_execution_required:
+                tool.pause_id = pause_id
+
+
+def upgraded_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
+    """Decode a run dict an earlier release stored as the store reads it once layout versions 6 and 8 rewrote it.
+
+    A paused notice is no longer its content or its members', a paused team run's waiting delegation call names the
+    paused run of the member it names (see the ``LEGACY_COMPAT`` marker in
+    ``mindroom.session_storage.legacy_paused_runs``), and a paused call takes its stored requirement's id as its pause
+    id and delegation state lists its pending calls once (``mindroom.session_storage.legacy_run_requirements``).
     """
     run = stored_run_record(data)
     members = run.member_responses if isinstance(run, TeamRunRecord) else []
+    delegation = (run.metadata or {}).get("mindroom_delegation")
+    if isinstance(delegation, dict):
+        delegation.pop("pending_requirements", None)
+    if run.status is RunStatus.paused:
+        stored_members = data.get("member_responses") or []
+        for record, stored in ((run, data), *zip(members, stored_members, strict=True)):
+            _take_pause_ids(record, stored)
     for record in (run, *members):
         if str(record.content).startswith(PAUSED_NOTICE_OPENINGS):
             record.content = None
-    paused_runs = {item.member_agent_id: item.member_run_id for item in run.requirements or ()}
+    paused_runs = {item.member_agent_id: item.member_run_id for item in run.requirements}
     for tool in run.tools or ():
         if tool.child_run_id is None and str(tool.result).endswith("requires human input before continuing."):
             tool.child_run_id = paused_runs.get((tool.tool_args or {}).get("member_id"))

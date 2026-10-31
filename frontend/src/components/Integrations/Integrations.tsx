@@ -43,7 +43,6 @@ import {
 } from "@/hooks/useTools";
 import { useConfigStore } from "@/store/configStore";
 import { getIconForTool } from "./iconMapping";
-import { API_BASE_URL } from "@/lib/api";
 import {
   builtInProviderCards,
   oauthCard,
@@ -151,10 +150,6 @@ const discoveredOAuthCard = (
     getIconForTool(providerTool?.icon ?? null, providerTool?.icon_color),
   );
 };
-
-const oauthRedirectPlaceholderOrigin = () =>
-  new URL(API_BASE_URL || window.location.origin, window.location.origin)
-    .origin;
 
 const hasConfigFields = (integration: Integration) =>
   Boolean(integration.config_fields?.length);
@@ -454,7 +449,7 @@ export function Integrations() {
         label: "Redirect URI",
         type: "text",
         required: false,
-        placeholder: `${oauthRedirectPlaceholderOrigin()}/api/oauth/${integration.id}/callback`,
+        placeholder: `${window.location.origin}/api/oauth/${integration.id}/callback`,
         description: "Optional provider-specific redirect URI",
       });
     }
