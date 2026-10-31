@@ -79,7 +79,12 @@ _MESSAGE_PAGES = r"/me(/mailFolders/[^/]+)?/messages"
 _ATTACHMENT_PAGES = r"/me/messages/[^/]+/attachments"
 _AutomaticReplyStatus = Literal["disabled", "alwaysEnabled", "scheduled"]
 # The choice that sets Graph's "none" is named internal_only, which says what it does.
-_EXTERNAL_AUDIENCES = {"internal_only": "none", "contactsOnly": "contactsOnly", "all": "all"}
+_ExternalAudience = Literal["internal_only", "contactsOnly", "all"]
+_EXTERNAL_AUDIENCES: dict[_ExternalAudience, str] = {
+    "internal_only": "none",
+    "contactsOnly": "contactsOnly",
+    "all": "all",
+}
 # Graph writes these values in either case; reads report them as the setter takes them.
 _READ_STATUSES = {status.casefold(): status for status in get_args(_AutomaticReplyStatus)}
 _READ_AUDIENCES = {graph.casefold(): choice for choice, graph in _EXTERNAL_AUDIENCES.items()}
@@ -200,10 +205,10 @@ def _schedule(status: str, start: str | None, end: str | None, time_zone: str) -
 
 
 def _reply_messages(
-    status: str,
+    status: _AutomaticReplyStatus,
     internal_message: str | None,
     external_message: str | None,
-    external_audience: str | None,
+    external_audience: _ExternalAudience | None,
 ) -> dict[str, str]:
     """Return the automatic reply messages and audience to set.
 
@@ -798,7 +803,7 @@ class OutlookMailTools(Toolkit):
         start: str | None = None,
         end: str | None = None,
         time_zone: str = "UTC",
-        external_audience: Literal["internal_only", "contactsOnly", "all"] | None = None,
+        external_audience: _ExternalAudience | None = None,
     ) -> str:
         """Turn the requester's own automatic replies (out of office) off, on, or on for a period, and set their text.
 
