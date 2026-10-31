@@ -657,7 +657,7 @@ async def test_browser_discovery_keeps_existing_worker_behavior(
     worker_requests: list[dict[str, object]],
     action: str,
 ) -> None:
-    """Discovery ignores target/node hints as before, including a desktop default."""
+    """Discovery ignores target/node hints, including a desktop default."""
     agent, context = _context_agent(
         tmp_path / "primary",
         "browser",

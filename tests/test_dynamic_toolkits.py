@@ -1245,7 +1245,7 @@ def test_chat_ui_instructions_map_only_the_enabled_functions(
         assert (f"\n- {name}(" in prompt) is (name not in excluded)
     assert "open_panel(panel='computer') shows the Computer panel" in prompt
     assert "open_panel(panel='members') shows the Members panel" in prompt
-    # With both panels offered, the agent learns that a real website needs the Computer panel, not a canvas.
+    # With show_canvas beside open_panel, the agent learns that a real website needs the Computer panel, not a canvas.
     assert ("a canvas cannot." in prompt) is ("show_canvas" not in excluded)
 
 
