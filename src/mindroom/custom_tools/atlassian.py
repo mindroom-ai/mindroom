@@ -98,14 +98,14 @@ class _InvalidArgumentError(AtlassianError):
 
 
 def _page_id(value: str, *, field_name: str = "page_id") -> str:
-    if value.isascii() and _PAGE_ID_PATTERN.fullmatch(value):
+    if _PAGE_ID_PATTERN.fullmatch(value):
         return value
     msg = f"{field_name} must be a numeric Confluence page ID, not a URL, title, or path."
     raise _InvalidArgumentError(msg)
 
 
 def _confluence_attachment_id(value: str) -> str:
-    match = _ATTACHMENT_ID_PATTERN.fullmatch(value) if value.isascii() else None
+    match = _ATTACHMENT_ID_PATTERN.fullmatch(value)
     if match is None:
         msg = "attachment_id must be a Confluence attachment ID from confluence_list_attachments, such as att123456."
         raise _InvalidArgumentError(msg)
@@ -113,7 +113,7 @@ def _confluence_attachment_id(value: str) -> str:
 
 
 def _issue_key(value: str) -> str:
-    if value.isascii() and _ISSUE_KEY_PATTERN.fullmatch(value):
+    if _ISSUE_KEY_PATTERN.fullmatch(value):
         return value.upper()
     msg = "issue_key must be a Jira issue key such as PROJ-123, or a numeric issue ID."
     raise _InvalidArgumentError(msg)
@@ -142,8 +142,8 @@ def _cursor(value: str | None, field_name: str) -> str | None:
 def _string_list(value: list[str] | None, field_name: str) -> list[str] | None:
     if value is None:
         return None
-    items = [item.strip() for item in value if item.strip()]
-    if not value or len(items) != len(value):
+    items = [item.strip() for item in value]
+    if not items or not all(items):
         msg = f"{field_name} must be a non-empty list of strings."
         raise _InvalidArgumentError(msg)
     return items
