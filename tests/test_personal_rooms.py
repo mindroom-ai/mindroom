@@ -21,7 +21,6 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind
@@ -43,7 +42,6 @@ from mindroom.matrix.personal_rooms import (
     PersonalRoomService,
     PersonalRoomValidationError,
 )
-from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.personal_agents import _append_personal_agent_roster_entry
@@ -317,6 +315,7 @@ async def test_validated_replacement_source_completes_deferred_welcome(
             owner.runtime_paths,
             owner,
             lambda _: None,
+            Mock(),
         )
         await lifecycle.member_event(
             nio.MatrixRoom(room_id, server.user_id),
@@ -332,6 +331,7 @@ async def test_validated_replacement_source_completes_deferred_welcome(
         restarted.runtime_paths,
         restarted,
         lambda _: PersonalRoomTarget(restarted, True),
+        Mock(),
     )
     await router._reconcile()
     record = read_personal_room(path)
@@ -651,6 +651,7 @@ async def test_a_pending_guest_removal_retry_does_not_delay_shutdown(
         runtime_paths=owner.runtime_paths,
         service=owner,
         lookup_target=lambda _agent: None,
+        config_reload=Mock(),
     )
 
     await asyncio.wait_for(lifecycle.cancel_reconciliation(timeout_seconds=1), timeout=2)
@@ -671,6 +672,7 @@ async def test_the_room_lifecycle_removes_an_invited_person(tmp_path: Path, monk
         runtime_paths=owner.runtime_paths,
         service=owner,
         lookup_target=lambda _agent: None,
+        config_reload=Mock(),
     )
     room = nio.MatrixRoom(room_id, server.user_id)
     room.add_member("@alice:localhost", None, None)
@@ -1008,150 +1010,6 @@ def bots(tmp_path: Path, server: MatrixServer, monkeypatch: pytest.MonkeyPatch, 
     router, target = result
     target._first_sync_done = True
     return router, target
-
-
-def _template_router(tmp_path: Path, profile: object, status: str = "applied") -> tuple[Any, Config, Any, Mock]:
-    """A router whose personal_rooms.agent names a template, with a stub reload lifecycle in the given status."""
-    paths = test_runtime_paths(tmp_path)
-    state = MatrixState.load(paths)
-    state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    save_matrix_state(state, paths)
-    config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
-    user = AgentMatrixUser(
-        agent_name=ROUTER_AGENT_NAME,
-        user_id="@mindroom_router:localhost",
-        display_name="Router",
-        password=TEST_PASSWORD,
-    )
-    router = make_test_agent_bot(user, config=config, runtime_paths=paths)
-    router.client = SimpleNamespace(user_id=user.user_id, get_displayname=AsyncMock(return_value=profile))
-    config_reload = router.orchestrator.config_reload
-    config_reload.request_reload = Mock()
-    config_reload.status = ConfigReloadStatus(status=status)
-    return router, config, paths, config_reload.request_reload
-
-
-_ALICE_JOIN = RoomMemberJoin(
-    "!lobby:localhost",
-    "$join",
-    "@alice:localhost",
-    "@alice:localhost",
-    None,
-    None,
-    "join",
-    None,
-)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("profile", "display_name"),
-    [
-        (nio.ProfileGetDisplayNameResponse("Alice A."), "Alice A."),
-        (nio.ProfileGetDisplayNameError("missing", "M_NOT_FOUND"), None),
-    ],
-)
-async def test_router_provisions_a_joining_users_agent_and_reloads(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    profile: object,
-    display_name: str | None,
-) -> None:
-    """A lobby join with a template target creates that user's agent under their display name, then reloads."""
-    router, config, paths, request_reload = _template_router(tmp_path, profile)
-    provision = AsyncMock(return_value=("mind_alice", True))
-    monkeypatch.setattr("mindroom.bot.provision_personal_agent", provision)
-
-    await router._personal_room_lifecycle.baseline_join(_ALICE_JOIN)
-
-    router.client.get_displayname.assert_awaited_once_with("@alice:localhost")
-    provision.assert_awaited_once_with(
-        config,
-        paths,
-        template="mind",
-        user_id="@alice:localhost",
-        user_display_name=display_name,
-        source_user_id="@alice:localhost",
-        source_room_id="!lobby:localhost",
-    )
-    request_reload.assert_called_once_with()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("changed", "status", "reloads"),
-    [(True, "pending", True), (False, "pending", False), (False, "applied", True), (False, "failed", True)],
-)
-async def test_router_reprovisioning_never_supersedes_a_queued_reload(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    changed: bool,
-    status: str,
-    reloads: bool,
-) -> None:
-    """An agent whose roster entry already existed asks for a reload only when none is queued, so retries cannot restart its wait."""
-    router, _, _, request_reload = _template_router(tmp_path, nio.ProfileGetDisplayNameResponse("Alice"), status)
-    monkeypatch.setattr("mindroom.bot.provision_personal_agent", AsyncMock(return_value=("mind_alice", changed)))
-
-    await router._personal_room_lifecycle.baseline_join(_ALICE_JOIN)
-
-    assert request_reload.called is reloads
-
-
-@pytest.mark.asyncio
-async def test_router_provisions_one_users_agent_one_call_at_a_time(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A second call for a user being provisioned returns at once instead of registering again; other users proceed."""
-    router, _, _, _ = _template_router(tmp_path, nio.ProfileGetDisplayNameResponse("Alice"))
-    release = asyncio.Event()
-    users: list[str] = []
-
-    async def provision(*_args: object, user_id: str, **_kwargs: object) -> tuple[str, bool]:
-        users.append(user_id)
-        await release.wait()
-        return "mind_x", True
-
-    monkeypatch.setattr("mindroom.bot.provision_personal_agent", provision)
-
-    first = asyncio.create_task(
-        router._provision_personal_agent("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost"),
-    )
-    await asyncio.sleep(0)
-    await asyncio.wait_for(
-        router._provision_personal_agent("mind", "@alice:localhost", "@bridge_alice:localhost", "!other:localhost"),
-        timeout=1,
-    )
-    other = asyncio.create_task(
-        router._provision_personal_agent("mind", "@bob:localhost", "@bob:localhost", "!lobby:localhost"),
-    )
-    await asyncio.sleep(0)
-    release.set()
-    await asyncio.gather(first, other)
-
-    assert users == ["@alice:localhost", "@bob:localhost"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("interruption", [RuntimeError("registration failed"), asyncio.CancelledError()])
-async def test_an_interrupted_provisioning_lets_the_next_request_for_that_user_run(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    interruption: BaseException,
-) -> None:
-    """A provisioning call that fails or is cancelled requests no reload and no longer blocks that user's next request."""
-    router, _, _, request_reload = _template_router(tmp_path, nio.ProfileGetDisplayNameResponse("Alice"))
-    provision = AsyncMock(side_effect=[interruption, ("mind_alice", True)])
-    monkeypatch.setattr("mindroom.bot.provision_personal_agent", provision)
-
-    with pytest.raises(type(interruption)):
-        await router._provision_personal_agent("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost")
-    request_reload.assert_not_called()
-    await router._provision_personal_agent("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost")
-
-    assert provision.await_count == 2
-    request_reload.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -2499,6 +2357,7 @@ async def test_owner_event_retires_initial_join_after_later_invite(
         owner.runtime_paths,
         owner,
         lambda _agent: None,
+        Mock(),
     )
     server.set_member(room_id, "@alice:localhost", observed_membership)
     event = _room_member_event(membership=observed_membership, prev_membership=previous_membership)
@@ -2540,6 +2399,7 @@ async def test_owner_event_retirement_requires_recorded_room_and_user(
         owner.runtime_paths,
         owner,
         lambda _agent: None,
+        Mock(),
     )
     leave = _room_member_event(membership="leave", prev_membership="invite")
     await lifecycle.member_event(nio.MatrixRoom("!other:localhost", server.user_id), leave)
@@ -2568,6 +2428,7 @@ async def test_unrecorded_owner_event_creates_no_lock_when_feature_disabled(
         owner.runtime_paths,
         owner,
         lambda _agent: None,
+        Mock(),
     )
     await lifecycle.member_event(
         nio.MatrixRoom("!other:localhost", server.user_id),

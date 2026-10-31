@@ -54,7 +54,6 @@ from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manag
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.model_catalog_receiver import register_model_catalog_receiver
 from mindroom.orchestration.server_state import publish_server_state, server_state_content
-from mindroom.personal_agents import provision_personal_agent
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.runtime_shutdown import (
@@ -345,7 +344,6 @@ class AgentBot:
                 ),
             )
 
-        self._personal_agents_provisioning: set[tuple[str, str]] = set()
         self.personal_rooms = PersonalRoomService(
             self.agent_name,
             self._runtime_view,
@@ -358,7 +356,7 @@ class AgentBot:
             self.runtime_paths,
             self.personal_rooms,
             self._lookup_personal_room_target,
-            self._provision_personal_agent,
+            orchestrator.config_reload,
         )
         self._room_lifecycle = BotRoomLifecycle(
             BotRoomLifecycleDeps(
@@ -2084,43 +2082,6 @@ class AgentBot:
         if target is None or target.client is None:
             return None
         return PersonalRoomTarget(target.personal_rooms, target.first_sync_complete)
-
-    async def _provision_personal_agent(
-        self,
-        template: str,
-        user_id: str,
-        source_user_id: str,
-        source_room_id: str,
-    ) -> None:
-        """Create one user's agent from a template and reload the config so the runtime starts it."""
-        client = self.client
-        assert client is not None
-        # A live join and a reconciliation pass can both reach one user; only one may register the account.
-        # A second call returns at once, so the caller treats the user as pending and retries without waiting.
-        key = (template, user_id)
-        if key in self._personal_agents_provisioning:
-            return
-        self._personal_agents_provisioning.add(key)
-        try:
-            profile = await client.get_displayname(user_id)
-            _, changed = await provision_personal_agent(
-                self.config,
-                self.runtime_paths,
-                template=template,
-                user_id=user_id,
-                user_display_name=profile.displayname
-                if isinstance(profile, nio.ProfileGetDisplayNameResponse)
-                else None,
-                source_user_id=source_user_id,
-                source_room_id=source_room_id,
-            )
-        finally:
-            self._personal_agents_provisioning.discard(key)
-        # This runs only while the live config lacks the agent, so an existing entry still needs a reload,
-        # but re-requesting a queued one would restart its debounce and response drain on every retry.
-        config_reload = self.orchestrator.config_reload
-        if changed or config_reload.status.status != "pending":
-            config_reload.request_reload()
 
     def personal_room_target_ready(self) -> None:
         """Let the router onboard a user at once because their own agent finished its first sync."""
