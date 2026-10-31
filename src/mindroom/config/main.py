@@ -125,6 +125,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
+    is_managed_room_key,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
@@ -1575,7 +1576,7 @@ class Config(BaseModel):
 
     def managed_room_keys(self) -> set[str]:
         """Return configured room keys, excluding Matrix room IDs (`!…`) and aliases (`#…`)."""
-        return {room_key for room_key in self.get_all_configured_rooms() if not room_key.startswith(("!", "#"))}
+        return {room_key for room_key in self.get_all_configured_rooms() if is_managed_room_key(room_key)}
 
     def get_entity_thread_mode(
         self,
