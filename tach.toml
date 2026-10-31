@@ -2963,7 +2963,7 @@ depends_on = ["mindroom.providers.extra_kwargs"]
 
 [[modules]]
 path = "mindroom.providers.anthropic.repairs"
-depends_on = ["mindroom.providers.claude_wire_blocks"]
+depends_on = ["mindroom.llm", "mindroom.providers.claude_wire_blocks"]
 visibility = [
     "mindroom.providers.anthropic.legacy_stored_turns",
     "mindroom.providers.anthropic.prompt_cache",

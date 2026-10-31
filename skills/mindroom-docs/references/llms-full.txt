@@ -993,14 +993,17 @@ Set up the homeserver (examples use `chat.example.com`):
    The handoff URL must use HTTPS on the homeserver's own origin.
    Add `"push": false` to turn push off: the app then registers no pusher for the homeserver and hides the push setting.
    Signed-in accounts pick up a change of the advert only when they sign out and in again.
-2. Serve the handoff page behind Access. It redirects to the app with the value of the `CF_Authorization` cookie:
+2. Serve the handoff page behind Access. It redirects to the app with the homeserver's own origin and the value of the `CF_Authorization` cookie:
 
     ```nginx
     location = /native/cloudflare-access {
       add_header Cache-Control "no-store" always;
-      return 302 "mindroom://cloudflare-access#token=$cookie_CF_Authorization";
+      return 302 "mindroom://cloudflare-access#origin=https://chat.example.com&token=$cookie_CF_Authorization";
     }
     ```
+
+   Write the origin into the config rather than taking it from the request; the app refuses a token whose callback names no origin or another one.
+   Without `origin` the app's Access sign-in fails with "Cloudflare Access sign-in returned no valid token."; earlier app releases ignore it, so add it before users update the app.
 
    If the same origin serves the MindRoom Chat web app, exclude `/native` from its service worker's navigation fallback (`serviceWorker.navigationFallbackExcludePaths` in the client chart, or `window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__`), or a Safari that has opened the web app answers the handoff with its own page.
    The page also answers when opened in Safari, where iOS hands the token to whichever app handles `mindroom://`.
@@ -16259,6 +16262,7 @@ Do not report or "fix" these; they are deliberate.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, and start time, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
 - Each agent, team, and the router also publishes its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one.
   MindRoom Chat uses a published origin only from agents on the viewer's homeserver, and only while that homeserver binds tokens, so a hostile agent can collect at most tokens bound to its own origin.
+- Administrators may use every agent created with `create_agent`, whose instructions its owner wrote, and its tools act for the administrator, so a copy of a creator that has an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
