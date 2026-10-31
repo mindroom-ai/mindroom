@@ -37,8 +37,8 @@ Any other status without a deployment becomes `error`.
 ### A failed observation changes nothing
 
 A kubectl failure says nothing about the instance, so it must never read as a missing deployment.
-The earlier existence check returned false on any failure, so an API-server outage marked running instances `error` and made the subscription lifecycle redeploy a resuming instance instead of starting it.
-The deployment lookup raises on failure for every caller: a sync leaves the row as it was and unstamped, so the next dashboard poll checks again, the bulk sync counts the failure, and the lifecycle records it and retries.
+The earlier existence check returned false on any failure, so an API-server outage marked running instances `error` and made the subscription lifecycle attempt a redeploy during the outage, which failed and marked the instance `error`.
+The deployment lookup raises on failure for every caller: a sync leaves the row as it was and unstamped, so the next dashboard poll checks again, the bulk sync counts the failure, and the lifecycle records it and retries; like any failed resume, that retry redeploys.
 
 ### Every write is guarded by the status it read
 

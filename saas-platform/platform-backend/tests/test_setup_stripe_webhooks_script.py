@@ -8,12 +8,15 @@ from types import ModuleType, SimpleNamespace
 
 import dotenv
 import pytest
+import stripe
 
 _SCRIPT = Path(__file__).resolve().parents[3] / "cluster/scripts/setup-stripe-webhooks.py"
 
 
 def _load_script(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ModuleType:
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_placeholder")
+    # Importing the script sets the shared Stripe client's key, so restore it afterwards.
+    monkeypatch.setattr(stripe, "api_key", stripe.api_key)
     # Importing the script must not read a developer's real cluster/.env.
     monkeypatch.setattr(dotenv, "load_dotenv", lambda *_args, **_kwargs: False)
     spec = importlib.util.spec_from_file_location("setup_stripe_webhooks", _SCRIPT)

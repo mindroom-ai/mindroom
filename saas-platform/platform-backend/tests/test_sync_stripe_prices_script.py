@@ -9,6 +9,7 @@ from typing import Any
 
 import dotenv
 import pytest
+import stripe
 
 _SCRIPT = Path(__file__).resolve().parents[3] / "cluster/scripts/sync-stripe-prices.py"
 _PLAN = {"name": "Bring Your Own Keys", "price_monthly": 1200, "price_yearly": 9600}
@@ -36,6 +37,8 @@ def _price(price_id: str, amount: int, *, active: bool = True) -> SimpleNamespac
 
 def _load_script(monkeypatch: pytest.MonkeyPatch, prices: _FakePrices) -> ModuleType:
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_placeholder")
+    # Importing the script sets the shared Stripe client's key, so restore it afterwards.
+    monkeypatch.setattr(stripe, "api_key", stripe.api_key)
     # Importing the script must not read a developer's real saas-platform/.env.
     monkeypatch.setattr(dotenv, "load_dotenv", lambda *_args, **_kwargs: False)
     spec = importlib.util.spec_from_file_location("sync_stripe_prices", _SCRIPT)
