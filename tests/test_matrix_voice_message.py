@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from pydantic import ValidationError
 
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_voice_message import MatrixVoiceMessageTools, _normalize_openai_base_url
@@ -18,7 +19,7 @@ from mindroom.matrix.voice_message import PreparedVoiceAudio
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.voice.openai_realtime_speech import RealtimeSpeechError, pcm_to_wav
-from tests.agent_tool_helpers import toolkit_offers
+from tests.agent_tool_helpers import call_entrypoint, toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -127,13 +128,9 @@ async def test_matrix_voice_message_rejects_empty_text(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_voice_message_rejects_non_string_inputs(tmp_path: Path) -> None:
-    """Tool inputs should report type errors separately from empty values."""
-    with tool_runtime_context(_context(tmp_path)):
-        result = await MatrixVoiceMessageTools(api_key="sk-test").matrix_voice_message(123)  # type: ignore[arg-type]
-
-    payload = _payload(result)
-    assert payload["status"] == "error"
-    assert payload["message"] == "text must be a string."
+    """A non-string argument fails call validation before the tool body runs."""
+    with tool_runtime_context(_context(tmp_path)), pytest.raises(ValidationError):
+        await call_entrypoint(_matrix_voice_message_function(), text=123)
 
 
 @pytest.mark.asyncio
@@ -340,6 +337,46 @@ async def test_matrix_voice_message_companion_message_sends_to_same_thread(tmp_p
     assert payload["status"] == "ok"
     assert payload["event_id"] == "$voice-event"
     assert payload["companion_event_id"] == "$companion-event"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("caption", "expected_caption"), [("  Audio body  ", "Audio body"), ("   ", None)])
+async def test_matrix_voice_message_strips_caption_and_skips_blank_companion(
+    tmp_path: Path,
+    caption: str,
+    expected_caption: str | None,
+) -> None:
+    """A padded caption is stripped, a blank one falls back to the filename, and blank companion text sends nothing."""
+    context = _context(tmp_path, thread_id="$thread-root")
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new_callable=AsyncMock,
+        ) as mock_text_send,
+        patch(
+            "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
+            new_callable=AsyncMock,
+            return_value=_prepared_voice_audio(),
+        ),
+        patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
+    ):
+        mock_openai.return_value.audio.speech.create.return_value = SimpleNamespace(content=b"voice-bytes")
+        mock_send.return_value = "$voice-event"
+
+        result = await MatrixVoiceMessageTools(api_key="sk-test", model="tts-test").matrix_voice_message(
+            "spoken version",
+            caption=caption,
+            companion_message="   ",
+        )
+
+    mock_text_send.assert_not_awaited()
+    assert mock_send.await_args.kwargs["caption"] == expected_caption
+    payload = _payload(result)
+    assert payload["status"] == "ok"
+    assert payload["companion_event_id"] is None
 
 
 @pytest.mark.asyncio
