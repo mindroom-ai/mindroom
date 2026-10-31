@@ -166,7 +166,7 @@ function sourceTypeForBase(config?: KnowledgeBaseConfig): KnowledgeSourceType {
   return config?.git ? "git" : "local";
 }
 
-const branchOrMain = (text: string) => text || "main";
+const branchOrMain = (text: string) => text.trim() || "main";
 
 function secondsAtLeastFive(text: string): number {
   const seconds = Number.parseInt(text, 10);
@@ -204,13 +204,13 @@ function normalizeGitConfig(gitConfig: KnowledgeGitConfig): KnowledgeGitConfig {
   const repoUrl = gitConfig.repo_url.trim();
   return {
     repo_url: repoUrl,
-    branch: gitConfig.branch?.trim() || "main",
+    branch: gitConfig.branch,
     poll_interval_seconds:
       typeof gitConfig.poll_interval_seconds === "number" &&
       gitConfig.poll_interval_seconds >= 5
         ? gitConfig.poll_interval_seconds
         : DEFAULT_GIT_SETTINGS.poll_interval_seconds,
-    credentials_service: gitConfig.credentials_service?.trim() || undefined,
+    credentials_service: gitConfig.credentials_service,
     lfs: gitConfig.lfs ?? DEFAULT_GIT_SETTINGS.lfs,
     sync_timeout_seconds:
       typeof gitConfig.sync_timeout_seconds === "number" &&
@@ -1548,14 +1548,13 @@ export function Knowledge() {
                       >
                         Credentials Service (optional)
                       </label>
-                      <Input
+                      <ParsedInput
                         id="knowledge-git-credentials-service"
-                        value={settings.git.credentials_service ?? ""}
-                        onChange={(event) =>
-                          updateGitSettings({
-                            credentials_service:
-                              event.target.value || undefined,
-                          })
+                        value={settings.git.credentials_service}
+                        format={(service) => service ?? ""}
+                        parse={(text) => text.trim() || undefined}
+                        onChange={(credentials_service) =>
+                          updateGitSettings({ credentials_service })
                         }
                         placeholder="github-pat"
                       />
