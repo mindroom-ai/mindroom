@@ -1860,19 +1860,6 @@ async def test_dynamic_workflow_tool_revalidates_saved_revision_policy_before_ru
 
 
 @pytest.mark.asyncio
-async def test_dynamic_workflow_tool_returns_payload_for_invalid_scope(tmp_path: Path) -> None:
-    """Tool calls should return JSON payload errors instead of raising runtime exceptions."""
-    tool = DynamicWorkflowTools()
-    context = _make_context(tmp_path)
-
-    with tool_runtime_context(context):
-        result = _tool_payload(await tool.list_workflows(scope="global"))
-
-    assert result["status"] == "error"
-    assert "Unsupported Dynamic Workflow scope" in result["message"]
-
-
-@pytest.mark.asyncio
 async def test_dynamic_workflow_tool_returns_payload_when_agent_name_is_missing(tmp_path: Path) -> None:
     """Runtime-aware tool should fail cleanly when required context owner data is missing."""
     tool = DynamicWorkflowTools()
@@ -1883,22 +1870,6 @@ async def test_dynamic_workflow_tool_returns_payload_when_agent_name_is_missing(
 
     assert result["status"] == "error"
     assert "Agent name is missing" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_dynamic_workflow_tool_denies_shared_scopes_without_policy(tmp_path: Path) -> None:
-    """Agent tools should not mutate room or tenant workflow scopes without an approval policy."""
-    tool = DynamicWorkflowTools()
-    context = _make_context(tmp_path)
-
-    with tool_runtime_context(context):
-        room_result = _tool_payload(await tool.create_workflow(_workflow_spec(), scope="room"))
-        tenant_result = _tool_payload(await tool.create_workflow(_workflow_spec(), scope="tenant"))
-
-    assert room_result["status"] == "error"
-    assert "scope requires Dynamic Workflow approval policy" in room_result["message"]
-    assert tenant_result["status"] == "error"
-    assert "scope requires Dynamic Workflow approval policy" in tenant_result["message"]
 
 
 def test_room_agent_participant_must_be_available_to_requester_in_room(tmp_path: Path) -> None:

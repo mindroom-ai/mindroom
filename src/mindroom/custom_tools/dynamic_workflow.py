@@ -20,6 +20,7 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.resolution import authored_tool_entries
 from mindroom.custom_tools.dynamic_workflow_context import (
+    AGENT_SCOPE,
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
@@ -143,7 +144,7 @@ _TOOL_DESCRIPTIONS = {
     "update_workflow": "Create and publish a new Dynamic Workflow revision from a patch.",
     "run_workflow": "Run a Dynamic Workflow and persist step outputs plus report artifacts.",
     "get_workflow_run": "Read one Dynamic Workflow run record.",
-    "list_workflows": "List Dynamic Workflows available in one scope.",
+    "list_workflows": "List your saved Dynamic Workflows.",
     "list_workflow_revisions": "List immutable revisions for one Dynamic Workflow.",
 }
 
@@ -153,7 +154,6 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
         "type": "object",
         "properties": {
             "spec": {**JSON_OBJECT_SCHEMA, "description": _SPEC_PARAMETER_DESCRIPTION},
-            "scope": {"type": "string"},
             "reason": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         },
         "required": ["spec"],
@@ -169,7 +169,6 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
             "workflow_id": {"type": "string"},
             "patch": JSON_OBJECT_SCHEMA,
             "reason": {"type": "string"},
-            "scope": {"type": "string"},
         },
         "required": ["workflow_id", "patch", "reason"],
     },
@@ -178,7 +177,6 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
         "properties": {
             "workflow_id": {"type": "string"},
             "input": JSON_OBJECT_SCHEMA,
-            "scope": {"type": "string"},
         },
         "required": ["workflow_id", "input"],
     },
@@ -187,20 +185,16 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
         "properties": {
             "workflow_id": {"type": "string"},
             "run_id": {"type": "string"},
-            "scope": {"type": "string"},
         },
         "required": ["workflow_id", "run_id"],
     },
     "list_workflows": {
         "type": "object",
-        "properties": {"scope": {"type": "string"}},
+        "properties": {},
     },
     "list_workflow_revisions": {
         "type": "object",
-        "properties": {
-            "workflow_id": {"type": "string"},
-            "scope": {"type": "string"},
-        },
+        "properties": {"workflow_id": {"type": "string"}},
         "required": ["workflow_id"],
     },
 }
@@ -244,7 +238,6 @@ class DynamicWorkflowTools(Toolkit):
     async def create_workflow(
         self,
         spec: dict[str, Any],
-        scope: str = "agent",
         reason: str | None = None,
     ) -> str:
         """Create a Dynamic Workflow from a declarative workflow spec."""
@@ -252,13 +245,13 @@ class DynamicWorkflowTools(Toolkit):
             return context
         try:
             parsed = parse_workflow_spec(spec)
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            store, owner_id = dynamic_workflow_store_and_owner(context)
 
             def create() -> DynamicWorkflowSummary:
                 _validate_workflow_policy_for_context(context, parsed)
                 return store.create_workflow(
                     spec=parsed,
-                    scope=scope,
+                    scope=AGENT_SCOPE,
                     owner_id=owner_id,
                     created_by=context.agent_name,
                     reason=reason,
@@ -301,18 +294,17 @@ class DynamicWorkflowTools(Toolkit):
         workflow_id: str,
         patch: dict[str, Any],
         reason: str,
-        scope: str = "agent",
     ) -> str:
         """Create and publish a new Dynamic Workflow revision from a patch."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            store, owner_id = dynamic_workflow_store_and_owner(context)
             summary = await run_blocking_until_complete(
                 partial(
                     store.update_workflow,
                     workflow_id=workflow_id,
-                    scope=scope,
+                    scope=AGENT_SCOPE,
                     owner_id=owner_id,
                     patch=patch,
                     updated_by=context.agent_name,
@@ -338,14 +330,13 @@ class DynamicWorkflowTools(Toolkit):
         self,
         workflow_id: str,
         input: dict[str, Any],  # noqa: A002
-        scope: str = "agent",
     ) -> str:
         """Run a Dynamic Workflow and persist step outputs plus report artifacts."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         state = _WorkflowRun(f"{workflow_id}:{uuid4().hex}")
         try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            store, owner_id = dynamic_workflow_store_and_owner(context)
             service = DynamicWorkflowService(
                 store,
                 participant_executor=_participant_executor(context, state),
@@ -353,7 +344,7 @@ class DynamicWorkflowTools(Toolkit):
             )
             run = await service.run_workflow(
                 workflow_id=workflow_id,
-                scope=scope,
+                scope=AGENT_SCOPE,
                 owner_id=owner_id,
                 input_data=input,
                 requested_by=context.requester_id,
@@ -367,19 +358,20 @@ class DynamicWorkflowTools(Toolkit):
         description=_TOOL_DESCRIPTIONS["get_workflow_run"],
         parameters=_TOOL_PARAMETERS["get_workflow_run"],
     )
-    async def get_workflow_run(
-        self,
-        workflow_id: str,
-        run_id: str,
-        scope: str = "agent",
-    ) -> str:
+    async def get_workflow_run(self, workflow_id: str, run_id: str) -> str:
         """Read one Dynamic Workflow run record."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            store, owner_id = dynamic_workflow_store_and_owner(context)
             run = await run_blocking_until_complete(
-                partial(store.get_workflow_run, workflow_id=workflow_id, scope=scope, owner_id=owner_id, run_id=run_id),
+                partial(
+                    store.get_workflow_run,
+                    workflow_id=workflow_id,
+                    scope=AGENT_SCOPE,
+                    owner_id=owner_id,
+                    run_id=run_id,
+                ),
             )
             authorize_dynamic_workflow_run(context, run)
         except DynamicWorkflowError as exc:
@@ -387,18 +379,20 @@ class DynamicWorkflowTools(Toolkit):
         return self._run_payload(run, steps=run.steps)
 
     @passthrough_tool(description=_TOOL_DESCRIPTIONS["list_workflows"], parameters=_TOOL_PARAMETERS["list_workflows"])
-    async def list_workflows(self, scope: str = "agent") -> str:
-        """List Dynamic Workflows available in one scope."""
+    async def list_workflows(self) -> str:
+        """List your saved Dynamic Workflows."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            workflows = await run_blocking_until_complete(partial(store.list_workflows, scope=scope, owner_id=owner_id))
+            store, owner_id = dynamic_workflow_store_and_owner(context)
+            workflows = await run_blocking_until_complete(
+                partial(store.list_workflows, scope=AGENT_SCOPE, owner_id=owner_id),
+            )
         except DynamicWorkflowError as exc:
             return self._payload("error", message=str(exc))
         return self._payload(
             "ok",
-            scope=scope,
+            scope=AGENT_SCOPE,
             owner_id=owner_id,
             workflows=[
                 {
@@ -416,14 +410,14 @@ class DynamicWorkflowTools(Toolkit):
         description=_TOOL_DESCRIPTIONS["list_workflow_revisions"],
         parameters=_TOOL_PARAMETERS["list_workflow_revisions"],
     )
-    async def list_workflow_revisions(self, workflow_id: str, scope: str = "agent") -> str:
+    async def list_workflow_revisions(self, workflow_id: str) -> str:
         """List immutable revisions for one Dynamic Workflow."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            store, owner_id = dynamic_workflow_store_and_owner(context)
             revisions = await run_blocking_until_complete(
-                partial(store.list_workflow_revisions, workflow_id=workflow_id, scope=scope, owner_id=owner_id),
+                partial(store.list_workflow_revisions, workflow_id=workflow_id, scope=AGENT_SCOPE, owner_id=owner_id),
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))

@@ -711,6 +711,13 @@ async def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_
                 confirm_public=False,
             ),
         )
+        with_scope = _tool_payload(
+            await report_tool.publish_report(
+                source_type="dynamic_workflow_run",
+                source={"workflow_id": "competitor-research-report", "run_id": run["run_id"], "scope": "agent"},
+                confirm_public=True,
+            ),
+        )
         published = _tool_payload(
             await report_tool.publish_report(
                 source_type="dynamic_workflow_run",
@@ -722,12 +729,12 @@ async def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_
 
     assert missing_confirmation["status"] == "error"
     assert "confirm_public" in missing_confirmation["message"]
+    assert with_scope["message"] == "dynamic_workflow_run source contains unsupported field 'scope'."
     assert published["status"] == "ok"
     assert published["source_type"] == "dynamic_workflow_run"
     assert published["source"] == {
         "workflow_id": "competitor-research-report",
         "run_id": run["run_id"],
-        "scope": "agent",
     }
     assert published["public_url"] == f"https://acme.mindroom.chat/mindroom/reports/public/{published['slug']}"
     assert published["public_path"] == f"/mindroom/reports/public/{published['slug']}"
@@ -882,7 +889,7 @@ async def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_p
     spec["outputs"] = [{"id": "brief", "type": "text", "from_step": "write"}]
 
     with tool_runtime_context(context):
-        store, owner_id = dynamic_workflow_store_and_owner(context, "agent")
+        store, owner_id = dynamic_workflow_store_and_owner(context)
         store.create_workflow(
             spec=parse_workflow_spec(spec),
             scope="agent",

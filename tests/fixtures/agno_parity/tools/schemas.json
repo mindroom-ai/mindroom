@@ -8397,9 +8397,6 @@
               },
               "description": "Declarative workflow spec. Minimal valid example: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]} Required fields: schema_version (must be 1), kind (must be 'workflow'), id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as {id, participant, prompt})."
             },
-            "scope": {
-              "type": "string"
-            },
             "reason": {
               "anyOf": [
                 {
@@ -8535,9 +8532,6 @@
             "reason": {
               "type": "string"
             },
-            "scope": {
-              "type": "string"
-            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -8602,9 +8596,6 @@
                 ]
               }
             },
-            "scope": {
-              "type": "string"
-            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -8641,9 +8632,6 @@
             "run_id": {
               "type": "string"
             },
-            "scope": {
-              "type": "string"
-            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -8670,13 +8658,10 @@
       },
       {
         "name": "list_workflows",
-        "description": "List Dynamic Workflows available in one scope.",
+        "description": "List your saved Dynamic Workflows.",
         "parameters": {
           "type": "object",
           "properties": {
-            "scope": {
-              "type": "string"
-            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -8705,9 +8690,6 @@
           "type": "object",
           "properties": {
             "workflow_id": {
-              "type": "string"
-            },
-            "scope": {
               "type": "string"
             },
             "mindroom_output_path": {
