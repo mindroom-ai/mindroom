@@ -447,10 +447,10 @@ async def _host_call_within_time_limit[T](action: str, call: Awaitable[T]) -> T:
 
 
 async def _tab_title(page: Page) -> str | None:
-    """Return a tab's title, or None when its page does not answer in time."""
+    """Return a tab's title, or None when its page cannot answer, such as one a script froze or whose renderer crashed."""
     try:
         return await _within_seconds(_TAB_TITLE_TIMEOUT_SECONDS, page.title())
-    except TimeoutError:
+    except (TimeoutError, PlaywrightError):
         return None
 
 

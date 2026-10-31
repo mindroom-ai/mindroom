@@ -3285,6 +3285,29 @@ async def test_status_reading_a_frozen_tab_does_not_hold_up_other_calls(
 
 
 @pytest.mark.asyncio
+async def test_tab_listings_report_a_crashed_tab_instead_of_failing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tab whose renderer crashed shows as unresponsive, so the model can still list the tabs and close it."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    browser = BrowserTools(paths)
+    crashed_id = json.loads(await browser.browser("start"))["activeTargetId"]
+
+    async def crashed_title() -> str:
+        msg = "Page.title: Target crashed"
+        raise PlaywrightError(msg)
+
+    monkeypatch.setattr(adapters[0].pages[0], "title", crashed_title)
+
+    for action in ("status", "tabs"):
+        tabs = json.loads(await browser.browser(action))["tabs"]
+        assert [(tab["targetId"], tab["title"], tab.get("unresponsive")) for tab in tabs] == [(crashed_id, None, True)]
+    await browser.aclose()
+
+
+@pytest.mark.asyncio
 async def test_a_tab_frozen_by_its_script_lists_as_unresponsive_and_closes_cleanly(tmp_path: Path) -> None:
     """In a real browser, other tabs keep working beside a frozen one, and closing it logs no error."""
     workspace = tmp_path / "workspace"
