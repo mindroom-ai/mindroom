@@ -198,9 +198,36 @@ def _external_requirements(response: AnyRunRecord) -> list[RunRequirement]:
     ]
 
 
-def has_delegation_state(response: AnyRunRecord) -> bool:
+def _has_delegation_state(response: AnyRunRecord) -> bool:
     """Return whether the native delegation driver owns this run's pause."""
     return bool(_external_requirements(response) or (response.metadata or {}).get(DELEGATION_STATE_KEY))
+
+
+class _ApprovalResume(NamedTuple):
+    """Where a saved approval's paused run resumes from, and the decided calls its delegation driver still answers."""
+
+    events: AsyncIterator[RunEvent]
+    driver_calls: Sequence[ApprovalCall] | None
+
+
+def resume_from_approval[R: AnyRunRecord](
+    persisted: R,
+    approval_calls: Sequence[ApprovalCall],
+    continue_parent: ContinueRun[R],
+) -> _ApprovalResume:
+    """Return how the paused run ``persisted`` resumes with a saved approval's decided calls.
+
+    A run the delegation driver owns resumes through it, with the decisions on its children's calls; any other run
+    resumes with the decisions on its own calls, and the driver continues it if it then pauses on a delegation.
+    """
+    if _has_delegation_state(persisted):
+        return _ApprovalResume(_stored_run(persisted), approval_calls)
+    return _ApprovalResume(continue_parent.events(persisted, approval_decisions(approval_calls)), None)
+
+
+async def _stored_run(record: AnyRunRecord) -> AsyncIterator[RunEvent]:
+    """Yield a stored run as the end of a stream, for the driver to continue."""
+    yield RunFinished(record)
 
 
 def answered_delegation_calls(response: AnyRunRecord) -> dict[tuple[str | None, str], str]:
@@ -510,16 +537,9 @@ async def _continue_child(
 ) -> RunRecord:
     """Apply child decisions and drive any further nested delegations under the config ``runner`` resumes with."""
     resume = _ObservedChildResume(runner)
-    driver_calls: Sequence[ApprovalCall] | None = approval_calls
-    if not has_delegation_state(persisted):
-        persisted = await forward_resume(
-            resume.events(persisted, approval_decisions(approval_calls)),
-            None,
-            paused=persisted,
-        )
-        driver_calls = None
+    events, driver_calls = resume_from_approval(persisted, approval_calls, resume)
     return await _drive_delegations(
-        persisted,
+        await forward_resume(events, None, paused=persisted),
         continue_parent=resume,
         agent_name=child.child_agent_name,
         run_child=run_child,
@@ -1397,7 +1417,7 @@ async def _drive_delegations[R: AnyRunRecord](
     waits for. The continuation's events reach ``on_event``.
     """
     storage = continue_parent.storage
-    if not has_delegation_state(response):
+    if not _has_delegation_state(response):
         return response
     if execution_identity is None or execution_identity.channel != "matrix":
         msg = "Native delegation requires a Matrix execution owner"
@@ -1493,7 +1513,7 @@ async def drive_delegation_stream[R: AnyRunRecord](
             if not finished.collect(event):
                 yield event
     record = finished.terminal(options["agent_name"])
-    if record.status is not RunStatus.paused or not has_delegation_state(record):
+    if record.status is not RunStatus.paused or not _has_delegation_state(record):
         yield RunFinished(record)
         return
 

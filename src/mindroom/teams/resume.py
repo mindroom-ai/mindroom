@@ -20,13 +20,12 @@ from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.config.resolution import entity_timezone
-from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
+from mindroom.delegation.execution import drive_delegation_stream, resume_from_approval
 from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.session_context import load_scope_session, resolve_bound_team_scope
-from mindroom.llm.events import RunFinished
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
@@ -255,11 +254,6 @@ async def _build_paused_members(team: TeamSpec, paused: TeamRunRecord) -> None:
             await member.ensure_built()
 
 
-async def _finished(record: TeamRunRecord) -> AsyncIterator[TeamRunEvent]:
-    """Yield a stored run as the end of a stream, for the driver to continue."""
-    yield RunFinished(record)
-
-
 @owned_tool_execution(
     enabled=lambda *, config, runtime_paths, **_kwargs: background_tool_jobs_enabled(config, runtime_paths),
 )
@@ -317,7 +311,6 @@ async def continue_paused_team_run(
     try:
         set_consumption_storage(scope.storage_factory)
         persisted = _stored_paused_team_run(scope, run_id)
-        delegated = has_delegation_state(persisted)
         decided = approval_decisions(approval_calls)
         tools = current_plugins(config, runtime_paths).tools
         async with asyncio.TaskGroup() as recovery:
@@ -415,18 +408,16 @@ async def continue_paused_team_run(
             plan=plan,
             user_id=user_id,
         )
-        # A run the delegation driver owns resumes through it with the decisions on its children's calls; any
-        # other run resumes with the decisions on its own calls, and the driver continues it if it then pauses
-        # on a member's delegation.
+        resumed, driver_calls = resume_from_approval(persisted, approval_calls, resume)
         events = drive_team_delegations(
-            _finished(persisted) if delegated else resume.events(persisted, decided),
+            cast("AsyncIterator[TeamRunEvent]", resumed),
             resume,
             team_name=entity_name,
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
             refresh_scheduler=refresh_scheduler,
-            approval_calls=approval_calls if delegated else None,
+            approval_calls=driver_calls,
         )
         events = with_resumed_turn_log_context(events, entity_name=entity_name)
         with helper_usage_context(scope):

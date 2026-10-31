@@ -17,17 +17,17 @@ from mindroom.agents import create_agent
 from mindroom.ai import agent_run_metadata_content, run_delegated_child_response, stream_agent_response
 from mindroom.ai_run_metadata import prior_usage_of
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
-from mindroom.approval.resume import ResumeRunner, approval_decisions
+from mindroom.approval.resume import ResumeRunner
 from mindroom.approval.tool_owners import (
     authorize_prepared_tool_call,
     required_approval_tool_names,
     validate_approval_tool_owners,
 )
-from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, has_delegation_state
+from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, resume_from_approval
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
-from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
@@ -158,10 +158,6 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
             presentation.complete_tool(tool.call)
 
 
-async def _persisted_events(persisted: RunRecord) -> AsyncIterator[RunEvent]:
-    yield RunFinished(persisted)
-
-
 def _continuation_model(config: Config, runtime_paths: RuntimePaths, continuation: ApprovalContinuation) -> TurnModel:
     """Return the model a paused agent run resumes on: the one it ran, else the one its room and thread choose now."""
     return resolve_turn_model(
@@ -193,11 +189,7 @@ async def _continue_persisted_agent(
     progress: ProgressPublisher | None,
     model_name: str,
 ) -> CompletedApprovalRun | PausedAttempt:
-    """Resume a persisted agent with event streaming so presentation order is retained.
-
-    A run the delegation driver owns resumes through it with the decisions on its children's calls; any other run
-    resumes with the decisions on its own calls, and the driver continues it if it pauses on a delegation.
-    """
+    """Resume a persisted agent with event streaming so presentation order is retained."""
     runner = ResumeRunner(
         build=build,
         config=config,
@@ -206,10 +198,7 @@ async def _continue_persisted_agent(
         storage=storage,
         user_id=continuation.requester_id,
     )
-    delegated = has_delegation_state(persisted)
-    native_events = (
-        _persisted_events(persisted) if delegated else runner.events(persisted, approval_decisions(continuation.calls))
-    )
+    native_events, driver_calls = resume_from_approval(persisted, continuation.calls, runner)
     events = drive_delegation_stream(
         native_events,
         record_type=RunRecord,
@@ -220,7 +209,7 @@ async def _continue_persisted_agent(
         runtime_paths=runtime_paths,
         execution_identity=tool_context.execution_identity,
         refresh_scheduler=refresh_scheduler,
-        approval_calls=continuation.calls if delegated else None,
+        approval_calls=driver_calls,
     )
     presentation = CollectedStreamPresentation(
         show_tool_calls=continuation.show_tool_calls,
