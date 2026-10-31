@@ -490,7 +490,7 @@ async def test_a_resume_that_leaves_the_record_waiting_ends_paused_before_any_re
     assert model.requests == []
 
 
-async def test_an_external_execution_pause_keeps_the_silent_flag() -> None:
+async def test_a_delegation_pause_waits_for_the_external_result() -> None:
     model = ScriptedModel([calls(tool_call("echo", "c1", text="task"), metrics=usage(1, 1))])
 
     events, record = await _run(spec(model, external(echo)), _prompt())
@@ -499,11 +499,7 @@ async def test_an_external_execution_pause_keeps_the_silent_flag() -> None:
     assert record.tools is not None
     assert record.requirements is not None
     [paused] = record.tools
-    assert (paused.external_execution_required, paused.external_execution_silent, paused.requires_confirmation) == (
-        True,
-        True,
-        None,
-    )
+    assert (paused.external_execution_required, paused.requires_confirmation) == (True, None)
     assert record.requirements[0].needs_external_execution
 
 

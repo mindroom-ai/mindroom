@@ -44,6 +44,7 @@ from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import answered_calls, approval_continuation, repeats_each_request
@@ -1097,7 +1098,7 @@ async def test_failed_nested_resume_settles_descendants_and_visible_tools(
     assert not nested.requirements
 
 
-def test_native_delegate_uses_external_execution() -> None:
+def test_native_delegate_pauses_for_its_driver() -> None:
     """A native parent must pause before entering the child call stack."""
     from agno.tools import Toolkit  # noqa: PLC0415 - the Agno toolkit is the authoring API the flags live on
 
@@ -1106,7 +1107,7 @@ def test_native_delegate_uses_external_execution() -> None:
 
     toolkit = Toolkit(name="delegate", tools=[run_subagent])
     functions = gated_functions(toolkit, Config(), registered_tool_name="delegate")
-    assert functions["run_subagent"].external_execution is True
+    assert functions["run_subagent"].gate is ToolGate.DELEGATION
 
 
 def test_detached_delegate_retains_inline_execution() -> None:
@@ -1118,7 +1119,7 @@ def test_detached_delegate_retains_inline_execution() -> None:
 
     toolkit = Toolkit(name="delegate", tools=[run_subagent])
     functions = gated_functions(toolkit, Config(), registered_tool_name="delegate", resumable=False)
-    assert not functions["run_subagent"].external_execution
+    assert functions["run_subagent"].gate is None
 
 
 @pytest.mark.asyncio
@@ -1586,8 +1587,8 @@ def test_workflow_grant_runs_for_requester_the_caller_already_serves(
     assert delegate == "Cannot delegate to 'leader': that agent is not allowed to reply to you."
 
 
-def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path: Path) -> None:
-    """The adapted delegate functions carry the external-execution flags the approval capability sets."""
+def test_adapted_delegate_functions_carry_the_delegation_gate(tmp_path: Path) -> None:
+    """The adapted delegate functions carry the delegation gate the approval capability sets."""
     paths = _runtime_paths(tmp_path)
     config = _config(paths, child_tools=())
     toolkit = DelegateTools(
@@ -1599,11 +1600,11 @@ def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path:
         execution_identity=_leader_identity(),
     )
 
-    flags = {
-        function.name: (function.external_execution, function.external_execution_silent)
+    gates = {
+        function.name: function.gate
         for function in gated_functions(toolkit, config, registered_tool_name="delegate").values()
     }
-    assert flags == {"run_subagent": (True, True), "continue_subagent": (True, True)}
+    assert gates == {"run_subagent": ToolGate.DELEGATION, "continue_subagent": ToolGate.DELEGATION}
 
 
 def _cut_off_turn(call_id: str) -> list[ScriptStep]:
