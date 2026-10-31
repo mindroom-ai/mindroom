@@ -213,8 +213,7 @@ describe("TeamEditor", () => {
     return actual.useConfigStore;
   }
 
-  beforeEach(() => {
-    vi.clearAllMocks();
+  function mockStore(overrides: Record<string, unknown> = {}) {
     (useConfigStore as any).mockReturnValue({
       teams: [mockTeam],
       agents: mockAgents,
@@ -247,7 +246,19 @@ describe("TeamEditor", () => {
       isDirty: false,
       diagnostics: [],
       selectTeam: vi.fn(),
+      ...overrides,
     });
+  }
+
+  const messageTeam: Team = {
+    ...mockTeam,
+    num_history_runs: null,
+    num_history_messages: 12,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore();
   });
 
   it("renders team editor with team details", () => {
@@ -261,18 +272,11 @@ describe("TeamEditor", () => {
   });
 
   it("shows placeholder when no team is selected", () => {
-    (useConfigStore as any).mockReturnValue({
+    mockStore({
       teams: [],
-      agents: mockAgents,
       rooms: [],
       selectedTeamId: null,
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
       agentPoliciesByAgent: {},
-      config: mockConfig,
-      isDirty: false,
-      diagnostics: [],
     });
 
     render(<TeamEditor />);
@@ -280,29 +284,25 @@ describe("TeamEditor", () => {
     expect(screen.getByText("Select a team to edit")).toBeInTheDocument();
   });
 
-  it("updates team display name", async () => {
+  it("updates team display name", () => {
     render(<TeamEditor />);
 
     const nameInput = screen.getByLabelText("Display Name");
     fireEvent.change(nameInput, { target: { value: "Updated Team Name" } });
 
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        display_name: "Updated Team Name",
-      });
+    expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
+      display_name: "Updated Team Name",
     });
   });
 
-  it("updates team role description", async () => {
+  it("updates team role description", () => {
     render(<TeamEditor />);
 
     const roleInput = screen.getByLabelText("Team Purpose");
     fireEvent.change(roleInput, { target: { value: "Updated team purpose" } });
 
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        role: "Updated team purpose",
-      });
+    expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
+      role: "Updated team purpose",
     });
   });
 
@@ -322,126 +322,63 @@ describe("TeamEditor", () => {
     });
   });
 
-  it("updates team history runs", async () => {
+  it("updates team history runs", () => {
     render(<TeamEditor />);
 
     const historyRunsInput = screen.getByLabelText("History Runs");
     fireEvent.change(historyRunsInput, { target: { value: "8" } });
 
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        num_history_runs: 8,
-      });
+    expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
+      num_history_runs: 8,
     });
   });
 
-  it("clears invalid negative history runs instead of writing them through", async () => {
-    render(<TeamEditor />);
+  it.each([
+    [
+      "invalid negative history runs",
+      mockTeam,
+      "History Runs",
+      "num_history_runs",
+      "-1",
+    ],
+    ["zero history runs", mockTeam, "History Runs", "num_history_runs", "0"],
+    [
+      "zero history messages",
+      messageTeam,
+      "History Messages",
+      "num_history_messages",
+      "0",
+    ],
+  ])(
+    "clears %s instead of writing them through",
+    (_label, team, fieldLabel, field, value) => {
+      mockStore({ teams: [team] });
+      render(<TeamEditor />);
 
-    const historyRunsInput = screen.getByLabelText("History Runs");
-    fireEvent.change(historyRunsInput, { target: { value: "-1" } });
-
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        num_history_runs: null,
+      fireEvent.change(screen.getByLabelText(fieldLabel), {
+        target: { value },
       });
-    });
-  });
 
-  it("clears zero history runs instead of writing them through", async () => {
-    render(<TeamEditor />);
-
-    const historyRunsInput = screen.getByLabelText("History Runs");
-    fireEvent.change(historyRunsInput, { target: { value: "0" } });
-
-    await waitFor(() => {
       expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        num_history_runs: null,
+        [field]: null,
       });
-    });
-  });
+    },
+  );
 
-  it("updates team history messages", async () => {
-    const messageTeam: Team = {
-      ...mockTeam,
-      num_history_runs: null,
-      num_history_messages: 12,
-    };
-    (useConfigStore as any).mockReturnValue({
-      teams: [messageTeam],
-      agents: mockAgents,
-      rooms: [
-        {
-          id: "dev",
-          display_name: "Dev",
-          description: "Development room",
-          agents: ["code", "shell"],
-        },
-      ],
-      selectedTeamId: "dev_team",
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
-      agentPoliciesByAgent: mockAgentPoliciesByAgent,
-      config: mockConfig,
-      isDirty: false,
-      diagnostics: [],
-      selectTeam: vi.fn(),
-    });
+  it("updates team history messages", () => {
+    mockStore({ teams: [messageTeam] });
 
     render(<TeamEditor />);
 
     const historyMessagesInput = screen.getByLabelText("History Messages");
     fireEvent.change(historyMessagesInput, { target: { value: "15" } });
 
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        num_history_messages: 15,
-      });
+    expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
+      num_history_messages: 15,
     });
   });
 
-  it("clears zero history messages instead of writing them through", async () => {
-    const messageTeam: Team = {
-      ...mockTeam,
-      num_history_runs: null,
-      num_history_messages: 12,
-    };
-    (useConfigStore as any).mockReturnValue({
-      teams: [messageTeam],
-      agents: mockAgents,
-      rooms: [
-        {
-          id: "dev",
-          display_name: "Dev",
-          description: "Development room",
-          agents: ["code", "shell"],
-        },
-      ],
-      selectedTeamId: "dev_team",
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
-      agentPoliciesByAgent: mockAgentPoliciesByAgent,
-      config: mockConfig,
-      isDirty: false,
-      diagnostics: [],
-      selectTeam: vi.fn(),
-    });
-
-    render(<TeamEditor />);
-
-    const historyMessagesInput = screen.getByLabelText("History Messages");
-    fireEvent.change(historyMessagesInput, { target: { value: "0" } });
-
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        num_history_messages: null,
-      });
-    });
-  });
-
-  it("updates max tool calls from history", async () => {
+  it("updates max tool calls from history", () => {
     render(<TeamEditor />);
 
     const maxToolCallsInput = screen.getByLabelText(
@@ -449,10 +386,50 @@ describe("TeamEditor", () => {
     );
     fireEvent.change(maxToolCallsInput, { target: { value: "3" } });
 
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        max_tool_calls_from_history: 3,
-      });
+    expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
+      max_tool_calls_from_history: 3,
+    });
+  });
+
+  it("appends the inherited history defaults to the helper text", () => {
+    render(<TeamEditor />);
+
+    expect(
+      screen.getByText(
+        "Number of prior team-scoped runs to include as replay. Leave empty to use default (all).",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Max replay messages from team-scoped history. Leave empty to use default (20).",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Max tool call messages replayed from team history. Leave empty to use default (4).",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps invalid threshold percent text local until blur restores the stored value", () => {
+    mockStore({
+      teams: [{ ...mockTeam, compaction: { threshold_percent: 0.6 } }],
+    });
+    render(<TeamEditor />);
+
+    const input = screen.getByLabelText("Threshold Percent");
+    expect(input).toHaveValue(0.6);
+
+    fireEvent.change(input, { target: { value: "1.5" } });
+    expect(input).toHaveValue(1.5);
+    expect(mockUpdateTeam).not.toHaveBeenCalled();
+
+    fireEvent.blur(input);
+    expect(input).toHaveValue(0.6);
+
+    fireEvent.change(input, { target: { value: "0.5" } });
+    expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
+      compaction: { threshold_percent: 0.5, threshold_tokens: null },
     });
   });
 
@@ -493,77 +470,26 @@ describe("TeamEditor", () => {
     });
   });
 
-  it("preserves explicit team compaction model clears during normalization", () => {
-    expect(
-      normalizeTeamUpdates(mockTeam, { compaction: { model: null } })
-        .compaction,
-    ).toEqual({
-      model: null,
-    });
-  });
-
-  it("preserves explicit team compaction fallback model clears during normalization", () => {
-    expect(
-      normalizeTeamUpdates(mockTeam, { compaction: { fallback_model: null } })
-        .compaction,
-    ).toEqual({
-      fallback_model: null,
-    });
-  });
+  it.each([
+    ["model", () => ({ model: null })],
+    ["fallback model", () => ({ fallback_model: null })],
+  ])(
+    "preserves explicit team compaction %s clears during normalization",
+    (_label, compaction) => {
+      expect(
+        normalizeTeamUpdates(mockTeam, { compaction: compaction() }).compaction,
+      ).toEqual(compaction());
+    },
+  );
 
   it.each([
-    ["model", { model: null }],
-    ["fallback model", { fallback_model: null }],
+    ["a pure team model clear", { model: null }],
+    ["a pure team fallback model clear", { fallback_model: null }],
+    ["an empty team compaction override", {}],
   ])(
-    "shows automatic required compaction as disabled for a pure team %s clear when defaults are disabled",
+    "shows automatic required compaction as disabled for %s when defaults are disabled",
     (_label, compaction) => {
-      const compactionTeam: Team = {
-        ...mockTeam,
-        compaction,
-      };
-      (useConfigStore as any).mockReturnValue({
-        teams: [compactionTeam],
-        agents: mockAgents,
-        rooms: [
-          {
-            id: "dev",
-            display_name: "Dev",
-            description: "Development room",
-            agents: ["code", "shell"],
-          },
-          {
-            id: "lobby",
-            display_name: "Lobby",
-            description: "Main lobby",
-            agents: [],
-          },
-          {
-            id: "research",
-            display_name: "Research",
-            description: "Research room",
-            agents: ["research"],
-          },
-        ],
-        config: {
-          ...mockConfig,
-          defaults: {
-            ...mockConfig.defaults,
-            compaction: {
-              enabled: false,
-              reserve_tokens: 16384,
-              threshold_percent: 0.8,
-            },
-          },
-        },
-        selectedTeamId: "dev_team",
-        updateTeam: mockUpdateTeam,
-        deleteTeam: mockDeleteTeam,
-        saveConfig: mockSaveConfig,
-        isDirty: false,
-        diagnostics: [],
-        agentPoliciesByAgent: mockAgentPoliciesByAgent,
-        selectTeam: vi.fn(),
-      });
+      mockStore({ teams: [{ ...mockTeam, compaction }] });
 
       render(<TeamEditor />);
 
@@ -573,202 +499,37 @@ describe("TeamEditor", () => {
     },
   );
 
-  it("shows automatic required compaction as disabled for an empty team compaction override when defaults are disabled", () => {
-    const compactionTeam: Team = {
-      ...mockTeam,
-      compaction: {},
-    };
-    (useConfigStore as any).mockReturnValue({
-      teams: [compactionTeam],
-      agents: mockAgents,
-      rooms: [
-        {
-          id: "dev",
-          display_name: "Dev",
-          description: "Development room",
-          agents: ["code", "shell"],
-        },
-        {
-          id: "lobby",
-          display_name: "Lobby",
-          description: "Main lobby",
-          agents: [],
-        },
-        {
-          id: "research",
-          display_name: "Research",
-          description: "Research room",
-          agents: ["research"],
-        },
-      ],
-      config: {
-        ...mockConfig,
-        defaults: {
-          ...mockConfig.defaults,
-          compaction: {
-            enabled: false,
-            reserve_tokens: 16384,
-            threshold_percent: 0.8,
-          },
-        },
-      },
-      selectedTeamId: "dev_team",
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-      diagnostics: [],
-      agentPoliciesByAgent: mockAgentPoliciesByAgent,
-      selectTeam: vi.fn(),
-    });
+  it.each([
+    ["enabled", "defaults.compaction is omitted", {}, true],
+    [
+      "disabled",
+      "defaults.compaction is null",
+      { ...mockConfig.defaults, compaction: null },
+      false,
+    ],
+    [
+      "enabled",
+      "defaults.compaction is an authored empty object",
+      { ...mockConfig.defaults, compaction: {} },
+      true,
+    ],
+  ])(
+    "shows automatic required compaction as %s when %s",
+    (_state, _label, defaults, checked) => {
+      mockStore({ config: { ...mockConfig, defaults } });
 
-    render(<TeamEditor />);
+      render(<TeamEditor />);
 
-    expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).not.toBeChecked();
-  });
-
-  it("shows automatic required compaction as enabled when defaults.compaction is omitted", () => {
-    (useConfigStore as any).mockReturnValue({
-      teams: [mockTeam],
-      agents: mockAgents,
-      rooms: [
-        {
-          id: "dev",
-          display_name: "Dev",
-          description: "Development room",
-          agents: ["code", "shell"],
-        },
-        {
-          id: "lobby",
-          display_name: "Lobby",
-          description: "Main lobby",
-          agents: [],
-        },
-        {
-          id: "research",
-          display_name: "Research",
-          description: "Research room",
-          agents: ["research"],
-        },
-      ],
-      config: {
-        ...mockConfig,
-        defaults: {},
-      },
-      selectedTeamId: "dev_team",
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-      diagnostics: [],
-      agentPoliciesByAgent: mockAgentPoliciesByAgent,
-      selectTeam: vi.fn(),
-    });
-
-    render(<TeamEditor />);
-
-    expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).toBeChecked();
-  });
-
-  it("shows automatic required compaction as disabled when defaults.compaction is null", () => {
-    (useConfigStore as any).mockReturnValue({
-      teams: [mockTeam],
-      agents: mockAgents,
-      rooms: [
-        {
-          id: "dev",
-          display_name: "Dev",
-          description: "Development room",
-          agents: ["code", "shell"],
-        },
-        {
-          id: "lobby",
-          display_name: "Lobby",
-          description: "Main lobby",
-          agents: [],
-        },
-        {
-          id: "research",
-          display_name: "Research",
-          description: "Research room",
-          agents: ["research"],
-        },
-      ],
-      config: {
-        ...mockConfig,
-        defaults: {
-          ...mockConfig.defaults,
-          compaction: null,
-        },
-      },
-      selectedTeamId: "dev_team",
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-      diagnostics: [],
-      agentPoliciesByAgent: mockAgentPoliciesByAgent,
-      selectTeam: vi.fn(),
-    });
-
-    render(<TeamEditor />);
-
-    expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).not.toBeChecked();
-  });
-
-  it("shows automatic required compaction as enabled when defaults.compaction is an authored empty object", () => {
-    (useConfigStore as any).mockReturnValue({
-      teams: [mockTeam],
-      agents: mockAgents,
-      rooms: [
-        {
-          id: "dev",
-          display_name: "Dev",
-          description: "Development room",
-          agents: ["code", "shell"],
-        },
-        {
-          id: "lobby",
-          display_name: "Lobby",
-          description: "Main lobby",
-          agents: [],
-        },
-        {
-          id: "research",
-          display_name: "Research",
-          description: "Research room",
-          agents: ["research"],
-        },
-      ],
-      config: {
-        ...mockConfig,
-        defaults: {
-          ...mockConfig.defaults,
-          compaction: {},
-        },
-      },
-      selectedTeamId: "dev_team",
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-      diagnostics: [],
-      agentPoliciesByAgent: mockAgentPoliciesByAgent,
-      selectTeam: vi.fn(),
-    });
-
-    render(<TeamEditor />);
-
-    expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).toBeChecked();
-  });
+      const checkbox = screen.getByLabelText(
+        "Enable automatic required compaction",
+      );
+      if (checked) {
+        expect(checkbox).toBeChecked();
+      } else {
+        expect(checkbox).not.toBeChecked();
+      }
+    },
+  );
 
   it("displays team members with checkboxes", () => {
     render(<TeamEditor />);
@@ -814,30 +575,13 @@ describe("TeamEditor", () => {
   });
 
   it("disables agents when policy preview is unavailable", () => {
-    (useConfigStore as any).mockReturnValue({
-      teams: [mockTeam],
-      agents: mockAgents,
-      rooms: [
-        {
-          id: "dev",
-          display_name: "Dev",
-          description: "Development room",
-          agents: ["code", "shell"],
-        },
-      ],
-      selectedTeamId: "dev_team",
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
+    mockStore({
       agentPoliciesByAgent: {
         code: mockAgentPoliciesByAgent.code,
         shell: mockAgentPoliciesByAgent.shell,
         leader: mockAgentPoliciesByAgent.leader,
         mind: mockAgentPoliciesByAgent.mind,
       },
-      config: mockConfig,
-      isDirty: false,
-      diagnostics: [],
     });
 
     render(<TeamEditor />);
@@ -853,7 +597,7 @@ describe("TeamEditor", () => {
     ).toBeInTheDocument();
   });
 
-  it("adds agent to team when checkbox is checked", async () => {
+  it("adds agent to team when checkbox is checked", () => {
     render(<TeamEditor />);
 
     const researchCheckbox = screen.getByRole("checkbox", {
@@ -861,23 +605,19 @@ describe("TeamEditor", () => {
     });
     fireEvent.click(researchCheckbox);
 
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        agents: ["code", "shell", "research"],
-      });
+    expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
+      agents: ["code", "shell", "research"],
     });
   });
 
-  it("removes agent from team when checkbox is unchecked", async () => {
+  it("removes agent from team when checkbox is unchecked", () => {
     render(<TeamEditor />);
 
     const codeCheckbox = screen.getByRole("checkbox", { name: /Code Agent/ });
     fireEvent.click(codeCheckbox);
 
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        agents: ["shell"],
-      });
+    expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
+      agents: ["shell"],
     });
   });
 
@@ -897,16 +637,14 @@ describe("TeamEditor", () => {
     expect(researchRoomCheckbox).toBeChecked();
   });
 
-  it("removes room from team when checkbox is unchecked", async () => {
+  it("removes room from team when checkbox is unchecked", () => {
     render(<TeamEditor />);
 
     const devCheckbox = screen.getByRole("checkbox", { name: /Dev/ });
     fireEvent.click(devCheckbox);
 
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        rooms: ["lobby"],
-      });
+    expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
+      rooms: ["lobby"],
     });
   });
 
@@ -962,39 +700,7 @@ describe("TeamEditor", () => {
   });
 
   it("calls saveConfig when save button is clicked", async () => {
-    // Re-mock with isDirty: true so the button is enabled
-    (useConfigStore as any).mockReturnValue({
-      teams: [mockTeam],
-      agents: mockAgents,
-      rooms: [
-        {
-          id: "dev",
-          display_name: "Dev",
-          description: "Development room",
-          agents: ["code", "shell"],
-        },
-        {
-          id: "lobby",
-          display_name: "Lobby",
-          description: "Main lobby",
-          agents: [],
-        },
-        {
-          id: "research",
-          display_name: "Research",
-          description: "Research room",
-          agents: ["research"],
-        },
-      ],
-      selectedTeamId: "dev_team",
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
-      agentPoliciesByAgent: mockAgentPoliciesByAgent,
-      config: mockConfig,
-      isDirty: true,
-      diagnostics: [],
-    });
+    mockStore({ isDirty: true });
 
     render(<TeamEditor />);
 
@@ -1014,58 +720,8 @@ describe("TeamEditor", () => {
     expect(saveButton).toBeDisabled();
   });
 
-  it("enables save button when dirty", () => {
-    (useConfigStore as any).mockReturnValue({
-      teams: [mockTeam],
-      agents: mockAgents,
-      rooms: [
-        {
-          id: "dev",
-          display_name: "Dev",
-          description: "Development room",
-          agents: ["code", "shell"],
-        },
-        {
-          id: "lobby",
-          display_name: "Lobby",
-          description: "Main lobby",
-          agents: [],
-        },
-      ],
-      selectedTeamId: "dev_team",
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
-      agentPoliciesByAgent: mockAgentPoliciesByAgent,
-      config: mockConfig,
-      isDirty: true,
-      diagnostics: [],
-    });
-
-    render(<TeamEditor />);
-
-    const saveButton = screen.getByRole("button", { name: /Save/i });
-    expect(saveButton).not.toBeDisabled();
-  });
-
   it("renders save diagnostics for team validation failures", () => {
-    (useConfigStore as any).mockReturnValue({
-      teams: [mockTeam],
-      agents: mockAgents,
-      rooms: [
-        {
-          id: "dev",
-          display_name: "Dev",
-          description: "Development room",
-          agents: ["code", "shell"],
-        },
-      ],
-      selectedTeamId: "dev_team",
-      updateTeam: mockUpdateTeam,
-      deleteTeam: mockDeleteTeam,
-      saveConfig: mockSaveConfig,
-      agentPoliciesByAgent: mockAgentPoliciesByAgent,
-      config: mockConfig,
+    mockStore({
       isDirty: true,
       diagnostics: [
         {
@@ -1084,6 +740,31 @@ describe("TeamEditor", () => {
     expect(
       screen.getByText("Team members cannot include private agents."),
     ).toBeInTheDocument();
+  });
+
+  it("shows team history and compaction validation errors", () => {
+    const fields = [
+      "num_history_runs",
+      "num_history_messages",
+      "max_tool_calls_from_history",
+      "compaction",
+    ];
+    mockStore({
+      diagnostics: fields.map((field) => ({
+        kind: "validation",
+        issue: {
+          loc: ["teams", "dev_team", field],
+          msg: `Invalid ${field}.`,
+          type: "value_error",
+        },
+      })),
+    });
+
+    render(<TeamEditor />);
+
+    for (const field of fields) {
+      expect(screen.getByText(`Invalid ${field}.`)).toBeInTheDocument();
+    }
   });
 
   it("edits accept_invites through More settings", () => {

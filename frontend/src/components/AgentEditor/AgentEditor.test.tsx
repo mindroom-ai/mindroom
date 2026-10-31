@@ -98,7 +98,6 @@ describe("AgentEditor", () => {
         config: { model: "text-embedding-3-small" },
       },
     },
-    agents: { test_agent: mockAgent },
     knowledge_bases: {
       legal: { path: "./legal", watch: true },
       research: { path: "./research", watch: true },
@@ -133,6 +132,39 @@ describe("AgentEditor", () => {
     diagnostics: [],
     selectAgent: vi.fn(),
     getAgentToolOverrides: vi.fn(() => null),
+  };
+
+  const mockStoreWith = (
+    agent: Agent,
+    overrides: Record<string, unknown> = {},
+  ) => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [agent],
+      ...overrides,
+    });
+  };
+
+  const shellTool = {
+    name: "shell",
+    display_name: "Shell Commands",
+    setup_type: "none",
+    status: "available",
+    agent_override_fields: [
+      {
+        name: "extra_env_passthrough",
+        label: "Env Passthrough",
+        type: "string[]",
+      },
+    ],
+  };
+
+  const disabledCompactionDefaults = {
+    compaction: {
+      enabled: false,
+      reserve_tokens: 16384,
+      threshold_percent: 0.8,
+    },
   };
 
   const { id: _mockAgentId, ...mockAgentConfig } = mockAgent;
@@ -176,6 +208,11 @@ describe("AgentEditor", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (useConfigStore as any).mockReturnValue(mockStore);
+    vi.mocked(useConfigSchema).mockReturnValue({
+      schema: null,
+      error: null,
+      retry: vi.fn(),
+    });
     (useTools as any).mockReturnValue({
       tools: [
         {
@@ -209,28 +246,13 @@ describe("AgentEditor", () => {
   });
 
   it("requests tools using inherited defaults.worker_scope", () => {
-    const inheritedScopeAgent = {
-      ...mockAgent,
-      worker_scope: undefined,
-      private: undefined,
-    };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [inheritedScopeAgent],
-      config: {
-        ...mockConfig,
-        defaults: {
-          ...mockConfig.defaults,
-          worker_scope: "user",
-        },
-      },
+    mockStoreWith(mockAgent, {
       agentPoliciesByAgent: makeAgentPolicies({
         effective_execution_scope: "user",
         scope_label: "worker_scope=user",
         scope_source: "defaults.worker_scope",
         dashboard_credentials_supported: false,
       }),
-      rooms: mockStore.rooms,
     });
 
     render(<AgentEditor />);
@@ -239,14 +261,10 @@ describe("AgentEditor", () => {
   });
 
   it("shows inherited default tools even when defaults.tools is omitted from authored config", () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      config: {
-        ...mockConfig,
-        defaults: {},
-      },
-      agents: [{ ...mockAgent, include_default_tools: undefined }],
-    });
+    mockStoreWith(
+      { ...mockAgent, include_default_tools: undefined },
+      { config: { ...mockConfig, defaults: {} } },
+    );
 
     render(<AgentEditor />);
 
@@ -254,14 +272,11 @@ describe("AgentEditor", () => {
   });
 
   it("fails closed when agent policy preview is unavailable", () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agentPoliciesByAgent: {},
-    });
+    mockStoreWith(mockAgent, { agentPoliciesByAgent: {} });
 
     render(<AgentEditor />);
 
-    expect(useTools).toHaveBeenCalledWith(null, undefined);
+    expect(useTools).toHaveBeenCalledWith(null, null);
     expect(
       screen.getByText(
         "Agent policy preview is unavailable. Save or refresh to re-validate tool scope support for this draft.",
@@ -283,10 +298,7 @@ describe("AgentEditor", () => {
   });
 
   it("prefers the unavailable preview message over generic tool loading", () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agentPoliciesByAgent: {},
-    });
+    mockStoreWith(mockAgent, { agentPoliciesByAgent: {} });
     (useTools as any).mockReturnValue({
       tools: [],
       loading: true,
@@ -444,13 +456,7 @@ describe("AgentEditor", () => {
   });
 
   it("offers lazy loading only for tools whose entries may set it", () => {
-    const lazyAgent = { ...mockAgent, tools: ["calculator", "dynamic_tools"] };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [lazyAgent],
-      config: { ...mockConfig, agents: { test_agent: lazyAgent } },
-      getAgentToolOverrides: vi.fn(() => null),
-    });
+    mockStoreWith({ ...mockAgent, tools: ["calculator", "dynamic_tools"] });
     (useTools as any).mockReturnValue({
       tools: [
         {
@@ -483,38 +489,18 @@ describe("AgentEditor", () => {
   });
 
   it("shows customized indicators and opens the inline tool settings panel for checked tools", () => {
-    const shellAgent = { ...mockAgent, tools: ["shell"] };
     const getAgentToolOverrides = vi.fn((agentId: string, toolName: string) =>
       agentId === "test_agent" && toolName === "shell"
         ? { extra_env_passthrough: ["GITEA_TOKEN"] }
         : null,
     );
 
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [shellAgent],
-      config: {
-        ...mockConfig,
-        agents: { test_agent: shellAgent },
-      },
-      getAgentToolOverrides,
-    });
+    mockStoreWith(
+      { ...mockAgent, tools: ["shell"] },
+      { getAgentToolOverrides },
+    );
     (useTools as any).mockReturnValue({
-      tools: [
-        {
-          name: "shell",
-          display_name: "Shell Commands",
-          setup_type: "none",
-          status: "available",
-          agent_override_fields: [
-            {
-              name: "extra_env_passthrough",
-              label: "Env Passthrough",
-              type: "string[]",
-            },
-          ],
-        },
-      ],
+      tools: [shellTool],
       loading: false,
       statusAuthoritative: true,
     });
@@ -539,21 +525,7 @@ describe("AgentEditor", () => {
       tools: [{ shell: { extra_env_passthrough: ["TOKEN"] } }],
     });
     (useTools as any).mockReturnValue({
-      tools: [
-        {
-          name: "shell",
-          display_name: "Shell Commands",
-          setup_type: "none",
-          status: "available",
-          agent_override_fields: [
-            {
-              name: "extra_env_passthrough",
-              label: "Env Passthrough",
-              type: "string[]",
-            },
-          ],
-        },
-      ],
+      tools: [shellTool],
       loading: false,
       statusAuthoritative: true,
     });
@@ -598,16 +570,24 @@ describe("AgentEditor", () => {
     ]);
   });
 
-  it("keeps selected unsupported tools visible so they can be removed", async () => {
-    const invalidToolAgent = { ...mockAgent, tools: ["gmail"] };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [invalidToolAgent],
-      config: {
-        ...mockConfig,
-        agents: { test_agent: invalidToolAgent },
-      },
+  it("opens a tool's settings when the tool is checked", async () => {
+    await loadRealStore({ display_name: "Test Agent", tools: [] });
+    (useTools as any).mockReturnValue({
+      tools: [shellTool],
+      loading: false,
+      statusAuthoritative: true,
     });
+
+    render(<AgentEditor />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Shell Commands" }));
+
+    expect(
+      screen.getByText("Shell Commands — Per-Agent Settings"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps selected unsupported tools visible so they can be removed", () => {
+    mockStoreWith({ ...mockAgent, tools: ["gmail"] });
     (useTools as any).mockReturnValue({
       tools: [
         {
@@ -623,23 +603,17 @@ describe("AgentEditor", () => {
 
     render(<AgentEditor />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Selected But Unavailable")).toBeInTheDocument();
-      expect(screen.getByLabelText("Gmail")).toBeInTheDocument();
-      expect(
-        screen.getByText(
-          "Not supported for this execution scope. Uncheck it to remove it.",
-        ),
-      ).toBeInTheDocument();
-    });
+    expect(screen.getByText("Selected But Unavailable")).toBeInTheDocument();
+    expect(screen.getByLabelText("Gmail")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Not supported for this execution scope. Uncheck it to remove it.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("lists tools by section, sorted by name, with section-specific rows", () => {
-    const sectionAgent = { ...mockAgent, tools: ["retired_tool", "zeta"] };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [sectionAgent],
-    });
+    mockStoreWith({ ...mockAgent, tools: ["retired_tool", "zeta"] });
     (useTools as any).mockReturnValue({
       tools: [
         {
@@ -699,21 +673,7 @@ describe("AgentEditor", () => {
       tools: ["shell"],
     });
     (useTools as any).mockReturnValue({
-      tools: [
-        {
-          name: "shell",
-          display_name: "Shell Commands",
-          setup_type: "none",
-          status: "available",
-          agent_override_fields: [
-            {
-              name: "extra_env_passthrough",
-              label: "Env Passthrough",
-              type: "string[]",
-            },
-          ],
-        },
-      ],
+      tools: [shellTool],
       loading: false,
       statusAuthoritative: true,
     });
@@ -738,43 +698,32 @@ describe("AgentEditor", () => {
     expect(screen.getByDisplayValue("Test Agent")).toBeTruthy();
     expect(screen.getByDisplayValue("Test role")).toBeTruthy();
     expect(screen.getByDisplayValue("Test instruction")).toBeTruthy();
-    // Rooms are now displayed as checkboxes, not input fields
     const testRoomCheckbox = screen.getByRole("checkbox", {
       name: /Test Room/i,
     });
     expect(testRoomCheckbox).toBeChecked();
   });
 
-  it("clears zero history runs instead of writing them through", async () => {
+  it("clears zero history runs instead of writing them through", () => {
     render(<AgentEditor />);
 
     const historyRunsInput = screen.getByLabelText("History Runs");
     fireEvent.change(historyRunsInput, { target: { value: "0" } });
 
-    await waitFor(() => {
-      expect(mockStore.updateAgent).toHaveBeenCalledWith("test_agent", {
-        num_history_runs: null,
-      });
+    expect(mockStore.updateAgent).toHaveBeenCalledWith("test_agent", {
+      num_history_runs: null,
     });
   });
 
   it("shows empty state when no agent is selected", () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      selectedAgentId: null,
-      rooms: mockStore.rooms,
-    });
+    mockStoreWith(mockAgent, { selectedAgentId: null });
 
     render(<AgentEditor />);
     expect(screen.getByText("Select an agent to edit")).toBeTruthy();
   });
 
   it("handles save button click", async () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      isDirty: true,
-      rooms: mockStore.rooms,
-    });
+    mockStoreWith(mockAgent, { isDirty: true });
 
     render(<AgentEditor />);
 
@@ -789,10 +738,8 @@ describe("AgentEditor", () => {
   });
 
   it("shows a toast when a save is superseded by newer draft edits", async () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
+    mockStoreWith(mockAgent, {
       isDirty: true,
-      rooms: mockStore.rooms,
       saveConfig: vi.fn().mockResolvedValue({ status: "stale" }),
     });
 
@@ -826,15 +773,7 @@ describe("AgentEditor", () => {
       },
     };
 
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [privateAgent],
-      config: {
-        ...mockConfig,
-        agents: {
-          test_agent: privateAgent,
-        },
-      },
+    mockStoreWith(privateAgent, {
       diagnostics: [
         {
           kind: "global",
@@ -934,21 +873,30 @@ describe("AgentEditor", () => {
     confirmSpy.mockRestore();
   });
 
-  it("adds and removes instructions", () => {
+  it("adds, edits, and removes instructions", async () => {
+    const { store } = await loadRealStore();
+
     render(<AgentEditor />);
+    fireEvent.click(screen.getByTestId("add-instruction-button"));
+    expect(store.getState().agents[0].instructions).toEqual([
+      "Test instruction",
+      "",
+    ]);
 
-    // Find add instruction button
-    const addInstructionButton = screen.getByTestId("add-instruction-button");
+    fireEvent.change(screen.getAllByPlaceholderText("Instruction...")[1], {
+      target: { value: "Second" },
+    });
+    expect(store.getState().agents[0].instructions).toEqual([
+      "Test instruction",
+      "Second",
+    ]);
 
-    fireEvent.click(addInstructionButton);
-
-    // Should have called updateAgent with new instruction
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
-      "test_agent",
-      expect.objectContaining({
-        instructions: ["Test instruction", ""],
-      }),
+    fireEvent.click(
+      screen
+        .getByDisplayValue("Test instruction")
+        .parentElement!.querySelector("button")!,
     );
+    expect(store.getState().agents[0].instructions).toEqual(["Second"]);
   });
 
   it("adds an instruction to an agent loaded without instructions", async () => {
@@ -998,19 +946,6 @@ describe("AgentEditor", () => {
     );
   });
 
-  it("enables requester-private state with the default private scope", async () => {
-    render(<AgentEditor />);
-
-    fireEvent.click(screen.getByLabelText("Enable requester-private state"));
-
-    await waitFor(() => {
-      expect(mockStore.setAgentPrivateEnabled).toHaveBeenCalledWith(
-        "test_agent",
-        true,
-      );
-    });
-  });
-
   it("clears explicit worker_scope when enabling private state and restores it on disable", async () => {
     const { store } = await loadRealStore({
       ...mockAgentConfig,
@@ -1028,57 +963,6 @@ describe("AgentEditor", () => {
     expect(store.getState().agents[0].worker_scope).toBe("user_agent");
   });
 
-  it("renders and updates private agent fields", async () => {
-    const privateAgent: Agent = {
-      ...mockAgent,
-      private: {
-        per: "user_agent",
-        root: "mind_data",
-        template_dir: "./mind_template",
-        context_files: ["SOUL.md"],
-        knowledge: {
-          enabled: true,
-          path: "memory",
-          watch: true,
-        },
-      },
-    };
-
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [privateAgent],
-      config: {
-        ...mockConfig,
-        agents: {
-          test_agent: privateAgent,
-        },
-      },
-    });
-
-    render(<AgentEditor />);
-
-    expect(screen.getByDisplayValue("mind_data")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("./mind_template")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("SOUL.md")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("memory")).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText("Private Root"), {
-      target: { value: "updated_data" },
-    });
-
-    await waitFor(() => {
-      expect(mockStore.updateAgent).toHaveBeenCalledWith(
-        "test_agent",
-        expect.objectContaining({
-          private: expect.objectContaining({
-            per: "user_agent",
-            root: "updated_data",
-          }),
-        }),
-      );
-    });
-  });
-
   it("writes every private field edit to the store", async () => {
     const { store } = await loadRealStore({
       ...mockAgentConfig,
@@ -1093,8 +977,20 @@ describe("AgentEditor", () => {
 
     render(<AgentEditor />);
 
+    expect(screen.getByDisplayValue("mind_data")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("./mind_template")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("SOUL.md")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("memory")).toBeInTheDocument();
+
     fireEvent.click(screen.getByLabelText("Private Scope"));
     fireEvent.click(screen.getByRole("option", { name: "user_agent" }));
+    fireEvent.change(screen.getByLabelText("Private Root"), {
+      target: { value: "updated_data" },
+    });
+    expect(store.getState().agents[0].private).toMatchObject({
+      per: "user_agent",
+      root: "updated_data",
+    });
     fireEvent.change(screen.getByLabelText("Private Root"), {
       target: { value: "  " },
     });
@@ -1154,58 +1050,6 @@ describe("AgentEditor", () => {
     });
   });
 
-  it("updates private knowledge description", async () => {
-    const privateAgent: Agent = {
-      ...mockAgent,
-      private: {
-        per: "user",
-        knowledge: {
-          enabled: true,
-          path: "memory",
-          watch: true,
-        },
-      },
-    };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [privateAgent],
-      config: {
-        ...mockConfig,
-        agents: {
-          test_agent: privateAgent,
-        },
-      },
-      agentPoliciesByAgent: makeAgentPolicies({
-        is_private: true,
-        effective_execution_scope: "user",
-        scope_label: "private.per=user",
-        scope_source: "private.per",
-        private_workspace_enabled: true,
-        private_agent_knowledge_enabled: true,
-      }),
-    });
-
-    render(<AgentEditor />);
-
-    fireEvent.change(screen.getByLabelText("Private Knowledge Description"), {
-      target: {
-        value: "Requester-private notes, preferences, and working memory.",
-      },
-    });
-
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
-      "test_agent",
-      expect.objectContaining({
-        private: expect.objectContaining({
-          knowledge: expect.objectContaining({
-            description:
-              "Requester-private notes, preferences, and working memory.",
-          }),
-        }),
-      }),
-    );
-  });
-
   it("drops empty compaction overrides during normalization", () => {
     expect(
       normalizeAgentUpdates(mockAgent, { compaction: {} }).compaction,
@@ -1218,146 +1062,66 @@ describe("AgentEditor", () => {
     ).toBeUndefined();
   });
 
-  it("preserves explicit disabled compaction overrides during normalization", () => {
-    expect(
-      normalizeAgentUpdates(mockAgent, { compaction: { enabled: false } })
-        .compaction,
-    ).toEqual({
-      enabled: false,
-    });
+  it.each([
+    {
+      name: "preserves explicit disabled compaction overrides during normalization",
+      compaction: { enabled: false },
+      expected: { enabled: false },
+    },
+    {
+      name: "preserves explicit compaction model clears during normalization",
+      compaction: { model: null },
+      expected: { model: null },
+    },
+    {
+      name: "preserves explicit compaction fallback model clears during normalization",
+      compaction: { fallback_model: null },
+      expected: { fallback_model: null },
+    },
+    {
+      name: "enables authored compaction overrides and clears the inherited sibling threshold",
+      compaction: { threshold_percent: 0.6, threshold_tokens: null },
+      expected: {
+        enabled: true,
+        threshold_percent: 0.6,
+        threshold_tokens: null,
+      },
+    },
+    {
+      name: "preserves replay-window-only compaction overrides as enabled",
+      compaction: { replay_window_tokens: 200_000 },
+      expected: { enabled: true, replay_window_tokens: 200_000 },
+    },
+    {
+      name: "preserves timeout-only compaction overrides as enabled",
+      compaction: { timeout_seconds: 300 },
+      expected: { enabled: true, timeout_seconds: 300 },
+    },
+  ])("$name", ({ compaction, expected }) => {
+    expect(normalizeAgentUpdates(mockAgent, { compaction }).compaction).toEqual(
+      expected,
+    );
   });
 
-  it("preserves explicit compaction model clears during normalization", () => {
-    expect(
-      normalizeAgentUpdates(mockAgent, { compaction: { model: null } })
-        .compaction,
-    ).toEqual({
-      model: null,
-    });
-  });
-
-  it("preserves explicit compaction fallback model clears during normalization", () => {
-    expect(
-      normalizeAgentUpdates(mockAgent, { compaction: { fallback_model: null } })
-        .compaction,
-    ).toEqual({
-      fallback_model: null,
-    });
-  });
-
-  it("enables authored compaction overrides and clears the inherited sibling threshold", () => {
-    expect(
-      normalizeAgentUpdates(mockAgent, {
-        compaction: {
-          threshold_percent: 0.6,
-          threshold_tokens: null,
-        },
-      }).compaction,
-    ).toEqual({
-      enabled: true,
-      threshold_percent: 0.6,
-      threshold_tokens: null,
-    });
-  });
-
-  it("preserves replay-window-only compaction overrides as enabled", () => {
-    expect(
-      normalizeAgentUpdates(mockAgent, {
-        compaction: { replay_window_tokens: 200_000 },
-      }).compaction,
-    ).toEqual({
-      enabled: true,
-      replay_window_tokens: 200_000,
-    });
-  });
-
-  it("preserves timeout-only compaction overrides as enabled", () => {
-    expect(
-      normalizeAgentUpdates(mockAgent, {
-        compaction: { timeout_seconds: 300 },
-      }).compaction,
-    ).toEqual({
-      enabled: true,
-      timeout_seconds: 300,
-    });
-  });
-
-  it("authors a replay window from the editor", async () => {
+  it("authors a replay window from the editor", () => {
     render(<AgentEditor />);
 
     fireEvent.change(screen.getByLabelText("Replay Window Tokens"), {
       target: { value: "200000" },
     });
 
-    await waitFor(() => {
-      expect(mockStore.updateAgent).toHaveBeenCalledWith(
-        "test_agent",
-        expect.objectContaining({
-          compaction: { replay_window_tokens: 200_000 },
-        }),
-      );
-    });
-  });
-
-  it("treats authored compaction overrides as enabled in the editor", () => {
-    const compactionAgent: Agent = {
-      ...mockAgent,
-      compaction: { threshold_tokens: 2000 },
-    };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [compactionAgent],
-      config: {
-        ...mockConfig,
-        agents: { test_agent: compactionAgent },
-      },
-    });
-
-    render(<AgentEditor />);
-
-    expect(
-      screen.getByRole("checkbox", {
-        name: /enable automatic required compaction/i,
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      "test_agent",
+      expect.objectContaining({
+        compaction: { replay_window_tokens: 200_000 },
       }),
-    ).toBeChecked();
+    );
   });
 
-  it("treats a timeout-only override as enabled even when defaults disable compaction", () => {
-    const compactionAgent: Agent = {
-      ...mockAgent,
-      compaction: { timeout_seconds: 300 },
-    };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [compactionAgent],
-      config: {
-        ...mockConfig,
-        agents: { test_agent: compactionAgent },
-        defaults: { ...mockConfig.defaults, compaction: { enabled: false } },
-      },
-    });
-
-    render(<AgentEditor />);
-
-    expect(
-      screen.getByRole("checkbox", {
-        name: /enable automatic required compaction/i,
-      }),
-    ).toBeChecked();
-  });
-
-  it("clears invalid compaction integer input instead of writing NaN", async () => {
-    const compactionAgent: Agent = {
+  it("clears invalid compaction integer input instead of writing NaN", () => {
+    mockStoreWith({
       ...mockAgent,
       compaction: { enabled: true, threshold_tokens: 2000 },
-    };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [compactionAgent],
-      config: {
-        ...mockConfig,
-        agents: { test_agent: compactionAgent },
-      },
     });
 
     render(<AgentEditor />);
@@ -1366,28 +1130,18 @@ describe("AgentEditor", () => {
       target: { value: "abc" },
     });
 
-    await waitFor(() => {
-      expect(mockStore.updateAgent).toHaveBeenCalledWith(
-        "test_agent",
-        expect.objectContaining({
-          compaction: { enabled: true },
-        }),
-      );
-    });
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      "test_agent",
+      expect.objectContaining({
+        compaction: { enabled: true },
+      }),
+    );
   });
 
-  it("clears the compaction model as an explicit null override", async () => {
-    const compactionAgent: Agent = {
+  it("clears the compaction model as an explicit null override", () => {
+    mockStoreWith({
       ...mockAgent,
       compaction: { enabled: true, model: "summary-model" },
-    };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [compactionAgent],
-      config: {
-        ...mockConfig,
-        agents: { test_agent: compactionAgent },
-      },
     });
 
     render(<AgentEditor />);
@@ -1396,195 +1150,91 @@ describe("AgentEditor", () => {
       target: { value: "" },
     });
 
-    await waitFor(() => {
-      expect(mockStore.updateAgent).toHaveBeenCalledWith(
-        "test_agent",
-        expect.objectContaining({
-          compaction: { enabled: true, model: null },
-        }),
-      );
-    });
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      "test_agent",
+      expect.objectContaining({
+        compaction: { enabled: true, model: null },
+      }),
+    );
   });
 
-  it("shows automatic required compaction as disabled for a pure model clear when defaults are disabled", () => {
-    const compactionAgent: Agent = {
-      ...mockAgent,
+  it.each<{
+    name: string;
+    compaction?: Agent["compaction"];
+    defaults: Record<string, unknown>;
+    checked: boolean;
+  }>([
+    {
+      name: "treats authored compaction overrides as enabled in the editor",
+      compaction: { threshold_tokens: 2000 },
+      defaults: {},
+      checked: true,
+    },
+    {
+      name: "treats a timeout-only override as enabled even when defaults disable compaction",
+      compaction: { timeout_seconds: 300 },
+      defaults: { compaction: { enabled: false } },
+      checked: true,
+    },
+    {
+      name: "shows automatic required compaction as disabled for a pure model clear when defaults are disabled",
       compaction: { model: null },
-    };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [compactionAgent],
-      config: {
-        ...mockConfig,
-        defaults: {
-          ...mockConfig.defaults,
-          compaction: {
-            enabled: false,
-            reserve_tokens: 16384,
-            threshold_percent: 0.8,
-          },
-        },
-        agents: { test_agent: compactionAgent },
-      },
-    });
-
-    render(<AgentEditor />);
-
-    expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).not.toBeChecked();
-  });
-
-  it("shows automatic required compaction as disabled for a pure fallback model clear when defaults are disabled", () => {
-    const compactionAgent: Agent = {
-      ...mockAgent,
+      defaults: disabledCompactionDefaults,
+      checked: false,
+    },
+    {
+      name: "shows automatic required compaction as disabled for a pure fallback model clear when defaults are disabled",
       compaction: { fallback_model: null },
-    };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [compactionAgent],
-      config: {
-        ...mockConfig,
-        defaults: {
-          ...mockConfig.defaults,
-          compaction: {
-            enabled: false,
-            reserve_tokens: 16384,
-            threshold_percent: 0.8,
-          },
-        },
-        agents: { test_agent: compactionAgent },
-      },
-    });
-
-    render(<AgentEditor />);
-
-    expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).not.toBeChecked();
-  });
-
-  it("shows automatic required compaction as disabled for an empty authored override when defaults are disabled", () => {
-    const compactionAgent: Agent = {
-      ...mockAgent,
+      defaults: disabledCompactionDefaults,
+      checked: false,
+    },
+    {
+      name: "shows automatic required compaction as disabled for an empty authored override when defaults are disabled",
       compaction: {},
-    };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [compactionAgent],
-      config: {
-        ...mockConfig,
-        defaults: {
-          ...mockConfig.defaults,
-          compaction: {
-            enabled: false,
-            reserve_tokens: 16384,
-            threshold_percent: 0.8,
-          },
-        },
-        agents: { test_agent: compactionAgent },
-      },
-    });
-
-    render(<AgentEditor />);
-
-    expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).not.toBeChecked();
-  });
-
-  it("shows replay-window-only compaction as enabled when defaults are disabled", () => {
-    const compactionAgent: Agent = {
-      ...mockAgent,
+      defaults: disabledCompactionDefaults,
+      checked: false,
+    },
+    {
+      name: "shows replay-window-only compaction as enabled when defaults are disabled",
       compaction: { replay_window_tokens: 200_000 },
-    };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [compactionAgent],
-      config: {
-        ...mockConfig,
-        defaults: {
-          ...mockConfig.defaults,
-          compaction: {
-            enabled: false,
-            reserve_tokens: 16384,
-            threshold_percent: 0.8,
-          },
-        },
-        agents: { test_agent: compactionAgent },
-      },
-    });
+      defaults: disabledCompactionDefaults,
+      checked: true,
+    },
+    {
+      name: "shows automatic required compaction as enabled when defaults.compaction is omitted",
+      defaults: {},
+      checked: true,
+    },
+    {
+      name: "shows automatic required compaction as disabled when defaults.compaction is null",
+      defaults: { compaction: null },
+      checked: false,
+    },
+    {
+      name: "shows automatic required compaction as enabled when defaults.compaction is an authored empty object",
+      defaults: { compaction: {} },
+      checked: true,
+    },
+  ])("$name", ({ compaction, defaults, checked }) => {
+    mockStoreWith(
+      compaction === undefined ? mockAgent : { ...mockAgent, compaction },
+      { config: { ...mockConfig, defaults } },
+    );
 
     render(<AgentEditor />);
 
-    expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).toBeChecked();
-  });
-
-  it("shows automatic required compaction as enabled when defaults.compaction is omitted", () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [mockAgent],
-      config: {
-        ...mockConfig,
-        defaults: {},
-        agents: { test_agent: mockAgent },
-      },
-    });
-
-    render(<AgentEditor />);
-
-    expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).toBeChecked();
-  });
-
-  it("shows automatic required compaction as disabled when defaults.compaction is null", () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [mockAgent],
-      config: {
-        ...mockConfig,
-        defaults: {
-          ...mockConfig.defaults,
-          compaction: null,
-        },
-        agents: { test_agent: mockAgent },
-      },
-    });
-
-    render(<AgentEditor />);
-
-    expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).not.toBeChecked();
-  });
-
-  it("shows automatic required compaction as enabled when defaults.compaction is an authored empty object", () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [mockAgent],
-      config: {
-        ...mockConfig,
-        defaults: {
-          ...mockConfig.defaults,
-          compaction: {},
-        },
-        agents: { test_agent: mockAgent },
-      },
-    });
-
-    render(<AgentEditor />);
-
-    expect(
-      screen.getByLabelText("Enable automatic required compaction"),
-    ).toBeChecked();
+    const checkbox = screen.getByLabelText(
+      "Enable automatic required compaction",
+    );
+    if (checked) {
+      expect(checkbox).toBeChecked();
+    } else {
+      expect(checkbox).not.toBeChecked();
+    }
   });
 
   it("shows field-level history and compaction validation errors", () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
+    mockStoreWith(mockAgent, {
       diagnostics: [
         {
           kind: "validation",
@@ -1647,6 +1297,26 @@ describe("AgentEditor", () => {
     expect(
       screen.getByPlaceholderText(SHARED_CONTEXT_FILE_PLACEHOLDER),
     ).toBeInTheDocument();
+  });
+
+  it("lists knowledge bases sorted by name", () => {
+    mockStoreWith(mockAgent, {
+      config: {
+        ...mockConfig,
+        knowledge_bases: {
+          research: { path: "./research", watch: true },
+          legal: { path: "./legal", watch: true },
+        },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      [...document.querySelectorAll('[id^="knowledge-base-"]')].map(
+        (el) => el.id,
+      ),
+    ).toEqual(["knowledge-base-legal", "knowledge-base-research"]);
   });
 
   it("updates knowledge bases when checkboxes are toggled", async () => {
@@ -1773,16 +1443,7 @@ describe("AgentEditor", () => {
   });
 
   it("renders missing assigned skills so they can be removed", () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [
-        {
-          ...mockAgent,
-          skills: ["ghost-skill"],
-        },
-      ],
-      rooms: mockStore.rooms,
-    });
+    mockStoreWith({ ...mockAgent, skills: ["ghost-skill"] });
 
     render(<AgentEditor />);
 
@@ -1845,65 +1506,37 @@ describe("AgentEditor", () => {
     );
   });
 
-  it("updates memory backend when selected", () => {
+  it.each([
+    {
+      name: "updates memory backend when selected",
+      agent: mockAgent,
+      option: "File (markdown memory)",
+      expected: "file",
+    },
+    {
+      name: "updates memory backend to disabled when none is selected",
+      agent: mockAgent,
+      option: "Disabled (stateless)",
+      expected: "none",
+    },
+    {
+      name: "clears memory backend override when inherit is selected",
+      agent: { ...mockAgent, memory_backend: "file" as const },
+      option: /Inherit global/i,
+      expected: undefined,
+    },
+  ])("$name", ({ agent, option, expected }) => {
+    mockStoreWith(agent);
+
     render(<AgentEditor />);
 
-    const memoryBackendSelect = screen.getByLabelText("Memory Backend");
-    fireEvent.click(memoryBackendSelect);
-
-    const fileOption = screen.getByRole("option", {
-      name: "File (markdown memory)",
-    });
-    fireEvent.click(fileOption);
+    fireEvent.click(screen.getByLabelText("Memory Backend"));
+    fireEvent.click(screen.getByRole("option", { name: option }));
 
     expect(mockStore.updateAgent).toHaveBeenCalledWith(
       "test_agent",
       expect.objectContaining({
-        memory_backend: "file",
-      }),
-    );
-  });
-
-  it("updates memory backend to disabled when none is selected", () => {
-    render(<AgentEditor />);
-
-    const memoryBackendSelect = screen.getByLabelText("Memory Backend");
-    fireEvent.click(memoryBackendSelect);
-
-    const disabledOption = screen.getByRole("option", {
-      name: "Disabled (stateless)",
-    });
-    fireEvent.click(disabledOption);
-
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
-      "test_agent",
-      expect.objectContaining({
-        memory_backend: "none",
-      }),
-    );
-  });
-
-  it("clears memory backend override when inherit is selected", () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [{ ...mockAgent, memory_backend: "file" }],
-      rooms: mockStore.rooms,
-    });
-
-    render(<AgentEditor />);
-
-    const memoryBackendSelect = screen.getByLabelText("Memory Backend");
-    fireEvent.click(memoryBackendSelect);
-
-    const inheritOption = screen.getByRole("option", {
-      name: /Inherit global/i,
-    });
-    fireEvent.click(inheritOption);
-
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
-      "test_agent",
-      expect.objectContaining({
-        memory_backend: undefined,
+        memory_backend: expected,
       }),
     );
   });
@@ -1912,14 +1545,11 @@ describe("AgentEditor", () => {
     const twoToolAgent = { ...mockAgent, tools: ["calculator", "file"] };
 
     it("shows inherited defaults as checked with (default) label", () => {
-      (useConfigStore as any).mockReturnValue({
-        ...mockStore,
-        agents: [{ ...twoToolAgent, worker_tools: undefined }],
+      mockStoreWith(twoToolAgent, {
         config: {
           ...mockConfig,
           defaults: { ...mockConfig.defaults, worker_tools: ["calculator"] },
         },
-        rooms: mockStore.rooms,
       });
 
       render(<AgentEditor />);
@@ -1935,14 +1565,11 @@ describe("AgentEditor", () => {
     });
 
     it("seeds from defaults on first toggle so other defaults are preserved", () => {
-      (useConfigStore as any).mockReturnValue({
-        ...mockStore,
-        agents: [{ ...twoToolAgent, worker_tools: undefined }],
+      mockStoreWith(twoToolAgent, {
         config: {
           ...mockConfig,
           defaults: { ...mockConfig.defaults, worker_tools: ["calculator"] },
         },
-        rooms: mockStore.rooms,
       });
 
       render(<AgentEditor />);
@@ -1960,15 +1587,15 @@ describe("AgentEditor", () => {
     });
 
     it("renders empty list as explicit disable (all unchecked, no default labels)", () => {
-      (useConfigStore as any).mockReturnValue({
-        ...mockStore,
-        agents: [{ ...twoToolAgent, worker_tools: [] }],
-        config: {
-          ...mockConfig,
-          defaults: { ...mockConfig.defaults, worker_tools: ["calculator"] },
+      mockStoreWith(
+        { ...twoToolAgent, worker_tools: [] },
+        {
+          config: {
+            ...mockConfig,
+            defaults: { ...mockConfig.defaults, worker_tools: ["calculator"] },
+          },
         },
-        rooms: mockStore.rooms,
-      });
+      );
 
       render(<AgentEditor />);
 
@@ -2109,10 +1736,7 @@ describe("AgentEditor", () => {
         knowledge: { enabled: true, path: "memory", watch: true },
       },
     };
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [privateAgent],
-      diagnostics: [],
+    mockStoreWith(privateAgent, {
       agentPoliciesByAgent: makeAgentPolicies({
         is_private: true,
         effective_execution_scope: "user",

@@ -5,10 +5,12 @@ import { Input } from "@/components/ui/input";
 import { SchemaSection } from "@/components/SchemaForm";
 import { setObjectKey } from "@/lib/configSchema";
 import { FieldGroup } from "./FieldGroup";
+import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
 import {
   resolveEffectiveCompactionEnabled,
   type CompactionConfig,
   type Config,
+  type Team,
 } from "@/types/config";
 
 // Compaction keys this section renders by hand; More compaction settings shows the rest.
@@ -21,13 +23,17 @@ const COMPACTION_EDITOR_FIELDS = [
   "model",
 ] as const;
 
+const THRESHOLD_TOKENS_HELPER_TEXT =
+  "Compaction trigger in tokens, counted over the whole request. Supported OpenAI and Claude routes compact natively at it; every other route runs text compaction before the reply.";
+
 /** The history and compaction fields agents and teams share. */
-interface HistoryContextValues {
-  num_history_runs?: number | null;
-  num_history_messages?: number | null;
-  max_tool_calls_from_history?: number | null;
-  compaction?: CompactionConfig | null;
-}
+type HistoryContextValues = Pick<
+  Team,
+  | "num_history_runs"
+  | "num_history_messages"
+  | "max_tool_calls_from_history"
+  | "compaction"
+>;
 
 interface HistoryContextSectionProps {
   values: HistoryContextValues;
@@ -36,26 +42,19 @@ interface HistoryContextSectionProps {
     value: HistoryContextValues[K],
   ) => void;
   resetKey: string | null | undefined;
-  /** Where this entity's compaction lives in config.yaml, for validation errors. */
-  compactionPath: Array<string | number>;
+  /** Where this entity lives in config.yaml, for validation errors. */
+  path: Array<string | number>;
   defaults?: Config["defaults"];
+  /** Lead sentences; the section appends the inherited default. */
   historyRunsHelperText: string;
   historyMessagesHelperText: string;
   maxToolCallsHelperText: string;
   autoCompactionHelperText: string;
-  thresholdTokensHelperText: string;
   compactionModelPlaceholder: string;
-  numHistoryRunsError?: string;
-  numHistoryMessagesError?: string;
-  maxToolCallsFromHistoryError?: string;
-  compactionError?: string;
 }
 
 function parseOptionalInt(raw: string, min: number): number | null {
   const trimmed = raw.trim();
-  if (trimmed === "") {
-    return null;
-  }
   if (!/^-?\d+$/.test(trimmed)) {
     return null;
   }
@@ -67,33 +66,35 @@ function parseOptionalInt(raw: string, min: number): number | null {
 }
 
 function parseOptionalUnitFloat(raw: string): number | null {
-  const trimmed = raw.trim();
-  if (trimmed === "") {
-    return null;
-  }
-  const value = Number.parseFloat(trimmed);
+  const value = Number.parseFloat(raw.trim());
   if (!Number.isFinite(value) || value <= 0 || value >= 1) {
     return null;
   }
   return value;
 }
 
+function isInvalidUnitFloatInput(raw: string): boolean {
+  return raw.trim() !== "" && parseOptionalUnitFloat(raw) == null;
+}
+
+function inheritedDefaultText(
+  value: number | null | undefined,
+  fallback: string,
+): string {
+  return ` Leave empty to use default (${value ?? fallback}).`;
+}
+
 export function HistoryContextSection({
   values,
   onChange,
   resetKey,
-  compactionPath,
+  path,
   defaults,
   historyRunsHelperText,
   historyMessagesHelperText,
   maxToolCallsHelperText,
   autoCompactionHelperText,
-  thresholdTokensHelperText,
   compactionModelPlaceholder,
-  numHistoryRunsError,
-  numHistoryMessagesError,
-  maxToolCallsFromHistoryError,
-  compactionError,
 }: HistoryContextSectionProps) {
   const {
     num_history_runs: numHistoryRuns,
@@ -101,6 +102,7 @@ export function HistoryContextSection({
     max_tool_calls_from_history: maxToolCallsFromHistory,
     compaction: compactionConfig,
   } = values;
+  const validationErrorForPath = useScopedConfigValidation(path);
   const patchCompaction = (patch: CompactionConfig) =>
     onChange("compaction", { ...compactionConfig, ...patch });
   const [compactionThresholdPercentInput, setCompactionThresholdPercentInput] =
@@ -111,13 +113,14 @@ export function HistoryContextSection({
     defaultCompaction,
   );
 
+  const storedThresholdPercentInput =
+    compactionConfig?.threshold_percent != null
+      ? String(compactionConfig.threshold_percent)
+      : "";
+
   useEffect(() => {
-    setCompactionThresholdPercentInput(
-      compactionConfig?.threshold_percent != null
-        ? String(compactionConfig.threshold_percent)
-        : "",
-    );
-  }, [compactionConfig?.threshold_percent, resetKey]);
+    setCompactionThresholdPercentInput(storedThresholdPercentInput);
+  }, [storedThresholdPercentInput, resetKey]);
 
   return (
     <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
@@ -128,9 +131,12 @@ export function HistoryContextSection({
       <div className="space-y-4">
         <FieldGroup
           label="History Runs"
-          helperText={historyRunsHelperText}
+          helperText={
+            historyRunsHelperText +
+            inheritedDefaultText(defaults?.num_history_runs, "all")
+          }
           htmlFor="num_history_runs"
-          error={numHistoryRunsError}
+          error={validationErrorForPath(["num_history_runs"], true)}
         >
           <Input
             id="num_history_runs"
@@ -156,9 +162,12 @@ export function HistoryContextSection({
 
         <FieldGroup
           label="History Messages"
-          helperText={historyMessagesHelperText}
+          helperText={
+            historyMessagesHelperText +
+            inheritedDefaultText(defaults?.num_history_messages, "all")
+          }
           htmlFor="num_history_messages"
-          error={numHistoryMessagesError}
+          error={validationErrorForPath(["num_history_messages"], true)}
         >
           <Input
             id="num_history_messages"
@@ -187,9 +196,15 @@ export function HistoryContextSection({
 
         <FieldGroup
           label="Max Tool Calls from History"
-          helperText={maxToolCallsHelperText}
+          helperText={
+            maxToolCallsHelperText +
+            inheritedDefaultText(
+              defaults?.max_tool_calls_from_history,
+              "no limit",
+            )
+          }
           htmlFor="max_tool_calls_from_history"
-          error={maxToolCallsFromHistoryError}
+          error={validationErrorForPath(["max_tool_calls_from_history"], true)}
         >
           <Input
             id="max_tool_calls_from_history"
@@ -214,7 +229,7 @@ export function HistoryContextSection({
           label="Required Compaction"
           helperText={autoCompactionHelperText}
           htmlFor="compaction_enabled"
-          error={compactionError}
+          error={validationErrorForPath(["compaction"], true)}
         >
           <div className="space-y-3">
             <div className="flex items-center gap-3">
@@ -246,7 +261,7 @@ export function HistoryContextSection({
             <div className="grid gap-4 md:grid-cols-2">
               <FieldGroup
                 label="Threshold Tokens"
-                helperText={thresholdTokensHelperText}
+                helperText={THRESHOLD_TOKENS_HELPER_TEXT}
                 htmlFor="compaction_threshold_tokens"
               >
                 <Input
@@ -292,10 +307,10 @@ export function HistoryContextSection({
                   onChange={(e) => {
                     const raw = e.target.value;
                     setCompactionThresholdPercentInput(raw);
-                    const value = parseOptionalUnitFloat(raw);
-                    if (raw.trim() !== "" && value == null) {
+                    if (isInvalidUnitFloatInput(raw)) {
                       return;
                     }
+                    const value = parseOptionalUnitFloat(raw);
                     patchCompaction({
                       threshold_percent: value ?? undefined,
                       threshold_tokens:
@@ -305,17 +320,11 @@ export function HistoryContextSection({
                     });
                   }}
                   onBlur={() => {
-                    const value = parseOptionalUnitFloat(
-                      compactionThresholdPercentInput,
-                    );
                     if (
-                      compactionThresholdPercentInput.trim() !== "" &&
-                      value == null
+                      isInvalidUnitFloatInput(compactionThresholdPercentInput)
                     ) {
                       setCompactionThresholdPercentInput(
-                        compactionConfig?.threshold_percent != null
-                          ? String(compactionConfig.threshold_percent)
-                          : "",
+                        storedThresholdPercentInput,
                       );
                     }
                   }}
@@ -385,7 +394,7 @@ export function HistoryContextSection({
               title="More compaction settings"
               definition="CompactionOverrideConfig"
               value={compactionConfig}
-              path={compactionPath}
+              path={[...path, "compaction"]}
               exclude={COMPACTION_EDITOR_FIELDS}
               onFieldChange={(key, next) =>
                 onChange(

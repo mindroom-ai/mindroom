@@ -6,14 +6,7 @@ import { pluralize } from "@/lib/utils";
 import { ListPanel, ListItem } from "@/components/shared/ListPanel";
 import { ItemCard, ItemCardBadge } from "@/components/shared/ItemCard";
 
-// Extend Agent type to be compatible with ListItem
-interface AgentListItem extends ListItem {
-  role: string;
-  tools: Agent["tools"];
-  rooms: string[];
-  // Add index signature to be compatible with ListItem
-  [key: string]: any;
-}
+type AgentListItem = Agent & ListItem;
 
 export function AgentList() {
   const { agents, selectedAgentId, selectAgent, createAgent } =
@@ -35,12 +28,12 @@ export function AgentList() {
     const badges: ItemCardBadge[] = [
       {
         content: pluralize(agent.tools.length, "tool"),
-        variant: "secondary" as const,
+        variant: "secondary",
         icon: Bot,
       },
       {
         content: pluralize(agent.rooms.length, "room"),
-        variant: "secondary" as const,
+        variant: "secondary",
         icon: MapPin,
       },
     ];

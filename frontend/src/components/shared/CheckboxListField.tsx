@@ -21,7 +21,7 @@ export function CheckboxListField({
   onChange,
   idPrefix,
   emptyMessage,
-  className = "space-y-2 max-h-56 overflow-y-auto border rounded-lg p-2",
+  className = "space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2",
 }: CheckboxListFieldProps) {
   return (
     <div className={className}>

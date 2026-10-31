@@ -67,19 +67,6 @@ export function TeamEditor() {
   const roleError = validationErrorForPath(["role"], true);
   const modeError = validationErrorForPath(["mode"], true);
   const modelError = validationErrorForPath(["model"], true);
-  const numHistoryRunsError = validationErrorForPath(
-    ["num_history_runs"],
-    true,
-  );
-  const numHistoryMessagesError = validationErrorForPath(
-    ["num_history_messages"],
-    true,
-  );
-  const maxToolCallsFromHistoryError = validationErrorForPath(
-    ["max_tool_calls_from_history"],
-    true,
-  );
-  const compactionError = validationErrorForPath(["compaction"], true);
   const membersError = validationErrorForPath(["agents"]);
   const roomsError = validationErrorForPath(["rooms"]);
 
@@ -89,15 +76,6 @@ export function TeamEditor() {
     enabled: !!selectedTeamId && window.innerWidth < 1024,
   });
 
-  const handleDelete = () => {
-    if (
-      selectedTeamId &&
-      confirm("Are you sure you want to delete this team?")
-    ) {
-      deleteTeam(selectedTeamId);
-    }
-  };
-
   if (!selectedTeam) {
     return (
       <EditorPanelEmptyState icon={Users} message="Select a team to edit" />
@@ -106,6 +84,12 @@ export function TeamEditor() {
 
   const handleFieldChange = <K extends keyof Team>(field: K, value: Team[K]) =>
     updateTeam(selectedTeam.id, { [field]: value });
+
+  const handleDelete = () => {
+    if (confirm("Are you sure you want to delete this team?")) {
+      deleteTeam(selectedTeam.id);
+    }
+  };
 
   return (
     <EditorPanel
@@ -218,32 +202,15 @@ export function TeamEditor() {
           updateTeam(selectedTeam.id, { [field]: value })
         }
         resetKey={selectedTeamId}
-        compactionPath={["teams", selectedTeam.id, "compaction"]}
+        path={["teams", selectedTeam.id]}
         defaults={config?.defaults}
-        historyRunsHelperText={`Number of prior team-scoped runs to include as replay. Leave empty to use default${
-          config?.defaults?.num_history_runs != null
-            ? ` (${config.defaults.num_history_runs})`
-            : " (all)"
-        }.`}
-        historyMessagesHelperText={`Max replay messages from team-scoped history. Leave empty to use default${
-          config?.defaults?.num_history_messages != null
-            ? ` (${config.defaults.num_history_messages})`
-            : " (all)"
-        }.`}
-        maxToolCallsHelperText={`Max tool call messages replayed from team history. Leave empty to use default${
-          config?.defaults?.max_tool_calls_from_history != null
-            ? ` (${config.defaults.max_tool_calls_from_history})`
-            : " (no limit)"
-        }.`}
+        historyRunsHelperText="Number of prior team-scoped runs to include as replay."
+        historyMessagesHelperText="Max replay messages from team-scoped history."
+        maxToolCallsHelperText="Max tool call messages replayed from team history."
         autoCompactionHelperText="Automatically compact older team-scoped history before the next run when the request crosses the compaction threshold on a route without native compaction, or when raw replay exceeds the hard context budget."
-        thresholdTokensHelperText="Compaction trigger in tokens, counted over the whole request. Supported OpenAI and Claude routes compact natively at it; every other route runs text compaction before the reply."
         compactionModelPlaceholder={
           config?.defaults?.compaction?.model ?? "Default: team run model"
         }
-        numHistoryRunsError={numHistoryRunsError}
-        numHistoryMessagesError={numHistoryMessagesError}
-        maxToolCallsFromHistoryError={maxToolCallsFromHistoryError}
-        compactionError={compactionError}
       />
 
       {/* Team Members (Agents) */}
@@ -259,8 +226,7 @@ export function TeamEditor() {
             const eligibilityReason =
               agentPolicy?.team_eligibility_reason ??
               (agentPolicy == null ? AGENT_POLICY_UNAVAILABLE_REASON : null);
-            const isSelectable =
-              agentPolicy != null && eligibilityReason == null;
+            const isSelectable = eligibilityReason == null;
             return (
               <div
                 key={agent.id}
@@ -270,17 +236,14 @@ export function TeamEditor() {
                   id={`agent-${agent.id}`}
                   checked={isChecked}
                   disabled={!isSelectable && !isChecked}
-                  onCheckedChange={(checked) => {
-                    if (!isSelectable && checked === true) {
-                      return;
-                    }
+                  onCheckedChange={(checked) =>
                     handleFieldChange(
                       "agents",
                       checked
                         ? [...selectedTeam.agents, agent.id]
                         : selectedTeam.agents.filter((a) => a !== agent.id),
-                    );
-                  }}
+                    )
+                  }
                   className="h-5 w-5 sm:h-4 sm:w-4"
                 />
                 <label
@@ -319,7 +282,6 @@ export function TeamEditor() {
           onChange={(next) => handleFieldChange("rooms", next)}
           idPrefix="room"
           emptyMessage="No rooms available. Create rooms in the Rooms tab."
-          className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
         />
       </FieldGroup>
 

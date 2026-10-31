@@ -54,14 +54,6 @@ export function RoomEditor() {
   const handleFieldChange = <K extends keyof Room>(field: K, value: Room[K]) =>
     updateRoom(selectedRoom.id, { [field]: value });
 
-  const handleAgentToggle = (agentId: string, checked: boolean) =>
-    handleFieldChange(
-      "agents",
-      checked
-        ? [...selectedRoom.agents, agentId]
-        : selectedRoom.agents.filter((id) => id !== agentId),
-    );
-
   const handleDelete = () => {
     if (confirm("Are you sure you want to delete this room?")) {
       deleteRoom(selectedRoom.id);
@@ -117,10 +109,12 @@ export function RoomEditor() {
       >
         <Select
           value={selectedRoom.model || "default_model"}
-          onValueChange={(value) => {
-            const newValue = value === "default_model" ? undefined : value;
-            handleFieldChange("model", newValue);
-          }}
+          onValueChange={(value) =>
+            handleFieldChange(
+              "model",
+              value === "default_model" ? undefined : value,
+            )
+          }
         >
           <SelectTrigger id="room-model">
             <SelectValue placeholder="Select a model" />
@@ -156,7 +150,12 @@ export function RoomEditor() {
                   id={`agent-${agent.id}`}
                   checked={selectedRoom.agents.includes(agent.id)}
                   onCheckedChange={(checked) =>
-                    handleAgentToggle(agent.id, checked as boolean)
+                    handleFieldChange(
+                      "agents",
+                      checked
+                        ? [...selectedRoom.agents, agent.id]
+                        : selectedRoom.agents.filter((id) => id !== agent.id),
+                    )
                   }
                   className="h-5 w-5 sm:h-4 sm:w-4"
                 />

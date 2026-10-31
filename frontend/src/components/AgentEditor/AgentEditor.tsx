@@ -1,10 +1,4 @@
-import {
-  Fragment,
-  useEffect,
-  useState,
-  useMemo,
-  type ComponentProps,
-} from "react";
+import { Fragment, useEffect, useState, useMemo, type ReactNode } from "react";
 import { useConfigStore } from "@/store/configStore";
 import { useSwipeBack } from "@/hooks/useSwipeBack";
 import { Button } from "@/components/ui/button";
@@ -34,7 +28,7 @@ import {
   MemoryBackend,
   ThreadMode,
   getDefaultPrivateConfig,
-  resolveEffectiveDefaultTools,
+  resolveEffectiveAgentTools,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
 } from "@/types/config";
 import { Badge } from "@/components/ui/badge";
@@ -43,7 +37,7 @@ import { useTools, type ToolInfo } from "@/hooks/useTools";
 import { useSkills } from "@/hooks/useSkills";
 import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
 import { ToolConfigPanel } from "@/components/ToolConfig/ToolConfigPanel";
-import { ToolSelectionRow } from "./ToolSelectionRow";
+import { ToolSelectionRow, type ToolSectionKind } from "./ToolSelectionRow";
 import { SchemaSection } from "@/components/SchemaForm";
 import { setObjectKey } from "@/lib/configSchema";
 import { toolEntriesForNames, toolNames } from "@/lib/toolEntry";
@@ -105,6 +99,91 @@ const byDisplayName = (
   b: { display_name: string },
 ) => a.display_name.localeCompare(b.display_name);
 
+function LabeledCheckbox({
+  id,
+  checked,
+  onChange,
+  children,
+}: {
+  id: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <Checkbox
+        id={id}
+        checked={checked}
+        onCheckedChange={(next) => onChange(next === true)}
+      />
+      <label
+        htmlFor={id}
+        className="text-sm font-medium cursor-pointer select-none"
+      >
+        {children}
+      </label>
+    </div>
+  );
+}
+
+function AddButton({
+  onClick,
+  testId,
+}: {
+  onClick: () => void;
+  testId?: string;
+}) {
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={onClick}
+      className="h-9 px-3"
+      data-testid={testId}
+    >
+      <Plus className="h-4 w-4 sm:mr-1" />
+      <span className="hidden sm:inline">Add</span>
+    </Button>
+  );
+}
+
+/** An editable list of strings, one input and remove button per entry. */
+function StringListField({
+  values,
+  onChange,
+  placeholder,
+}: {
+  values: string[];
+  onChange: (values: string[]) => void;
+  placeholder: string;
+}) {
+  return (
+    <div className="space-y-2">
+      {values.map((value, index) => (
+        <div key={index} className="flex gap-2">
+          <Input
+            value={value}
+            onChange={(e) =>
+              onChange(values.map((v, i) => (i === index ? e.target.value : v)))
+            }
+            placeholder={placeholder}
+            className="min-h-[40px]"
+          />
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => onChange(values.filter((_, i) => i !== index))}
+            className="h-10 w-10 flex-shrink-0"
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function AgentEditor() {
   const {
     agents,
@@ -127,12 +206,6 @@ export function AgentEditor() {
   const defaultShowToolCalls = config?.defaults?.show_tool_calls ?? true;
   const defaultMarkdown = config?.defaults?.markdown ?? true;
   const globalMemoryBackend = config?.memory?.backend ?? "mem0";
-  const knowledgeBaseNames = useMemo(
-    () => Object.keys(config?.knowledge_bases || {}).sort(),
-    [config?.knowledge_bases],
-  );
-
-  // Fetch tools and skills from backend
   const selectedAgentPolicy = selectedAgent
     ? (agentPoliciesByAgent[selectedAgent.id] ?? null)
     : null;
@@ -140,13 +213,14 @@ export function AgentEditor() {
     selectedAgentPolicy?.effective_execution_scope ?? null;
   const policyPreviewAvailable =
     selectedAgent == null || selectedAgentPolicy != null;
+  // Fetch tools and skills from backend
   const {
     tools: backendTools,
     loading: toolsLoading,
     statusAuthoritative,
   } = useTools(
     policyPreviewAvailable ? selectedAgentId : null,
-    policyPreviewAvailable ? selectedExecutionScope : undefined,
+    selectedExecutionScope,
   );
   const { skills: availableSkills, loading: skillsLoading } = useSkills();
 
@@ -166,19 +240,6 @@ export function AgentEditor() {
   );
   const validationErrorForPath = useScopedConfigValidation(validationPrefix);
   const agentRootError = validationErrorForPath([], true);
-  const numHistoryRunsError = validationErrorForPath(
-    ["num_history_runs"],
-    true,
-  );
-  const numHistoryMessagesError = validationErrorForPath(
-    ["num_history_messages"],
-    true,
-  );
-  const maxToolCallsFromHistoryError = validationErrorForPath(
-    ["max_tool_calls_from_history"],
-    true,
-  );
-  const compactionError = validationErrorForPath(["compaction"], true);
   const privateScopeError = validationErrorForPath(["private", "per"], true);
   const privateRootError = validationErrorForPath(["private", "root"], true);
   const privateTemplateDirError = validationErrorForPath(
@@ -258,20 +319,6 @@ export function AgentEditor() {
       selectedUnavailableTools: selectedUnavailable.sort(byDisplayName),
     };
   }, [selectedToolNames, backendTools]);
-  // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
-  const effectiveTools = useMemo(() => {
-    const tools = new Set(selectedToolNames);
-    if (selectedAgent?.include_default_tools ?? true) {
-      for (const t of resolveEffectiveDefaultTools(config?.defaults)) {
-        tools.add(t);
-      }
-    }
-    return [...tools];
-  }, [
-    selectedToolNames,
-    selectedAgent?.include_default_tools,
-    config?.defaults,
-  ]);
 
   // Prepare checkbox items for skills (includes orphaned selected skills)
   const skillItems: CheckboxListItem[] = useMemo(() => {
@@ -302,11 +349,10 @@ export function AgentEditor() {
   );
   const knowledgeBaseItems: CheckboxListItem[] = useMemo(
     () =>
-      knowledgeBaseNames.map((baseName) => ({
-        value: baseName,
-        label: baseName,
-      })),
-    [knowledgeBaseNames],
+      Object.keys(config?.knowledge_bases || {})
+        .sort()
+        .map((baseName) => ({ value: baseName, label: baseName })),
+    [config?.knowledge_bases],
   );
 
   // Include this agent so fresh self subagents can be explicitly allowed.
@@ -353,18 +399,9 @@ export function AgentEditor() {
       "tools",
       toolEntriesForNames(nextTools, selectedAgent.tools),
     );
-    setActiveToolName((currentActiveToolName) => {
-      if (checked) {
-        return toolName;
-      }
-      if (
-        currentActiveToolName != null &&
-        nextTools.includes(currentActiveToolName)
-      ) {
-        return currentActiveToolName;
-      }
-      return null;
-    });
+    if (checked) {
+      setActiveToolName(toolName);
+    }
   };
 
   const handleDelete = () => {
@@ -373,49 +410,10 @@ export function AgentEditor() {
     }
   };
 
-  const handleAddInstruction = () => {
-    handleFieldChange("instructions", [...selectedAgent.instructions, ""]);
-  };
-
-  const handleRemoveInstruction = (index: number) => {
-    handleFieldChange(
-      "instructions",
-      selectedAgent.instructions.filter((_, i) => i !== index),
-    );
-  };
-
-  const handleAddContextFile = () => {
-    handleFieldChange("context_files", [
-      ...(selectedAgent.context_files ?? []),
-      "",
-    ]);
-  };
-
-  const handleRemoveContextFile = (index: number) => {
-    handleFieldChange(
-      "context_files",
-      (selectedAgent.context_files ?? []).filter((_, i) => i !== index),
-    );
-  };
-
   const updatePrivate = (patch: Partial<AgentPrivateConfig>) => {
     handleFieldChange("private", {
       ...getDefaultPrivateConfig(selectedAgent),
       ...patch,
-    });
-  };
-
-  const handleAddPrivateContextFile = () => {
-    updatePrivate({
-      context_files: [...(privateConfig?.context_files ?? []), ""],
-    });
-  };
-
-  const handleRemovePrivateContextFile = (index: number) => {
-    updatePrivate({
-      context_files: (privateConfig?.context_files ?? []).filter(
-        (_, i) => i !== index,
-      ),
     });
   };
 
@@ -442,6 +440,10 @@ export function AgentEditor() {
     });
   };
 
+  const effectiveTools = resolveEffectiveAgentTools(
+    selectedAgent,
+    config?.defaults,
+  );
   const workerTools =
     selectedAgent.worker_tools ?? config?.defaults?.worker_tools ?? [];
   const workerToolsInherited =
@@ -455,7 +457,7 @@ export function AgentEditor() {
 
   const renderToolRow = (
     tool: ToolInfo,
-    sectionKind: ComponentProps<typeof ToolSelectionRow>["sectionKind"],
+    sectionKind: ToolSectionKind,
     idPrefix: string,
   ) => {
     const isChecked = selectedToolNames.includes(tool.name);
@@ -473,10 +475,6 @@ export function AgentEditor() {
           isActive={isActive}
           hasOverrides={hasOverrides}
           showSettings={showSettings}
-          setupBlocked={
-            sectionKind === "setupRequired" &&
-            tool.dashboard_configuration_supported === false
-          }
           onCheckedChange={(checked) => updateSelectedTools(tool.name, checked)}
           onToggleSettings={() =>
             setActiveToolName((prev) => (prev === tool.name ? null : tool.name))
@@ -631,7 +629,6 @@ export function AgentEditor() {
           onChange={(next) => handleFieldChange("knowledge_bases", next)}
           idPrefix="knowledge-base"
           emptyMessage="No knowledge bases available. Add one in the Knowledge tab."
-          className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
         />
       </FieldGroup>
 
@@ -646,7 +643,6 @@ export function AgentEditor() {
           onChange={(next) => handleFieldChange("delegate_to", next)}
           idPrefix="delegate"
           emptyMessage="No agents available."
-          className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
         />
       </FieldGroup>
 
@@ -659,42 +655,22 @@ export function AgentEditor() {
             : "Workspace-relative files loaded into each freshly built agent instance and prepended to its role context."
         }
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleAddContextFile}
-            className="h-9 px-3"
-            data-testid="add-context-file-button"
-          >
-            <Plus className="h-4 w-4 sm:mr-1" />
-            <span className="hidden sm:inline">Add</span>
-          </Button>
+          <AddButton
+            onClick={() =>
+              handleFieldChange("context_files", [
+                ...(selectedAgent.context_files ?? []),
+                "",
+              ])
+            }
+            testId="add-context-file-button"
+          />
         }
       >
-        <div className="space-y-2">
-          {(selectedAgent.context_files ?? []).map((filePath, index) => (
-            <div key={index} className="flex gap-2">
-              <Input
-                value={filePath}
-                onChange={(e) => {
-                  const updated = [...(selectedAgent.context_files ?? [])];
-                  updated[index] = e.target.value;
-                  handleFieldChange("context_files", updated);
-                }}
-                placeholder={SHARED_CONTEXT_FILE_PLACEHOLDER}
-                className="min-h-[40px]"
-              />
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => handleRemoveContextFile(index)}
-                className="h-10 w-10 flex-shrink-0"
-              >
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-          ))}
-        </div>
+        <StringListField
+          values={selectedAgent.context_files ?? []}
+          onChange={(next) => handleFieldChange("context_files", next)}
+          placeholder={SHARED_CONTEXT_FILE_PLACEHOLDER}
+        />
       </FieldGroup>
 
       <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
@@ -707,21 +683,15 @@ export function AgentEditor() {
           helperText="Enable requester-local state for one shared agent definition. Private agents cannot join configured teams or transitive delegation, but explicitly tagged ad hoc teams can include them for that requester."
           htmlFor="private_enabled"
         >
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id="private_enabled"
-              checked={privateConfig != null}
-              onCheckedChange={(checked) =>
-                setAgentPrivateEnabled(selectedAgent.id, checked === true)
-              }
-            />
-            <label
-              htmlFor="private_enabled"
-              className="text-sm font-medium cursor-pointer select-none"
-            >
-              Enable requester-private state
-            </label>
-          </div>
+          <LabeledCheckbox
+            id="private_enabled"
+            checked={privateConfig != null}
+            onChange={(checked) =>
+              setAgentPrivateEnabled(selectedAgent.id, checked)
+            }
+          >
+            Enable requester-private state
+          </LabeledCheckbox>
         </FieldGroup>
 
         {privateConfig != null && (
@@ -789,43 +759,23 @@ export function AgentEditor() {
               helperText="Private-root-relative files loaded into role context for each requester-private instance."
               error={privateContextFilesError}
               actions={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleAddPrivateContextFile}
-                  className="h-9 px-3"
-                >
-                  <Plus className="h-4 w-4 sm:mr-1" />
-                  <span className="hidden sm:inline">Add</span>
-                </Button>
+                <AddButton
+                  onClick={() =>
+                    updatePrivate({
+                      context_files: [
+                        ...(privateConfig.context_files ?? []),
+                        "",
+                      ],
+                    })
+                  }
+                />
               }
             >
-              <div className="space-y-2">
-                {(privateConfig.context_files ?? []).map((filePath, index) => (
-                  <div key={index} className="flex gap-2">
-                    <Input
-                      value={filePath}
-                      onChange={(e) => {
-                        const updated = [
-                          ...(privateConfig.context_files ?? []),
-                        ];
-                        updated[index] = e.target.value;
-                        updatePrivate({ context_files: updated });
-                      }}
-                      placeholder="SOUL.md"
-                      className="min-h-[40px]"
-                    />
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => handleRemovePrivateContextFile(index)}
-                      className="h-10 w-10 flex-shrink-0"
-                    >
-                      <X className="h-4 w-4" />
-                    </Button>
-                  </div>
-                ))}
-              </div>
+              <StringListField
+                values={privateConfig.context_files ?? []}
+                onChange={(next) => updatePrivate({ context_files: next })}
+                placeholder="SOUL.md"
+              />
             </FieldGroup>
 
             <FieldGroup
@@ -834,21 +784,13 @@ export function AgentEditor() {
               htmlFor="private_knowledge_enabled"
               error={privateKnowledgeError}
             >
-              <div className="flex items-center gap-2">
-                <Checkbox
-                  id="private_knowledge_enabled"
-                  checked={privateKnowledge?.enabled ?? false}
-                  onCheckedChange={(checked) =>
-                    handleEnablePrivateKnowledge(checked === true)
-                  }
-                />
-                <label
-                  htmlFor="private_knowledge_enabled"
-                  className="text-sm font-medium cursor-pointer select-none"
-                >
-                  Enable private knowledge
-                </label>
-              </div>
+              <LabeledCheckbox
+                id="private_knowledge_enabled"
+                checked={privateKnowledge?.enabled ?? false}
+                onChange={(checked) => handleEnablePrivateKnowledge(checked)}
+              >
+                Enable private knowledge
+              </LabeledCheckbox>
             </FieldGroup>
 
             {privateKnowledge?.enabled === true && (
@@ -891,21 +833,15 @@ export function AgentEditor() {
                   helperText="Schedule refresh on access for private agent knowledge."
                   htmlFor="private_knowledge_watch"
                 >
-                  <div className="flex items-center gap-2">
-                    <Checkbox
-                      id="private_knowledge_watch"
-                      checked={privateKnowledge.watch ?? true}
-                      onCheckedChange={(checked) =>
-                        updatePrivateKnowledge({ watch: checked === true })
-                      }
-                    />
-                    <label
-                      htmlFor="private_knowledge_watch"
-                      className="text-sm font-medium cursor-pointer select-none"
-                    >
-                      Refresh on access
-                    </label>
-                  </div>
+                  <LabeledCheckbox
+                    id="private_knowledge_watch"
+                    checked={privateKnowledge.watch ?? true}
+                    onChange={(checked) =>
+                      updatePrivateKnowledge({ watch: checked })
+                    }
+                  >
+                    Refresh on access
+                  </LabeledCheckbox>
                 </FieldGroup>
 
                 <SchemaSection
@@ -932,21 +868,15 @@ export function AgentEditor() {
         helperText="Whether to merge the global default tools into this agent's tools"
         htmlFor="include_default_tools"
       >
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="include_default_tools"
-            checked={selectedAgent.include_default_tools ?? true}
-            onCheckedChange={(checked) =>
-              handleFieldChange("include_default_tools", checked === true)
-            }
-          />
-          <label
-            htmlFor="include_default_tools"
-            className="text-sm font-medium cursor-pointer select-none"
-          >
-            Include default tools
-          </label>
-        </div>
+        <LabeledCheckbox
+          id="include_default_tools"
+          checked={selectedAgent.include_default_tools ?? true}
+          onChange={(checked) =>
+            handleFieldChange("include_default_tools", checked)
+          }
+        >
+          Include default tools
+        </LabeledCheckbox>
       </FieldGroup>
 
       {/* Tools */}
@@ -1143,6 +1073,7 @@ export function AgentEditor() {
             selected={selectedAgent.skills}
             onChange={(next) => handleFieldChange("skills", next)}
             idPrefix="skill"
+            className="space-y-2 max-h-56 overflow-y-auto border rounded-lg p-2"
             emptyMessage="No skills available. Create skills in the Skills tab first."
           />
         )}
@@ -1153,42 +1084,22 @@ export function AgentEditor() {
         label="Instructions"
         helperText="Custom instructions for this agent"
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleAddInstruction}
-            data-testid="add-instruction-button"
-            className="h-9 px-3"
-          >
-            <Plus className="h-4 w-4 sm:mr-1" />
-            <span className="hidden sm:inline">Add</span>
-          </Button>
+          <AddButton
+            onClick={() =>
+              handleFieldChange("instructions", [
+                ...selectedAgent.instructions,
+                "",
+              ])
+            }
+            testId="add-instruction-button"
+          />
         }
       >
-        <div className="space-y-2">
-          {selectedAgent.instructions.map((instruction, index) => (
-            <div key={index} className="flex gap-2">
-              <Input
-                value={instruction}
-                onChange={(e) => {
-                  const updated = [...selectedAgent.instructions];
-                  updated[index] = e.target.value;
-                  handleFieldChange("instructions", updated);
-                }}
-                placeholder="Instruction..."
-                className="min-h-[40px]"
-              />
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => handleRemoveInstruction(index)}
-                className="h-10 w-10 flex-shrink-0"
-              >
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-          ))}
-        </div>
+        <StringListField
+          values={selectedAgent.instructions}
+          onChange={(next) => handleFieldChange("instructions", next)}
+          placeholder="Instruction..."
+        />
       </FieldGroup>
 
       {/* Rooms */}
@@ -1202,7 +1113,6 @@ export function AgentEditor() {
           onChange={(next) => handleFieldChange("rooms", next)}
           idPrefix="room"
           emptyMessage="No rooms available. Create rooms in the Rooms tab."
-          className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
         />
       </FieldGroup>
 
@@ -1214,21 +1124,13 @@ export function AgentEditor() {
         })`}
         htmlFor="markdown"
       >
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="markdown"
-            checked={selectedAgent.markdown ?? defaultMarkdown}
-            onCheckedChange={(checked) =>
-              handleFieldChange("markdown", checked === true)
-            }
-          />
-          <label
-            htmlFor="markdown"
-            className="text-sm font-medium cursor-pointer select-none"
-          >
-            Enable markdown
-          </label>
-        </div>
+        <LabeledCheckbox
+          id="markdown"
+          checked={selectedAgent.markdown ?? defaultMarkdown}
+          onChange={(checked) => handleFieldChange("markdown", checked)}
+        >
+          Enable markdown
+        </LabeledCheckbox>
       </FieldGroup>
 
       {/* Show Tool Calls */}
@@ -1237,21 +1139,13 @@ export function AgentEditor() {
         helperText="Display tool call details inline in agent responses"
         htmlFor="show_tool_calls"
       >
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="show_tool_calls"
-            checked={selectedAgent.show_tool_calls ?? defaultShowToolCalls}
-            onCheckedChange={(checked) =>
-              handleFieldChange("show_tool_calls", checked === true)
-            }
-          />
-          <label
-            htmlFor="show_tool_calls"
-            className="text-sm font-medium cursor-pointer select-none"
-          >
-            Show tool calls inline
-          </label>
-        </div>
+        <LabeledCheckbox
+          id="show_tool_calls"
+          checked={selectedAgent.show_tool_calls ?? defaultShowToolCalls}
+          onChange={(checked) => handleFieldChange("show_tool_calls", checked)}
+        >
+          Show tool calls inline
+        </LabeledCheckbox>
       </FieldGroup>
 
       {/* Worker Tools */}
@@ -1314,25 +1208,19 @@ export function AgentEditor() {
         helperText="Let this agent read and modify its own configuration at runtime"
         htmlFor="allow_self_config"
       >
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="allow_self_config"
-            checked={
-              selectedAgent.allow_self_config ??
-              config?.defaults?.allow_self_config ??
-              false
-            }
-            onCheckedChange={(checked) =>
-              handleFieldChange("allow_self_config", checked === true)
-            }
-          />
-          <label
-            htmlFor="allow_self_config"
-            className="text-sm font-medium cursor-pointer select-none"
-          >
-            Enable self-configuration
-          </label>
-        </div>
+        <LabeledCheckbox
+          id="allow_self_config"
+          checked={
+            selectedAgent.allow_self_config ??
+            config?.defaults?.allow_self_config ??
+            false
+          }
+          onChange={(checked) =>
+            handleFieldChange("allow_self_config", checked)
+          }
+        >
+          Enable self-configuration
+        </LabeledCheckbox>
       </FieldGroup>
 
       <HistoryContextSection
@@ -1341,32 +1229,15 @@ export function AgentEditor() {
           updateAgent(selectedAgent.id, { [field]: value })
         }
         resetKey={selectedAgentId}
-        compactionPath={["agents", selectedAgent.id, "compaction"]}
+        path={["agents", selectedAgent.id]}
         defaults={config?.defaults}
-        historyRunsHelperText={`Number of prior conversation runs to include as history context. Leave empty to use default${
-          config?.defaults?.num_history_runs != null
-            ? ` (${config.defaults.num_history_runs})`
-            : " (all)"
-        }.`}
-        historyMessagesHelperText={`Max messages from history (mutually exclusive with History Runs). Leave empty to use default${
-          config?.defaults?.num_history_messages != null
-            ? ` (${config.defaults.num_history_messages})`
-            : " (all)"
-        }.`}
-        maxToolCallsHelperText={`Max tool call messages replayed from history. Leave empty to use default${
-          config?.defaults?.max_tool_calls_from_history != null
-            ? ` (${config.defaults.max_tool_calls_from_history})`
-            : " (no limit)"
-        }.`}
+        historyRunsHelperText="Number of prior conversation runs to include as history context."
+        historyMessagesHelperText="Max messages from history (mutually exclusive with History Runs)."
+        maxToolCallsHelperText="Max tool call messages replayed from history."
         autoCompactionHelperText="Automatically compact older session history before a run when the request crosses the compaction threshold on a route without native compaction, or when raw replay exceeds the hard context budget."
-        thresholdTokensHelperText="Compaction trigger in tokens, counted over the whole request. Supported OpenAI and Claude routes compact natively at it; every other route runs text compaction before the reply."
         compactionModelPlaceholder={
           config?.defaults?.compaction?.model ?? "Default: agent model"
         }
-        numHistoryRunsError={numHistoryRunsError}
-        numHistoryMessagesError={numHistoryMessagesError}
-        maxToolCallsFromHistoryError={maxToolCallsFromHistoryError}
-        compactionError={compactionError}
       />
 
       <SchemaSection
