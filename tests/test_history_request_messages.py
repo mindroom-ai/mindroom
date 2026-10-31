@@ -30,7 +30,6 @@ from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
-from tests.history_helpers import replay_settings
 from tests.llm.agno_dict_helpers import stored_run_record
 from tests.session_storage.goldens import LEGACY_AGNO3, loaded_sessions
 
@@ -44,7 +43,6 @@ _SCOPED_SELECTIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
     (_HISTORY / "scoped_selections.json").read_text(),
 )
 _HISTORY_GOLDENS = sorted(path for path in _HISTORY.glob("*.json") if path.name != "scoped_selections.json")
-_SETTINGS = replay_settings()
 _AGENT = HistoryScope(kind="agent", scope_id="code")
 _TEAM = HistoryScope(kind="team", scope_id="squad")
 _SUMMARY = ScopeSummary(
