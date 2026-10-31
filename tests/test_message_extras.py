@@ -7,7 +7,6 @@ import pytest
 from mindroom.matrix.message_extras import (
     MINDROOM_MESSAGE_EXTRAS_KEY,
     MatrixMessageExtra,
-    MessageExtraSection,
     build_message_extras_content,
     parse_message_extra_sections,
 )
@@ -17,13 +16,13 @@ def test_build_message_extras_content_uses_cinny_schema() -> None:
     """Message extras should match the schema rendered by MindRoom Chat."""
     content = build_message_extras_content(
         [
-            MessageExtraSection(
+            MatrixMessageExtra(
                 title="Evidence",
                 content_type="text/html",
                 content="<table><tr><td>42</td></tr></table>",
                 collapsed=False,
             ),
-            MessageExtraSection(
+            MatrixMessageExtra(
                 title="Notes",
                 content="**Markdown** details",
             ),
@@ -78,4 +77,4 @@ def test_parse_message_extra_sections_strips_titles_and_keeps_section_settings()
         [MatrixMessageExtra(title="  Evidence ", content=" raw ", content_type="text/html", collapsed=False)],
     )
 
-    assert section == MessageExtraSection(title="Evidence", content=" raw ", content_type="text/html", collapsed=False)
+    assert section == MatrixMessageExtra(title="Evidence", content=" raw ", content_type="text/html", collapsed=False)

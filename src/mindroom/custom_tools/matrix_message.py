@@ -29,7 +29,6 @@ from mindroom.tool_system.authoring import Toolkit
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
-    from mindroom.matrix.message_extras import MessageExtraSection
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -195,7 +194,7 @@ class MatrixMessageTools(Toolkit):
         new_thread: bool,
         event_id: str | None,
         attachments: list[str],
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         limit: int | None,
         send_claim: MatrixMessageSendClaim | None = None,
     ) -> str:

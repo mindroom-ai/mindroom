@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -18,7 +17,6 @@ __all__ = [
     "MINDROOM_MESSAGE_EXTRAS_VERSION",
     "MatrixMessageExtra",
     "MessageExtraContentType",
-    "MessageExtraSection",
     "build_message_extras_content",
     "parse_message_extra_sections",
 ]
@@ -32,16 +30,6 @@ MINDROOM_MESSAGE_EXTRAS_MAX_CONTENT_CHARS = 16 * 1024
 MessageExtraContentType = Literal["text/plain", "text/markdown", "text/html"]
 
 
-@dataclass(frozen=True, slots=True)
-class MessageExtraSection:
-    """One collapsible MindRoom message extra section."""
-
-    title: str
-    content: str
-    content_type: MessageExtraContentType = "text/markdown"
-    collapsed: bool = True
-
-
 class MatrixMessageExtra(BaseModel):
     """Model-facing fields for one optional collapsible section."""
 
@@ -53,13 +41,13 @@ class MatrixMessageExtra(BaseModel):
     collapsed: bool = True
 
 
-def parse_message_extra_sections(sections: Sequence[MatrixMessageExtra]) -> list[MessageExtraSection]:
+def parse_message_extra_sections(sections: Sequence[MatrixMessageExtra]) -> list[MatrixMessageExtra]:
     """Return the sections a tool was given, titles stripped, refusing ones over the limits or without a title."""
     if len(sections) > MINDROOM_MESSAGE_EXTRAS_MAX_SECTIONS:
         msg = f"message_extras supports at most {MINDROOM_MESSAGE_EXTRAS_MAX_SECTIONS} sections."
         raise ValueError(msg)
 
-    parsed_sections: list[MessageExtraSection] = []
+    parsed_sections: list[MatrixMessageExtra] = []
     for index, section in enumerate(sections, start=1):
         title = section.title.strip()
         if not title:
@@ -74,19 +62,12 @@ def parse_message_extra_sections(sections: Sequence[MatrixMessageExtra]) -> list
                 f"{MINDROOM_MESSAGE_EXTRAS_MAX_CONTENT_CHARS} characters."
             )
             raise ValueError(msg)
-        parsed_sections.append(
-            MessageExtraSection(
-                title=title,
-                content=section.content,
-                content_type=section.content_type,
-                collapsed=section.collapsed,
-            ),
-        )
+        parsed_sections.append(section.model_copy(update={"title": title}))
 
     return parsed_sections
 
 
-def build_message_extras_content(sections: Sequence[MessageExtraSection]) -> dict[str, object]:
+def build_message_extras_content(sections: Sequence[MatrixMessageExtra]) -> dict[str, object]:
     """Build Matrix event content for MindRoom-aware clients to render as extras."""
     return {
         MINDROOM_MESSAGE_EXTRAS_KEY: {

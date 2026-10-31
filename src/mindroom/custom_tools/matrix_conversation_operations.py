@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.message_extras import MessageExtraSection
+    from mindroom.matrix.message_extras import MatrixMessageExtra
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -113,7 +113,7 @@ class MatrixMessageOperations:
         text: str,
         thread_id: str | None,
         recipient_user_id: str | None,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         known_latest_thread_event_id: str | None = None,
         attachment_ids: list[str] | None = None,
         send_claim: MatrixMessageSendClaim | None = None,
@@ -218,7 +218,7 @@ class MatrixMessageOperations:
         recipient_user_id: str | None,
         room_mode: bool,
         new_thread: bool,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,
     ) -> MatrixMessageOperationResult:
@@ -466,7 +466,7 @@ class MatrixMessageOperations:
         thread_id: str | None,
         event_id: str | None,
         message: str | None,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
     ) -> MatrixMessageOperationResult:
         if event_id is None:
             return self._result("error", action="edit", message="event_id is required for edit.")
@@ -523,7 +523,7 @@ class MatrixMessageOperations:
         recipient_user_id: str | None,
         room_mode: bool,
         new_thread: bool,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         read_limit: int,
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,
