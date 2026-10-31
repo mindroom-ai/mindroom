@@ -1,7 +1,6 @@
 import { Agent, AgentPoliciesByAgent, Config } from "@/types/config";
 import { ConfigValidationIssue } from "@/lib/configValidation";
 
-const API_BASE = "/api";
 const CONFIG_GENERATION_HEADER = "x-mindroom-config-generation";
 const CONFIG_USES_INCLUDES_HEADER = "x-mindroom-config-uses-includes";
 const CONFIG_PENDING_RESTART_HEADER = "x-mindroom-config-pending-restart";
@@ -72,14 +71,17 @@ async function responseDetail(response: Response): Promise<unknown> {
   }
 }
 
+function responseHeader(response: Response, name: string): string | null {
+  return typeof response.headers?.get === "function"
+    ? response.headers.get(name)
+    : null;
+}
+
 function responseGeneration(
   response: Response,
   fallbackGeneration: number,
 ): number {
-  const headerValue =
-    typeof response.headers?.get === "function"
-      ? response.headers.get(CONFIG_GENERATION_HEADER)
-      : null;
+  const headerValue = responseHeader(response, CONFIG_GENERATION_HEADER);
   const parsed =
     headerValue == null || headerValue.trim() === ""
       ? Number.NaN
@@ -88,22 +90,14 @@ function responseGeneration(
 }
 
 function responseUsesIncludes(response: Response): boolean {
-  const headerValue =
-    typeof response.headers?.get === "function"
-      ? response.headers.get(CONFIG_USES_INCLUDES_HEADER)
-      : null;
-  return headerValue === "true";
+  return responseHeader(response, CONFIG_USES_INCLUDES_HEADER) === "true";
 }
 
 // The saved event_journal is read once, when the store is opened, so an edit
 // to it is accepted and then does nothing until a restart. The editor shows
 // the saved value either way; this is what stops that from being a lie.
 function responsePendingRestart(response: Response): boolean {
-  const headerValue =
-    typeof response.headers?.get === "function"
-      ? response.headers.get(CONFIG_PENDING_RESTART_HEADER)
-      : null;
-  return headerValue === "true";
+  return responseHeader(response, CONFIG_PENDING_RESTART_HEADER) === "true";
 }
 
 export async function loadConfig(): Promise<{
@@ -112,7 +106,7 @@ export async function loadConfig(): Promise<{
   usesIncludes: boolean;
   pendingRestart: boolean;
 }> {
-  const response = await fetch(`${API_BASE}/config/load`, {
+  const response = await fetch("/api/config/load", {
     method: "POST",
   });
 
@@ -160,7 +154,7 @@ export async function getAgentPolicies(
     {} as Record<string, Omit<Agent, "id">>,
   );
 
-  const response = await fetch(`${API_BASE}/config/agent-policies`, {
+  const response = await fetch("/api/config/agent-policies", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -185,7 +179,7 @@ export async function saveConfig(
   config: Config,
   generation: number,
 ): Promise<{ generation: number }> {
-  const response = await fetch(`${API_BASE}/config/save`, {
+  const response = await fetch("/api/config/save", {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
@@ -221,7 +215,7 @@ export async function loadRawConfigSource(): Promise<{
   source: string;
   generation: number;
 }> {
-  const response = await fetch(`${API_BASE}/config/raw`);
+  const response = await fetch("/api/config/raw");
 
   if (!response.ok) {
     const detail = await responseDetail(response);
@@ -244,7 +238,7 @@ export async function saveRawConfigSource(
   source: string,
   generation: number,
 ): Promise<{ generation: number }> {
-  const response = await fetch(`${API_BASE}/config/raw`, {
+  const response = await fetch("/api/config/raw", {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",

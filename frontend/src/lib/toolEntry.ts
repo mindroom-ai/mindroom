@@ -52,7 +52,7 @@ function parseToolEntry(entry: ToolEntry): {
   };
 }
 
-function sanitizeOverrideValue(value: unknown): unknown | null {
+function sanitizeOverrideValue(value: unknown): unknown {
   if (value == null) {
     return null;
   }

@@ -554,7 +554,6 @@ describe("TeamEditor", () => {
               threshold_percent: 0.8,
             },
           },
-          teams: { dev_team: compactionTeam },
         },
         selectedTeamId: "dev_team",
         updateTeam: mockUpdateTeam,
@@ -612,7 +611,6 @@ describe("TeamEditor", () => {
             threshold_percent: 0.8,
           },
         },
-        teams: { dev_team: compactionTeam },
       },
       selectedTeamId: "dev_team",
       updateTeam: mockUpdateTeam,
@@ -658,7 +656,6 @@ describe("TeamEditor", () => {
       config: {
         ...mockConfig,
         defaults: {},
-        teams: { dev_team: mockTeam },
       },
       selectedTeamId: "dev_team",
       updateTeam: mockUpdateTeam,
@@ -707,7 +704,6 @@ describe("TeamEditor", () => {
           ...mockConfig.defaults,
           compaction: null,
         },
-        teams: { dev_team: mockTeam },
       },
       selectedTeamId: "dev_team",
       updateTeam: mockUpdateTeam,
@@ -756,7 +752,6 @@ describe("TeamEditor", () => {
           ...mockConfig.defaults,
           compaction: {},
         },
-        teams: { dev_team: mockTeam },
       },
       selectedTeamId: "dev_team",
       updateTeam: mockUpdateTeam,
@@ -882,24 +877,6 @@ describe("TeamEditor", () => {
     await waitFor(() => {
       expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
         agents: ["shell"],
-      });
-    });
-  });
-
-  it("adds room to team when checkbox is checked", async () => {
-    render(<TeamEditor />);
-
-    // Find the research room checkbox specifically (not the research agent checkbox)
-    const checkboxes = screen.getAllByRole("checkbox");
-    const researchRoomCheckbox = checkboxes.find(
-      (cb) => cb.id === "room-research",
-    );
-
-    fireEvent.click(researchRoomCheckbox!);
-
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        rooms: ["dev", "lobby", "research"],
       });
     });
   });

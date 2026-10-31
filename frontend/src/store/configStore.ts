@@ -216,14 +216,14 @@ function nextDraftVersion(draftVersion: number): number {
   return draftVersion + 1;
 }
 
-function markDraftDirty<T extends object>(
+function markDraftDirty(
   state: Pick<ConfigState, "draftVersion" | "diagnostics" | "dirtyRoots">,
-  changes: T,
   touchedPaths: ConfigDiagnosticPath[] = [],
-): T &
-  Pick<ConfigState, "isDirty" | "diagnostics" | "draftVersion" | "dirtyRoots"> {
+): Pick<
+  ConfigState,
+  "isDirty" | "diagnostics" | "draftVersion" | "dirtyRoots"
+> {
   return {
-    ...changes,
     isDirty: true,
     diagnostics: retainedDraftDiagnostics(state.diagnostics, touchedPaths),
     draftVersion: nextDraftVersion(state.draftVersion),
@@ -1332,7 +1332,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           nextAgents,
           state.teams,
         ),
-        ...markDraftDirty(state, {}, touchedPaths),
+        ...markDraftDirty(state, touchedPaths),
       };
     });
     if (shouldRefreshAgentPolicies && get().config != null) {
@@ -1387,7 +1387,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           nextAgents,
           state.teams,
         ),
-        ...markDraftDirty(state, {}, touchedPaths),
+        ...markDraftDirty(state, touchedPaths),
         privateWorkerScopeBackups: nextBackups,
       };
     });
@@ -1412,7 +1412,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         state.teams,
       ),
       selectedAgentId: id,
-      ...markDraftDirty(state, {}, [["agents"]]),
+      ...markDraftDirty(state, [["agents"]]),
     }));
     if (get().config != null) {
       void get().refreshAgentPolicies([...get().agents]);
@@ -1449,7 +1449,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       privateWorkerScopeBackups: remainingBackups,
       selectedAgentId:
         state.selectedAgentId === agentId ? null : state.selectedAgentId,
-      ...markDraftDirty(state, {}, [["agents"], ["teams"]]),
+      ...markDraftDirty(state, [["agents"], ["teams"]]),
     });
     if (get().config != null && deletedAgent != null) {
       void get().refreshAgentPolicies(nextAgents);
@@ -1484,7 +1484,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           state.agents,
           nextTeams,
         ),
-        ...markDraftDirty(state, {}, touchedPaths),
+        ...markDraftDirty(state, touchedPaths),
       };
     });
   },
@@ -1503,7 +1503,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         newTeam,
       ]),
       selectedTeamId: id,
-      ...markDraftDirty(state, {}, [["teams"]]),
+      ...markDraftDirty(state, [["teams"]]),
     }));
   },
 
@@ -1521,7 +1521,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ),
         selectedTeamId:
           state.selectedTeamId === teamId ? null : state.selectedTeamId,
-        ...markDraftDirty(state, {}, [["teams"]]),
+        ...markDraftDirty(state, [["teams"]]),
       };
     });
   },
@@ -1619,7 +1619,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             updatedAgents,
             state.teams,
           ),
-          ...markDraftDirty(state, {}, [
+          ...markDraftDirty(state, [
             ["agents"],
             ...roomMetadataTouchedPaths,
             ...roomModelTouchedPaths,
@@ -1651,7 +1651,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           state.agents,
           state.teams,
         ),
-        ...markDraftDirty(state, {}, touchedPaths),
+        ...markDraftDirty(state, touchedPaths),
       };
     });
   },
@@ -1707,7 +1707,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ),
         agents: updatedAgents,
         selectedRoomId: id,
-        ...markDraftDirty(state, {}, touchedPaths),
+        ...markDraftDirty(state, touchedPaths),
       };
     });
   },
@@ -1776,7 +1776,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ),
         selectedRoomId:
           state.selectedRoomId === roomId ? null : state.selectedRoomId,
-        ...markDraftDirty(state, {}, touchedPaths),
+        ...markDraftDirty(state, touchedPaths),
       };
     });
   },
@@ -1788,7 +1788,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const nextConfig = { ...state.config, memory: memoryConfig };
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["memory"]]),
+        ...markDraftDirty(state, [["memory"]]),
       };
     });
   },
@@ -1810,7 +1810,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       };
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["knowledge_bases", baseName]]),
+        ...markDraftDirty(state, [["knowledge_bases", baseName]]),
       };
     });
   },
@@ -1832,30 +1832,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             })
           : agent,
       );
-      const configAgents = Object.fromEntries(
-        Object.entries(state.config.agents).map(([agentId, agentConfig]) => [
-          agentId,
-          {
-            ...agentConfig,
-            knowledge_bases: (agentConfig.knowledge_bases || []).filter(
-              (base) => base !== baseName,
-            ),
-          },
-        ]),
-      );
       const nextConfig = {
         ...state.config,
         knowledge_bases: knowledgeBases,
-        agents: configAgents,
       };
 
       return {
         config: nextConfig,
         agents,
-        ...markDraftDirty(state, {}, [
-          ["knowledge_bases", baseName],
-          ["agents"],
-        ]),
+        ...markDraftDirty(state, [["knowledge_bases", baseName], ["agents"]]),
       };
     });
   },
@@ -1871,7 +1856,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       };
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["models"]]),
+        ...markDraftDirty(state, [["models"]]),
       };
     });
   },
@@ -1883,7 +1868,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         config: nextConfig,
         rooms: deriveRooms(nextConfig, state.agents, state.teams),
-        ...markDraftDirty(state, {}, [[...path]]),
+        ...markDraftDirty(state, [[...path]]),
       };
     });
   },

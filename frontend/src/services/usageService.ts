@@ -154,7 +154,7 @@ export async function fetchUsage(
 ): Promise<UsagePollResult> {
   let response: Response;
   try {
-    response = await fetch(`/api/usage?include_daily=true`, {
+    response = await fetch("/api/usage?include_daily=true", {
       cache: "no-store",
       credentials: "same-origin",
       signal,

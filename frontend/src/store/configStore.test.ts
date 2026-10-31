@@ -37,6 +37,19 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+// Saves the draft and returns the payload of that save.
+async function savedPayload() {
+  (global.fetch as any).mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({ success: true }),
+  });
+  await useConfigStore.getState().saveConfig();
+  const saveCalls = (global.fetch as any).mock.calls.filter(
+    ([url]: [string]) => url === "/api/config/save",
+  );
+  return JSON.parse(saveCalls[saveCalls.length - 1][1].body);
+}
+
 describe("configStore", () => {
   beforeEach(() => {
     // Reset store state
@@ -586,18 +599,6 @@ describe("configStore", () => {
           }),
         });
         await useConfigStore.getState().loadConfig();
-      }
-
-      async function savedPayload() {
-        (global.fetch as any).mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ success: true }),
-        });
-        await useConfigStore.getState().saveConfig();
-        const saveCalls = (global.fetch as any).mock.calls.filter(
-          ([url]: [string]) => url === "/api/config/save",
-        );
-        return JSON.parse(saveCalls[saveCalls.length - 1][1].body);
       }
 
       it("fills them in on load", async () => {
@@ -2077,7 +2078,7 @@ describe("configStore", () => {
       expect(state.config?.agents).toEqual({ test: agentWithoutId });
     });
 
-    it("saves the draft's tool entries after config clones", async () => {
+    it("saves the draft's tool entries", async () => {
       const mockConfig = {
         agents: {
           test: {
@@ -2159,76 +2160,6 @@ describe("configStore", () => {
         { gmail: { label: "support" } },
         "file",
       ]);
-    });
-
-    it("preserves structured tool entries when a room creation clone is followed by agent edits", async () => {
-      const mockConfig = {
-        agents: {
-          test: {
-            display_name: "Test Agent",
-            role: "Test role",
-            tools: ["calculator", { shell: { sandbox: "tight" } }],
-            skills: [],
-            instructions: [],
-            rooms: [],
-          },
-        },
-        defaults: {
-          markdown: true,
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { test: makeAgentPolicy("test") },
-        }),
-      });
-
-      await useConfigStore.getState().loadConfig();
-      useConfigStore.getState().createRoom({
-        display_name: "Project Room",
-        description: "Planning space",
-        agents: [],
-      });
-      useConfigStore.getState().updateAgent("test", {
-        tools: toolEntriesForNames(
-          ["shell", "browser"],
-          useConfigStore.getState().agents[0].tools,
-        ),
-      });
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true }),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const saveCall = (global.fetch as any).mock.calls[2];
-      expect(JSON.parse(saveCall[1].body)).toMatchObject({
-        agents: {
-          test: {
-            tools: [{ shell: { sandbox: "tight" } }, "browser"],
-          },
-        },
-        rooms: {
-          project_room: {
-            display_name: "Project Room",
-            description: "Planning space",
-          },
-        },
-      });
     });
 
     it("stores backend validation issues without poisoning the global load error", async () => {
@@ -4335,7 +4266,7 @@ describe("configStore", () => {
       expect(state.isDirty).toBe(true);
     });
 
-    it("should remove deleted knowledge base from all agent assignments", () => {
+    it("should remove deleted knowledge base from all agent assignments", async () => {
       useConfigStore.setState({
         config: {
           memory: {
@@ -4408,9 +4339,10 @@ describe("configStore", () => {
       expect(
         state.agents.find((agent) => agent.id === "agent2")?.knowledge_bases,
       ).toEqual([]);
-      expect(state.config?.agents.agent1.knowledge_bases).toEqual(["legal"]);
-      expect(state.config?.agents.agent2.knowledge_bases).toEqual([]);
       expect(state.isDirty).toBe(true);
+      const payload = await savedPayload();
+      expect(payload.agents.agent1.knowledge_bases).toEqual(["legal"]);
+      expect(payload.agents.agent2.knowledge_bases).toEqual([]);
     });
   });
 
@@ -6017,18 +5949,6 @@ describe("configStore", () => {
       await useConfigStore.getState().loadConfig();
     }
 
-    async function savedPayload() {
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true }),
-      });
-      await useConfigStore.getState().saveConfig();
-      const saveCall = (global.fetch as any).mock.calls.find(
-        ([url]: [string]) => url === "/api/config/save",
-      );
-      return JSON.parse(saveCall[1].body);
-    }
-
     it("marks the root dirty and saves its new value", async () => {
       await loadBaseConfig();
 
@@ -6404,15 +6324,7 @@ describe("configStore", () => {
       useConfigStore.getState().updateConfigValue(path, { preset: "openai" });
       useConfigStore.getState().restoreConfigValue(path, undefined, before);
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true }),
-      });
-      await useConfigStore.getState().saveConfig();
-      const saveCall = (global.fetch as any).mock.calls.find(
-        ([url]: [string]) => url === "/api/config/save",
-      );
-      expect(JSON.parse(saveCall[1].body).egress_broker).toEqual(
+      expect((await savedPayload()).egress_broker).toEqual(
         authored.egress_broker,
       );
     });
@@ -6428,16 +6340,15 @@ describe("configStore", () => {
   });
 
   describe("tool overrides", () => {
-    async function loadAgentTools(defaultTools?: unknown[]) {
+    async function loadAgentTools({
+      tools = ["browser", { shell: { sandbox: "tight" } }] as unknown[],
+      defaultTools = undefined as unknown[] | undefined,
+    } = {}) {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => ({
           agents: {
-            coder: {
-              display_name: "Coder",
-              role: "Codes",
-              tools: ["browser", { shell: { sandbox: "tight" } }],
-            },
+            coder: { display_name: "Coder", role: "Codes", tools },
           },
           models: { default: { provider: "ollama", id: "test-model" } },
           defaults: {
@@ -6453,18 +6364,6 @@ describe("configStore", () => {
         }),
       });
       await useConfigStore.getState().loadConfig();
-    }
-
-    async function savedPayload() {
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-      await useConfigStore.getState().saveConfig();
-      const saveCall = (global.fetch as any).mock.calls.find(
-        ([url]: [string]) => url === "/api/config/save",
-      );
-      return JSON.parse(saveCall[1].body);
     }
 
     it("gives an agent re-created under a deleted agent's id no tool overrides", async () => {
@@ -6506,7 +6405,7 @@ describe("configStore", () => {
     });
 
     it("ignores overrides for a tool the agent or the defaults do not list", async () => {
-      await loadAgentTools(["file"]);
+      await loadAgentTools({ defaultTools: ["file"] });
       const before = useConfigStore.getState();
 
       useConfigStore
@@ -6524,7 +6423,7 @@ describe("configStore", () => {
     });
 
     it("leaves the loaded config unchanged when overrides are edited", async () => {
-      await loadAgentTools([{ gmail: { label: "support" } }]);
+      await loadAgentTools({ defaultTools: [{ gmail: { label: "support" } }] });
       const loaded = structuredClone(useConfigStore.getState().loadedConfig);
 
       useConfigStore
@@ -6544,32 +6443,9 @@ describe("configStore", () => {
     });
 
     it("clears lazy-loading flags patched to null and keeps other overrides", async () => {
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agents: {
-            coder: {
-              display_name: "Coder",
-              role: "Codes",
-              tools: [
-                { shell: { defer: true, initial: true, sandbox: "tight" } },
-              ],
-              skills: [],
-              instructions: [],
-              rooms: [],
-            },
-          },
-          models: { default: { provider: "ollama", id: "test-model" } },
-          defaults: { markdown: true },
-        }),
+      await loadAgentTools({
+        tools: [{ shell: { defer: true, initial: true, sandbox: "tight" } }],
       });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { coder: makeAgentPolicy("coder") },
-        }),
-      });
-      await useConfigStore.getState().loadConfig();
 
       useConfigStore.getState().updateAgentToolOverrides("coder", "shell", {
         defer: null,
@@ -6578,170 +6454,55 @@ describe("configStore", () => {
       expect(
         useConfigStore.getState().getAgentToolOverrides("coder", "shell"),
       ).toEqual({ sandbox: "tight" });
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true }),
-      });
-      await useConfigStore.getState().saveConfig();
-      const saveCall = (global.fetch as any).mock.calls.find(
-        ([url]: [string]) => url === "/api/config/save",
-      );
-      expect(JSON.parse(saveCall[1].body).agents.coder.tools).toEqual([
+      expect((await savedPayload()).agents.coder.tools).toEqual([
         { shell: { sandbox: "tight" } },
       ]);
     });
 
     it("exposes the overrides of loaded tool entries", async () => {
-      const mockConfig = {
-        agents: {
-          openclaw: {
-            display_name: "OpenClaw",
-            role: "Coding agent",
-            tools: [
-              "browser",
-              { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
-            ],
-            skills: [],
-            instructions: [],
-            rooms: [],
-          },
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-        defaults: {
-          markdown: true,
-        },
-        router: {
-          model: "default",
-        },
-        memory: {
-          embedder: {
-            provider: "openai",
-            config: {
-              model: "text-embedding-3-small",
-            },
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { openclaw: makeAgentPolicy("openclaw") },
-        }),
-      });
-
-      await useConfigStore.getState().loadConfig();
+      const tools = [
+        "browser",
+        { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
+      ];
+      await loadAgentTools({ tools });
 
       const state = useConfigStore.getState();
-      expect(state.agents[0].tools).toEqual(mockConfig.agents.openclaw.tools);
-      expect(state.getAgentToolOverrides("openclaw", "shell")).toEqual({
+      expect(state.agents[0].tools).toEqual(tools);
+      expect(state.getAgentToolOverrides("coder", "shell")).toEqual({
         extra_env_passthrough: ["GITEA_TOKEN"],
       });
     });
 
     it("updates overrides, marks the draft dirty, and saves the edited entry", async () => {
-      const mockConfig = {
-        agents: {
-          openclaw: {
-            display_name: "OpenClaw",
-            role: "Coding agent",
-            tools: [
-              "browser",
-              { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
-            ],
-            skills: [],
-            instructions: [],
-            rooms: [],
-          },
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-        defaults: {
-          markdown: true,
-        },
-        router: {
-          model: "default",
-        },
-        memory: {
-          embedder: {
-            provider: "openai",
-            config: {
-              model: "text-embedding-3-small",
-            },
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
+      await loadAgentTools({
+        tools: [
+          "browser",
+          { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
+        ],
       });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { openclaw: makeAgentPolicy("openclaw") },
-        }),
-      });
-
-      await useConfigStore.getState().loadConfig();
-      useConfigStore.getState().updateAgentToolOverrides("openclaw", "shell", {
+      useConfigStore.getState().updateAgentToolOverrides("coder", "shell", {
         shell_path_prepend: ["/run/wrappers/bin"],
       });
 
       expect(useConfigStore.getState().isDirty).toBe(true);
       expect(
-        useConfigStore.getState().getAgentToolOverrides("openclaw", "shell"),
+        useConfigStore.getState().getAgentToolOverrides("coder", "shell"),
       ).toEqual({
         extra_env_passthrough: ["GITEA_TOKEN"],
         shell_path_prepend: ["/run/wrappers/bin"],
       });
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const saveCall = (global.fetch as any).mock.calls[2];
-      expect(saveCall[0]).toBe("/api/config/save");
-      expect(saveCall[1]).toMatchObject({
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "x-mindroom-config-generation": "0",
-        },
-      });
-      expect(JSON.parse(saveCall[1].body)).toMatchObject({
-        agents: {
-          openclaw: {
-            ...mockConfig.agents.openclaw,
-            tools: [
-              "browser",
-              {
-                shell: {
-                  extra_env_passthrough: ["GITEA_TOKEN"],
-                  shell_path_prepend: ["/run/wrappers/bin"],
-                },
-              },
-            ],
+      expect((await savedPayload()).agents.coder).toEqual({
+        display_name: "Coder",
+        role: "Codes",
+        tools: [
+          "browser",
+          {
+            shell: {
+              extra_env_passthrough: ["GITEA_TOKEN"],
+              shell_path_prepend: ["/run/wrappers/bin"],
+            },
           },
-        },
-        knowledge_bases: {},
+        ],
       });
     });
 
@@ -6811,17 +6572,7 @@ describe("configStore", () => {
         extra_env_passthrough: ["GITEA_TOKEN"],
         shell_path_prepend: ["/run/wrappers/bin"],
       });
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const saveCall = (global.fetch as any).mock.calls[2];
-      expect(saveCall[0]).toBe("/api/config/save");
-      expect(JSON.parse(saveCall[1].body)).toMatchObject({
+      expect(await savedPayload()).toMatchObject({
         ...mockConfig,
         room_models: {
           lobby: "claude",
@@ -6830,80 +6581,14 @@ describe("configStore", () => {
     });
 
     it("collapses an empty override object back to a plain string entry on save", async () => {
-      const mockConfig = {
-        agents: {
-          openclaw: {
-            display_name: "OpenClaw",
-            role: "Coding agent",
-            tools: [{ shell: { extra_env_passthrough: ["GITEA_TOKEN"] } }],
-            skills: [],
-            instructions: [],
-            rooms: [],
-          },
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-        defaults: {
-          markdown: true,
-        },
-        router: {
-          model: "default",
-        },
-        memory: {
-          embedder: {
-            provider: "openai",
-            config: {
-              model: "text-embedding-3-small",
-            },
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
+      await loadAgentTools({
+        tools: [{ shell: { extra_env_passthrough: ["GITEA_TOKEN"] } }],
       });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { openclaw: makeAgentPolicy("openclaw") },
-        }),
-      });
-
-      await useConfigStore.getState().loadConfig();
-      useConfigStore.getState().updateAgentToolOverrides("openclaw", "shell", {
+      useConfigStore.getState().updateAgentToolOverrides("coder", "shell", {
         extra_env_passthrough: null,
       });
 
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await useConfigStore.getState().saveConfig();
-
-      const saveCall = (global.fetch as any).mock.calls[2];
-      expect(saveCall[0]).toBe("/api/config/save");
-      expect(saveCall[1]).toMatchObject({
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "x-mindroom-config-generation": "0",
-        },
-      });
-      expect(JSON.parse(saveCall[1].body)).toMatchObject({
-        agents: {
-          openclaw: {
-            ...mockConfig.agents.openclaw,
-            tools: ["shell"],
-          },
-        },
-        knowledge_bases: {},
-      });
+      expect((await savedPayload()).agents.coder.tools).toEqual(["shell"]);
     });
   });
 });

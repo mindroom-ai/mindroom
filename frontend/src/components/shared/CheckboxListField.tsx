@@ -11,7 +11,7 @@ export interface CheckboxListFieldProps {
   selected: string[];
   onChange: (selected: string[]) => void;
   idPrefix: string;
-  emptyMessage?: string;
+  emptyMessage: string;
   className?: string;
 }
 
@@ -25,7 +25,7 @@ export function CheckboxListField({
 }: CheckboxListFieldProps) {
   return (
     <div className={className}>
-      {items.length === 0 && emptyMessage ? (
+      {items.length === 0 ? (
         <p className="text-sm text-muted-foreground text-center py-2">
           {emptyMessage}
         </p>
@@ -36,7 +36,7 @@ export function CheckboxListField({
           return (
             <div
               key={item.value}
-              className="flex items-center space-x-2 p-2 rounded-lg hover:bg-secondary transition-all duration-200"
+              className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-secondary transition-all duration-200"
             >
               <Checkbox
                 id={checkboxId}
@@ -48,8 +48,12 @@ export function CheckboxListField({
                       : selected.filter((v) => v !== item.value),
                   )
                 }
+                className="h-5 w-5 sm:h-4 sm:w-4"
               />
-              <label htmlFor={checkboxId} className="flex-1 cursor-pointer">
+              <label
+                htmlFor={checkboxId}
+                className="flex-1 cursor-pointer select-none"
+              >
                 <div className="font-medium text-sm">{item.label}</div>
                 {item.description && (
                   <div className="text-xs text-gray-500 dark:text-gray-400">

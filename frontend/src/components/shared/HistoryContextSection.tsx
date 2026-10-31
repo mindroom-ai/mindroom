@@ -98,13 +98,11 @@ export function HistoryContextSection({
   const {
     num_history_runs: numHistoryRuns,
     num_history_messages: numHistoryMessages,
+    max_tool_calls_from_history: maxToolCallsFromHistory,
     compaction: compactionConfig,
   } = values;
-  const mutateCompaction = (
-    mutator: (
-      current: CompactionConfig | null | undefined,
-    ) => CompactionConfig | null | undefined,
-  ) => onChange("compaction", mutator(compactionConfig));
+  const patchCompaction = (patch: CompactionConfig) =>
+    onChange("compaction", { ...compactionConfig, ...patch });
   const [compactionThresholdPercentInput, setCompactionThresholdPercentInput] =
     useState("");
   const defaultCompaction = defaults?.compaction;
@@ -197,7 +195,7 @@ export function HistoryContextSection({
             id="max_tool_calls_from_history"
             type="number"
             min={0}
-            value={values.max_tool_calls_from_history ?? ""}
+            value={maxToolCallsFromHistory ?? ""}
             placeholder={
               defaults?.max_tool_calls_from_history != null
                 ? `Default: ${defaults.max_tool_calls_from_history}`
@@ -224,10 +222,7 @@ export function HistoryContextSection({
                 id="compaction_enabled"
                 checked={effectiveCompactionEnabled}
                 onCheckedChange={(checked) => {
-                  mutateCompaction((current) => ({
-                    ...(current ?? {}),
-                    enabled: checked === true,
-                  }));
+                  patchCompaction({ enabled: checked === true });
                 }}
               />
               <label
@@ -266,14 +261,13 @@ export function HistoryContextSection({
                   }
                   onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 1);
-                    mutateCompaction((current) => ({
-                      ...(current ?? {}),
+                    patchCompaction({
                       threshold_tokens: value ?? undefined,
                       threshold_percent:
                         value != null
                           ? null
-                          : (current?.threshold_percent ?? undefined),
-                    }));
+                          : (compactionConfig?.threshold_percent ?? undefined),
+                    });
                   }}
                 />
               </FieldGroup>
@@ -302,14 +296,13 @@ export function HistoryContextSection({
                     if (raw.trim() !== "" && value == null) {
                       return;
                     }
-                    mutateCompaction((current) => ({
-                      ...(current ?? {}),
+                    patchCompaction({
                       threshold_percent: value ?? undefined,
                       threshold_tokens:
                         value != null
                           ? null
-                          : (current?.threshold_tokens ?? undefined),
-                    }));
+                          : (compactionConfig?.threshold_tokens ?? undefined),
+                    });
                   }}
                   onBlur={() => {
                     const value = parseOptionalUnitFloat(
@@ -346,10 +339,9 @@ export function HistoryContextSection({
                   }
                   onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 1);
-                    mutateCompaction((current) => ({
-                      ...(current ?? {}),
+                    patchCompaction({
                       replay_window_tokens: value ?? undefined,
-                    }));
+                    });
                   }}
                 />
               </FieldGroup>
@@ -367,10 +359,7 @@ export function HistoryContextSection({
                   placeholder={`Default: ${defaultCompaction?.reserve_tokens ?? 16384}`}
                   onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 0);
-                    mutateCompaction((current) => ({
-                      ...(current ?? {}),
-                      reserve_tokens: value ?? undefined,
-                    }));
+                    patchCompaction({ reserve_tokens: value ?? undefined });
                   }}
                 />
               </FieldGroup>
@@ -386,10 +375,7 @@ export function HistoryContextSection({
                   placeholder={compactionModelPlaceholder}
                   onChange={(e) => {
                     const value = e.target.value.trim();
-                    mutateCompaction((current) => ({
-                      ...(current ?? {}),
-                      model: value === "" ? null : value,
-                    }));
+                    patchCompaction({ model: value === "" ? null : value });
                   }}
                 />
               </FieldGroup>
@@ -402,7 +388,10 @@ export function HistoryContextSection({
               path={compactionPath}
               exclude={COMPACTION_EDITOR_FIELDS}
               onFieldChange={(key, next) =>
-                mutateCompaction((current) => setObjectKey(current, key, next))
+                onChange(
+                  "compaction",
+                  setObjectKey(compactionConfig, key, next),
+                )
               }
             />
           </div>

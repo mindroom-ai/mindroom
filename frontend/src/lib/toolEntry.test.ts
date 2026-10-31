@@ -10,17 +10,17 @@ import {
 
 describe("toolEntry", () => {
   it("reads tool names from every entry form", () => {
-    const rawEntries: ToolEntry[] = [
+    const entries: ToolEntry[] = [
       "browser",
       { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
       { name: "coding", overrides: { mode: "strict" } },
     ];
 
-    expect(toolNames(rawEntries)).toEqual(["browser", "shell", "coding"]);
+    expect(toolNames(entries)).toEqual(["browser", "shell", "coding"]);
   });
 
   it("reads structured tool overrides", () => {
-    const rawEntries: ToolEntry[] = [
+    const entries: ToolEntry[] = [
       "browser",
       {
         shell: {
@@ -30,15 +30,15 @@ describe("toolEntry", () => {
       },
     ];
 
-    expect(getToolOverrides("browser", rawEntries)).toBeNull();
-    expect(getToolOverrides("shell", rawEntries)).toEqual({
+    expect(getToolOverrides("browser", entries)).toBeNull();
+    expect(getToolOverrides("shell", entries)).toEqual({
       extra_env_passthrough: ["GITEA_TOKEN"],
       shell_path_prepend: ["/run/wrappers/bin"],
     });
   });
 
   it("sets structured overrides without dropping unknown keys", () => {
-    const rawEntries: ToolEntry[] = [
+    const entries: ToolEntry[] = [
       {
         shell: {
           extra_env_passthrough: ["GITEA_TOKEN"],
@@ -55,7 +55,7 @@ describe("toolEntry", () => {
           extra_env_passthrough: null,
           shell_path_prepend: ["/run/wrappers/bin"],
         },
-        rawEntries,
+        entries,
       ),
     ).toEqual([
       {
@@ -69,7 +69,7 @@ describe("toolEntry", () => {
   });
 
   it("keeps override values the patch does not name verbatim", () => {
-    const rawEntries: ToolEntry[] = [
+    const entries: ToolEntry[] = [
       {
         shell: {
           ports: [8080, 8443],
@@ -84,7 +84,7 @@ describe("toolEntry", () => {
       setToolOverridesInEntries(
         "shell",
         { extra_env_passthrough: [" TOKEN "] },
-        rawEntries,
+        entries,
       ),
     ).toEqual([
       {
@@ -97,7 +97,7 @@ describe("toolEntry", () => {
         },
       },
     ]);
-    expect(rawEntries[0]).toEqual({
+    expect(entries[0]).toEqual({
       shell: {
         ports: [8080, 8443],
         allowlist: [],
@@ -108,15 +108,15 @@ describe("toolEntry", () => {
   });
 
   it("never adds a tool the entries do not list", () => {
-    const rawEntries: ToolEntry[] = ["browser"];
+    const entries: ToolEntry[] = ["browser"];
 
     expect(
-      setToolOverridesInEntries("shell", { sandbox: "tight" }, rawEntries),
+      setToolOverridesInEntries("shell", { sandbox: "tight" }, entries),
     ).toEqual(["browser"]);
   });
 
   it("keeps lazy-loading flags from the explicit named form", () => {
-    const rawEntries: ToolEntry[] = [
+    const entries: ToolEntry[] = [
       {
         name: "shell",
         defer: true,
@@ -126,13 +126,13 @@ describe("toolEntry", () => {
       { name: "browser" },
     ];
 
-    expect(getToolOverrides("shell", rawEntries)).toEqual({
+    expect(getToolOverrides("shell", entries)).toEqual({
       extra_env_passthrough: ["GITEA_TOKEN"],
       defer: true,
       initial: true,
     });
     expect(
-      setToolOverridesInEntries("shell", { sandbox: "tight" }, rawEntries),
+      setToolOverridesInEntries("shell", { sandbox: "tight" }, entries),
     ).toEqual([
       {
         shell: {
@@ -147,7 +147,7 @@ describe("toolEntry", () => {
   });
 
   it("removes lazy-loading flags patched to null", () => {
-    const rawEntries: ToolEntry[] = [
+    const entries: ToolEntry[] = [
       { shell: { defer: true, initial: true, future_field: "keep-me" } },
     ];
 
@@ -155,20 +155,20 @@ describe("toolEntry", () => {
       setToolOverridesInEntries(
         "shell",
         { defer: null, initial: null },
-        rawEntries,
+        entries,
       ),
     ).toEqual([{ shell: { future_field: "keep-me" } }]);
     expect(
       setToolOverridesInEntries(
         "shell",
         { defer: null, initial: null, future_field: null },
-        rawEntries,
+        entries,
       ),
     ).toEqual(["shell"]);
   });
 
   it("collapses a structured entry back to a plain string when overrides are cleared", () => {
-    const rawEntries: ToolEntry[] = [
+    const entries: ToolEntry[] = [
       { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
       "browser",
     ];
@@ -179,19 +179,19 @@ describe("toolEntry", () => {
         {
           extra_env_passthrough: [],
         },
-        rawEntries,
+        entries,
       ),
     ).toEqual(["shell", "browser"]);
   });
 
   it("keeps the entries of listed tools and adds new names bare", () => {
-    const rawEntries: ToolEntry[] = [
+    const entries: ToolEntry[] = [
       { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
       "browser",
     ];
 
     expect(
-      toolEntriesForNames(["browser", "shell", "coding"], rawEntries),
+      toolEntriesForNames(["browser", "shell", "coding"], entries),
     ).toEqual([
       "browser",
       { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },

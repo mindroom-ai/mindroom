@@ -2,7 +2,7 @@ import { fetchJSON } from "@/lib/api";
 import { SkillDetail, SkillSummary } from "@/types/skills";
 
 export async function listSkills(): Promise<SkillSummary[]> {
-  return fetchJSON<SkillSummary[]>(`/api/skills`);
+  return fetchJSON<SkillSummary[]>("/api/skills");
 }
 
 export async function getSkill(skillName: string): Promise<SkillDetail> {
@@ -23,7 +23,7 @@ export async function createSkill(
   name: string,
   description: string,
 ): Promise<SkillSummary> {
-  return fetchJSON<SkillSummary>(`/api/skills`, {
+  return fetchJSON<SkillSummary>("/api/skills", {
     method: "POST",
     body: JSON.stringify({ name, description }),
   });

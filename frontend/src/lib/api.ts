@@ -3,19 +3,18 @@ import type { WorkerScope } from "@/types/config";
 export const API_ENDPOINTS = {
   // Config endpoints
   config: {
-    schema: `/api/config/schema`,
-    personalAgents: `/api/config/personal-agents`,
+    schema: "/api/config/schema",
+    personalAgents: "/api/config/personal-agents",
   },
 
   // Matrix operations
   matrix: {
-    agentsRooms: `/api/matrix/agents/rooms`,
-    leaveRoomsBulk: `/api/matrix/rooms/leave-bulk`,
+    agentsRooms: "/api/matrix/agents/rooms",
+    leaveRoomsBulk: "/api/matrix/rooms/leave-bulk",
   },
 
   // Knowledge base operations
   knowledge: {
-    bases: `/api/knowledge/bases`,
     files: (baseId: string) =>
       `/api/knowledge/bases/${encodeURIComponent(baseId)}/files`,
     upload: (baseId: string) =>
@@ -30,7 +29,7 @@ export const API_ENDPOINTS = {
 
   // Credentials operations
   credentials: {
-    list: `/api/credentials/list`,
+    list: "/api/credentials/list",
     status: (service: string) =>
       `/api/credentials/${encodeURIComponent(service)}/status`,
     get: (service: string) => `/api/credentials/${encodeURIComponent(service)}`,
@@ -43,28 +42,27 @@ export const API_ENDPOINTS = {
 
   // Egress broker operations
   egressBroker: {
-    services: `/api/egress-broker/services`,
+    services: "/api/egress-broker/services",
     secret: (service: string) =>
       `/api/egress-broker/services/${encodeURIComponent(service)}/secret`,
     account: (
       service: string,
       action: "connect" | "disconnect" | "oauth-reuse",
     ) => `/api/egress-broker/services/${encodeURIComponent(service)}/${action}`,
-    logs: `/api/egress-broker/logs`,
-    presets: `/api/egress-broker/presets`,
-    caPem: `/api/egress-broker/ca.pem`,
+    logs: "/api/egress-broker/logs",
+    presets: "/api/egress-broker/presets",
+    caPem: "/api/egress-broker/ca.pem",
   },
 
   // Other endpoints
-  tools: `/api/tools`,
+  tools: "/api/tools",
 };
 
 export function withQueryParams(
   url: string,
   params: Record<string, string | null | undefined>,
 ): string {
-  const isAbsolute = /^https?:\/\//.test(url);
-  const parsed = isAbsolute ? new URL(url) : new URL(url, "http://localhost");
+  const parsed = new URL(url, "http://localhost");
 
   Object.entries(params).forEach(([key, value]) => {
     if (value == null || value === "") {
@@ -74,9 +72,6 @@ export function withQueryParams(
     parsed.searchParams.set(key, value);
   });
 
-  if (isAbsolute) {
-    return parsed.toString();
-  }
   return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 

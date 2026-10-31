@@ -98,10 +98,6 @@ export function TeamEditor() {
     }
   };
 
-  const handleSave = async () => {
-    return saveConfig();
-  };
-
   if (!selectedTeam) {
     return (
       <EditorPanelEmptyState icon={Users} message="Select a team to edit" />
@@ -116,7 +112,7 @@ export function TeamEditor() {
       icon={Users}
       title="Team Details"
       isDirty={isDirty}
-      onSave={handleSave}
+      onSave={saveConfig}
       onDelete={handleDelete}
       disableSave={isLoading}
       onBack={() => selectTeam(null)}

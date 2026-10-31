@@ -28,7 +28,7 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
       onDisconnect: async () => {
         const response = await fetch(
           withAgentExecutionScope(
-            `/api/homeassistant/disconnect`,
+            "/api/homeassistant/disconnect",
             agentName,
             executionScope,
           ),
@@ -56,7 +56,7 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
     try {
       const response = await fetch(
         withAgentExecutionScope(
-          `/api/homeassistant/status`,
+          "/api/homeassistant/status",
           agentName,
           executionScope,
         ),

@@ -1,22 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/api", () => ({
-  withAgentExecutionScope: (
-    url: string,
-    agentName?: string | null,
-    executionScope?: string | null,
-  ) => {
-    const parsed = new URL(url, window.location.origin);
-    if (agentName) {
-      parsed.searchParams.set("agent_name", agentName);
-    }
-    if (executionScope) {
-      parsed.searchParams.set("execution_scope", executionScope);
-    }
-    return `${parsed.pathname}${parsed.search}`;
-  },
-}));
-
 import { homeAssistantIntegration } from "./index";
 
 // Mock fetch

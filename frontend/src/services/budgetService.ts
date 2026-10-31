@@ -30,7 +30,7 @@ export async function fetchBudgets(
 ): Promise<BudgetStatus> {
   let response: Response;
   try {
-    response = await fetch(`/api/budgets`, {
+    response = await fetch("/api/budgets", {
       cache: "no-store",
       credentials: "same-origin",
       signal,

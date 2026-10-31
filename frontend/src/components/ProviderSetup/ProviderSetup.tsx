@@ -33,8 +33,8 @@ interface ConnectProviderResponse {
   missing: MissingProviderKey[];
 }
 
-const STATUS_URL = `/api/provider-setup/status`;
-const CONNECT_URL = `/api/provider-setup/connect`;
+const STATUS_URL = "/api/provider-setup/status";
+const CONNECT_URL = "/api/provider-setup/connect";
 
 const PROVIDER_OPTIONS: {
   id: ConnectableProvider;

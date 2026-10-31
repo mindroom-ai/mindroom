@@ -46,13 +46,6 @@ interface HomeAssistantIntegrationProps {
   executionScope?: WorkerScope | null;
 }
 
-function getHomeAssistantCallbackUrl(): string {
-  return new URL(
-    "/api/homeassistant/callback",
-    window.location.origin,
-  ).toString();
-}
-
 export function HomeAssistantIntegration({
   onSuccess,
   agentName,
@@ -67,7 +60,7 @@ export function HomeAssistantIntegration({
   const [allowPrivateUrl, setAllowPrivateUrl] = useState(false);
   const [activeTab, setActiveTab] = useState("oauth");
   const { toast } = useToast();
-  const callbackUrl = getHomeAssistantCallbackUrl();
+  const callbackUrl = `${window.location.origin}/api/homeassistant/callback`;
 
   useEffect(() => {
     checkStatus();
@@ -78,7 +71,7 @@ export function HomeAssistantIntegration({
     try {
       const response = await fetch(
         withAgentExecutionScope(
-          `/api/homeassistant/status`,
+          "/api/homeassistant/status",
           agentName,
           executionScope,
         ),
@@ -117,7 +110,7 @@ export function HomeAssistantIntegration({
     try {
       const response = await fetch(
         withAgentExecutionScope(
-          `/api/homeassistant/connect/oauth`,
+          "/api/homeassistant/connect/oauth",
           agentName,
           executionScope,
         ),
@@ -159,7 +152,7 @@ export function HomeAssistantIntegration({
           // Check the status again to see if we're now connected
           const statusResponse = await fetch(
             withAgentExecutionScope(
-              `/api/homeassistant/status`,
+              "/api/homeassistant/status",
               agentName,
               executionScope,
             ),
@@ -217,7 +210,7 @@ export function HomeAssistantIntegration({
     try {
       const response = await fetch(
         withAgentExecutionScope(
-          `/api/homeassistant/connect/token`,
+          "/api/homeassistant/connect/token",
           agentName,
           executionScope,
         ),
@@ -273,7 +266,7 @@ export function HomeAssistantIntegration({
     try {
       const response = await fetch(
         withAgentExecutionScope(
-          `/api/homeassistant/disconnect`,
+          "/api/homeassistant/disconnect",
           agentName,
           executionScope,
         ),
