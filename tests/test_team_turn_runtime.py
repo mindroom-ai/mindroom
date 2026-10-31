@@ -2715,6 +2715,44 @@ async def test_a_stopped_member_keeps_its_usage_and_its_row_ends_cancelled(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["stopped", "failed"])
+async def test_the_next_team_turn_still_reads_the_thread_messages_an_interrupted_turn_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """What others posted before the team was addressed reaches the leader's next turn once, before the prompt it preceded."""
+    working = asyncio.Event()
+    first_reply = _wait_to_be_cancelled(working) if ending == "stopped" else _provider_fails("provider connection lost")
+    team = squad_turn(tmp_path, monkeypatch, leader=[[first_reply], answer("Slot 7.")])
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+    follow_up = make_visible_message(sender=REQUESTER_ID, body="Where is the key?", event_id="$follow-up:localhost")
+
+    task = asyncio.create_task(team.respond(thread_history=[earlier, current]))
+    if ending == "stopped":
+        await asyncio.wait_for(working.wait(), timeout=5)
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await team.respond(
+        message="Where is the key?",
+        run_id="run-2",
+        reply_to_event_id="$follow-up:localhost",
+        thread_history=[earlier, current, follow_up],
+    )
+
+    sent = [str(message.content) for message in team.models["default"].requests[-1].messages]
+    mentions = [index for index, content in enumerate(sent) if "vault slot 7" in content]
+    first_prompt = next(index for index, content in enumerate(sent) if EVENT_ID in content)
+    assert len(mentions) == 1, sent
+    assert mentions[0] < first_prompt, sent
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False])
 async def test_a_stopped_team_turn_records_its_member_runs_in_configured_order(
     tmp_path: Path,

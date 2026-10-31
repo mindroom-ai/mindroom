@@ -42,7 +42,11 @@ _INTERRUPTION_SUMMARIES = {
 
 @dataclass(frozen=True)
 class InterruptedReplaySnapshot:
-    """Trusted interrupted self-turn facts needed for canonical replay."""
+    """Trusted interrupted self-turn facts needed for canonical replay.
+
+    ``context_messages`` are the thread messages the turn sent before its prompt, which its row keeps as a completed
+    run's does, since its metadata marks their events seen.
+    """
 
     user_message: str
     partial_text: str
@@ -51,6 +55,7 @@ class InterruptedReplaySnapshot:
     run_metadata: dict[str, Any] = field(default_factory=dict)
     user_message_is_structured: bool = False
     original_status: RunStatus = RunStatus.cancelled
+    context_messages: tuple[Message, ...] = ()
 
 
 def is_interrupted_replay_run(run: AnyRunRecord) -> bool:
@@ -194,7 +199,8 @@ def _build_interrupted_replay_run(
     The session names the run's session, its owner, and whether it is a team's.
     """
     content = _render_interrupted_replay_content(snapshot)
-    messages = []
+    # Each context message keeps its id, so one a mid-turn fold took stays folded in the stored run.
+    messages = list(snapshot.context_messages)
     if snapshot.user_message:
         requester_id = snapshot.run_metadata.get("requester_id")
         source_event_id = snapshot.run_metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
@@ -246,6 +252,7 @@ def build_interrupted_replay_snapshot(
     response_event_id: str | None = None,
     original_status: RunStatus = RunStatus.cancelled,
     folded_tool_call_ids: Collection[str] = (),
+    context_messages: Sequence[Message] = (),
 ) -> InterruptedReplaySnapshot:
     """Build one canonical interrupted replay snapshot from trusted runtime state.
 
@@ -265,6 +272,7 @@ def build_interrupted_replay_snapshot(
         run_metadata=metadata,
         user_message_is_structured=user_message_is_structured,
         original_status=original_status,
+        context_messages=tuple(context_messages),
     )
 
 

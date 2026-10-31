@@ -704,6 +704,93 @@ async def test_an_error_record_never_takes_an_earlier_reply_in_the_thread_for_it
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completed", "stopped", "failed"])
+@pytest.mark.usefixtures("probe")
+async def test_the_next_turn_still_reads_the_thread_messages_a_reply_read_however_the_reply_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """What others posted before the agent was addressed reaches the next turn once, before the prompt it preceded.
+
+    A stopped or failed reply keeps the thread messages it read where a completed one keeps them.
+    """
+    first_reply = {
+        "completed": answer("Noted."),
+        "stopped": [TextDelta("Partial "), Await(_cancel_current_task)],
+        "failed": [_raising(RateLimited("slow down", provider="openai"))],
+    }[ending]
+    reply = _reply(tmp_path, monkeypatch, [first_reply, answer("Slot 7.")])
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+    follow_up = make_visible_message(sender=REQUESTER_ID, body="Where is the key?", event_id="$follow-up:localhost")
+
+    first_turn = asyncio.create_task(_respond(reply, thread_history=[earlier, current]))
+    await asyncio.gather(first_turn, return_exceptions=True)
+    reply.recorder = TurnRecorder()
+    await _respond(
+        reply,
+        prompt="Where is the key?",
+        run_id="run-2",
+        reply_to_event_id="$follow-up:localhost",
+        thread_history=[earlier, current, follow_up],
+    )
+
+    sent = [str(message.content) for message in reply.model.requests[-1].messages]
+    mentions = [index for index, content in enumerate(sent) if "vault slot 7" in content]
+    first_prompt = next(index for index, content in enumerate(sent) if EVENT_ID in content)
+    assert len(mentions) == 1, sent
+    assert mentions[0] < first_prompt, sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completed", "stopped"])
+@pytest.mark.usefixtures("probe")
+async def test_thread_messages_a_mid_turn_fold_summarized_stay_out_of_the_next_turn_however_the_reply_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """Once a fold summarized the thread messages a reply read, the next turn reads its summary, not those messages."""
+    second_reply = answer("Done.") if ending == "completed" else [TextDelta("Partial "), Await(_cancel_current_task)]
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        # The first response reports a request far over the 4,000-token window, so the second request compacts.
+        [calls(tool_call("touch", "call_1", label="a"), metrics=usage(1_000_000, 1)), second_reply, answer("Slot 7.")],
+        context_window=4000,
+    )
+    install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+    follow_up = make_visible_message(sender=REQUESTER_ID, body="Where is the key?", event_id="$follow-up:localhost")
+
+    first_turn = asyncio.create_task(_respond(reply, thread_history=[earlier, current]))
+    await asyncio.gather(first_turn, return_exceptions=True)
+    assert any("vault slot 7" in str(message.content) for message in reply.model.requests[0].messages)
+    reply.recorder = TurnRecorder()
+    await _respond(
+        reply,
+        prompt="Where is the key?",
+        run_id="run-2",
+        reply_to_event_id="$follow-up:localhost",
+        thread_history=[earlier, current, follow_up],
+    )
+
+    sent = [str(message.content) for message in reply.model.requests[-1].messages]
+    assert not any("vault slot 7" in content for content in sent), sent
+    assert any("SUMMARY" in content for content in sent), sent
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
 async def test_an_empty_reply_is_left_out_of_history_and_retried_once_under_a_run_id_of_its_own(
     tmp_path: Path,

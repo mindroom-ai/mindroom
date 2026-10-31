@@ -449,6 +449,7 @@ class _TeamTurn:
             pipeline_timing=self.ctx.pipeline_timing,
         )
         run.run_metadata = prepared.run_metadata
+        run.context_messages = prepared.turn.context
         presentation = TeamStreamPresentation.new(
             members.requested_agent_names,
             members.display_names,

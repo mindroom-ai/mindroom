@@ -456,6 +456,7 @@ def _begin_attempt(
     """Record one prepared attempt on the turn's run state, and return where it is stored and its request."""
     prepared_run = run_context.prepared_run
     run.run_metadata = run_context.metadata
+    run.context_messages = prepared_run.turn.context
     storage = bind_turn_session(
         run,
         replays=lambda record: replays_as_turn(
