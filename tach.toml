@@ -1771,7 +1771,6 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.custom_tools.dynamic_workflow_context",
     "mindroom.custom_tools.tool_payloads",
-    "mindroom.custom_tools.json_schemas",
     "mindroom.delegation.direct",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.personas",

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 import yaml
+from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
 from mindroom import agents
@@ -46,11 +47,11 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import system_text
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
+from mindroom.tool_system.authoring import toolkit_functions
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.access_schema_support import with_responder_access
-from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -1580,19 +1581,34 @@ async def test_dynamic_workflow_tool_denies_run_read_for_different_requester(tmp
     assert "not available to the current requester" in read_result["message"]
 
 
-def test_dynamic_workflow_tool_json_schemas_allow_arbitrary_json_values() -> None:
-    """Tool-call schemas should accept scalar, array, and object values inside JSON payload fields."""
-    tool = DynamicWorkflowTools()
+@pytest.mark.asyncio
+async def test_dynamic_workflow_json_arguments_take_objects_of_any_json_values() -> None:
+    """spec, patch, and input take an object of any JSON values; a non-object or an unknown argument fails validation."""
+    functions = toolkit_functions(DynamicWorkflowTools())
+    value = {
+        "text": "a",
+        "number": 1.5,
+        "integer": 2,
+        "flag": True,
+        "none": None,
+        "list": [1, "b"],
+        "object": {"c": []},
+    }
+    calls = {
+        "create_workflow": ("spec", {}),
+        "validate_workflow": ("spec", {}),
+        "update_workflow": ("patch", {"workflow_id": "flow", "reason": "edit"}),
+        "run_workflow": ("input", {"workflow_id": "flow"}),
+    }
 
-    spec_schema = toolkit_offers(tool, "create_workflow").parameters["properties"]["spec"]
-    patch_schema = toolkit_offers(tool, "update_workflow").parameters["properties"]["patch"]
-    input_schema = toolkit_offers(tool, "run_workflow").parameters["properties"]["input"]
-
-    for schema in (spec_schema, patch_schema, input_schema):
-        value_schema = schema["additionalProperties"]
-        allowed_types = {entry["type"] for entry in value_schema["anyOf"]}
-        assert {"object", "array", "string", "boolean", "null"} <= allowed_types
-        assert allowed_types & {"number", "integer"}
+    for name, (argument, others) in calls.items():
+        # Outside a tool call the body answers that it has no runtime context, so the arguments validated.
+        accepted = json.loads(await functions[name](**others, **{argument: value}))
+        assert "tool context is unavailable" in accepted["message"]
+        with pytest.raises(ValidationError):
+            await functions[name](**others, **{argument: ["not", "an", "object"]})
+    with pytest.raises(ValidationError):
+        await functions["list_workflows"](scope="agent")
 
 
 @pytest.mark.asyncio

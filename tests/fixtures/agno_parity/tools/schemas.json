@@ -8368,34 +8368,11 @@
           "properties": {
             "spec": {
               "type": "object",
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": true
-                  },
-                  {
-                    "type": "array",
-                    "items": {}
-                  },
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+              "propertyNames": {
+                "type": "string"
               },
-              "description": "Declarative workflow spec. Minimal valid example: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]} Required fields: schema_version (must be 1), kind (must be 'workflow'), id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as {id, participant, prompt})."
+              "additionalProperties": {},
+              "description": "Declarative workflow spec. Required fields: schema_version (must be 1), kind (must be 'workflow'),\nid, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as\n{id, participant, prompt})."
             },
             "reason": {
               "anyOf": [
@@ -8405,7 +8382,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Why the workflow is created, recorded with its first revision."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8438,34 +8416,11 @@
           "properties": {
             "spec": {
               "type": "object",
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": true
-                  },
-                  {
-                    "type": "array",
-                    "items": {}
-                  },
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+              "propertyNames": {
+                "type": "string"
               },
-              "description": "Declarative workflow spec. Minimal valid example: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]} Required fields: schema_version (must be 1), kind (must be 'workflow'), id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as {id, participant, prompt})."
+              "additionalProperties": {},
+              "description": "Declarative workflow spec. Required fields: schema_version (must be 1), kind (must be 'workflow'),\nid, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as\n{id, participant, prompt})."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8501,33 +8456,10 @@
             },
             "patch": {
               "type": "object",
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": true
-                  },
-                  {
-                    "type": "array",
-                    "items": {}
-                  },
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
             },
             "reason": {
               "type": "string"
@@ -8568,33 +8500,10 @@
             },
             "input": {
               "type": "object",
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": true
-                  },
-                  {
-                    "type": "array",
-                    "items": {}
-                  },
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
             },
             "mindroom_output_path": {
               "anyOf": [

@@ -24,7 +24,6 @@ from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
-from mindroom.custom_tools.json_schemas import JSON_OBJECT_SCHEMA
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.lifecycle import finish_child_turn, prepare_child_turn
@@ -62,7 +61,7 @@ from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.run_storage import TerminalRecord
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
-from mindroom.tool_system.authoring import Toolkit, passthrough_tool
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.metadata import resolve_tool_settings
 from mindroom.tool_system.plugins import config_plugins
@@ -116,88 +115,23 @@ _MINIMAL_SPEC_EXAMPLE = (
     '"workflow": [{"id": "draft", "participant": "writer", "prompt": "Write a haiku about {input.topic}."}]}'
 )
 
-_SPEC_PARAMETER_DESCRIPTION = (
-    "Declarative workflow spec. Minimal valid example: "
-    f"{_MINIMAL_SPEC_EXAMPLE} "
-    "Required fields: schema_version (must be 1), kind (must be 'workflow'), id, name, "
-    "participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as "
-    "{id, participant, prompt})."
+_CREATE_WORKFLOW_DESCRIPTION = (
+    "Create a Dynamic Workflow from a declarative workflow spec. "
+    f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
+    "Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile "
+    "saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only "
+    "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, "
+    "and only the skills it names from your own. "
+    "Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the "
+    "dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room "
+    "without tools."
 )
 
-_TOOL_DESCRIPTIONS = {
-    "create_workflow": (
-        "Create a Dynamic Workflow from a declarative workflow spec. "
-        f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
-        "Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile "
-        "saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only "
-        "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, "
-        "and only the skills it names from your own. "
-        "Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the "
-        "dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room "
-        "without tools."
-    ),
-    "validate_workflow": (
-        "Validate a declarative Dynamic Workflow spec without saving it. "
-        "Reports every detected validation error in one call. "
-        f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE}"
-    ),
-    "update_workflow": "Create and publish a new Dynamic Workflow revision from a patch.",
-    "run_workflow": "Run a Dynamic Workflow and persist step outputs plus report artifacts.",
-    "get_workflow_run": "Read one Dynamic Workflow run record.",
-    "list_workflows": "List your saved Dynamic Workflows.",
-    "list_workflow_revisions": "List immutable revisions for one Dynamic Workflow.",
-}
-
-
-_TOOL_PARAMETERS: dict[str, dict[str, object]] = {
-    "create_workflow": {
-        "type": "object",
-        "properties": {
-            "spec": {**JSON_OBJECT_SCHEMA, "description": _SPEC_PARAMETER_DESCRIPTION},
-            "reason": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-        },
-        "required": ["spec"],
-    },
-    "validate_workflow": {
-        "type": "object",
-        "properties": {"spec": {**JSON_OBJECT_SCHEMA, "description": _SPEC_PARAMETER_DESCRIPTION}},
-        "required": ["spec"],
-    },
-    "update_workflow": {
-        "type": "object",
-        "properties": {
-            "workflow_id": {"type": "string"},
-            "patch": JSON_OBJECT_SCHEMA,
-            "reason": {"type": "string"},
-        },
-        "required": ["workflow_id", "patch", "reason"],
-    },
-    "run_workflow": {
-        "type": "object",
-        "properties": {
-            "workflow_id": {"type": "string"},
-            "input": JSON_OBJECT_SCHEMA,
-        },
-        "required": ["workflow_id", "input"],
-    },
-    "get_workflow_run": {
-        "type": "object",
-        "properties": {
-            "workflow_id": {"type": "string"},
-            "run_id": {"type": "string"},
-        },
-        "required": ["workflow_id", "run_id"],
-    },
-    "list_workflows": {
-        "type": "object",
-        "properties": {},
-    },
-    "list_workflow_revisions": {
-        "type": "object",
-        "properties": {"workflow_id": {"type": "string"}},
-        "required": ["workflow_id"],
-    },
-}
+_VALIDATE_WORKFLOW_DESCRIPTION = (
+    "Validate a declarative Dynamic Workflow spec without saving it. "
+    "Reports every detected validation error in one call. "
+    f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE}"
+)
 
 
 class DynamicWorkflowTools(Toolkit):
@@ -234,13 +168,21 @@ class DynamicWorkflowTools(Toolkit):
             **fields,
         )
 
-    @passthrough_tool(description=_TOOL_DESCRIPTIONS["create_workflow"], parameters=_TOOL_PARAMETERS["create_workflow"])
+    @tool(description=_CREATE_WORKFLOW_DESCRIPTION)
     async def create_workflow(
         self,
         spec: dict[str, Any],
         reason: str | None = None,
     ) -> str:
-        """Create a Dynamic Workflow from a declarative workflow spec."""
+        """Create a Dynamic Workflow from a declarative workflow spec.
+
+        Args:
+            spec: Declarative workflow spec. Required fields: schema_version (must be 1), kind (must be 'workflow'),
+                id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as
+                {id, participant, prompt}).
+            reason: Why the workflow is created, recorded with its first revision.
+
+        """
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
@@ -271,12 +213,16 @@ class DynamicWorkflowTools(Toolkit):
             name=summary.name,
         )
 
-    @passthrough_tool(
-        description=_TOOL_DESCRIPTIONS["validate_workflow"],
-        parameters=_TOOL_PARAMETERS["validate_workflow"],
-    )
+    @tool(description=_VALIDATE_WORKFLOW_DESCRIPTION)
     async def validate_workflow(self, spec: dict[str, Any]) -> str:
-        """Validate a declarative Dynamic Workflow spec without saving it."""
+        """Validate a declarative Dynamic Workflow spec without saving it.
+
+        Args:
+            spec: Declarative workflow spec. Required fields: schema_version (must be 1), kind (must be 'workflow'),
+                id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as
+                {id, participant, prompt}).
+
+        """
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
@@ -288,7 +234,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", message=str(exc))
         return self._payload("ok", workflow_id=parsed.id, name=parsed.name)
 
-    @passthrough_tool(description=_TOOL_DESCRIPTIONS["update_workflow"], parameters=_TOOL_PARAMETERS["update_workflow"])
+    @tool
     async def update_workflow(
         self,
         workflow_id: str,
@@ -325,7 +271,7 @@ class DynamicWorkflowTools(Toolkit):
             name=summary.name,
         )
 
-    @passthrough_tool(description=_TOOL_DESCRIPTIONS["run_workflow"], parameters=_TOOL_PARAMETERS["run_workflow"])
+    @tool
     async def run_workflow(
         self,
         workflow_id: str,
@@ -354,10 +300,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
         return self._run_payload(run, step_count=len(run.steps))
 
-    @passthrough_tool(
-        description=_TOOL_DESCRIPTIONS["get_workflow_run"],
-        parameters=_TOOL_PARAMETERS["get_workflow_run"],
-    )
+    @tool
     async def get_workflow_run(self, workflow_id: str, run_id: str) -> str:
         """Read one Dynamic Workflow run record."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
@@ -378,7 +321,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", workflow_id=workflow_id, run_id=run_id, message=str(exc))
         return self._run_payload(run, steps=run.steps)
 
-    @passthrough_tool(description=_TOOL_DESCRIPTIONS["list_workflows"], parameters=_TOOL_PARAMETERS["list_workflows"])
+    @tool
     async def list_workflows(self) -> str:
         """List your saved Dynamic Workflows."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
@@ -406,10 +349,7 @@ class DynamicWorkflowTools(Toolkit):
             ],
         )
 
-    @passthrough_tool(
-        description=_TOOL_DESCRIPTIONS["list_workflow_revisions"],
-        parameters=_TOOL_PARAMETERS["list_workflow_revisions"],
-    )
+    @tool
     async def list_workflow_revisions(self, workflow_id: str) -> str:
         """List immutable revisions for one Dynamic Workflow."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
