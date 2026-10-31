@@ -59,7 +59,7 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, spec, toolkit
@@ -595,7 +595,7 @@ async def test_a_childs_gated_call_skips_its_card_only_inside_the_requesters_aut
     model = ScriptedModel([calls(tool_call("write_report", "w"))])
     _, response = await collect(
         run_agent(
-            spec(model, toolkit(write_report, name="file", requires_confirmation=True)),
+            spec(model, toolkit(write_report, name="file", gate=ToolGate.CONFIRM)),
             [Message(role="user", content="Report")],
             ctx=RunContext(run_id=child.run_id, session=UnstoredSession(child.session_id)),
             persist=None,

@@ -14,7 +14,6 @@ import yaml
 
 from mindroom.agents import create_agent
 from mindroom.api import config_lifecycle, main
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -31,6 +30,7 @@ from mindroom.custom_tools.self_config import SelfConfigTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 from tests.agent_tool_helpers import offered_function, source_toolkit
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -822,10 +822,8 @@ class TestUpdateOwnConfigAuthorization:
             model=turn_model(config, _runtime_paths_for(config), "writer"),
             plugins=config_plugins(config, _runtime_paths_for(config)),
         )
-        update = offered_function(agent, "update_own_config")
-        assert update.requires_confirmation is True
-        assert update.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
-        assert offered_function(agent, "get_own_config").requires_confirmation is not True
+        assert offered_function(agent, "update_own_config").gate is ToolGate.CONFIRM
+        assert offered_function(agent, "get_own_config").gate is None
 
 
 class TestAgentCreationInjection:

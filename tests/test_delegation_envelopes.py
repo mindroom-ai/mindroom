@@ -222,7 +222,9 @@ def _continuation_turns(continuation: str) -> list[list[ScriptStep]]:
         turns.append(calls(_deferred_call("list-files", "list_files")))
     if continuation == "preparation_error":
         # The continuation after this switch rebuilds the child, whose model preparation then fails.
-        turns.append(calls(tool_call("switch_thread_model", "switch-model", model_name="default", when="next-turn")))
+        turns.append(
+            calls(tool_call("switch_thread_model", "switch-model", model_name="default", when="after-toolcall")),
+        )
     if continuation == "nested_subagent":
         turns.extend(
             [

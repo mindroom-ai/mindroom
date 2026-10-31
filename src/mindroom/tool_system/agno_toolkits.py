@@ -37,7 +37,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system import authoring
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
-from mindroom.tool_system.tool_function import AdaptedToolkit, InjectedValue, ToolFunction, ToolValue
+from mindroom.tool_system.tool_function import AdaptedToolkit, InjectedValue, ToolFunction, ToolGate, ToolValue
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
 
 if TYPE_CHECKING:
@@ -172,14 +172,10 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
     ("name", "description", "parameters", "strict"): "mapped",
     # Wrapped in argument validation unless processing is skipped; the signature names the injected parameters.
     ("entrypoint", "skip_entrypoint_processing"): "mapped",
-    # The pause and stop flags the loop reads.
-    (
-        "requires_confirmation",
-        "approval_type",
-        "external_execution",
-        "external_execution_silent",
-        "stop_after_tool_call",
-    ): "mapped",
+    # The confirmation and stop flags the loop reads; a confirmation becomes the function's gate.
+    ("requires_confirmation", "stop_after_tool_call"): "mapped",
+    # Agno's approval kind ("required" or "audit") only labels the confirmation, which decides the gate.
+    ("approval_type",): "ignored",
     ("pre_hook", "post_hook", "tool_hooks"): _Rejected(
         sets=lambda function: (
             function.pre_hook is not None or function.post_hook is not None or bool(function.tool_hooks)
@@ -191,6 +187,13 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
         sets=lambda function: bool(function.requires_user_input),
         error="sets Agno's requires_user_input, but MindRoom never pauses a run to ask its user for input",
     ),
+    ("external_execution",): _Rejected(
+        sets=lambda function: bool(function.external_execution),
+        error="sets Agno's external_execution, but MindRoom runs every tool call itself and nothing would answer"
+        " one run elsewhere",
+    ),
+    # Agno reads it only for a function that requires external execution, which is rejected.
+    ("external_execution_silent",): "ignored",
     # A toolkit's adapter hands them over as ``function_instructions`` instead, which a deferred toolkit moves to tool
     # search or the function's description and an agent refuses in an eager one.
     ("instructions", "add_instructions"): _FUNCTION_INSTRUCTIONS,
@@ -264,7 +267,7 @@ def adapt_toolkit(
     key: str | None = None,
     registered: str | None = None,
 ) -> AdaptedToolkit:
-    """Adapt the functions ``toolkit`` offers, one per name, in Agno's async-run order; they share one ``actor_state``.
+    """Adapt the functions ``toolkit`` offers, one per name, in the order offered; they share one ``actor_state``.
 
     Each function is offered as its builder configured it (``configure_toolkit_functions``). ``key`` is the authored
     toolkit an agent is offered the functions from, which each one carries as its ``toolkit``; None for a toolkit
@@ -304,14 +307,12 @@ def adapt_callable(entrypoint: Callable[..., Any]) -> ToolFunction:
 
 
 def toolkit_function_names(toolkit: AnyToolkit) -> tuple[str, ...]:
-    """Return the names of the functions ``toolkit`` offers, in Agno's async-run order: synchronous ones first."""
+    """Return the names of the functions ``toolkit`` offers.
+
+    An owned toolkit offers them in its ``functions`` order, and an Agno toolkit in Agno's async-run order.
+    """
     offered = _FINISHING.get(toolkit, _Finishing()).offered
-    if isinstance(toolkit, authoring.Toolkit):
-        # TODO(simplify): an owned toolkit offers its synchronous functions before its async ones, as Agno's toolkit
-        # registers them; the order the class defines them in would reorder the tools of requests.
-        names = sorted(toolkit.functions, key=lambda name: inspect.iscoroutinefunction(toolkit.functions[name]))
-    else:
-        names = list(toolkit.get_async_functions())
+    names = toolkit.functions if isinstance(toolkit, authoring.Toolkit) else toolkit.get_async_functions()
     return tuple(name for name in names if offered is None or name in offered)
 
 
@@ -447,10 +448,7 @@ def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
         description=description,
         parameters=parameters,
         strict=function.strict,
-        requires_confirmation=function.requires_confirmation,
-        approval_type=function.approval_type,
-        external_execution=function.external_execution,
-        external_execution_silent=function.external_execution_silent,
+        gate=ToolGate.CONFIRM if function.requires_confirmation else None,
         stop_after_call=function.stop_after_tool_call,
         entrypoint=entrypoint,
         injected_params=injected,
@@ -497,9 +495,6 @@ def _owned_function(toolkit: authoring.Toolkit, name: str, finishing: _Finishing
             name=name,
             description=authoring.authored_description(function) or (tool_description(function) if derived else None),
             parameters=tool_parameters(function) if authored is None else deepcopy(authored),
-            # The flags Agno's registration sets for a function no toolkit option asks anything of.
-            requires_confirmation=False,
-            external_execution=False,
             entrypoint=validated_entrypoint(function) if derived else function,
         ),
     )

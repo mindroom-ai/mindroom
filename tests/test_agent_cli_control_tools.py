@@ -55,7 +55,7 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.skills import Skill, SkillsToolkit
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tool_system.tool_function import AdaptedToolkit
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
@@ -95,14 +95,20 @@ def _owner(catalog, **options) -> LiveTurnTools:
     )
 
 
-def _flagged(name: str, *entrypoints: Callable[..., object], **flags: object) -> AdaptedToolkit:
-    """Return a toolkit named ``name`` whose functions all carry ``flags``."""
+def _flagged(
+    name: str,
+    *entrypoints: Callable[..., object],
+    gate: ToolGate | None = None,
+    **flags: object,
+) -> AdaptedToolkit:
+    """Return a toolkit named ``name`` whose Agno functions all carry ``flags``; ``gate`` replaces the gate they give."""
     functions = []
     for entrypoint in entrypoints:
         function = Function.from_callable(entrypoint)
         for flag, value in flags.items():
             setattr(function, flag, value)
-        functions.append(offered_agno_function(function))
+        adapted = offered_agno_function(function)
+        functions.append(adapted if gate is None else replace(adapted, gate=gate))
     return AdaptedToolkit(name=name, functions=tuple(functions), instructions=None)
 
 
@@ -210,8 +216,9 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
             original_prompt="task",
             continuation_count=0,
         )
-        assert decision.should_continue
-        assert decision.model_switch_name == (None if raises else "next")
+        # Only the switch that succeeded continues the turn, on its model.
+        continued = decision.continuation
+        assert (None if continued is None else continued.model_name) == (None if raises else "next")
     else:
         assert effects == ["outer-0", "outer-1"]
         assert not owner.control_calls
@@ -282,7 +289,7 @@ async def test_hidden_delegation_uses_native_child_owner(
         tmp_path,
         config,
         paths,
-        [_flagged("delegate", run_subagent, continue_subagent, external_execution=True)],
+        [_flagged("delegate", run_subagent, continue_subagent, gate=ToolGate.DELEGATION)],
         max_tool_calls_per_turn=limit,
     )
     children = []
@@ -392,7 +399,7 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         tmp_path,
         config,
         paths,
-        [_flagged("delegate", run_subagent, external_execution=True)],
+        [_flagged("delegate", run_subagent, gate=ToolGate.DELEGATION)],
         approval_handler=decide,
     )
     call_id = uuid4()
@@ -506,7 +513,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             config,
             paths,
             [
-                _flagged("delegate", run_subagent, external_execution=True),
+                _flagged("delegate", run_subagent, gate=ToolGate.DELEGATION),
                 _flagged("control", switch_thread_model, stop_after_tool_call=True),
             ],
             approval_handler=approve,
@@ -752,7 +759,7 @@ async def test_hidden_unsupported_requirement_never_runs_body(tmp_path) -> None:
         effects.append(answer)
         return answer
 
-    catalog = await _catalog(tmp_path, [_flagged("tools", unsupported, external_execution=True)])
+    catalog = await _catalog(tmp_path, [_flagged("tools", unsupported, gate=ToolGate.DELEGATION)])
     owner = _owner(catalog)
     with pytest.raises(ExceptionGroup) as error:
         async with owner._window("bash-parent"):
@@ -769,6 +776,38 @@ async def test_hidden_unsupported_requirement_never_runs_body(tmp_path) -> None:
     assert "unsupported non-confirmation requirement" in str(error.value.exceptions[0])
     assert not effects
     await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_delegation_whose_function_no_longer_delegates_is_refused(tmp_path) -> None:
+    """Only a delegate function that still pauses for the delegation driver may advance a waiting delegation."""
+    config = _delegation_config()
+    paths = _runtime_paths(tmp_path)
+    catalog, _runtime, _identity = await _delegation_catalog(
+        tmp_path,
+        config,
+        paths,
+        [_flagged("delegate", run_subagent, gate=ToolGate.DELEGATION)],
+    )
+    binding = await catalog.bind(ToolKey("delegate", "run_subagent"))
+    arguments = {"agent_name": "code", "task": "work"}
+    events = [event async for event in execute_agent_tool_call(binding, "delegation-call", arguments)]
+    requirement = next(event.requirement for event in events if isinstance(event, AgentToolCallWaiting))
+    changed = replace(binding, function=replace(binding.function, gate=None))
+
+    with (
+        tool_runtime_context(catalog.runtime_context),
+        pytest.raises(ValueError, match="not owned by the delegate toolkit"),
+    ):
+        await advance_cli_delegation(
+            changed,
+            requirement,
+            parent_bash_call_id="bash-parent",
+            delegation_depth=0,
+            refresh_scheduler=None,
+            approval_calls=None,
+            on_event=lambda _event: None,
+        )
 
 
 @pytest.mark.asyncio

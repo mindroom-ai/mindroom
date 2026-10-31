@@ -19,6 +19,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.tool_function import ToolOutcome
 from tests.conftest import preserved_builtin_tools
 from tests.fakes.scripted_model import Await
 
@@ -77,7 +78,8 @@ class ProbeTools(Toolkit):
     """Tools an agent-path reply calls: a shell that answers or keeps running, a save that keeps running, and more.
 
     A call that keeps running sets ``running`` and waits to be cancelled, so a test can stop the turn mid-call.
-    ``switch_thread_model`` answers as the thread-model tool does and stops the run after it, as that tool does.
+    ``switch_thread_model`` answers as the thread-model tool does, and as that tool does, a switch for the current
+    response stops the run after it.
     """
 
     running: ClassVar[asyncio.Event]
@@ -94,7 +96,6 @@ class ProbeTools(Toolkit):
                 self.switch_thread_model,
             ],
         )
-        self.async_functions["switch_thread_model"].stop_after_tool_call = True
 
     @classmethod
     async def _keep_running(cls) -> str:
@@ -149,7 +150,7 @@ class ProbeTools(Toolkit):
         """
         return f"did {value}"
 
-    async def switch_thread_model(self, model_name: str, when: str = "next-turn") -> str:
+    async def switch_thread_model(self, model_name: str, when: str = "next-turn") -> str | ToolOutcome:
         """Switch the thread's model.
 
         Args:
@@ -164,7 +165,8 @@ class ProbeTools(Toolkit):
                 action="switch",
                 message=f"Unknown model '{model_name}'.",
             )
-        return custom_tool_payload("thread_model", "ok", action="switch", model=model_name, when=when)
+        payload = custom_tool_payload("thread_model", "ok", action="switch", model=model_name, when=when)
+        return ToolOutcome(content=payload, stop_after_call=True) if when == "after-toolcall" else payload
 
 
 @contextmanager

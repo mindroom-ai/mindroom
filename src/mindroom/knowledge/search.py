@@ -180,7 +180,6 @@ class AgentKnowledge:
             memory_search_available=memory_search_available,
         )
         function = adapt_callable(tool(name=KNOWLEDGE_SEARCH_TOOL_NAME, description=description)(search_knowledge_base))
-        # TODO(simplify): closed to other properties as Agno closed a schema it derived ahead of processing.
         return replace(function, parameters=closed_parameters(search_knowledge_base, function.parameters))
 
     def prompt_block(self) -> str:

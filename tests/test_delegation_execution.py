@@ -23,7 +23,7 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution
 from mindroom.delegation.lifecycle import authorize_delegation
@@ -44,6 +44,7 @@ from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import answered_calls, approval_continuation, repeats_each_request
@@ -96,6 +97,8 @@ def _config(paths: RuntimePaths, *, child_tools: Sequence[str] = ("report",), ga
             },
             defaults=DefaultsConfig(tools=[]),
             memory={"backend": "none"},
+            # A configured model the child's ``switch_thread_model`` calls can switch to.
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval={"rules": rules},
         ),
         "code",
@@ -106,7 +109,7 @@ def _config(paths: RuntimePaths, *, child_tools: Sequence[str] = ("report",), ga
 
 
 def _leader_identity() -> ToolExecutionIdentity:
-    return ToolExecutionIdentity("matrix", "leader", REQUESTER, "!room:example.org", None, None, "parent")
+    return ToolExecutionIdentity("matrix", "leader", REQUESTER, "!room:example.org", "$thread", "$thread", "parent")
 
 
 def _provider_failure(text: str) -> Await:
@@ -1046,7 +1049,7 @@ async def test_failed_nested_resume_settles_descendants_and_visible_tools(
     assert not nested.requirements
 
 
-def test_native_delegate_uses_external_execution() -> None:
+def test_native_delegate_pauses_for_its_driver() -> None:
     """A native parent must pause before entering the child call stack."""
     from agno.tools import Toolkit  # noqa: PLC0415 - the Agno toolkit is the authoring API the flags live on
 
@@ -1055,7 +1058,7 @@ def test_native_delegate_uses_external_execution() -> None:
 
     toolkit = Toolkit(name="delegate", tools=[run_subagent])
     functions = gated_functions(toolkit, Config(), registered_tool_name="delegate")
-    assert functions["run_subagent"].external_execution is True
+    assert functions["run_subagent"].gate is ToolGate.DELEGATION
 
 
 def test_detached_delegate_retains_inline_execution() -> None:
@@ -1067,7 +1070,7 @@ def test_detached_delegate_retains_inline_execution() -> None:
 
     toolkit = Toolkit(name="delegate", tools=[run_subagent])
     functions = gated_functions(toolkit, Config(), registered_tool_name="delegate", resumable=False)
-    assert not functions["run_subagent"].external_execution
+    assert functions["run_subagent"].gate is None
 
 
 @pytest.mark.asyncio
@@ -1536,8 +1539,8 @@ def test_workflow_grant_runs_for_requester_the_caller_already_serves(
     assert delegate == "Cannot delegate to 'leader': that agent is not allowed to reply to you."
 
 
-def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path: Path) -> None:
-    """The adapted delegate functions carry the external-execution flags the approval capability sets."""
+def test_adapted_delegate_functions_carry_the_delegation_gate(tmp_path: Path) -> None:
+    """The adapted delegate functions carry the delegation gate the approval capability sets."""
     paths = _runtime_paths(tmp_path)
     config = _config(paths, child_tools=())
     toolkit = DelegateTools(
@@ -1548,11 +1551,11 @@ def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path:
         execution_identity=_leader_identity(),
     )
 
-    flags = {
-        function.name: (function.external_execution, function.external_execution_silent)
+    gates = {
+        function.name: function.gate
         for function in gated_functions(toolkit, config, registered_tool_name="delegate").values()
     }
-    assert flags == {"run_subagent": (True, True), "continue_subagent": (True, True)}
+    assert gates == {"run_subagent": ToolGate.DELEGATION, "continue_subagent": ToolGate.DELEGATION}
 
 
 def _cut_off_turn(call_id: str) -> list[ScriptStep]:
@@ -1612,8 +1615,8 @@ async def test_a_run_keeps_its_hooks_across_its_delegation_continuations(
     assert len(leader.requests) == 5
 
 
-# A rejected model switch continues the turn on the current model.
-_SWITCH = tool_call("switch_thread_model", "call-switch", model_name="missing", when="next-turn")
+# A switch of the current response to the model it runs on, which ends the attempt for a continuation.
+_SWITCH = tool_call("switch_thread_model", "call-switch", model_name="default", when="after-toolcall")
 
 
 def _child_turn_usage(tmp_path: Path, config: Config, paths: RuntimePaths) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -1753,6 +1756,40 @@ async def _approve_the_child_s_pending_call(
         decisions={call_id: True},
         approval_id=approval_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_an_approved_child_s_switch_for_the_current_response_continues_it_on_the_new_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resumed run stops after the switch, and the child's continuation runs on the model the switch names."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=("report", "thread_model"))
+    config.models["alternate"] = ModelConfig(provider="openai", id="alternate-model")
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")), answer("Parent done")],
+    )
+    switch = tool_call("switch_thread_model", "call-switch", model_name="alternate", when="after-toolcall")
+    code = ScriptedModel([calls(tool_call("write_report", "same-call")), calls(switch), answer("child result")])
+    agents = ScriptedAgents({"leader": leader, "code": code})
+    agents.install(monkeypatch)
+
+    with registered_report_tool():
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=_leader_identity(),
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        result = await _approve_the_child_s_pending_call(config, paths, paused, "card-0")
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert len(code.requests) == 3
+    assert agents.built_models[-1] == "alternate"
 
 
 @pytest.mark.asyncio

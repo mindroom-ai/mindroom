@@ -263,6 +263,7 @@ depends_on = [
     "mindroom.response_turn",
     "mindroom.tool_system.runtime_context",
     "mindroom.llm",
+    "mindroom.tool_system.tool_function",
 ]
 visibility = [
     "mindroom.agent_cli.turn",
@@ -1515,6 +1516,7 @@ depends_on = [
     "mindroom.message_target",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.events",
+    "mindroom.tool_system.tool_function",
 ]
 visibility = [
     "mindroom.approval.continuation_runner",
@@ -1608,10 +1610,6 @@ visibility = [
     "mindroom.tool_system.tool_hooks",
     "mindroom.delegation.execution",
     "mindroom.custom_tools.dynamic_workflow",
-    # These tell a gated call that asks for its approval as its job from other calls.
-    "mindroom.agent_cli.cli_shell_agent",
-    "mindroom.skill_learning.reviewer",
-    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.approvals",
     "mindroom.turns.ingress",
 ]
@@ -2751,6 +2749,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.thread_models",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.tool_function",
     "mindroom.turn_model",
 ]
 
@@ -6127,10 +6126,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.media_attachments"
-depends_on = [
-    "mindroom.providers.registry",
-    "mindroom.tool_system.runtime_context",
-]
+depends_on = ["mindroom.tool_system.runtime_context"]
 
 [[modules]]
 path = "mindroom.tool_system.media_transport"
@@ -7275,7 +7271,6 @@ exclusive = true
 [[interfaces]]
 expose = [
     "ConfigField",
-    "MATRIX_ROOM_RUNTIME_APPROVAL_TYPE",
     "MATRIX_ROOM_RUNTIME_TOOL_NAMES",
     "SetupType",
     "SupportsPrimaryCallPlacement",
@@ -7287,6 +7282,7 @@ expose = [
     "ToolMetadata",
     "ToolStatus",
     "ToolValidationInfo",
+    "is_matrix_room_runtime_function",
 ]
 from = ["mindroom.tool_system.declarations"]
 
@@ -9131,7 +9127,6 @@ depends_on = [
 path = "mindroom.tool_jobs.execution"
 depends_on = [
     "mindroom.agent_loop",
-    "mindroom.approval.tool_approval",
     "mindroom.custom_tools.job",
     "mindroom.failure_text",
     "mindroom.llm",
@@ -9331,10 +9326,10 @@ depends_on = [
     "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.shell_contract",
-    "mindroom.approval.tool_approval",
     "mindroom.custom_tools.job",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_function",
 ]
 visibility = [
     "mindroom.agents",
@@ -9434,6 +9429,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
+    "mindroom.tool_system.tool_function",
 ]
 visibility = [
     "mindroom.delegation.job_approvals",
@@ -9886,7 +9882,6 @@ visibility = [
 path = "mindroom.skill_learning.reviewer"
 depends_on = [
     "mindroom.agent_loop",
-    "mindroom.approval.tool_approval",
     "mindroom.session_storage.agent_storage",
     "mindroom.helper_usage",
     "mindroom.llm",

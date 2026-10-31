@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from mindroom.llm.runs import ToolExecution
 from mindroom.turn_continuation import (
     TURN_CONTINUATION_LIMIT,
@@ -29,123 +31,8 @@ def _model_switch_execution(when: str, *, model_name: str = "large") -> ToolExec
     )
 
 
-def test_continuation_decision_switches_model_after_tool_call() -> None:
-    """Ignoring an immediate model-switch result would end the turn before the new model can continue."""
-    decision = continuation_decision_from_tools(
-        [_model_switch_execution("after-toolcall").call],
-        original_prompt="Solve the problem",
-        continuation_count=0,
-    )
-
-    assert decision.should_continue is True
-    assert decision.model_switch_name == "large"
-    assert decision.model_switch_when == "after-toolcall"
-    assert decision.next_prompt is not None
-    assert "Solve the problem" in decision.next_prompt
-    assert "Continue the same task with `large`" in decision.next_prompt
-
-
-def test_continuation_decision_defers_model_switch_until_next_turn() -> None:
-    """A next-turn switch still needs the original model to finish the stopped provider run."""
-    decision = continuation_decision_from_tools(
-        [_model_switch_execution("next-turn").call],
-        original_prompt="Solve the problem",
-        continuation_count=0,
-    )
-
-    assert decision.should_continue is True
-    assert decision.model_switch_name == "large"
-    assert decision.model_switch_when == "next-turn"
-    assert decision.next_prompt is not None
-    assert "Continue the same task with the model that started this response" in decision.next_prompt
-
-
-def test_failed_model_switch_resumes_with_current_model() -> None:
-    """A rejected switch must not strand the response at its stop-after-tool boundary."""
-    execution = ToolExecution(
-        tool_call_id="call-switch-model",
-        tool_name="switch_thread_model",
-        tool_args={"model_name": "missing", "when": "after-toolcall"},
-        result=json.dumps(
-            {
-                "action": "switch",
-                "message": "Unknown model 'missing'.",
-                "status": "error",
-                "tool": "thread_model",
-            },
-        ),
-        stop_after_call=True,
-    )
-
-    decision = continuation_decision_from_tools(
-        [execution.call],
-        original_prompt="Solve the problem",
-        continuation_count=0,
-    )
-
-    assert decision.should_continue is True
-    assert decision.model_switch_name is None
-    assert decision.model_switch_when is None
-    assert decision.next_prompt is not None
-    assert "Continue the same task with the current model" in decision.next_prompt
-
-
-def test_a_switch_result_that_is_not_ok_is_rejected_even_when_it_names_a_model() -> None:
-    """Only an ``ok`` switch result moves the reply to another model, whatever else the result carries."""
-    execution = ToolExecution(
-        tool_call_id="call-switch-model",
-        tool_name="switch_thread_model",
-        tool_args={"model_name": "large", "when": "after-toolcall"},
-        result=json.dumps(
-            {
-                "action": "switch",
-                "model": "large",
-                "status": "error",
-                "tool": "thread_model",
-                "when": "after-toolcall",
-            },
-        ),
-        stop_after_call=True,
-    )
-
-    decision = continuation_decision_from_tools(
-        [execution.call],
-        original_prompt="Solve the problem",
-        continuation_count=0,
-    )
-
-    assert decision.should_continue is True
-    assert decision.model_switch_name is None
-    assert decision.next_prompt is not None
-    assert "Continue the same task with the current model" in decision.next_prompt
-
-
-def test_malformed_model_switch_result_resumes_with_current_model() -> None:
-    """A malformed switch result must not strand the response at its stop-after-tool boundary."""
-    execution = ToolExecution(
-        tool_call_id="call-switch-model",
-        tool_name="switch_thread_model",
-        tool_args={"model_name": "large", "when": "after-toolcall"},
-        result="not-json",
-        stop_after_call=True,
-    )
-
-    decision = continuation_decision_from_tools(
-        [execution.call],
-        original_prompt="Solve the problem",
-        continuation_count=0,
-    )
-
-    assert decision.should_continue is True
-    assert decision.model_switch_name is None
-    assert decision.model_switch_when is None
-    assert decision.next_prompt is not None
-    assert "Continue the same task with the current model" in decision.next_prompt
-
-
-def test_latest_successful_model_switch_wins_over_later_rejection() -> None:
-    """A rejected later call cannot undo an earlier switch that was already persisted."""
-    rejected = ToolExecution(
+def _rejected_execution() -> ToolExecution:
+    return ToolExecution(
         tool_call_id="call-rejected-switch",
         tool_name="switch_thread_model",
         tool_args={"model_name": "missing", "when": "after-toolcall"},
@@ -157,17 +44,60 @@ def test_latest_successful_model_switch_wins_over_later_rejection() -> None:
                 "tool": "thread_model",
             },
         ),
-        stop_after_call=True,
     )
 
+
+def test_continuation_decision_switches_model_after_tool_call() -> None:
+    """Ignoring an immediate model-switch result would end the turn before the new model can continue."""
     decision = continuation_decision_from_tools(
-        [_model_switch_execution("after-toolcall").call, rejected.call],
+        [_model_switch_execution("after-toolcall").call],
         original_prompt="Solve the problem",
         continuation_count=0,
     )
 
-    assert decision.model_switch_name == "large"
-    assert decision.model_switch_when == "after-toolcall"
+    assert decision.continuation is not None
+    assert decision.continuation.model_name == "large"
+    assert decision.continuation.prompt == (
+        "Solve the problem\n\n"
+        "[SYSTEM NOTICE - MODEL SWITCH TOOL CALL COMPLETED]\n"
+        "The previous model step switched this thread to `large` with timing `after-toolcall`. "
+        "Continue the same task with `large` now. Do not repeat the model switch."
+    )
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _model_switch_execution("next-turn").result,
+        _rejected_execution().result,
+        json.dumps(
+            {"action": "switch", "model": "large", "status": "error", "tool": "thread_model", "when": "after-toolcall"},
+        ),
+        "not-json",
+    ],
+    ids=["next-turn", "rejected", "not-ok-naming-a-model", "malformed"],
+)
+def test_only_a_successful_switch_for_the_current_response_continues_the_turn(result: str) -> None:
+    """A switch that takes effect later, or did not take effect, was answered in its run, so nothing continues."""
+    execution = _model_switch_execution("after-toolcall")
+    execution.result = result
+
+    decision = continuation_decision_from_tools([execution.call], original_prompt="Solve", continuation_count=0)
+
+    assert decision.continuation is None
+    assert decision.limit_message is None
+
+
+def test_latest_successful_model_switch_wins_over_later_rejection() -> None:
+    """A rejected later call cannot undo an earlier switch that was already persisted."""
+    decision = continuation_decision_from_tools(
+        [_model_switch_execution("after-toolcall").call, _rejected_execution().call],
+        original_prompt="Solve the problem",
+        continuation_count=0,
+    )
+
+    assert decision.continuation is not None
+    assert decision.continuation.model_name == "large"
 
 
 def test_latest_successful_model_switch_wins_among_multiple_valid_calls() -> None:
@@ -181,8 +111,8 @@ def test_latest_successful_model_switch_wins_among_multiple_valid_calls() -> Non
         continuation_count=0,
     )
 
-    assert decision.model_switch_name == "default"
-    assert decision.model_switch_when == "after-toolcall"
+    assert decision.continuation is not None
+    assert decision.continuation.model_name == "default"
 
 
 def test_tool_search_and_call_tool_results_never_continue() -> None:
@@ -196,7 +126,7 @@ def test_tool_search_and_call_tool_results_never_continue() -> None:
 
     decision = continuation_decision_from_tools([search.call], original_prompt="Nap", continuation_count=0)
 
-    assert decision.should_continue is False
+    assert decision.continuation is None
     assert decision.limit_message is None
 
 
@@ -208,6 +138,8 @@ def test_model_switch_at_the_limit_returns_limit_message() -> None:
         continuation_count=TURN_CONTINUATION_LIMIT,
     )
 
-    assert decision.should_continue is False
-    assert decision.limit_message is not None
-    assert decision.model_switch_name == "large"
+    assert decision.continuation is None
+    assert decision.limit_message == (
+        f"Model switching did not produce a final answer after {TURN_CONTINUATION_LIMIT} continuation attempts. "
+        "The last request selected `large` with timing `after-toolcall`."
+    )

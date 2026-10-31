@@ -15,7 +15,7 @@ from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.ai_run_metadata import prior_usage_of
 from mindroom.approval.receipt_readers import add_approval_receipt_reader, approval_receipt_call_ids
 from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
 from mindroom.delegation.background import (
     delegation_outcome,
@@ -97,7 +97,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE, ToolOutcome
 from mindroom.turn_continuation import continuation_decision_from_tools, stopped_calls
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
@@ -416,20 +416,15 @@ async def _execute_child(
             original_prompt=child.task,
             continuation_count=0,
         )
-        if decision.next_prompt is not None:
-            model_name = (
-                decision.model_switch_name
-                if decision.model_switch_when == "after-toolcall" and decision.model_switch_name is not None
-                else child.model_name
-            )
-            note_child_run_id(child, uuid4().hex, runtime_paths, model_name=model_name)
+        if decision.continuation is not None:
+            note_child_run_id(child, uuid4().hex, runtime_paths, model_name=decision.continuation.model_name)
             return await _start_child_envelope(
                 child,
                 observation,
                 run_child,
                 config,
                 runtime_paths,
-                prompt=decision.next_prompt,
+                prompt=decision.continuation.prompt,
                 refresh_scheduler=refresh_scheduler,
                 # The continuation's runs follow the resumed run and the attempts its turn spent before it.
                 prior_usage=(*prior_usage_of(response), *(() if response.metrics is None else (response.metrics,))),
