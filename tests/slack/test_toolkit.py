@@ -918,6 +918,7 @@ async def test_listings_refuse_a_limit_outside_one_to_a_hundred(
         ("slack_search", {"query": "launch", "kind": "files"}),
         ("slack_search", {"query": "launch", "limit": 2.5}),
         ("slack_search", {"query": None}),
+        ("slack_watch", {"action": "pause"}),
     ],
 )
 async def test_malformed_arguments_fail_call_validation_before_any_request(
@@ -931,7 +932,7 @@ async def test_malformed_arguments_fail_call_validation_before_any_request(
     fake = FakeSlack().install(monkeypatch)
 
     with pytest.raises(ValidationError):
-        await toolkit_offers(_tools(paths), name).entrypoint(**arguments)
+        await toolkit_offers(_watch_tools(paths), name).entrypoint(**arguments)
 
     assert fake.requests == []
 
@@ -1999,7 +2000,6 @@ async def test_start_words_follow_the_filters(paths: RuntimePaths, filters: dict
     [
         ({"mentions": False, "direct_messages": False}, "Watch mentions, direct messages, or both"),
         ({"channels": ["U0123ABCD"]}, "Use a Slack conversation ID, <conversation>:<ts>, or a message link"),
-        ({"action": "pause"}, "action must be start, stop, or status"),
     ],
 )
 async def test_start_refuses_filters_that_watch_nothing_or_name_no_channel(
