@@ -782,6 +782,7 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
             None,
         ),
     )
+    # An authored value arrives validated as a list; a dashboard-saved one is whatever JSON the credentials API took.
     raw_allowed = settings.values.get("allowed_tools")
     if isinstance(raw_allowed, str):
         raw_allowed = [raw_allowed]

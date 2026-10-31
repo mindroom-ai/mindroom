@@ -2172,6 +2172,34 @@ def test_workflow_allowed_tools_layers_dashboard_values_under_authored_ones(tmp_
     assert allowed([], defaults=[{"dynamic_workflow": {"allowed_tools": ["shell"]}}]) == {"shell"}
 
 
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        (" calculator ", {"calculator"}),
+        (["website", 3, " ", " shell "], {"website", "shell"}),
+        (5, set()),
+    ],
+)
+def test_workflow_allowed_tools_reads_only_string_names_of_a_stored_value(
+    tmp_path: Path,
+    stored: object,
+    expected: set[str],
+) -> None:
+    """A dashboard-saved allowed_tools is unvalidated JSON, so only its non-blank string names count."""
+    context = _make_context(tmp_path)
+    target = RequestCredentialsTarget(
+        runtime_paths=context.runtime_paths,
+        base_manager=get_runtime_credentials_manager(context.runtime_paths),
+        worker_scope=None,
+        agent_name=None,
+        execution_identity=None,
+        tools=builtin_tool_registry(),
+    )
+    save_credentials_for_target("dynamic_workflow", {"allowed_tools": stored}, target)
+
+    assert dynamic_workflow_module._workflow_allowed_tools(context) == expected
+
+
 def test_participant_run_config_wildcard_pre_approves_all_granted_tools(tmp_path: Path) -> None:
     """allowed_tools ["*"] pre-approves every granted tool's functions."""
     context = _make_context(tmp_path)
