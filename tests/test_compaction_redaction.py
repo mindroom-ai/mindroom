@@ -113,7 +113,7 @@ def _store_legacy_seen_event_ids(
     session: ConversationSession,
     event_ids: list[str],
 ) -> None:
-    """Store seen ids on the session row as team turns of earlier releases recorded the events they consumed."""
+    """Store ``event_ids`` as the owner's seen ids that earlier releases preserved in session metadata."""
     storage.update_metadata(
         session,
         lambda metadata: {**(metadata or {}), constants.MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": event_ids}},
@@ -416,7 +416,7 @@ async def test_redaction_cleans_the_agent_runs_of_a_conversation_started_under_i
 
 
 def test_team_redaction_without_compaction_keeps_unrelated_runs(storage: ConversationStore) -> None:
-    """Seen ids earlier releases' team turns recorded on the session row are not legacy summary provenance."""
+    """Seen ids earlier releases preserved on the session row are not legacy summary provenance."""
     session = _seed(storage, ["t1", "t2", "t3"])
     _store_legacy_seen_event_ids(storage, session, ["$t1", "$t2", "$t3"])
 

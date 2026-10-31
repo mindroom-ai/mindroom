@@ -192,8 +192,8 @@ def _remove_redacted_event_from_history(
 
     The first element that answered, read, or wrote the event goes with everything
     after it, and the runs a removed summary covered replay again. Afterwards the
-    owner's preserved metadata seen ids are dropped, so messages only they covered
-    return as unseen thread context. ``session`` is synced to the stored result.
+    seen ids earlier releases preserved in metadata are dropped, so messages only they
+    covered return as unseen thread context. ``session`` is synced to the stored result.
     Returns whether the scope's history changed.
     """
     session_id, scope = session.session_id, owner_scope(session)
@@ -212,7 +212,6 @@ def _remove_redacted_event_from_history(
         return False
     elif legacy_event_ids is not None:
         summary_rows.retire(storage, session=session, scope_key=scope.key)
-    # The preserved seen ids of earlier releases go with any cut (see ``_preserved_seen_event_ids``).
     storage.update_metadata(session, partial(_with_history_state, field=_SEEN_EVENT_IDS, value=[]))
     return True
 
@@ -277,8 +276,8 @@ def set_force_compaction(
     *,
     session: ConversationSession,
     forced: bool,
-) -> HistoryScopeState:
-    """Store whether the next run of the scope owning ``session`` compacts first; return the stored state.
+) -> None:
+    """Store whether the next run of the scope owning ``session`` compacts first.
 
     The flag changes in the metadata the stored row holds, which writes nothing when the flag already reads
     ``forced``, and ``session`` then holds that metadata.
@@ -290,7 +289,6 @@ def set_force_compaction(
         return _with_history_state(metadata, _FORCE_COMPACTION, value=forced)
 
     storage.update_metadata(session, change)
-    return read_scope_state(session)
 
 
 def _latest_summary_row(storage: ConversationStore, session: ConversationSession) -> tuple[int | None, str | None]:

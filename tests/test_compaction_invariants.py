@@ -225,7 +225,7 @@ def test_clearing_the_force_flag_through_a_stale_session_lands_on_the_freshest_r
     storage.update_metadata(concurrent_session, lambda metadata: {**with_force_compaction(metadata), "other": "kept"})
     storage.save_run(concurrent_session, _completed_run("run-2"), record_usage=False)
 
-    assert set_force_compaction(storage, session=stale_session, forced=False) == HistoryScopeState()
+    set_force_compaction(storage, session=stale_session, forced=False)
 
     persisted_session = storage.load_session("session-1")
     assert persisted_session is not None
@@ -277,10 +277,9 @@ def test_a_force_flag_update_that_changes_nothing_writes_nothing(
 
     monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
 
-    assert set_force_compaction(storage, session=stale_session, forced=forced) == HistoryScopeState(
-        force_compact_before_next_run=forced,
-    )
+    set_force_compaction(storage, session=stale_session, forced=forced)
 
+    assert read_scope_state(stale_session).force_compact_before_next_run is forced
     assert statements
     assert not [statement for statement in statements if statement.lstrip().upper().startswith("UPDATE")]
     persisted_session = storage.load_session("session-1")

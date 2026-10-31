@@ -584,7 +584,7 @@ class _TeamTurn:
         elif (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
             shown = chunk.content
             yield chunk
-        yield AttemptResolved(await self.resolve_completed(run, attempt, record, shown=shown is not None))
+        yield AttemptResolved(self.resolve_completed(run, attempt, record, shown=shown is not None))
 
     def silent_no_report(self, record: TeamRunRecord) -> bool:
         """Whether a quiet scheduled turn's leader answered with the no-report token while no member found anything."""
@@ -628,7 +628,7 @@ class _TeamTurn:
             team_member_model_names=tuple(sorted(attempt.members.model_names.items())),
         )
 
-    async def resolve_completed(
+    def resolve_completed(
         self,
         run: TurnRunState,
         attempt: TeamAttempt,

@@ -725,7 +725,7 @@ async def test_a_request_survives_the_requesting_runs_terminal_save_and_a_concur
     identity = _execution_identity()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
-    # The requesting run and another turn both loaded the session before the run's tool call asked for compaction.
+    # The requesting run and another writer both loaded the session before the run's tool call asked for compaction.
     running = storage.load_session("session-1")
     other_copy = storage.load_session("session-1")
     assert running is not None

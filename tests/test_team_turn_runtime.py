@@ -34,7 +34,7 @@ from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner, build_prepared_turn
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
-from mindroom.constants import AI_RUN_METADATA_KEY, MINDROOM_HISTORY_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation.state import DelegationState, child_execution_identity
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import ApprovalDecision
@@ -242,9 +242,9 @@ async def test_a_team_turn_that_only_ran_tools_marks_its_trigger_seen(
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
 ) -> None:
-    """A turn whose runs called tools but wrote nothing keeps its run and marks the events it read seen, on either path.
+    """A turn whose runs called tools but wrote nothing keeps its run, which marks the events it read seen, on either path.
 
-    The stored session row keeps them as well as the run, as it does for every turn that produced anything.
+    The run is their only record: the session row's metadata stays unwritten.
     """
     team = squad_turn(
         tmp_path,
@@ -259,7 +259,7 @@ async def test_a_team_turn_that_only_ran_tools_marks_its_trigger_seen(
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert read_scope_seen_event_ids(team.storage, session) == {EVENT_ID}
-    assert session.metadata == {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": [EVENT_ID]}}
+    assert session.metadata is None
 
 
 @pytest.mark.asyncio

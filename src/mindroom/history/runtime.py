@@ -810,7 +810,8 @@ def _prepare_scope_state_for_run(
 ) -> HistoryScopeState:
     state = read_scope_state(session)
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
-        state = set_force_compaction(storage, session=session, forced=False)
+        set_force_compaction(storage, session=session, forced=False)
+        state = HistoryScopeState()
         logger.warning(
             "Forced compaction skipped because text compaction is unavailable",
             session_id=session.session_id,

@@ -46,7 +46,6 @@ from mindroom.mid_turn import QueuedMessage
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval, TurnSinks
-from mindroom.session_storage.store import ConversationStore
 from mindroom.teams.envelope import prepare_materialized_team_execution, team_response_stream
 from mindroom.teams.formation import resolve_live_shared_agent_names
 from mindroom.teams.members import build_team_spec, resolve_team_members
@@ -154,9 +153,9 @@ def _contents(request_messages: Sequence[Message]) -> list[tuple[str, str]]:
     return [(message.role, str(message.content)) for message in request_messages]
 
 
-def _leader_turn_messages(team: TeamTurn) -> list[tuple[str, str]]:
-    """Return the leader's first request after its system message: the replayed history, then the turn."""
-    return _contents([message for message in _leader(team).requests[0].messages if message.role != "system"])
+def _leader_turn_messages(team: TeamTurn, request: int = 0) -> list[tuple[str, str]]:
+    """Return one leader request, the first by default, after its system message: the replayed history, then the turn."""
+    return _contents([message for message in _leader(team).requests[request].messages if message.role != "system"])
 
 
 # ---------------------------------------------------------------------------
@@ -710,9 +709,7 @@ async def test_a_private_ad_hoc_team_stores_under_its_requester_scope_and_replay
         ("run-1", team.scope.scope_id),
         ("run-2", team.scope.scope_id),
     ]
-    first_prompt, _answer, second_prompt = _contents(
-        [message for message in _leader(team).requests[1].messages if message.role != "system"],
-    )
+    first_prompt, _answer, second_prompt = _leader_turn_messages(team, 1)
     assert "First question" in first_prompt[1]
     assert _answer == ("assistant", "First answer")
     assert "Second question" in second_prompt[1]
@@ -828,10 +825,8 @@ async def test_a_turn_regenerated_after_an_edit_reads_the_thread_events_the_remo
     assert remove_runs_answering(team.storage, SESSION_ID, team.scope, EVENT_ID)
     await team.respond(thread_history=thread_history, response_sender_id="@mindroom_team:localhost")
 
-    first, regenerated = (
-        _contents([message for message in request.messages if message.role != "system"])
-        for request in _leader(team).requests
-    )
+    assert len(_leader(team).requests) == 2
+    first, regenerated = _leader_turn_messages(team), _leader_turn_messages(team, 1)
     assert first == [
         ("user", "Earlier question"),
         ("assistant", "Earlier answer"),
@@ -839,29 +834,6 @@ async def test_a_turn_regenerated_after_an_edit_reads_the_thread_events_the_remo
         ("user", f"Current message:\n{render_msg_tag(sender=REQUESTER_ID, body='Hello', event_id=EVENT_ID)}"),
     ]
     assert regenerated == first
-
-
-@pytest.mark.asyncio
-async def test_a_team_reply_writes_no_session_metadata(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The stored team run alone records the events the turn consumed; the session row's metadata stays unwritten."""
-    team = _team(tmp_path, monkeypatch, leader=[answer("Recovered team response")])
-    update_metadata_calls: list[object] = []
-    monkeypatch.setattr(
-        ConversationStore,
-        "update_metadata",
-        lambda *args, **_kwargs: update_metadata_calls.append(args),
-    )
-
-    await team.respond(response_sender_id="@mindroom_team:localhost")
-
-    session = team.storage.load_session(SESSION_ID)
-    assert session is not None
-    assert read_scope_seen_event_ids(team.storage, session) == {EVENT_ID}
-    assert update_metadata_calls == []
-    assert session.metadata is None
 
 
 # ---------------------------------------------------------------------------

@@ -25,7 +25,6 @@ from mindroom.history.storage import (
 )
 from mindroom.history.types import (
     HistoryScope,
-    HistoryScopeState,
 )
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage import store as store_module
@@ -61,13 +60,11 @@ def test_the_force_flag_is_set_and_cleared_beside_the_seen_ids(storage: Conversa
         ),
     )
 
-    assert set_force_compaction(storage, session=session, forced=True) == HistoryScopeState(
-        force_compact_before_next_run=True,
-    )
+    set_force_compaction(storage, session=session, forced=True)
     assert session.metadata == {
         MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$kept"], "force_compact_before_next_run": True},
     }
-    assert set_force_compaction(storage, session=session, forced=False) == HistoryScopeState()
+    set_force_compaction(storage, session=session, forced=False)
     assert session.metadata == {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$kept"]}}
     assert with_force_compaction(None) == {MINDROOM_HISTORY_METADATA_KEY: {"force_compact_before_next_run": True}}
 
@@ -120,7 +117,7 @@ def test_seen_event_ids_match_model_history_visibility(tmp_path: Path, *, is_tea
         session_id="session-1",
         owner_id=entity_id,
         runs=runs,
-        # Seen ids an earlier release's team turn preserved on the session row.
+        # Seen ids an earlier release preserved on the session row.
         metadata={MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["preserved-event"]}},
         created_at=1,
     )
