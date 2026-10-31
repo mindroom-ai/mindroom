@@ -631,6 +631,9 @@ async def _hold(
 ) -> None:
     """Keep an instance of an unentitled subscription stopped, and tear it down once its grace period ends."""
     if instance.get("status") == "deprovisioned":
+        # A torn-down instance has nothing left to hold, so an earlier failed step, such as a lookup, is resolved.
+        if instance.get("lifecycle_error"):
+            update_instance(sb, instance["instance_id"], _CLEARED_LIFECYCLE_ERROR)
         return
     instance_id = instance["instance_id"]
     if instance.get("lifecycle_stopped_at") is None:

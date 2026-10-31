@@ -1968,6 +1968,52 @@ async def test_legacy_soft_deleted_instance_of_a_paying_restored_account_runs(pl
 
 
 @pytest.mark.asyncio
+async def test_failed_legacy_lookup_of_a_torn_down_instance_clears_once_a_lookup_succeeds(platform: Platform) -> None:
+    # An admin uninstalled the instance of a lapsed subscription, so it is deprovisioned without a lifecycle hold.
+    _pending_deletion(platform)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("deprovisioned", openrouter_key_hash=None))
+
+    unreachable = AsyncMock(side_effect=RuntimeError("kubectl get deployment/mindroom-7 failed: connection refused"))
+    with patch(f"{LEGACY}.check_deployment_exists", unreachable):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+    assert len(summary.errors) == 1
+    assert platform.instance()["lifecycle_error"]
+
+    with patch(f"{LEGACY}.check_deployment_exists", AsyncMock(return_value=False)):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert summary.errors == []
+    assert platform.instance()["lifecycle_error"] is None
+    assert platform.instance()["status"] == "deprovisioned"
+
+
+@pytest.mark.asyncio
+async def test_resume_during_a_cluster_outage_keeps_the_hold_and_redeploys_nothing(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=3)).isoformat(),
+            teardown_after=(now + timedelta(days=27)).isoformat(),
+        )
+    )
+
+    unreachable = AsyncMock(side_effect=RuntimeError("kubectl get deployment/mindroom-7 failed: connection refused"))
+    with patch("backend.services.instance_lifecycle.check_deployment_exists", unreachable):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert len(summary.errors) == 1
+    platform.provision.assert_not_awaited()
+    platform.start.assert_not_awaited()
+    instance = platform.instance()
+    assert instance["status"] == "stopped"
+    assert instance["lifecycle_stopped_at"] is not None
+    assert instance["lifecycle_error"]
+
+
+@pytest.mark.asyncio
 async def test_webhook_reconcile_does_not_look_for_legacy_deployments(platform: Platform) -> None:
     # Only the nightly run and accounts pending deletion pay a Kubernetes call per torn-down instance.
     platform.db.tables["subscriptions"].append(_subscription("cancelled"))
