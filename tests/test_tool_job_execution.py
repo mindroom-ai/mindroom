@@ -1500,8 +1500,7 @@ async def test_a_call_whose_access_resolves_during_its_wait_returns_its_handle(t
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     runtime = await tool_job_runtime(
         tmp_path,
-        authorize=lambda _job: grant["access"] == "allowed",
-        denied=lambda _job: False,
+        grant=lambda _job: "allowed" if grant["access"] == "allowed" else "pending",
     )
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -1542,7 +1541,7 @@ async def test_a_refused_job_fails_its_call_not_the_reply(
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: refusal != "start")
+    runtime = await tool_job_runtime(tmp_path, grant=lambda _job: "denied" if refusal == "start" else "allowed")
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     if refusal == "authority":

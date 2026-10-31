@@ -142,6 +142,8 @@ class JobFuzzRunner:
         self._skip = 0
         self._faults = 0
         self._dead = False
+        # The job a revocation step is taking the grant from, denied only for that step's pass.
+        self._revoking: set[str] = set()
         self._patch = pytest.MonkeyPatch()
         intercept_job_saves(self._patch, before=self._save)
         # Reads what the processes saved, as the next process will find it.
@@ -157,7 +159,11 @@ class JobFuzzRunner:
         self.runtime = await self._open()
 
     async def _open(self) -> ProcessRuntime:
-        return await tool_job_runtime(self._root, cancel=self._cleanup)
+        return await tool_job_runtime(
+            self._root,
+            grant=lambda job: "denied" if job.job_id in self._revoking else "allowed",
+            cancel=self._cleanup,
+        )
 
     async def run(self, actions: list[Action]) -> None:
         """Apply each step, then settle everything and check that an orderly restart changes nothing."""
@@ -351,7 +357,11 @@ class JobFuzzRunner:
 
     async def _revoke(self, _action: Action, job_id: str) -> None:
         self._cause(job_id, "cancel")
-        await self.runtime.cancel_revoked(denied=lambda job: job.job_id == job_id)
+        self._revoking.add(job_id)
+        try:
+            await self.runtime.cancel_revoked()
+        finally:
+            self._revoking.discard(job_id)
 
     async def _restart(self, action: Action | None = None, _job_id: str | None = None) -> None:
         """Shut down in order, then recover."""

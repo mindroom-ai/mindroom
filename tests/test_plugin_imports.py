@@ -121,10 +121,9 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
         if action == "create":
             runtime = ToolJobRuntime(
                 store,
-                authorize=lambda job: True,
+                grant=lambda job: "allowed",
                 authorize_execution=lambda *args: None,
                 cancel=no_cleanup,
-                denied=lambda job: False,
             )
             await runtime.recover()
 
@@ -159,10 +158,9 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
         elif action == "recover":
             runtime = ToolJobRuntime(
                 store,
-                authorize=authorized,
+                grant=lambda job: "allowed" if authorized(job) else "denied",
                 authorize_execution=lambda *args: None,
                 cancel=no_cleanup,
-                denied=lambda job: not authorized(job),
             )
             await runtime.recover()
             statuses = {

@@ -7,7 +7,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
@@ -31,6 +31,7 @@ from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
     JobAccessError,
+    JobGrant,
     ToolJobRuntime,
     register_background_runtime,
 )
@@ -137,10 +138,9 @@ class ToolJobRuntimeCoordinator:
             await store.take_ownership()
             self._runtime = ToolJobRuntime(
                 store,
-                authorize=self._authorized,
+                grant=self._grant,
                 authorize_execution=self._authorize_execution,
                 cancel=self._interrupt,
-                denied=self._denied,
             )
         self._initialized = True
 
@@ -169,16 +169,12 @@ class ToolJobRuntimeCoordinator:
             runtime_paths=self.runtime_paths,
         )
 
-    def _authorized(self, job: BackgroundJob) -> bool:
-        """Grant access only on a proven grant; unresolved membership fails closed."""
-        return self._grant(job) == "allowed"
+    def _grant(self, job: BackgroundJob) -> JobGrant:
+        """Recheck current delegation, team membership, and requester reply access.
 
-    def _denied(self, job: BackgroundJob) -> bool:
-        """Revoke execution only on a proven denial, never while membership is still resolving."""
-        return self._grant(job) == "denied"
-
-    def _grant(self, job: BackgroundJob) -> Literal["allowed", "denied", "pending"]:
-        """Recheck current delegation, team membership, and requester reply access."""
+        Access opens only on a proven grant and execution stops only on a proven denial; unresolved membership is
+        neither.
+        """
         config = self.config_provider()
         owner = job.owner
         if owner.channel != "matrix" or owner.requester_id is None or owner.room_id is None:
@@ -217,7 +213,7 @@ class ToolJobRuntimeCoordinator:
         requester_id: str,
         room_id: str | None,
         entities: Iterable[str],
-    ) -> Literal["allowed", "denied", "pending"]:
+    ) -> JobGrant:
         """Whether the requester may still converse with every entity, or membership is still resolving."""
         pending = False
         for entity_name in entities:
@@ -339,7 +335,7 @@ class ToolJobRuntimeCoordinator:
 
     async def _reconcile(self) -> None:
         """Stop revoked work, publish live jobs, and admit follow-ups."""
-        await self.runtime.cancel_revoked(denied=self._denied)
+        await self.runtime.cancel_revoked()
         await self._publisher.publish(self.bot_provider, self.runtime.retained_jobs())
         await self._admit_follow_ups(self.runtime)
 

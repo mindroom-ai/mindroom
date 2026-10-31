@@ -88,12 +88,12 @@ def test_completion_authority_uses_latest_config_and_team_membership(tmp_path: P
         journal_provider=partial(tool_job_journal, test_runtime_paths(tmp_path).storage_root),
     )
     job = completed_delegation_job()
-    assert coordinator._authorized(job)
+    assert coordinator._grant(job) == "allowed"
     config.agents["lead"].delegate_to = []
-    assert not coordinator._authorized(job)
+    assert coordinator._grant(job) != "allowed"
     config.agents["lead"].delegate_to = ["worker"]
     config.teams["team"].agents = ["worker"]
-    assert not coordinator._authorized(job)
+    assert coordinator._grant(job) != "allowed"
 
 
 def test_completion_authority_checks_requester_for_target_and_recipient(tmp_path: Path) -> None:
@@ -107,9 +107,9 @@ def test_completion_authority_checks_requester_for_target_and_recipient(tmp_path
         journal_provider=partial(tool_job_journal, test_runtime_paths(tmp_path).storage_root),
     )
     job = completed_delegation_job()
-    assert not coordinator._authorized(replace(job, owner=replace(job.owner, requester_id="@stranger:localhost")))
+    assert coordinator._grant(replace(job, owner=replace(job.owner, requester_id="@stranger:localhost"))) != "allowed"
     config.agents["worker"].access = ResponderAccessConfig(current_room_members=False)
-    assert not coordinator._authorized(job)
+    assert coordinator._grant(job) != "allowed"
 
 
 class _ResolvingMembership(AgentReplyMembershipIndex):
@@ -154,7 +154,7 @@ async def test_revocation_waits_for_resolving_room_membership(tmp_path: Path) ->
         agent_reply_memberships=membership,
         journal_provider=partial(tool_job_journal, test_runtime_paths(tmp_path).storage_root),
     )
-    runtime = await tool_job_runtime(tmp_path, authorize=coordinator._authorized)
+    runtime = await tool_job_runtime(tmp_path, grant=coordinator._grant)
     fixture = completed_delegation_job()
     release = asyncio.Event()
 
@@ -167,8 +167,8 @@ async def test_revocation_waits_for_resolving_room_membership(tmp_path: Path) ->
         await start_delegation_job(runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
         for state, running in (("pending", True), ("member", True), ("pending", True), ("stranger", False)):
             membership.state = state
-            assert coordinator._authorized(fixture) is (state == "member")
-            await runtime.cancel_revoked(denied=coordinator._denied)
+            assert (coordinator._grant(fixture) == "allowed") is (state == "member")
+            await runtime.cancel_revoked()
             status = runtime._entries[fixture.job_id].job.status
             assert (status == "running") is running, state
     finally:
@@ -321,9 +321,9 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
             },
         },
     )
-    assert coordinator._authorized(job)
+    assert coordinator._grant(job) == "allowed"
     config.agents["lead"].tools = []
-    assert not coordinator._authorized(job)
+    assert coordinator._grant(job) != "allowed"
 
 
 @pytest.mark.asyncio
@@ -595,7 +595,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
                 ),
             )
             coordinator._authorize_execution(owner, tool)
-            assert coordinator._authorized(stored)
+            assert coordinator._grant(stored) == "allowed"
             if authored == "openclaw_compat":
 
                 def replaced_factory() -> type[Toolkit]:
@@ -604,7 +604,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
                 replace_test_tool_factory(monkeypatch, "shell", replaced_factory)
                 with pytest.raises(JobAccessError):
                     coordinator._authorize_execution(owner, tool)
-                assert not coordinator._authorized(stored)
+                assert coordinator._grant(stored) != "allowed"
     finally:
         await coordinator.stop()
 
@@ -656,7 +656,7 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
         ):
             with pytest.raises(JobAccessError):
                 coordinator._authorize_execution(owner, tool)
-            assert not coordinator._authorized(stored)
+            assert coordinator._grant(stored) != "allowed"
     finally:
         await coordinator.stop()
 

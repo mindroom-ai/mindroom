@@ -271,7 +271,7 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
     await runtime.acknowledge_wait("durable", waited.claim)
     await runtime.shutdown()
     allowed = True
-    runtime = await tool_job_runtime(tmp_path, authorize=lambda _: allowed)
+    runtime = await tool_job_runtime(tmp_path, grant=lambda _: "allowed" if allowed else "denied")
     await runtime.recover()
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
