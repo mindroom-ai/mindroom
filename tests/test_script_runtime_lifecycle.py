@@ -851,8 +851,12 @@ def _served_lifecycle(tmp_path: Path, *, api_enabled: bool = True) -> ScriptRunt
 
 
 @pytest.mark.asyncio
-async def test_shutdown_stops_serving_script_tools_before_it_cancels_background_work(tmp_path: Path) -> None:
-    """A tool call that arrives while shutdown waits for its background tasks finds the runtime not ready."""
+@pytest.mark.parametrize("stop", ["shutdown", "unbind_api"])
+async def test_stopping_stops_serving_script_tools_before_it_cancels_background_work(
+    tmp_path: Path,
+    stop: str,
+) -> None:
+    """A tool call that arrives while shutdown or an API unbind waits for background tasks finds the runtime not ready."""
     runtime = _served_lifecycle(tmp_path)
     await runtime.start()
     runtime.bind_api("http://primary.test/api/script-gateway")
@@ -877,13 +881,14 @@ async def test_shutdown_stops_serving_script_tools_before_it_cancels_background_
         ),
     )
     await cancel_task(maintenance_task)
-    shutdown = asyncio.create_task(runtime.shutdown())
+    stopping = asyncio.create_task(runtime.shutdown() if stop == "shutdown" else runtime.unbind_api())
     await asyncio.wait_for(cancelling.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert runtime.tool_manager is None
 
     release.set()
-    await shutdown
+    await stopping
+    await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -2455,12 +2460,8 @@ async def test_failed_nested_preparation_keeps_the_earlier_reload_fence(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [ScriptWorkerError, WorkerBackendError])
-async def test_one_unreachable_run_stays_retryable_without_blocking_later_reconciliation(
-    tmp_path: Path,
-    failure: type[Exception],
-) -> None:
-    """A typed worker or backend failure of one run leaves it retryable and the rest of the pass continues."""
+async def test_one_unreachable_run_stays_retryable_without_blocking_later_reconciliation(tmp_path: Path) -> None:
+    """A failed reconciliation of one run leaves it retryable and the rest of the pass continues."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     first = _stored_run(store, runtime_paths)
@@ -2470,7 +2471,7 @@ async def test_one_unreachable_run_stays_retryable_without_blocking_later_reconc
     async def reconcile_durable(*, run_id: str) -> ScriptRunRecord:
         if run_id == first.run_id:
             message = "worker unavailable"
-            raise failure(message)
+            raise ScriptRunManagerError(message)
         reconciled.append(run_id)
         return second
 

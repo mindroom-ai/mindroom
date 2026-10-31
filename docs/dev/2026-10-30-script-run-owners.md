@@ -20,10 +20,12 @@ Kubernetes script workers can outlive a primary upgrade, so the script protocol 
 Dropping the never-read `failure_kind` response field is compatible in both directions: an older primary reads its absence as the worker failure it always assumed, and a newer primary ignores it from an older worker.
 A rejected message becomes a worker error that names each field but never its value, because a launch request carries the primary's config snapshot.
 
-## Where requester-facing errors are decided
+## Where request failures become the manager's error
 
-Start, status, and cancel requests report worker transport and worker backend failures as the manager's own error, so the script tool answers with its JSON error instead of raising.
-The translation sits only at those three request methods: lifecycle reconciliation calls below them and already treats each of these failures as retryable, and translating at every raise site would spread one rule over the worker client, the supervisor adapter, and each backend call.
+Start, status, cancel, and durable reconciliation report worker transport, worker backend, and local supervisor startup failures as the manager's own error, so the script tool answers with its JSON error instead of raising and the lifecycle's maintenance and recovery passes catch one error type.
+A lifecycle catch that named the specific types missed a primary supervisor that cannot start, which failed every maintenance pass instead of leaving that run for the next one.
+The translation sits at those public methods, not at every raise site, which would spread one rule over the worker client, the supervisor adapter, and each backend call.
+Process-only reconciliation of a revoked run keeps the raw failure, because its one caller treats every exception as retryable.
 Rejected: a base exception shared by the manager, the wire, and backend errors, which needed a new module below all three; and translating in the tool, which would make the tool the owner of the manager's failure set.
 
 ## Why the claim rechecks the run first

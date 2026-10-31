@@ -51,7 +51,6 @@ from mindroom.script_runs.reasons import (
 )
 from mindroom.script_runs.recovery import run_matches_recovery_signature, script_process_authority
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
-from mindroom.script_runs.wire import ScriptWorkerError
 from mindroom.script_runs.worker_client import ScriptWorkerClient
 from mindroom.tool_system.worker_routing import (
     parse_tool_execution_identity_payload,
@@ -379,10 +378,11 @@ class ScriptRuntimeLifecycle:
     def tool_manager(self) -> ScriptRunManager | None:
         """Return the manager script tools use while this runtime serves them, else None.
 
-        Serving starts when activation with the API begins its startup reconciliation and ends at `unbind_api` or the
-        start of `shutdown`.
+        Serving starts when activation with the API begins its startup reconciliation and ends at the start of
+        `unbind_api` or `shutdown`.
         """
-        return self.manager if self.api_enabled and self._started and self._start_requested else None
+        serving = self.api_enabled and self._api_ready.is_set() and self._started and self._start_requested
+        return self.manager if serving else None
 
     def bind_api(self, gateway_url: str) -> None:
         """Publish the reachable gateway without replacing the broker that owns calls."""
@@ -840,7 +840,7 @@ class ScriptRuntimeLifecycle:
             async with semaphore:
                 try:
                     await self.manager.reconcile_durable(run_id=run.run_id)
-                except (ScriptRunManagerError, ScriptWorkerError, WorkerBackendError):
+                except ScriptRunManagerError:
                     logger.warning(
                         "script_run_reconciliation_pending",
                         run_id=run.run_id,
@@ -950,13 +950,7 @@ class ScriptRuntimeLifecycle:
                     # Settle that ownership without replaying it or revoking the surviving process.
                     await self.broker.cancel_run(run.run_id)
                     adopted.add(run.run_id)
-            except (
-                ScriptRunManagerError,
-                ScriptRunStoreError,
-                ScriptWorkerError,
-                WorkerBackendError,
-                _ScriptRuntimeUnavailableError,
-            ):
+            except (ScriptRunManagerError, ScriptRunStoreError, WorkerBackendError, _ScriptRuntimeUnavailableError):
                 logger.warning("script_startup_recovery_pending", run_id=run.run_id, exc_info=True)
         return adopted
 

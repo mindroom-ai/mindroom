@@ -629,21 +629,24 @@ class ScriptRunManager:
         broker_revoked: bool = False,
     ) -> ScriptRunRecord:
         """Reconcile process truth for one trusted durable lifecycle record."""
-        async with self._run_lock(run_id):
-            run = await asyncio.to_thread(self.store.get_run, run_id)
-            if run.state in TERMINAL_SCRIPT_RUN_STATES:
-                return run
-            # An observed exit is always revoked too, and termination finalizes it without signalling again.
-            if run.cancel_requested_at is not None:
-                return await self._terminate_durable_run_locked(
-                    run_id,
-                    reason=run.cancellation_reason or OWNER_CANCELLATION,
-                    broker_revoked=broker_revoked,
-                )
-            if _runtime_expired(run):
-                return await self._terminate_durable_run_locked(run_id, reason=MAX_RUNTIME_EXCEEDED)
-            status = await self._process_status(run)
-            return await self._apply_process_status(run, status)
+        try:
+            async with self._run_lock(run_id):
+                run = await asyncio.to_thread(self.store.get_run, run_id)
+                if run.state in TERMINAL_SCRIPT_RUN_STATES:
+                    return run
+                # An observed exit is always revoked too, and termination finalizes it without signalling again.
+                if run.cancel_requested_at is not None:
+                    return await self._terminate_durable_run_locked(
+                        run_id,
+                        reason=run.cancellation_reason or OWNER_CANCELLATION,
+                        broker_revoked=broker_revoked,
+                    )
+                if _runtime_expired(run):
+                    return await self._terminate_durable_run_locked(run_id, reason=MAX_RUNTIME_EXCEEDED)
+                status = await self._process_status(run)
+                return await self._apply_process_status(run, status)
+        except _REQUEST_FAILURES as exc:
+            raise ScriptRunManagerError(str(exc)) from exc
 
     async def reconcile_revoked_process(self, *, run_id: str) -> ScriptRunRecord:
         """Record process truth for one already-revoked run without broker or resource cleanup."""

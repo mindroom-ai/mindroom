@@ -3369,7 +3369,6 @@ depends_on = [
     "mindroom.script_runs.models",
     "mindroom.script_runs.recovery",
     "mindroom.script_runs.store",
-    "mindroom.script_runs.wire",
     "mindroom.script_runs.worker_client",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.worker_routing",

@@ -1349,7 +1349,7 @@ async def test_local_supervisor_that_cannot_start_fails_the_request_with_the_man
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A primary supervisor that cannot start fails start and status with the one script request error."""
+    """A primary supervisor that cannot start fails start, status, and reconciliation with the one script request error."""
     manager, _backend, _client = _manager(tmp_path, mode="local")
     context = _context(tmp_path, mode="local")
 
@@ -1371,11 +1371,13 @@ async def test_local_supervisor_that_cannot_start_fails_the_request_with_the_man
 
     with pytest.raises(ScriptRunManagerError, match="did not become ready"):
         await manager.status(context, run_id=running.run_id)
+    with pytest.raises(ScriptRunManagerError, match="did not become ready"):
+        await manager.reconcile_durable(run_id=running.run_id)
 
 
 @pytest.mark.asyncio
 async def test_worker_status_failure_fails_the_status_request_with_the_manager_error(tmp_path: Path) -> None:
-    """An unreachable worker fails the requester's status poll with the one script request error."""
+    """An unreachable worker fails a status poll and a reconciliation with the one script request error."""
     manager, _backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n")
@@ -1383,6 +1385,9 @@ async def test_worker_status_failure_fails_the_status_request_with_the_manager_e
 
     with pytest.raises(ScriptRunManagerError, match="timed out"):
         await manager.status(context, run_id=run.run_id)
+    client.status_failures.append(ScriptWorkerError("Worker script request failed: timed out"))
+    with pytest.raises(ScriptRunManagerError, match="timed out"):
+        await manager.reconcile_durable(run_id=run.run_id)
 
 
 @pytest.mark.asyncio
@@ -1524,7 +1529,7 @@ async def test_status_reports_an_exited_run_whose_worker_could_not_be_removed_ye
 async def test_unconfirmed_cancellation_fails_the_request_but_keeps_its_cause_for_reconciliation(
     tmp_path: Path,
 ) -> None:
-    """The requester sees the manager's error; lifecycle reconciliation still sees the worker failure it retries."""
+    """The requester and lifecycle reconciliation see the manager's error, chained to the worker failure the run retries."""
     manager, backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n")
@@ -1534,8 +1539,9 @@ async def test_unconfirmed_cancellation_fails_the_request_but_keeps_its_cause_fo
         await manager.cancel(context, run_id=run.run_id)
 
     _unreachable_worker(client, backend)
-    with pytest.raises(ScriptWorkerError, match="connection refused"):
+    with pytest.raises(ScriptRunManagerError, match="connection refused") as reconciliation:
         await manager.reconcile_durable(run_id=run.run_id)
+    assert isinstance(reconciliation.value.__cause__, ScriptWorkerError)
     assert manager.store.get_run(run.run_id).state is ScriptRunState.RUNNING
 
 
