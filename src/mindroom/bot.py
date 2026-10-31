@@ -1598,7 +1598,7 @@ class AgentBot:
 
             # Persist correctness-critical source events; keep ID-less auxiliary inputs best-effort.
             client.add_event_callback(
-                self._on_invite_before_sync_certification,  # ty: ignore[invalid-argument-type]
+                self._room_lifecycle.on_invite,  # ty: ignore[invalid-argument-type]
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
             await self._register_call_manager_callbacks(client)
@@ -2019,29 +2019,6 @@ class AgentBot:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _on_invite_before_sync_certification(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.InviteEvent,
-    ) -> None:
-        """Act on one invite without journalling it.
-
-        An invite has no Matrix event ID to key durable work on.
-        Persist its room and inviter before network work moves to the
-        background so policy changes and process restarts can reconcile it.
-        """
-        if (
-            not isinstance(event, nio.InviteMemberEvent)
-            or event.state_key != self.agent_user.user_id
-            or event.membership != "invite"
-        ):
-            return
-        await self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
-        create_background_task(
-            self._room_lifecycle.handle_recorded_invite(room, event.sender),
-            owner=self._runtime_view,
-        )
 
     def _room_for_journal_event(self, room_id: str) -> nio.MatrixRoom:
         """Resolve one recovery room without depending on a new sync response."""

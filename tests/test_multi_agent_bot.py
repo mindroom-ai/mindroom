@@ -229,7 +229,7 @@ class TestAgentBot(AgentBotTestBase):
         invite_callback = next(
             call.args[0] for call in mock_client.add_event_callback.call_args_list if call.args[1] is nio.InviteEvent
         )
-        assert invite_callback == bot._on_invite_before_sync_certification
+        assert invite_callback == bot._room_lifecycle.on_invite
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
@@ -290,7 +290,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._turn_policy.deps.matrix_id.full_id == actual_user_id
         assert bot._turn_ingress.deps.matrix_id.full_id == actual_user_id
         mock_client.add_event_callback.assert_called_once_with(
-            bot._on_invite_before_sync_certification,
+            bot._room_lifecycle.on_invite,
             nio.InviteEvent,
         )
         assert bot._journal_dispatcher.callbacks.on_room_lifecycle == bot._on_room_member
@@ -924,8 +924,8 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room", return_value=True),
         ):
-            await bot._room_lifecycle.record_pending_room_invite(mock_room.room_id, mock_event.sender)
-            await bot._room_lifecycle.handle_recorded_invite(mock_room, mock_event.sender)
+            await bot._room_lifecycle._record_pending_room_invite(mock_room.room_id, mock_event.sender)
+            await bot._room_lifecycle._handle_recorded_invite(mock_room, mock_event.sender)
 
         assert change_membership.await_count == expected_join_calls
 

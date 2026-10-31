@@ -140,8 +140,8 @@ def _cache_current_invite(bot: AgentBot, room_id: str, sender: str) -> nio.Matri
 
 async def _handle_invite(bot: AgentBot, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
     current_room = _cache_current_invite(bot, room.room_id, event.sender)
-    await bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
-    await bot._room_lifecycle.handle_recorded_invite(current_room, event.sender)
+    await bot._room_lifecycle._record_pending_room_invite(room.room_id, event.sender)
+    await bot._room_lifecycle._handle_recorded_invite(current_room, event.sender)
 
 
 def _router_user() -> AgentMatrixUser:
@@ -362,7 +362,7 @@ async def test_router_invitation_list_uses_current_inviter_at_join_boundary(
     try:
         assert await asyncio.to_thread(fence_started.wait, 2)
         room.inviter = replacement_sender
-        await bot._room_lifecycle.record_pending_room_invite(room.room_id, replacement_sender)
+        await bot._room_lifecycle._record_pending_room_invite(room.room_id, replacement_sender)
     finally:
         release_fence.set()
 
@@ -432,7 +432,7 @@ async def test_reconciliation_forgets_refused_invites_and_survives_a_failing_joi
     _cache_current_invite(bot, failing, "@owner:localhost")
     _cache_current_invite(bot, refused, "@outsider:localhost")
     _cache_current_invite(bot, joinable, "@owner:localhost")
-    await bot._room_lifecycle.record_pending_room_invite(refused, "@outsider:localhost")
+    await bot._room_lifecycle._record_pending_room_invite(refused, "@outsider:localhost")
 
     async def join_room(_client: object, room_id: str) -> RoomJoinOutcome:
         return RoomJoinOutcome.RETRYABLE_FAILURE if room_id == failing else RoomJoinOutcome.JOINED
@@ -460,9 +460,9 @@ async def test_withdrawn_invites_leave_no_pending_entries(
     for index in range(20):
         room_id = f"!withdrawn-{index}:localhost"
         current = _cache_current_invite(bot, room_id, "@owner:localhost")
-        await bot._room_lifecycle.record_pending_room_invite(room_id, "@owner:localhost")
+        await bot._room_lifecycle._record_pending_room_invite(room_id, "@owner:localhost")
         bot.client.invited_rooms.pop(room_id)
-        await bot._room_lifecycle.handle_recorded_invite(current, "@owner:localhost")
+        await bot._room_lifecycle._handle_recorded_invite(current, "@owner:localhost")
 
     join_room.assert_not_awaited()
     assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
@@ -486,7 +486,7 @@ async def test_pending_invite_ledger_keeps_only_the_newest_invites_off_the_event
     monkeypatch.setattr("mindroom.matrix.invited_rooms_store._save_pending_room_invites", save_from_thread)
 
     for index in range(5):
-        await bot._room_lifecycle.record_pending_room_invite(f"!failing-{index}:localhost", "@owner:localhost")
+        await bot._room_lifecycle._record_pending_room_invite(f"!failing-{index}:localhost", "@owner:localhost")
 
     assert list(_pending_room_invites(config, ROUTER_AGENT_NAME)) == [
         "!failing-2:localhost",
@@ -949,7 +949,7 @@ async def test_unconfirmed_invite_join_failure_retains_retry_state(
     assert isinstance(event, nio.InviteMemberEvent)
 
     room = _cache_current_invite(bot, "!invalid-state:localhost", event.sender)
-    await bot._on_invite_before_sync_certification(room, event)
+    await bot._room_lifecycle.on_invite(room, event)
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     bot.client.join.assert_awaited_once_with("!invalid-state:localhost")
@@ -983,7 +983,7 @@ async def test_recovered_invite_without_current_invite_is_forgotten_without_join
         lambda *_args, **_kwargs: True,
     )
     room_id = "!revoked-invite:localhost"
-    await bot._room_lifecycle.record_pending_room_invite(room_id, "@owner:localhost")
+    await bot._room_lifecycle._record_pending_room_invite(room_id, "@owner:localhost")
 
     await bot._room_lifecycle.reconcile_pending_invites()
     await bot._room_lifecycle.reconcile_pending_invites()
@@ -1030,7 +1030,7 @@ async def test_initial_sync_invite_is_current_membership_work(
     assert isinstance(event, nio.InviteMemberEvent)
     room = _cache_current_invite(bot, "!invited:localhost", event.sender)
 
-    await bot._on_invite_before_sync_certification(room, event)
+    await bot._room_lifecycle.on_invite(room, event)
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     join_room.assert_awaited_once_with(bot.client, room.room_id)
@@ -1065,7 +1065,7 @@ async def test_only_authenticated_self_invites_start_invite_work(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    bot._room_lifecycle.handle_recorded_invite = AsyncMock()
+    bot._room_lifecycle._handle_recorded_invite = AsyncMock()
     room = nio.MatrixInvitedRoom("!metadata:localhost", bot.matrix_id.full_id)
     event = nio.InviteEvent.parse_event(
         {
@@ -1077,11 +1077,11 @@ async def test_only_authenticated_self_invites_start_invite_work(
     )
     assert isinstance(event, nio.InviteEvent)
 
-    await bot._on_invite_before_sync_certification(room, event)
+    await bot._room_lifecycle.on_invite(room, event)
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
-    bot._room_lifecycle.handle_recorded_invite.assert_not_awaited()
+    bot._room_lifecycle._handle_recorded_invite.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1106,7 +1106,7 @@ async def test_invite_sync_callback_runs_durable_join_in_background(tmp_path: Pa
         join_started.set()
         await release_join.wait()
 
-    bot._room_lifecycle.handle_recorded_invite = delayed_invite
+    bot._room_lifecycle._handle_recorded_invite = delayed_invite
     room = nio.MatrixRoom("!background-invite:localhost", bot.matrix_id.full_id)
     event = nio.InviteEvent.parse_event(
         {
@@ -1119,7 +1119,7 @@ async def test_invite_sync_callback_runs_durable_join_in_background(tmp_path: Pa
     assert isinstance(event, nio.InviteEvent)
 
     callback_task = asyncio.create_task(
-        bot._on_invite_before_sync_certification(room, event),
+        bot._room_lifecycle.on_invite(room, event),
     )
     try:
         await asyncio.wait_for(join_started.wait(), timeout=1)
@@ -1153,7 +1153,7 @@ async def test_invite_sync_callback_does_not_start_work_when_identity_save_fails
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    bot._room_lifecycle.handle_recorded_invite = AsyncMock()
+    bot._room_lifecycle._handle_recorded_invite = AsyncMock()
     monkeypatch.setattr("mindroom.matrix.invited_rooms_store._save_pending_room_invites", lambda *_args: False)
     room = nio.MatrixRoom("!failed-pending-save:localhost", bot.matrix_id.full_id)
     event = nio.InviteEvent.parse_event(
@@ -1167,9 +1167,9 @@ async def test_invite_sync_callback_does_not_start_work_when_identity_save_fails
     assert isinstance(event, nio.InviteEvent)
 
     with pytest.raises(OSError, match="Failed to persist pending room invite"):
-        await bot._on_invite_before_sync_certification(room, event)
+        await bot._room_lifecycle.on_invite(room, event)
 
-    bot._room_lifecycle.handle_recorded_invite.assert_not_awaited()
+    bot._room_lifecycle._handle_recorded_invite.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1754,13 +1754,13 @@ async def test_redelivered_invite_retries_a_failed_welcome(
     )
     assert isinstance(event, nio.InviteEvent)
     room = _cache_current_invite(bot, "!router-invited:localhost", event.sender)
-    await bot._on_invite_before_sync_certification(room, event)
+    await bot._room_lifecycle.on_invite(room, event)
     await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     # The welcome failed. An invite the bot has not finished acting on is
     # still in the next sync response, so the retry arrives as a redelivery
     # rather than from an in-process retry loop.
-    await bot._on_invite_before_sync_certification(room, event)
+    await bot._room_lifecycle.on_invite(room, event)
     await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     join_room.assert_awaited_with(bot.client, room.room_id)
