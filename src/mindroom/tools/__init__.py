@@ -3,7 +3,7 @@
 Importing this package registers every built-in tool: it imports each tool's decorated factory,
 or the module itself for a tool registered as metadata only, and registers three tools below.
 Factories are imported by name, not through their modules, because privata counts only imports
-from other modules as uses and would otherwise report every factory as private.
+from other modules as uses and would otherwise report those factories as private.
 """
 
 from __future__ import annotations
