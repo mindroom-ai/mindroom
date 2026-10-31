@@ -7446,15 +7446,11 @@ class TestWorkerToolsOverride:
         assert builtin_tool_registry().entries[tool_name].requires_primary_runtime is True
         assert _runs_in_worker(runtime_paths, tool_name, [tool_name]) is False
 
-    @pytest.mark.parametrize(
-        ("method_name", "arguments"),
-        [("open_panel", {"panel": "computer"}), ("open_panel", {"panel": "members"})],
-    )
+    @pytest.mark.parametrize("panel", ["computer", "members"])
     def test_get_tool_by_name_keeps_chat_ui_local_when_explicitly_worker_routed(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        method_name: str,
-        arguments: dict[str, str],
+        panel: str,
     ) -> None:
         """A configured worker_tools entry must retain the live primary-runtime context boundary."""
 
@@ -7488,9 +7484,9 @@ class TestWorkerToolsOverride:
             worker_target=_worker_target(runtime_paths, "user_agent", "general", execution_identity),
             tools=builtin_tool_registry(),
         )
-        entrypoint = _offered_entrypoint(tool, method_name)
+        entrypoint = _offered_entrypoint(tool, "open_panel")
 
-        result = json.loads(asyncio.run(entrypoint(**arguments)))
+        result = json.loads(asyncio.run(entrypoint(panel=panel)))
         assert result["status"] == "error"
         assert "runtime context" in result["message"]
 
