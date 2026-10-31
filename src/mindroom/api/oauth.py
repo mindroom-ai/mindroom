@@ -301,12 +301,20 @@ async def _issue_authorization_url(
     if connect_target is not None:
         conversation_context = _conversation_connect_context(request, provider, runtime_paths, connect_target)
         _verify_connect_target_query(connect_target.binding, agent_name, request.query_params.get("execution_scope"))
-    await _client_config_resolution_for_request(request, provider, runtime_paths, reject_remote_provisioned=True)
+    resolution = await _client_config_resolution_for_request(
+        request,
+        provider,
+        runtime_paths,
+        reject_remote_provisioned=True,
+    )
     if conversation_context is not None:
         context = conversation_context
     else:
         target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
         context = _credential_context(provider, target)
+    if resolution is None:
+        detail = f"{provider.display_name} has no OAuth client configured. Configure one in the MindRoom dashboard."
+        raise HTTPException(status_code=503, detail=detail)
     try:
         payload = (
             await _conversation_target_payload(context, connect_target)

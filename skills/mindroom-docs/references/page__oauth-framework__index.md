@@ -171,6 +171,7 @@ These rules apply to built-in providers and to providers that plugins register (
 
 ### Troubleshooting OAuth Connections
 
+- **`<Provider> has no OAuth client configured`**: the provider has no OAuth app client yet; save its client ID and secret with **Configure client** on its integration in the dashboard **Tools** tab, or seed its client config service.
 - **Credentials cannot be read**: when a stored token exists but cannot be read, `/status` returns `reset_required: true`, and tools tell the requester that the credentials "cannot be read" and to reset the connection from the dashboard (the **Tools** tab), then reconnect.
 - **Provider token endpoint changed**: MindRoom sends refresh tokens only to the token endpoint recorded when the account was connected.
   If the provider now resolves a different endpoint, MindRoom deletes the stored credential and the user must reconnect; the log shows `oauth_credentials_refresh_failed` with `reason="token_endpoint_changed"` and both endpoint origins.
