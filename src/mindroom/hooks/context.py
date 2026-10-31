@@ -39,7 +39,7 @@ class _UnsetType:
 _UNSET = _UnsetType()
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable
     from pathlib import Path
     from typing import Protocol
 
@@ -121,8 +121,7 @@ class HookContextSupport:
     runtime_paths: RuntimePaths
     agent_name: str
     hook_registry_state: HookRegistrySource
-    # Read at each use: a login that switched the bot's Matrix user replaces its reader.
-    conversation_reader: Callable[[], ConversationReader]
+    conversation_reader: ConversationReader
     logger: structlog.stdlib.BoundLogger
 
     @property
@@ -136,7 +135,7 @@ class HookContextSupport:
         body: str,
         thread_id: str | None,
         source_hook: str,
-        extra_content: dict[str, Any] | None = None,
+        extra_content: dict[str, Any] | None,
         *,
         trigger_dispatch: bool = False,
     ) -> str | None:
@@ -155,7 +154,7 @@ class HookContextSupport:
             source_hook,
             extra_content,
             trigger_dispatch=trigger_dispatch,
-            conversation_reader=self.conversation_reader(),
+            conversation_reader=self.conversation_reader,
         )
         if event_id:
             self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)
@@ -174,7 +173,7 @@ class HookContextSupport:
         from mindroom.matrix.conversation_reads import latest_agent_message_snapshot  # noqa: PLC0415
 
         return await latest_agent_message_snapshot(
-            self.conversation_reader(),
+            self.conversation_reader,
             room_id=room_id,
             thread_id=thread_id,
             sender=sender,
@@ -399,7 +398,7 @@ class HookContext:
             text,
             thread_id,
             format_hook_source(self.plugin_name, self.event_name),
-            resolved_extra_content or None,
+            resolved_extra_content,
             trigger_dispatch=trigger_dispatch,
         )
 

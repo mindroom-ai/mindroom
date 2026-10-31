@@ -217,7 +217,12 @@ class PersonalRoomLifecycle:
             if is_mindroom_account_id(user_id, self.runtime_paths):
                 logger.debug("MindRoom account gets no personal agent", user_id=user_id, room_id=source_room_id)
                 return
-            await self._provision_personal_agent(settings.agent, owner_id, user_id, source_room_id)
+            await self._provision_personal_agent(
+                settings.agent,
+                user_id=owner_id,
+                source_user_id=user_id,
+                source_room_id=source_room_id,
+            )
             msg = "Personal agent is not in the live config yet"
             raise _TargetPendingError(msg)
         target = self.lookup_target(target_name)
@@ -238,6 +243,7 @@ class PersonalRoomLifecycle:
     async def _provision_personal_agent(
         self,
         template: str,
+        *,
         user_id: str,
         source_user_id: str,
         source_room_id: str,

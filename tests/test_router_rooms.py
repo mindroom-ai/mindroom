@@ -325,16 +325,12 @@ async def test_router_updates_rooms_on_config_change(
         async def mock_start() -> None:
             pass
 
-        async def mock_ensure_user_account() -> None:
-            pass
-
         async def mock_sync_forever() -> None:
             raise asyncio.CancelledError
 
         for bot in orchestrator.agent_bots.values():
             monkeypatch.setattr(bot, "stop", mock_stop)
             monkeypatch.setattr(bot, "start", mock_start)
-            monkeypatch.setattr(bot, "ensure_user_account", mock_ensure_user_account)
             monkeypatch.setattr(bot, "sync_forever", mock_sync_forever)
 
         # Update config

@@ -598,10 +598,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
         assert "router" in orchestrator.agent_bots
 
         # Test that agents can be started
-        with (
-            patch("mindroom.bot.login_agent_owned_session") as mock_login,
-            patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock()),
-        ):
+        with patch("mindroom.bot.login_agent_owned_session") as mock_login:
             mock_client = AsyncMock()
             mock_client.add_event_callback = MagicMock()
             mock_client.add_response_callback = MagicMock()

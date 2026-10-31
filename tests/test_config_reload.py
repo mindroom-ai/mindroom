@@ -3288,7 +3288,6 @@ async def test_orchestrator_handles_config_reload(
     for bot in orchestrator.agent_bots.values():
         monkeypatch.setattr(bot, "stop", AsyncMock())
         monkeypatch.setattr(bot, "start", mock_start_with_client)
-        monkeypatch.setattr(bot, "ensure_user_account", AsyncMock())
         monkeypatch.setattr(bot, "sync_forever", AsyncMock(side_effect=asyncio.CancelledError()))
 
     # Update config

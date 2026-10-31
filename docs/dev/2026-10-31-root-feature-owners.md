@@ -9,8 +9,6 @@ The orchestrator offers the router bot's hook support through one accessor; the 
 The router never asks that accessor for its own capabilities, which is what keeps capability lookup from recursing.
 A router without a client still binds its own sender, because a hook context retained across a failed router start must send once the same router connects.
 
-The sender and the snapshot reader read the bot's conversation reader when they run, not when the support was built, because a login that switched the bot's Matrix user rebuilds the reader while hook contexts bound earlier stay live.
-
 Scheduled hooks keep their own capability set on purpose: the scheduled-task runtime's hook lifetime, which outlives any bot generation, and a sender built from the client, config, and reader the fire was handed, because the scheduling executor receives exactly those values rather than a bot and is called that way by every scheduled fire and its tests; during a fire the operation lends the owner bot's client, so it sends as the bot's own sender would.
 
 Agent lifecycle emission stayed in the bot.

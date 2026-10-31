@@ -61,9 +61,7 @@ from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.knowledge_graph.runtime import KnowledgeGraphRuntime
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.provisioning_heartbeat import run_provisioning_heartbeat
-from mindroom.matrix.users import (
-    load_agent_user,
-)
+from mindroom.matrix.users import load_agent_user
 from mindroom.matrix_rtc.call_manager import preload_matrix_call_dependencies
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager

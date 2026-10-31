@@ -1292,15 +1292,30 @@ async def test_one_users_agent_is_provisioned_one_call_at_a_time(template_coordi
 
     template_coordination.provision.side_effect = provision
     first = asyncio.create_task(
-        lifecycle._provision_personal_agent("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost"),
+        lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@alice:localhost",
+            source_user_id="@alice:localhost",
+            source_room_id="!lobby:localhost",
+        ),
     )
     await asyncio.sleep(0)
     await asyncio.wait_for(
-        lifecycle._provision_personal_agent("mind", "@alice:localhost", "@bridge_alice:localhost", "!other:localhost"),
+        lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@alice:localhost",
+            source_user_id="@bridge_alice:localhost",
+            source_room_id="!other:localhost",
+        ),
         timeout=1,
     )
     other = asyncio.create_task(
-        lifecycle._provision_personal_agent("mind", "@bob:localhost", "@bob:localhost", "!lobby:localhost"),
+        lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@bob:localhost",
+            source_user_id="@bob:localhost",
+            source_room_id="!lobby:localhost",
+        ),
     )
     await asyncio.sleep(0)
     release.set()
@@ -1320,9 +1335,19 @@ async def test_an_interrupted_provisioning_lets_the_next_request_for_that_user_r
     template_coordination.provision.side_effect = [interruption, ("mind_alice", True)]
 
     with pytest.raises(type(interruption)):
-        await lifecycle._provision_personal_agent("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost")
+        await lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@alice:localhost",
+            source_user_id="@alice:localhost",
+            source_room_id="!lobby:localhost",
+        )
     template_coordination.config_reload.request_reload.assert_not_called()
-    await lifecycle._provision_personal_agent("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost")
+    await lifecycle._provision_personal_agent(
+        "mind",
+        user_id="@alice:localhost",
+        source_user_id="@alice:localhost",
+        source_room_id="!lobby:localhost",
+    )
 
     assert template_coordination.provision.await_count == 2
     template_coordination.config_reload.request_reload.assert_called_once_with()

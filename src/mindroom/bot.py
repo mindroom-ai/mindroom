@@ -395,8 +395,7 @@ class AgentBot:
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
         self._journal_principal_id = journal_principal_id(self.agent_name, runtime_matrix_id.full_id)
-        # One database holds every principal, so the runtime's one store serves this bot's view, including the new
-        # principal's view after a login authenticates as a different Matrix user. The runtime closes it.
+        # One database holds every principal, so the runtime's one store serves this bot's view. The runtime closes it.
         self._journal_store = self.orchestrator.event_journal_store()
         principal = self._journal_store.principal(self._journal_principal_id)
         self._journal_principal = principal
@@ -462,7 +461,7 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             agent_name=self.agent_name,
             hook_registry_state=self._hook_registry_state,
-            conversation_reader=lambda: self._conversation_reader,
+            conversation_reader=self._conversation_reader,
             logger=self.logger,
         )
         self._router = (
@@ -841,15 +840,6 @@ class AgentBot:
             context=Context(),
         )
 
-    def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
-        """Refresh startup collaborators when Matrix login authenticates as a different user."""
-        if self.agent_user.user_id == matrix_id_before_login.full_id:
-            return
-
-        self.agent_user.__dict__.pop("matrix_id", None)
-        self.__dict__.pop("matrix_id", None)
-        self._init_runtime_components()
-
     @property
     def client(self) -> nio.AsyncClient | None:
         """Return the current Matrix client."""
@@ -1037,7 +1027,6 @@ class AgentBot:
         if not self.hook_registry.has_hooks(event_name):
             return
 
-        matrix_user_id = self.agent_user.user_id or self.matrix_id.full_id
         configured_rooms = tuple(get_rooms_for_entity(self.agent_name, self.config))
         joined_room_ids = tuple(room_id for room_id in self.rooms if room_id.startswith("!"))
         if event_name == EVENT_BOT_READY and self.client is not None:
@@ -1049,7 +1038,7 @@ class AgentBot:
             entity_name=self.agent_name,
             entity_type=self._entity_type(),
             rooms=configured_rooms,
-            matrix_user_id=matrix_user_id,
+            matrix_user_id=self.agent_user.user_id,
             joined_room_ids=joined_room_ids,
             stop_reason=stop_reason,
         )
@@ -1109,13 +1098,6 @@ class AgentBot:
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
         await self._room_lifecycle.leave_unconfigured_rooms()
-
-    async def ensure_user_account(self) -> None:
-        """Verify that orchestrator account preparation supplied this bot's account."""
-        if self.agent_user.user_id:
-            return
-        msg = f"Matrix account for {self.agent_name!r} was not prepared before bot startup"
-        raise PermanentMatrixStartupError(msg)
 
     async def refresh_presence(self) -> None:
         """Set presence status with model information."""
@@ -1538,15 +1520,12 @@ class AgentBot:
 
     async def start(self) -> None:
         """Log in with the account the runtime prepared and start this bot's services, without joining rooms yet."""
-        await self.ensure_user_account()
-        matrix_id_before_login = self.matrix_id
         client = await self._open_owned_matrix_client()
         # Captured the moment it becomes true. A restart that logs in as a new
         # device must not resend under the old device's transaction IDs
         # believing they still deduplicate.
         self._sending_device_id = client.device_id or None
         try:
-            self._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
             self.orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
             await self._room_lifecycle.restore_pending_join_decrypt_fences()

@@ -524,7 +524,7 @@ async def test_bot_hook_sender_tags_source_and_threads(tmp_path: Path) -> None:
     """Hook sends should include hook metadata and thread relations."""
     bot = _hook_bot(tmp_path)
     bot.client = AsyncMock()
-    bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value="$latest"))
+    bot.hook_context.conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value="$latest"))
 
     captured_content: dict[str, object] = {}
 
@@ -552,7 +552,7 @@ async def test_bot_hook_sender_tags_source_and_threads(tmp_path: Path) -> None:
     assert isinstance(captured_content["m.relates_to"], dict)
     assert captured_content["m.relates_to"]["rel_type"] == "m.thread"
     assert captured_content["m.relates_to"]["event_id"] == "$thread"
-    bot._conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+    bot.hook_context.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
         room_id="!room:localhost",
         thread_id="$thread",
     )
@@ -574,7 +574,7 @@ async def test_hook_send_message_preserves_original_sender_for_downstream_dispat
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 
-    bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
+    bot.hook_context.conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
     with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
         event_id = await bot.hook_context.send_message(
             "!room:localhost",
@@ -1365,7 +1365,6 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
         await ctx.send_message("!room:localhost", "router started")
 
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
-    bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
 
     with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
@@ -1395,7 +1394,6 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
         await ctx.send_message("!room:localhost", "dispatch me", trigger_dispatch=True)
 
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
-    bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
 
     with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)

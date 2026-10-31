@@ -5640,11 +5640,10 @@ class TestMultiAgentOrchestrator:
             )
             await orchestrator.initialize()
 
-            # Mock the agent clients and ensure_user_account
+            # Mock the agent clients
             for bot in orchestrator.agent_bots.values():
                 bot.client = AsyncMock()
                 bot.running = True
-                bot.ensure_user_account = AsyncMock()
 
             await orchestrator.stop()
 

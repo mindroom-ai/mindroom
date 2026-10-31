@@ -17,7 +17,6 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import EVENT_CONFIG_RELOADED, ConfigReloadedContext, HookContextSupport, HookRegistry, hook
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
-from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
@@ -37,6 +36,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.matrix.conversation_reads import ConversationReader
     from tests.runtime_fakes import ReadyRuntime
 
 
@@ -96,18 +96,14 @@ def _hook_support(
     *,
     client: object | None = None,
     router: HookContextSupport | None = None,
-    readers: list[ConversationReader] | None = None,
+    reader: ConversationReader | None = None,
 ) -> HookContextSupport:
-    """Return one bot's hook support over a stand-in runtime whose orchestrator offers ``router`` as the router's.
-
-    The support reads the last of ``readers``, as a bot reads the reader its latest login built.
-    """
+    """Return one bot's hook support over a stand-in runtime whose orchestrator offers ``router`` as the router's."""
 
     def router_hook_context() -> HookContextSupport | None:
         assert agent_name != ROUTER_AGENT_NAME, "the router never asks for the router's hook support"
         return router
 
-    readers = readers if readers is not None else [make_conversation_reader_mock()]
     return HookContextSupport(
         runtime=SimpleNamespace(
             client=client,
@@ -118,7 +114,7 @@ def _hook_support(
         runtime_paths=runtime_paths_for(config),
         agent_name=agent_name,
         hook_registry_state=HookRegistryState(HookRegistry.empty()),
-        conversation_reader=lambda: readers[-1],
+        conversation_reader=reader or make_conversation_reader_mock(),
         logger=get_logger("tests.hook_context_support"),
     )
 
@@ -207,24 +203,21 @@ def test_the_router_builds_its_matrix_admin_from_its_own_client(config: Config) 
 
 
 @pytest.mark.asyncio
-async def test_retained_hook_capabilities_read_the_bots_current_conversations(config: Config) -> None:
-    """A bound sender and snapshot reader read the conversation reader the bot has now, not the one it had then."""
-    readers = [make_conversation_reader_mock()]
-    bindings = _hook_support(config, "code", client=_client(), readers=readers).bindings()
+async def test_hook_capabilities_read_the_bots_conversations(config: Config) -> None:
+    """A bound sender finds the thread's latest event, and the snapshot reader reads, through the bot's conversations."""
+    reader = make_conversation_reader_mock()
+    reader.latest_thread_event_id.return_value = "$latest"
+    bindings = _hook_support(config, "code", client=_client(), reader=reader).bindings()
     assert bindings.message_sender is not None
     assert bindings.agent_message_snapshot_reader is not None
-    current_reader = make_conversation_reader_mock()
-    current_reader.latest_thread_event_id.return_value = "$latest"
-    readers.append(current_reader)
     _clients, transport = _sent_through()
 
     with patch("mindroom.hooks.sender.send_matrix_message", new=transport):
         await bindings.message_sender("!room:localhost", "hello", "$thread", "plugin:event", None)
     await bindings.agent_message_snapshot_reader(room_id="!room:localhost", thread_id=None, sender="@a:localhost")
 
-    current_reader.latest_thread_event_id.assert_awaited_once_with(room_id="!room:localhost", thread_id="$thread")
-    current_reader.read.assert_awaited_once()
-    readers[0].latest_thread_event_id.assert_not_awaited()
+    reader.latest_thread_event_id.assert_awaited_once_with(room_id="!room:localhost", thread_id="$thread")
+    reader.read.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -276,33 +269,3 @@ async def test_config_reloaded_hooks_without_a_router_get_no_matrix_capabilities
     assert ctx.room_state_putter is None
     assert ctx.agent_message_snapshot_reader is None
     assert ctx.is_active()
-
-
-@pytest.mark.asyncio
-async def test_retained_hook_capabilities_read_the_bots_conversations_after_its_identity_changes(
-    tmp_path: Path,
-) -> None:
-    """A sender and snapshot reader bound before login switched the bot's Matrix user read the current principal."""
-    agent = _bot(tmp_path, "code")
-    agent.client = make_matrix_client_mock(user_id=agent.agent_user.user_id)
-    bindings = agent.hook_context.bindings()
-    assert bindings.message_sender is not None
-    assert bindings.agent_message_snapshot_reader is not None
-    before_login = agent.matrix_id
-    reader_before_login = agent.conversation_reader
-    agent.agent_user.user_id = "@mindroom_code_renamed:localhost"
-    agent._rebuild_runtime_components_after_login_if_identity_changed(before_login)
-    current_reader = agent.conversation_reader
-    assert current_reader is not reader_before_login
-    _clients, transport = _sent_through()
-
-    with (
-        patch.object(ConversationReader, "latest_thread_event_id", autospec=True, return_value="$latest") as latest,
-        patch.object(ConversationReader, "read", autospec=True, return_value=SimpleNamespace(messages=[])) as read,
-        patch("mindroom.hooks.sender.send_matrix_message", new=transport),
-    ):
-        await bindings.message_sender("!room:localhost", "hello", "$thread", "plugin:event", None)
-        await bindings.agent_message_snapshot_reader(room_id="!room:localhost", thread_id=None, sender="@a:localhost")
-
-    assert [call.args[0] for call in latest.await_args_list] == [current_reader]
-    assert [call.args[0] for call in read.await_args_list] == [current_reader]
