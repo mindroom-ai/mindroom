@@ -73,6 +73,7 @@ _CANVAS_TITLE_MAX_UNITS = 120
 _CANVAS_TITLE_ERROR = (
     f"Canvas title must be one line of 1-{_CANVAS_TITLE_MAX_UNITS} characters of valid text without control characters."
 )
+_CANVAS_EVENT_ID_ERROR = "canvas_event_id must be the event ID returned by an earlier show_canvas call."
 # A page that fits an edit envelope travels inside the event, so every canvas stays editable;
 # that plaintext ceiling also keeps the Megolm-encrypted event far below the 64 KB hard limit.
 # Larger pages are uploaded as (encrypted) Matrix media and the event carries a reference.
@@ -269,7 +270,7 @@ class ChatUITools(Toolkit):
                 message="Chat UI action agent identity is unavailable from the managed Matrix runtime.",
             )
         sender = context.client.user_id
-        if not isinstance(sender, str) or sender != expected_sender:
+        if sender != expected_sender:
             return cls._payload(
                 "error",
                 action=action,
@@ -567,7 +568,7 @@ class ChatUITools(Toolkit):
             return self._payload(
                 "error",
                 action=action,
-                message="canvas_event_id must be the event ID returned by an earlier show_canvas call.",
+                message=_CANVAS_EVENT_ID_ERROR,
             )
         original = await self._canvas_target(context, requester_id, canvas_event_id, action=action)
         if isinstance(original, str):
@@ -641,14 +642,11 @@ class ChatUITools(Toolkit):
         canvas_event_id: str | None,
     ) -> str | None:
         if canvas_event_id is not None and not canvas_event_id.startswith("$"):
-            return cls._canvas_error(
-                "canvas_event_id must be the event ID returned by an earlier show_canvas call.",
-                canvas_event_id=canvas_event_id,
-            )
+            return cls._canvas_error(_CANVAS_EVENT_ID_ERROR, canvas_event_id=canvas_event_id)
         # An update may omit the title; it is checked once the canvas's own title is known.
         if (title or canvas_event_id is None) and not _canvas_title_is_valid(title):
             return cls._canvas_error(_CANVAS_TITLE_ERROR)
-        if len([value for value in (html, path) if value]) != 1:
+        if bool(html) == bool(path):
             return cls._canvas_error("Give exactly one of html or path.")
         if html and not html.strip():
             return cls._canvas_error("Canvas HTML must not be empty.")
