@@ -21,7 +21,6 @@ from mindroom.approval.auto_approve_windows import (
 )
 from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.response import plan_approval_calls
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.commands import auto_approve_commands
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import CommandType, command_parser, get_command_help
@@ -30,6 +29,7 @@ from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCardView, ApprovalDecision, CallKey
 from mindroom.llm.runs import ToolExecution
 from mindroom.message_target import MessageTarget
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from tests.approval_card_helpers import card_view
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import approval_manager_for_test, make_conversation_reader_mock, test_runtime_paths

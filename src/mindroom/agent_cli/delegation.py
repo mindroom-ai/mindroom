@@ -14,6 +14,7 @@ from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_argu
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import PausedAttempt, paused_attempt_from_response
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -74,7 +75,7 @@ async def advance_cli_delegation(
     if (
         tool.tool_name != binding.key.function
         or binding.key.toolkit != "delegate"
-        or not binding.function.external_execution
+        or binding.function.gate is not ToolGate.DELEGATION
     ):
         msg = "CLI external call is not owned by the delegate toolkit"
         raise ValueError(msg)

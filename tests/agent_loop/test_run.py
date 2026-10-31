@@ -31,6 +31,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.tool_function import ToolGate
 from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.run_record_helpers import PRODUCT, approved_call, denied_call, result, resumed, settled, waiting_call
@@ -576,9 +577,7 @@ def _gated_calculator() -> AdaptedToolkit:
     return replace(
         adapted,
         functions=tuple(
-            replace(function, requires_confirmation=True, approval_type="mindroom_policy")
-            if function.name == "multiply"
-            else function
+            replace(function, gate=ToolGate.POLICY) if function.name == "multiply" else function
             for function in adapted.functions
         ),
     )
@@ -1085,7 +1084,7 @@ async def test_a_resumed_batch_whose_result_stops_the_run_ends_it_without_anothe
     switch = toolkit(switch_thread_model, name="thread_model", stop_after_call=True)
     switch_call = tool_call("switch_thread_model", "c-switch", model_name="opus")
     if stopping == "approved":
-        tools = replace(switch, functions=tuple(replace(f, requires_confirmation=True) for f in switch.functions))
+        tools = replace(switch, functions=tuple(replace(f, gate=ToolGate.POLICY) for f in switch.functions))
         waiting = ToolExecution(
             tool_call_id="c-switch",
             tool_name="switch_thread_model",

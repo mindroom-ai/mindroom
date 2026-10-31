@@ -9,6 +9,7 @@ which the turn driver writes the interrupted-turn record after the loop stored i
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -75,11 +76,13 @@ from mindroom.response_turn import ResponsePausedForApproval, TurnSinks
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
+from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
+from tests.agent_tool_helpers import UnansweredCallTools
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import _hook_plugin, make_test_agent_bot, unique_room_send_responses
@@ -164,11 +167,13 @@ class _ProbeToolkit(Toolkit):
         return "remembered"
 
 
-class _ExternalProbeToolkit(_ProbeToolkit):
-    """The probe whose ``touch`` runs outside the loop, as a delegation's ``run_subagent`` does."""
+class _ExternalProbeToolkit(UnansweredCallTools):
+    """The probe whose ``touch`` pauses for an answer from outside the loop, which nothing gives."""
+
+    unanswered = frozenset({"touch"})
 
     def __init__(self) -> None:
-        Toolkit.__init__(self, name="probe", tools=[self.touch], external_execution_required_tools=["touch"])
+        super().__init__(name="probe", tools=[_ProbeToolkit().touch])
 
 
 @pytest.fixture
@@ -321,6 +326,11 @@ def _assert_counted_usage(reply: _Reply, expected: Sequence[tuple[int, int]]) ->
         model=reply.model.identity,
         requester_id=REQUESTER_ID,
     )
+
+
+def _switch_now(call_id: str) -> dict[str, Any]:
+    """Return a switch of the current response to the model it runs on, which ends the attempt for a continuation."""
+    return tool_call("switch_thread_model", call_id, model_name="default", when="after-toolcall")
 
 
 def _contents(messages: Sequence[Message]) -> list[tuple[str, object]]:
@@ -1018,18 +1028,15 @@ async def test_a_turn_that_reads_the_approval_receipt_keeps_it_for_its_run_and_n
 ) -> None:
     """The bound receipt follows the reading run's input in each of its requests and never enters a stored run.
 
-    The rejected model switch ends the first attempt, so the turn's answer comes from a second attempt without it.
+    The model switch ends the first attempt, so the turn's answer comes from a second attempt without it.
     """
     reply = _reply(
         tmp_path,
         monkeypatch,
-        [
-            calls(tool_call("touch", "call_1", label="a")),
-            calls(tool_call("switch_thread_model", "call_2", model_name="missing", when="next-turn")),
-            answer("ok"),
-        ],
+        [calls(tool_call("touch", "call_1", label="a")), calls(_switch_now("call_2")), answer("ok")],
         tools=(PROBE_TOOL, "thread_model"),
     )
+    with_current_room_member_access(reply.config)
 
     with approval_receipt_context(RECEIPT_CALLS, run_id="run-1"):
         await _stream(reply, run_id="run-1")
@@ -1059,44 +1066,39 @@ async def test_a_later_attempt_of_a_turn_on_a_new_scope_replays_the_run_an_earli
     reply = _reply(
         tmp_path,
         monkeypatch,
-        [
-            calls(tool_call("touch", "call_1", label="a")),
-            calls(tool_call("switch_thread_model", "call_2", model_name="missing", when="next-turn")),
-            answer("ok"),
-        ],
+        [calls(tool_call("touch", "call_1", label="a")), calls(_switch_now("call_2")), answer("ok")],
         tools=(PROBE_TOOL, "thread_model"),
     )
+    with_current_room_member_access(reply.config)
 
     await _stream(reply)
 
     assert probe.calls == ["a"]
     *_, last = reply.model.requests
+    assert last.messages[-1].role == "user"
     assert [message.tool_call_id for message in last.messages if message.role == "tool"] == ["call_1", "call_2"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("max_tool_calls_per_turn", "runs"),
-    [(1, 1), (None, 2)],
-    ids=["refused_by_the_call_limit", "ran_and_failed"],
-)
-async def test_only_a_model_switch_that_ran_continues_the_turn(
+@pytest.mark.parametrize("when", ["next-turn", "after-toolcall"])
+@pytest.mark.parametrize("max_tool_calls_per_turn", [1, None], ids=["refused_by_the_call_limit", "ran_and_failed"])
+async def test_a_rejected_model_switch_is_answered_in_the_run_that_made_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
     max_tool_calls_per_turn: int | None,
-    runs: int,
+    when: str,
 ) -> None:
-    """A switch the call limit refused never ran, so the model's next answer ends the turn without a second attempt.
+    """Whether the call limit refused the switch or the tool rejected its model, the model reads why and answers.
 
-    A switch that ran and failed stops the run unanswered, so the turn continues with a second attempt.
+    The turn runs one attempt and stores one run, and its last request carries the switch's result, not the prompt.
     """
     reply = _reply(
         tmp_path,
         monkeypatch,
         [
             calls(tool_call("touch", "call_1", label="a")),
-            calls(tool_call("switch_thread_model", "call_2", model_name="missing", when="next-turn")),
+            calls(tool_call("switch_thread_model", "call_2", model_name="missing", when=when)),
             answer("Done."),
             answer("Started over."),
         ],
@@ -1107,16 +1109,57 @@ async def test_only_a_model_switch_that_ran_continues_the_turn(
     chunks = await _stream(reply)
 
     assert probe.calls == ["a"]
+    *_, last = reply.model.requests
     assert len(reply.model.requests) == 3
+    assert (last.messages[-1].role, last.messages[-1].tool_call_id) == ("tool", "call_2")
     assert "".join(streamed_text(chunks)).endswith("Done.")
     session = reply.storage.load_session(SESSION_ID)
     assert session is not None
-    assert len(session.runs) == runs
+    assert [run.run_id for run in session.runs] == ["run-1"]
     # The refused switch is recorded as a failed call; the one that ran answered with the tool's own error payload.
     assert [(tool.tool_name, tool.is_error) for tool in session.runs[0].tools or ()] == [
         ("touch", False),
         ("switch_thread_model", max_tool_calls_per_turn is not None),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_next_turn_model_switch_is_answered_in_the_run_that_made_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A default switch builds no second attempt: the model reads its switch's result and answers on its own model.
+
+    The turn stores one run, which holds the prompt once, and the thread's next turn uses the new model.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("switch_thread_model", "call-switch", model_name="large")), answer("Switched.")],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    with_current_room_member_access(reply.config)
+    reply.config.models["large"] = ModelConfig(provider="openai", id="large-model")
+    large = ScriptedModel([])
+    install_model_providers(monkeypatch, {"large": large})
+
+    with patch.object(ai, "create_agent", wraps=ai.create_agent) as build:
+        chunks = await _stream(reply, prompt="Use the large model from now on.")
+
+    assert "".join(streamed_text(chunks)).endswith("Switched.")
+    assert build.call_count == 1
+    assert large.requests == []
+    _, second = reply.model.requests
+    assert (second.messages[-1].role, second.messages[-1].tool_call_id) == ("tool", "call-switch")
+    assert json.loads(str(second.messages[-1].content))["when"] == "next-turn"
+    session = reply.storage.load_session(SESSION_ID)
+    assert session is not None
+    assert [run.run_id for run in session.runs] == ["run-1"]
+    stored = [str(message.content) for message in session.runs[0].messages]
+    assert sum("Use the large model from now on." in content for content in stored) == 1
+    override = resolve_thread_model_override(reply.runtime_paths, THREAD_ID, config=reply.config)
+    assert override.active["assistant"] == "large"
 
 
 @pytest.mark.asyncio
@@ -1199,13 +1242,17 @@ async def test_a_reply_publishes_the_usage_of_each_of_three_attempts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A model switch whose continuation came back empty and was retried publishes all three attempts' usage."""
-    switch = tool_call("switch_thread_model", "call-switch", model_name="missing", when="next-turn")
     reply = _reply(
         tmp_path,
         monkeypatch,
-        [calls(switch, metrics=usage(100, 5)), answer("", usage(40, 2)), answer("Answered.", usage(120, 9))],
+        [
+            calls(_switch_now("call-switch"), metrics=usage(100, 5)),
+            answer("", usage(40, 2)),
+            answer("Answered.", usage(120, 9)),
+        ],
         tools=(PROBE_TOOL, "thread_model"),
     )
+    with_current_room_member_access(reply.config)
     run_metadata: dict[str, Any] = {}
 
     with tool_runtime_context(reply.runtime):
@@ -1230,13 +1277,16 @@ async def test_a_reply_whose_continuation_failed_publishes_the_usage_of_the_atte
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The failed attempt ends the turn, and the reply's usage still holds the switch's attempt, as the ledger does."""
-    switch = tool_call("switch_thread_model", "call-switch", model_name="missing", when="next-turn")
     reply = _reply(
         tmp_path,
         monkeypatch,
-        [calls(switch, metrics=usage(100, 5)), [_raising(RateLimited("slow down", provider="openai"))]],
+        [
+            calls(_switch_now("call-switch"), metrics=usage(100, 5)),
+            [_raising(RateLimited("slow down", provider="openai"))],
+        ],
         tools=(PROBE_TOOL, "thread_model"),
     )
+    with_current_room_member_access(reply.config)
 
     with tool_runtime_context(reply.runtime):
         result = await ai_response(_ctx(reply), reply.runtime_paths, reply.config, sinks=TurnSinks())

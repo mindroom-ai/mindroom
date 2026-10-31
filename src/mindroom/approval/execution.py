@@ -255,7 +255,6 @@ async def _continue_persisted_agent(
         has_visible_content=collected.has_visible_content,
         run_id=response.run_id,
         attempt_run_id=response.run_id,
-        runtime_model_name=model_name,
         usage=response.metrics,
         status=response.status,
         tool_executions=collected.tool_executions,
