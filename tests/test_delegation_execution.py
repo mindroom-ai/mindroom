@@ -1079,6 +1079,9 @@ async def test_failed_nested_resume_settles_descendants_and_visible_tools(
         )
 
     assert isinstance(result, CompletedApprovalRun)
+    # The child call the approval was about closes in the parent's reply instead of staying pending.
+    assert "`write_report` [2]\n" in result.response_text
+    assert "⏳" not in result.response_text
     assert report.written == []
     resumed = _parent_record(config, paths, identity, "parent-run")
     result_message = next(message.content for message in resumed.messages if message.tool_call_id == "delegate-0")

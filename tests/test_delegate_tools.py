@@ -164,9 +164,7 @@ class TestDelegateTools:
         description = toolkit_offers(tools, "run_subagent").description
 
         assert description is not None
-        assert "Allowed subagents for this caller:" in description
-        for target in ("code", "research"):
-            assert target in description
+        assert "Allowed subagents for this caller: code, research.\n" in description
         assert "Use only these agent names." in description
         assert "fresh subagent and wait for its result" in description
         assert "Selecting your own name starts a fresh copy" in description
