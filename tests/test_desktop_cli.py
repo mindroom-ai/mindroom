@@ -1078,3 +1078,59 @@ async def test_folder_and_shell_bridge_revokes_shell_access_on_stop(
     assert "for 5 minutes" in output
     assert "observe-only" not in output
     assert "emergency stop" not in output
+
+
+@pytest.mark.asyncio
+async def test_terminal_approver_stops_reading_before_the_bridge_settles_pending_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    selected_root: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stopping a shell run cancels terminal approval first, then drains the bridge and reports the revoked grant."""
+    client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
+    lifecycle: list[str] = []
+    approving = asyncio.Event()
+
+    class Source:
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+        async def wait_for_work(self) -> None:
+            await asyncio.Event().wait()
+
+    class Bridge(DesktopBridge):
+        async def stop(self) -> None:
+            lifecycle.append("bridge_stop")
+            await super().stop()
+
+    async def approvals(*_args: object, **_kwargs: object) -> None:
+        approving.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            lifecycle.append("approvals_stopped")
+
+    owner = SimpleNamespace(client=client, source=Source(), close=client.close)
+    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopBridge", Bridge)
+    monkeypatch.setattr("mindroom.desktop.shell_prompt.serve_terminal_shell_approvals", approvals)
+    monkeypatch.setattr(
+        "mindroom.desktop.login_environment.capture_login_environment",
+        AsyncMock(return_value={"PATH": "/usr/bin:/bin"}),
+    )
+    task = asyncio.create_task(
+        desktop_cli._run_bridge(
+            runtime_paths=SimpleNamespace(storage_root=tmp_path),
+            session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
+            config=_run_config(roots=(selected_root,), shell_enabled=True),
+            allow_control=False,
+            lease_minutes=15,
+            deps=desktop_cli._BridgeRunDeps(open_client=AsyncMock(return_value=owner), prepare_client=AsyncMock()),
+        ),
+    )
+    await asyncio.wait_for(approving.wait(), 5)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert lifecycle == ["approvals_stopped", "bridge_stop"]
+    assert "Shell access revoked; pending and running shell commands were stopped." in capsys.readouterr().out

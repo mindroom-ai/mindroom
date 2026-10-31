@@ -1147,6 +1147,49 @@ async def test_runtime_start_failure_releases_pinned_folders(
     assert runtime.status()["gui_mode"] == "stopped"
 
 
+@pytest.mark.asyncio
+async def test_worker_failure_faults_the_runtime_and_releases_its_session(
+    offline_runtime_session: _FakeOwner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed worker leaves a faulted status for the app and releases Matrix, folders, and the shell."""
+    root = (tmp_path / "selected").resolve()
+    root.mkdir()
+    fail = asyncio.Event()
+
+    class FailingTransport(_IdleTransport):
+        async def run(self) -> None:
+            await fail.wait()
+            raise RuntimeError("transport failed")
+
+    monkeypatch.setattr("mindroom.desktop.transport.DesktopTransport", FailingTransport)
+    runtime = NativeBridgeRuntime(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None),
+        _folder_and_shell_config(root),
+    )
+    await runtime.start()
+    [(admit, _)] = offline_runtime_session.client.to_device_callbacks
+    bridge = admit.__self__
+    fail.set()
+    for _ in range(500):
+        if offline_runtime_session.closed:
+            break
+        await asyncio.sleep(0.01)
+
+    status = runtime.status()
+    assert status["gui_mode"] == "faulted"
+    assert status["last_error"]["message"] == "transport failed"
+    assert offline_runtime_session.client.to_device_callbacks == []
+    with pytest.raises(DesktopFilesystemError, match="closed"):
+        bridge.filesystem.list_folders()
+    assert bridge.shell.status()["auto_approve_remaining_seconds"] == 0
+    with pytest.raises(ValueError, match="not running"):
+        runtime.grant_shell(60)
+    await runtime.stop()
+    assert runtime.status()["gui_mode"] == "faulted"
+
+
 async def _native(
     host: NativeDesktopHost,
     action: str,
