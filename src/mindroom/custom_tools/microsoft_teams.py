@@ -201,10 +201,12 @@ def _check_members(chat_id: object, addresses: frozenset[str], session: GraphSes
 
 
 def _sign_in_names(people: list[str]) -> tuple[str, ...]:
-    names = tuple(person for person in people if _SIGN_IN_NAME.fullmatch(person))
-    distinct = {name.lower() for name in names}
-    if len(names) == len(people) == len(distinct) and 1 <= len(names) <= _MAX_PEOPLE:
-        return names
+    if (
+        1 <= len(people) <= _MAX_PEOPLE
+        and all(_SIGN_IN_NAME.fullmatch(person) for person in people)
+        and len({person.lower() for person in people}) == len(people)
+    ):
+        return tuple(people)
     msg = f"people must be a list of 1 to {_MAX_PEOPLE} different sign-in addresses, such as sam@contoso.com."
     raise MicrosoftGraphError(code="invalid_argument", message=msg)
 
