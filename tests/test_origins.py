@@ -29,6 +29,12 @@ from mindroom.origins import (
         ("http://127.0.0.1:80", "http://127.0.0.1"),
         ("http://[0:0:0:0:0:0:0:1]:8080", "http://[::1]:8080"),
         ("https://xn--fa-hia.de", "https://xn--fa-hia.de"),
+        ("https://127.1", "https://127.0.0.1"),
+        ("https://127.0.1", "https://127.0.0.1"),
+        ("http://127.1:80", "http://127.0.0.1"),
+        ("http://0x7f.1:8080", "http://127.0.0.1:8080"),
+        ("https://0177.0.0.1", "https://127.0.0.1"),
+        ("https://2130706433", "https://127.0.0.1"),
     ],
 )
 def test_normalized_origin(url: str, expected: str) -> None:
@@ -52,6 +58,10 @@ def test_normalized_origin(url: str, expected: str) -> None:
         "https://host.example:",
         "https://bücher.example",
         "https://faß.de",
+        "https://256.1.1.1",
+        "https://127.0.0.999",
+        "https://1.2.3.4.5",
+        "https://example.123",
     ],
 )
 def test_normalized_origin_none(url: str | None) -> None:
@@ -68,6 +78,7 @@ def test_normalized_origin_none(url: str | None) -> None:
         ("https://app.example:8443", "https://app.example:8443"),
         ("http://localhost:3000", "http://localhost:3000"),
         ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+        ("http://127.1:8080", "http://127.0.0.1:8080"),
         ("http://[::1]:8080", "http://[::1]:8080"),
         ("http://192.168.1.10:8080", "http://192.168.1.10:8080"),
         ("http://10.0.0.2", "http://10.0.0.2"),

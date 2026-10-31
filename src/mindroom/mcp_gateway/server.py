@@ -31,6 +31,7 @@ from mindroom.mcp_gateway.types import (
     GatewayErrorResponse,
     GatewayPrincipal,
 )
+from mindroom.origins import normalized_origin
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
@@ -371,21 +372,32 @@ class GatewayServer:
         self._timeout = timeout_seconds
         self._closing = False
         self._active: dict[tuple[GatewayPrincipal, type, int | str], ExecutionLease] = {}
+        origin = normalized_origin(public_url)
+        if origin is None:
+            msg = "MCP gateway public URL must be an HTTP or HTTPS origin"
+            raise ValueError(msg)
         self._server: Server[dict[str, Any]] = Server(
             "MindRoom gateway",
-            instructions=_instructions(public_url, personal_agent_name),
+            instructions=_instructions(origin, personal_agent_name),
             get_tool_input_schema=_input_schema,
             on_list_tools=self._list_tools,
             on_call_tool=self._handle_call_request,
         )
         # The default tracing middleware parses client `_meta` trace fields and logs malformed ones verbatim.
         self._server.middleware.clear()
-        origin = urlsplit(public_url)
+        origin_parts = urlsplit(origin)
+        allowed_hosts = [origin_parts.netloc, urlsplit(public_url).netloc]
+        if origin_parts.port is None:
+            # The transport compares the Host header exactly, and a client configured with the public
+            # URL as written may keep its explicit default port in the Host it sends; normalization
+            # drops that port, so admit the explicit form alongside the normalized and raw netlocs.
+            host = origin_parts.hostname or ""
+            if ":" in host:
+                host = f"[{host}]"
+            allowed_hosts.append(f"{host}:{443 if origin_parts.scheme == 'https' else 80}")
         security = TransportSecuritySettings(
-            allowed_hosts=[origin.netloc],
-            allowed_origins=list(allowed_origins)
-            if allowed_origins is not None
-            else [f"{origin.scheme}://{origin.netloc}"],
+            allowed_hosts=list(dict.fromkeys(allowed_hosts)),
+            allowed_origins=list(allowed_origins) if allowed_origins is not None else [origin],
         )
         self._security = TransportSecurityMiddleware(security)
         self._manager = StreamableHTTPSessionManager(

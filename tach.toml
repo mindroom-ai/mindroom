@@ -7726,7 +7726,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.mcp_gateway.oauth"
-depends_on = ["mindroom.mcp_gateway.store", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.lifecycle"]
+depends_on = ["mindroom.mcp_gateway.store", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.lifecycle", "mindroom.origins"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.store"
@@ -7763,7 +7763,7 @@ depends_on = ["mindroom.matrix.identity"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.lifecycle"
-depends_on = []
+depends_on = ["mindroom.origins"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.legacy_schema"
@@ -7772,7 +7772,7 @@ visibility = ["mindroom.mcp_gateway.store"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.server"
-depends_on = ["mindroom.bounded_bytes", "mindroom.logging_config", "mindroom.mcp_gateway.execution", "mindroom.mcp_gateway.types", "mindroom.timing"]
+depends_on = ["mindroom.bounded_bytes", "mindroom.logging_config", "mindroom.mcp_gateway.execution", "mindroom.mcp_gateway.types", "mindroom.origins", "mindroom.timing"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.execution"

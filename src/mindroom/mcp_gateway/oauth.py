@@ -25,8 +25,9 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from mindroom.mcp_gateway.accounts import account_is_active
-from mindroom.mcp_gateway.lifecycle import owned_grants, public_grant, touch_grant
+from mindroom.mcp_gateway.lifecycle import owned_grants, public_grant, resources_match, touch_grant
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError, GatewayOAuthStore
+from mindroom.origins import parse_browser_origin
 
 if TYPE_CHECKING:
     import sqlite3
@@ -135,9 +136,11 @@ class GatewayOAuthProvider(
         public_url: str,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        origin = public_url.rstrip("/")
-        parsed = urlsplit(origin)
-        if not _valid_url(origin) or parsed.path or parsed.query:
+        origin = parse_browser_origin(public_url)
+        if not _valid_url(origin):
+            # parse_browser_origin also accepts plain HTTP on private-network addresses, which the
+            # browser-origin allowlists want; OAuth credentials must not travel unencrypted beyond
+            # loopback, so the provider keeps the stricter HTTPS-or-loopback rule on the normalized origin.
             msg = "MCP public URL must be an HTTPS origin or loopback HTTP origin"
             raise ValueError(msg)
         self.resource_url = origin + "/mcp"
@@ -219,7 +222,7 @@ class GatewayOAuthProvider(
         registered = await self.get_client(client.client_id or "")
         if registered is None:
             raise AuthorizeError("unauthorized_client", "Unknown client")  # noqa: EM101
-        if params.resource != self.resource_url:
+        if not resources_match(params.resource, self.resource_url):
             raise AuthorizeError("invalid_request", "Exact MCP resource is required")  # noqa: EM101
         if params.scopes != _SCOPES:
             raise AuthorizeError("invalid_scope", "Only mcp:tools is supported")  # noqa: EM101
@@ -256,7 +259,7 @@ class GatewayOAuthProvider(
         if row is None or row["expires_at"] <= self._clock():
             raise AuthorizeError("invalid_request", "Consent is invalid or expired")  # noqa: EM101
         payload = json.loads(row["payload"])
-        if payload["params"]["resource"] != self.resource_url:
+        if not resources_match(payload["params"].get("resource"), self.resource_url):
             raise AuthorizeError("invalid_request", "Consent resource changed")  # noqa: EM101
         return row
 
@@ -401,7 +404,7 @@ class GatewayOAuthProvider(
             return None
         if not self._account_allowed(connection, row["account_id"]):
             return None
-        if json.loads(row["grant_payload"])["resource"] != self.resource_url:
+        if not resources_match(json.loads(row["grant_payload"]).get("resource"), self.resource_url):
             return None
         return row
 
@@ -482,6 +485,9 @@ class GatewayOAuthProvider(
         now = int(issued_at)
         expires_at = min(now + _ACCESS_TTL, int(row["grant_expires_at"]))
         grant = json.loads(row["grant_payload"])
+        # Tokens issued now carry the normalized resource even when the grant was stored with the
+        # configured spelling, so the stored family converges on first use (see lifecycle.resources_match).
+        grant["resource"] = self.resource_url
         access = GatewayAccessToken(**grant, token=_secret(), expires_at=expires_at)
         refresh = _GatewayRefreshToken(**grant, token=_secret(), expires_at=int(row["grant_expires_at"]))
         self._save_capability(connection, "access", access.token, access, issued_at=issued_at)
@@ -633,11 +639,15 @@ class GatewayOAuthProvider(
             for row in selected:
                 self.store.delete_family(connection, row["grant_id"])
             if grant_id is None:
-                connection.execute(
-                    """DELETE FROM pending WHERE requester_id = ? AND authenticated_user_id = ? AND account_id IS ?
-                       AND json_extract(payload, '$.params.resource') = ?""",
-                    (requester_id, authenticated_user_id, account_id, self.resource_url),
-                )
+                pending = connection.execute(
+                    """SELECT state_hash, payload FROM pending WHERE requester_id = ? AND authenticated_user_id = ?
+                       AND account_id IS ?""",
+                    (requester_id, authenticated_user_id, account_id),
+                ).fetchall()
+                for pending_row in pending:
+                    stored = json.loads(pending_row["payload"])["params"].get("resource")
+                    if resources_match(stored, self.resource_url):
+                        connection.execute("DELETE FROM pending WHERE state_hash = ?", (pending_row["state_hash"],))
             return grant_id is None or bool(selected)
 
         return await self.store.transact(revoke)
