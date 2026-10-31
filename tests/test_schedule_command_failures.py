@@ -41,6 +41,7 @@ THREAD_ID = "$thread"
 USER_ID = "@user:server"
 TASK_ID = "task123"
 _STATE_ERROR = nio.RoomGetStateError.from_dict({"errcode": "M_FORBIDDEN", "error": "Not authorized"}, room_id=ROOM_ID)
+_STATE_WRITE_REFUSED = nio.RoomPutStateError(message="denied", status_code="M_FORBIDDEN")
 _PARSE_FAILURE = (
     "Could not determine when to run the one-time task.\n\n"
     '💡 Include an explicit time like "today at 11:45 PM" or "in 10 minutes".'
@@ -261,7 +262,7 @@ async def test_cancel_whose_state_write_is_refused(tmp_path: Path) -> None:
     """A cancellation Matrix refuses to store reports the refusal and how to fix it."""
     client = make_matrix_client_mock()
     _serve_task(client, _workflow())
-    client.room_put_state = AsyncMock(return_value=nio.RoomPutStateError(message="denied", status_code="M_FORBIDDEN"))
+    client.room_put_state = AsyncMock(return_value=_STATE_WRITE_REFUSED)
 
     reply = await _reply(tmp_path, f"!cancel_schedule {TASK_ID}", client=client)
 
@@ -301,7 +302,7 @@ async def test_cancel_all_when_every_cancellation_fails(tmp_path: Path) -> None:
     """Cancelling every schedule when none can be stored counts the failures."""
     client = make_matrix_client_mock()
     _serve_pending_tasks(client, "first", "second")
-    client.room_put_state = AsyncMock(return_value=nio.RoomPutStateError(message="denied", status_code="M_FORBIDDEN"))
+    client.room_put_state = AsyncMock(return_value=_STATE_WRITE_REFUSED)
 
     reply = await _reply(tmp_path, "!cancel_schedule all", client=client)
 
@@ -316,7 +317,7 @@ async def test_cancel_all_when_some_cancellations_fail(tmp_path: Path) -> None:
     client.room_put_state = AsyncMock(
         side_effect=[
             nio.RoomPutStateResponse(event_id="$cancelled", room_id=ROOM_ID),
-            nio.RoomPutStateError(message="denied", status_code="M_FORBIDDEN"),
+            _STATE_WRITE_REFUSED,
         ],
     )
 

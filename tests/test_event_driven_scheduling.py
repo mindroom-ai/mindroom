@@ -9,6 +9,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.llm.errors import ProviderError
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
@@ -304,8 +305,12 @@ class TestEventDrivenScheduling:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "text"),
-    [(RuntimeError("parser unavailable"), "parser unavailable"), (TimeoutError(), "TimeoutError")],
-    ids=["with_text", "without_text"],
+    [
+        (RuntimeError("parser unavailable"), "parser unavailable"),
+        (TimeoutError(), "TimeoutError"),
+        (ProviderError("AI service error", provider="Synthetic"), "AI service error"),
+    ],
+    ids=["with_text", "without_text", "provider_error_is_not_a_refusal"],
 )
 async def test_a_parser_call_that_raises_reports_why(
     monkeypatch: pytest.MonkeyPatch,

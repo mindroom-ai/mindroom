@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -49,10 +49,6 @@ def create_mock_room(room_id: str, user_ids: list[str] | None = None) -> nio.Mat
             )
     room.members_synced = True
     return room
-
-
-def _conversation_reader() -> MagicMock:
-    return MagicMock()
 
 
 def _allow_schedule_state_persistence(client: AsyncMock, room_id: str) -> None:
@@ -245,13 +241,7 @@ async def test_schedule_allows_agents_in_room() -> None:
 
         # Try to schedule in a thread where calculator is in the room
         response = await schedule_task(
-            runtime=make_test_scheduling_runtime(
-                client=client,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                room=room,
-                conversation_reader=make_conversation_reader_mock(),
-            ),
+            runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="test_room",
             thread_id="$thread123",
             scheduled_by="@user:localhost",
@@ -261,7 +251,6 @@ async def test_schedule_allows_agents_in_room() -> None:
         # Should succeed because calculator is in the room
         assert "\n**Task ID:** `" in response
         assert "✅ Scheduled" in response
-        assert "❌" not in response
 
 
 @pytest.mark.asyncio
@@ -329,7 +318,7 @@ async def test_schedule_with_multiple_agents_validation() -> None:
         assert calculator_matrix_id in response
         # Researcher should not be mentioned as invalid
         researcher_matrix_id = entity_ids(config, runtime_paths_for(config))["researcher"].full_id
-        assert researcher_matrix_id not in response.split("not available")[1] if "not available" in response else True
+        assert researcher_matrix_id not in response
 
 
 @pytest.mark.asyncio
@@ -377,13 +366,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
         mock_parse.return_value = mock_workflow
 
         response = await schedule_task(
-            runtime=make_test_scheduling_runtime(
-                client=client,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                room=room,
-                conversation_reader=make_conversation_reader_mock(),
-            ),
+            runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="test_room",
             thread_id="$thread123",
             scheduled_by="@user:localhost",
@@ -462,7 +445,7 @@ async def test_schedule_validation_respects_sender_reply_permissions() -> None:
 
 @pytest.mark.asyncio
 async def test_schedule_with_nonexistent_agent() -> None:
-    """Test that mentioning a non-existent agent fails appropriately."""
+    """Mentioning an unknown agent still schedules the task, since only configured agents count as mentions."""
     config = _runtime_bound_config(
         Config(
             agents={

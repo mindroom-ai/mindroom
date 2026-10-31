@@ -18,7 +18,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookRegistry, HookRegistryState
-from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, ProviderError
+from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal
 from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.identity import MatrixID
@@ -59,11 +59,6 @@ def _parse_prompt(model: ScriptedModel) -> str:
     """Return the user prompt of the parser's only request."""
     [request] = model.requests
     return request.messages[-1].get_content_string()
-
-
-async def _fail_parse() -> None:
-    msg = "AI service error"
-    raise ProviderError(msg, provider="Synthetic")
 
 
 async def _refuse_parse() -> None:
@@ -428,7 +423,7 @@ class TestParseWorkflowSchedule:
         assert isinstance(result, ScheduledWorkflow)
         assert result.history_limit == 0
 
-    async def test_parse_once_without_execute_at_returns_parse_error(
+    async def test_parse_once_without_execute_at_fails(
         self,
         monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
@@ -455,7 +450,7 @@ class TestParseWorkflowSchedule:
         error, _suggestion = str(exc_info.value).split("\n\n💡 ")
         assert "when to run" in error
 
-    async def test_parse_cron_without_schedule_returns_parse_error(
+    async def test_parse_cron_without_schedule_fails(
         self,
         monkeypatch: pytest.MonkeyPatch,
         mock_config: MagicMock,
@@ -481,27 +476,6 @@ class TestParseWorkflowSchedule:
 
         error, _suggestion = str(exc_info.value).split("\n\n💡 ")
         assert "recurring schedule" in error
-
-    async def test_parse_error_handling(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        mock_config: MagicMock,
-    ) -> None:
-        """Test error handling in parse_workflow_schedule."""
-        install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(_fail_parse)]])})
-
-        with pytest.raises(SchedulingError) as exc_info:
-            await _parse_workflow_schedule(
-                "Schedule something",
-                config=mock_config,
-                runtime_paths=runtime_paths_for(mock_config),
-                available_responders=[_mid("general")],
-                timezone="UTC",
-            )
-
-        error, suggestion = str(exc_info.value).split("\n\n💡 ")
-        assert "Error parsing schedule" in error
-        assert suggestion
 
     async def test_parse_refusal_reports_declined_request_without_rephrase_hint(
         self,
@@ -1254,7 +1228,7 @@ class TestValidateConditionalWorkflow:
         """Skip validation for normal time-based schedules."""
         _validate_conditional_workflow(self._workflow("", is_conditional=False))
 
-    def test_conditional_once_returns_error(self) -> None:
+    def test_conditional_once_is_rejected(self) -> None:
         """Reject one-time parses for conditional requests."""
         with pytest.raises(SchedulingError) as exc_info:
             _validate_conditional_workflow(

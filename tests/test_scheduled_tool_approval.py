@@ -1740,8 +1740,9 @@ async def test_failed_withdrawal_reports_a_failed_cancel_without_publishing_it()
             runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
         )
 
-    assert str(exc_info.value).startswith("Failed to cancel task `task1234`: ")
-    assert "journal unavailable" in str(exc_info.value)
+    assert str(exc_info.value) == (
+        "Failed to cancel task `task1234`: could not withdraw the approval for its scheduled call (journal unavailable)"
+    )
     client.room_put_state.assert_not_awaited()
 
 

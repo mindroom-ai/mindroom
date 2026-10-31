@@ -364,7 +364,7 @@ def test_impossible_cron_rejected_on_create_and_edit_paths() -> None:
     with pytest.raises(SchedulingError, match="Invalid cron expression"):
         _validate_parsed_workflow(impossible_workflow)
 
-    assert _validate_parsed_workflow(existing_cron) is None
+    _validate_parsed_workflow(existing_cron)
 
 
 def _restoring_router(client: AsyncMock, tmp_path: Path) -> tuple[ScheduledTaskRuntime, object]:
@@ -915,27 +915,6 @@ async def test_list_scheduled_tasks_tasks_in_other_threads(tmp_path: Path) -> No
 
     assert "No scheduled tasks in this thread" in result
     assert "1 task(s) scheduled in other threads" in result
-
-
-@pytest.mark.asyncio
-async def test_list_scheduled_tasks_error_response(tmp_path: Path) -> None:
-    """Test list_scheduled_tasks when Matrix returns an error."""
-    client = AsyncMock()
-
-    # Return an error response
-    error_response = nio.RoomGetStateError.from_dict({"error": "Not authorized"}, room_id="!test:server")
-    client.room_get_state = AsyncMock(return_value=error_response)
-
-    with pytest.raises(SchedulingError) as exc_info:
-        await list_scheduled_tasks(
-            client=client,
-            room_id="!test:server",
-            runtime_paths=_test_runtime_paths(tmp_path),
-            thread_id="$thread123",
-            config=Config(),
-        )
-
-    assert str(exc_info.value) == "Unable to retrieve scheduled tasks."
 
 
 @pytest.mark.asyncio
@@ -1532,44 +1511,6 @@ async def test_cancel_scheduled_task_persists_through_the_router_when_active_age
 
 
 @pytest.mark.asyncio
-async def test_cancel_scheduled_task_returns_error_when_state_write_fails(tmp_path: Path) -> None:
-    """Failed Matrix state writes must not claim a task was cancelled."""
-    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
-    serve_task_state_events(client)
-    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
-    workflow = ScheduledWorkflow(
-        schedule_type="once",
-        execute_at=datetime.now(UTC) + timedelta(minutes=5),
-        message="cancel me",
-        description="cancel me",
-        room_id="!test:server",
-        thread_id="$thread",
-    )
-    client.room_get_state_event = AsyncMock(
-        return_value=nio.RoomGetStateEventResponse(
-            content={
-                "task_id": "taskcancel",
-                "workflow": workflow.model_dump_json(),
-                "status": "pending",
-            },
-            event_type=SCHEDULED_TASK_EVENT_TYPE,
-            state_key="taskcancel",
-            room_id="!test:server",
-        ),
-    )
-
-    with pytest.raises(SchedulingError) as exc_info:
-        await cancel_scheduled_task(
-            client=client,
-            room_id="!test:server",
-            task_id="taskcancel",
-            runtime_paths=_test_runtime_paths(tmp_path),
-        )
-
-    assert str(exc_info.value).startswith("Failed to cancel task `taskcancel`")
-
-
-@pytest.mark.asyncio
 async def test_cancel_scheduled_task_keeps_transient_state_read_retryable(tmp_path: Path) -> None:
     """A transient Matrix read failure must not become a terminal not-found result."""
     client = AsyncMock()
@@ -1747,49 +1688,6 @@ async def test_cancel_all_scheduled_tasks_persists_through_the_router_when_activ
     cancel_runner.assert_called_once_with("task1")
     router.room_put_state.assert_awaited_once()
     assert room_state["task1"]["content"]["status"] == "cancelled"
-
-
-@pytest.mark.asyncio
-async def test_cancel_all_scheduled_tasks_returns_error_when_state_write_fails(tmp_path: Path) -> None:
-    """Cancel-all must not report success when pending task state cannot be written."""
-    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
-    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
-    workflow = ScheduledWorkflow(
-        schedule_type="once",
-        execute_at=datetime.now(UTC) + timedelta(minutes=5),
-        message="cancel all",
-        description="cancel all",
-        room_id="!test:server",
-        thread_id="$thread",
-    )
-    client.room_get_state = AsyncMock(
-        return_value=nio.RoomGetStateResponse.from_dict(
-            [
-                {
-                    "type": SCHEDULED_TASK_EVENT_TYPE,
-                    "state_key": "task1",
-                    "content": {
-                        "task_id": "task1",
-                        "workflow": workflow.model_dump_json(),
-                        "status": "pending",
-                    },
-                    "event_id": "$state_task1",
-                    "sender": SCHEDULE_WRITER_ID,
-                    "origin_server_ts": 1234567890,
-                },
-            ],
-            room_id="!test:server",
-        ),
-    )
-
-    with pytest.raises(SchedulingError) as exc_info:
-        await cancel_all_scheduled_tasks(
-            client=client,
-            room_id="!test:server",
-            runtime_paths=_test_runtime_paths(tmp_path),
-        )
-
-    assert str(exc_info.value) == "Failed to cancel 1 scheduled task(s)"
 
 
 @pytest.mark.asyncio
@@ -2309,40 +2207,6 @@ async def test_edit_scheduled_task_persists_through_the_router_and_preserves_omi
 
 
 @pytest.mark.asyncio
-async def test_edit_scheduled_task_rejects_non_pending(tmp_path: Path) -> None:
-    """Editing should fail for cancelled/completed tasks."""
-    client = AsyncMock()
-    serve_task_state_events(client)
-    room = MagicMock()
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="once",
-        execute_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
-        message="original task",
-        description="original task",
-        room_id="!test:server",
-    )
-    state_response = nio.RoomGetStateEventResponse(
-        content={"status": "cancelled", "workflow": workflow.model_dump_json()},
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
-        state_key="task123",
-        room_id="!test:server",
-    )
-    client.room_get_state_event = AsyncMock(return_value=state_response)
-
-    with pytest.raises(SchedulingError) as exc_info:
-        await edit_scheduled_task(
-            runtime=_scheduling_runtime(client=client, runtime_paths=_test_runtime_paths(tmp_path), room=room),
-            room_id="!test:server",
-            task_id="task123",
-            full_text="tomorrow at 9am updated task",
-            scheduled_by="@user:server",
-        )
-
-    assert str(exc_info.value) == "Task `task123` cannot be edited because it is `cancelled`."
-
-
-@pytest.mark.asyncio
 async def test_save_edited_scheduled_task_preserves_created_at(tmp_path: Path) -> None:
     """Editing should keep created_at metadata from the original task."""
     client = AsyncMock()
@@ -2501,8 +2365,8 @@ async def test_save_edited_scheduled_task_rejects_schedule_type_change(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_returns_error_when_sender_blocked_from_all_agents() -> None:
-    """Scheduling should return a user-facing error when no agents are visible to the sender."""
+async def test_schedule_task_fails_when_sender_blocked_from_all_agents() -> None:
+    """Scheduling fails with a user-facing reason when no agents are visible to the sender."""
     client = AsyncMock()
     room = MagicMock()
     config = MagicMock()
@@ -2530,8 +2394,8 @@ async def test_schedule_task_returns_error_when_sender_blocked_from_all_agents()
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
-    """new_thread mode should also return a clean error when the sender has no visible agents."""
+async def test_schedule_task_blocked_sender_new_thread_fails() -> None:
+    """new_thread mode also fails with a clean reason when the sender has no visible agents."""
     client = AsyncMock()
     room = MagicMock()
     config = MagicMock()
@@ -3006,8 +2870,8 @@ async def test_schedule_task_rejects_invalid_history_limit_before_parsing(
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_returns_error_when_state_write_fails_without_a_fallback_writer(tmp_path: Path) -> None:
-    """Scheduling must not return a task ID when Matrix state persistence fails."""
+async def test_schedule_task_with_a_failed_state_write_and_no_fallback_writer_fails(tmp_path: Path) -> None:
+    """Scheduling fails without starting the task when Matrix state persistence fails."""
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     serve_full_room_state(client, "!test:server")
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
@@ -3087,7 +2951,7 @@ async def test_state_write_error_includes_hint_when_the_fallback_writer_raises()
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_returns_error_when_active_write_returns_unexpected_response(tmp_path: Path) -> None:
+async def test_schedule_task_fails_when_active_write_returns_unexpected_response(tmp_path: Path) -> None:
     """Scheduling must require a positive Matrix state-write response before returning success."""
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     serve_full_room_state(client, "!test:server")

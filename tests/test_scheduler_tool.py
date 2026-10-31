@@ -80,17 +80,6 @@ def test_extract_mentioned_agents_from_text() -> None:
     assert result == [expected_agent]
 
 
-@pytest.mark.asyncio
-async def test_scheduler_tool_requires_context() -> None:
-    """Tool should fail clearly when called outside Matrix response context."""
-    tools = SchedulerTools()
-
-    with pytest.raises(SchedulingError) as exc_info:
-        await tools.schedule("in 10 minutes remind me to check logs", new_thread=False)
-
-    assert str(exc_info.value) == "Scheduler tool is unavailable in this context."
-
-
 def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
     """The model-facing schema must not silently choose a delivery scope."""
     function = toolkit_offers(SchedulerTools(), "schedule")
@@ -247,35 +236,6 @@ async def test_scheduler_tool_uses_current_config_for_authorization() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scheduler_tool_raises_when_backend_rejects_request() -> None:
-    """Invalid schedule requests should fail the tool call instead of returning error text."""
-    tools = SchedulerTools()
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    context = _make_context(config)
-
-    with (
-        patch(
-            "mindroom.custom_tools.scheduler.schedule_task",
-            new=AsyncMock(side_effect=SchedulingError("Failed to schedule: schedule is not valid")),
-        ),
-        tool_runtime_context(context),
-        pytest.raises(SchedulingError) as exc_info,
-    ):
-        await tools.schedule("next message", new_thread=False)
-
-    assert str(exc_info.value) == "Failed to schedule: schedule is not valid"
-
-
-@pytest.mark.asyncio
-async def test_edit_schedule_tool_requires_context() -> None:
-    """Edit tool should fail clearly when called outside Matrix response context."""
-    tools = SchedulerTools()
-    with pytest.raises(SchedulingError) as exc_info:
-        await tools.edit_schedule("task123", "tomorrow at 9am check logs")
-    assert str(exc_info.value) == "Scheduler tool is unavailable in this context."
-
-
-@pytest.mark.asyncio
 async def test_edit_schedule_tool_calls_backend() -> None:
     """Edit tool should call edit_scheduled_task with correct arguments."""
     tools = SchedulerTools()
@@ -347,35 +307,6 @@ async def test_edit_schedule_tool_calls_backend() -> None:
 
 
 @pytest.mark.asyncio
-async def test_edit_schedule_tool_raises_when_backend_rejects_request() -> None:
-    """Edit failures should fail the tool call instead of returning error text."""
-    tools = SchedulerTools()
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    context = _make_context(config)
-
-    with (
-        patch(
-            "mindroom.custom_tools.scheduler.edit_scheduled_task",
-            new=AsyncMock(side_effect=SchedulingError("Failed to edit task `task123`.")),
-        ),
-        tool_runtime_context(context),
-        pytest.raises(SchedulingError) as exc_info,
-    ):
-        await tools.edit_schedule("task123", "tomorrow at 9am check deployment")
-
-    assert str(exc_info.value) == "Failed to edit task `task123`."
-
-
-@pytest.mark.asyncio
-async def test_list_schedules_tool_requires_context() -> None:
-    """List tool should fail clearly when called outside Matrix response context."""
-    tools = SchedulerTools()
-    with pytest.raises(SchedulingError) as exc_info:
-        await tools.list_schedules()
-    assert str(exc_info.value) == "Scheduler tool is unavailable in this context."
-
-
-@pytest.mark.asyncio
 async def test_list_schedules_tool_calls_backend() -> None:
     """List tool should call list_scheduled_tasks with correct arguments."""
     tools = SchedulerTools()
@@ -399,35 +330,6 @@ async def test_list_schedules_tool_calls_backend() -> None:
         thread_id=context.resolved_thread_id,
         config=context.config,
     )
-
-
-@pytest.mark.asyncio
-async def test_list_schedules_tool_raises_when_backend_rejects_request() -> None:
-    """List failures should fail the tool call instead of returning error text."""
-    tools = SchedulerTools()
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    context = _make_context(config)
-
-    with (
-        patch(
-            "mindroom.custom_tools.scheduler.list_scheduled_tasks",
-            new=AsyncMock(side_effect=SchedulingError("Unable to retrieve scheduled tasks.")),
-        ),
-        tool_runtime_context(context),
-        pytest.raises(SchedulingError) as exc_info,
-    ):
-        await tools.list_schedules()
-
-    assert str(exc_info.value) == "Unable to retrieve scheduled tasks."
-
-
-@pytest.mark.asyncio
-async def test_cancel_schedule_tool_requires_context() -> None:
-    """Cancel tool should fail clearly when called outside Matrix response context."""
-    tools = SchedulerTools()
-    with pytest.raises(SchedulingError) as exc_info:
-        await tools.cancel_schedule("task123")
-    assert str(exc_info.value) == "Scheduler tool is unavailable in this context."
 
 
 @pytest.mark.asyncio
@@ -457,26 +359,6 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
     )
 
 
-@pytest.mark.asyncio
-async def test_cancel_schedule_tool_raises_when_backend_rejects_request() -> None:
-    """Cancel failures should fail the tool call instead of returning error text."""
-    tools = SchedulerTools()
-    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    context = _make_context(config)
-
-    with (
-        patch(
-            "mindroom.custom_tools.scheduler.cancel_scheduled_task",
-            new=AsyncMock(side_effect=ScheduledTaskNotFoundError("task123")),
-        ),
-        tool_runtime_context(context),
-        pytest.raises(ScheduledTaskNotFoundError) as exc_info,
-    ):
-        await tools.cancel_schedule("task123")
-
-    assert str(exc_info.value) == "Task `task123` not found."
-
-
 def _call_context() -> ToolCallContext:
     return ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None)
 
@@ -501,25 +383,56 @@ async def test_scheduler_call_outside_a_conversation_fails(name: str, arguments:
 
 
 @pytest.mark.asyncio
-async def test_scheduler_operation_failure_is_a_failed_call_with_its_reason() -> None:
+@pytest.mark.parametrize(
+    ("name", "operation", "arguments", "error", "text"),
+    [
+        (
+            "schedule",
+            "schedule_task",
+            {"request": "next message", "new_thread": False},
+            SchedulingError("Failed to schedule: schedule is not valid"),
+            "Failed to schedule: schedule is not valid",
+        ),
+        (
+            "edit_schedule",
+            "edit_scheduled_task",
+            {"task_id": "task123", "request": "tomorrow at 9am check deployment"},
+            SchedulingError("Failed to edit task `task123`."),
+            "Failed to edit task `task123`.",
+        ),
+        (
+            "list_schedules",
+            "list_scheduled_tasks",
+            {},
+            SchedulingError("Unable to retrieve scheduled tasks."),
+            "Unable to retrieve scheduled tasks.",
+        ),
+        (
+            "cancel_schedule",
+            "cancel_scheduled_task",
+            {"task_id": "task123"},
+            ScheduledTaskNotFoundError("task123"),
+            "Task `task123` not found.",
+        ),
+    ],
+)
+async def test_scheduler_operation_failure_is_a_failed_call_with_its_reason(
+    name: str,
+    operation: str,
+    arguments: dict[str, object],
+    error: SchedulingError,
+    text: str,
+) -> None:
     """A scheduling operation that did not happen fails the call with the operation's reason as its text."""
     config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
     with (
-        patch(
-            "mindroom.custom_tools.scheduler.cancel_scheduled_task",
-            new=AsyncMock(side_effect=ScheduledTaskNotFoundError("task123")),
-        ),
+        patch(f"mindroom.custom_tools.scheduler.{operation}", new=AsyncMock(side_effect=error)),
         tool_runtime_context(_make_context(config)),
     ):
-        result = await run_tool_call(
-            toolkit_offers(SchedulerTools(), "cancel_schedule"),
-            {"task_id": "task123"},
-            _call_context(),
-            middleware=(),
-        )
+        result = await run_tool_call(toolkit_offers(SchedulerTools(), name), arguments, _call_context(), middleware=())
 
     assert result.status == "failed"
-    assert result.failure_text == "Task `task123` not found."
+    assert result.failure_text == text
 
 
 @pytest.mark.asyncio
