@@ -1,12 +1,12 @@
 # Config and CLI: one owner per validation rule, load failure, runtime path, and preset
 
-This record holds the decisions behind moving the tool-entry lazy-flag rule onto the entry, keeping a failed config load only as its exception, giving the CLI one runtime resolver and one provider-preset table, and having `mindroom doctor` run the checks `mindroom config validate` runs.
+This record holds the decisions behind the owners of the tool-entry lazy-flag rule, of a failed config load, of the CLI's runtime resolution and provider presets, and of the checks `mindroom doctor` shares with `mindroom config validate`.
 
 ## Decisions
 
 - The "no `defer` or `initial` on presets and control-plane tools" rule belongs to `ToolConfigEntry`, because it needs nothing beyond one entry.
   It is checked first in the entry's lazy-flag validator, so the documented preset message still wins over "initial requires defer" without a second parser of the raw YAML forms.
-  The error now points at the entry (`agents → code → tools → 0`), and field parsing and entry-shape errors now win over it for malformed entries.
+  The error points at the entry (`agents → code → tools → 0`), and for a malformed entry its field parsing and entry-shape errors come first.
   `DefaultsConfig` keeps rejecting every flag in `defaults.tools`; that is a different rule.
 - A failed load is recorded only as `ConfigLoad.error`; the API derives the 422 detail or the fixed 500 text from it when a request reads the config, so `config/` never chooses HTTP status codes.
   `uses_includes` stays a separate field because a failed load still knows it and no exception carries it after a successful parse.
@@ -24,7 +24,7 @@ This record holds the decisions behind moving the tool-entry lazy-flag rule onto
 ## Rejected alternatives
 
 - Making the dashboard `reference="model"` hint the only declaration of model fields, checked by one walker: a hint names a target type, not when a reference must resolve (a disabled knowledge graph, sandbox runner configs, plugin-check configs).
-  The four model fields that lacked the hint got it, and a schema test now requires the hint on every model-named field that is not a provider's own model ID.
+  A schema test requires the hint on every model-named field that is not a provider's own model ID.
 - Gating doctor's provider probes on the shared environment warnings: that needs per-route policy, since Ollama must keep probing its SDK default host.
 - Writing the config bundle's journal and metadata through `durable_write`: its directory fsync can raise after the replacement, which changes the recovery outcomes the bundle installer reports.
 - Composing setup hints from one phrase per preset: see the hint decision above.
