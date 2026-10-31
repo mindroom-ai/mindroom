@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import io
+import pathlib
 from typing import TYPE_CHECKING
 
 import pytest
@@ -150,6 +152,57 @@ def test_write_text_atomic_replaces_content_and_preserves_mode(tmp_path: Path) -
     assert path.read_text(encoding="utf-8") == "new\n"
     assert path.stat().st_mode & 0o777 == 0o640
     assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_text_atomic_copies_into_a_bind_mount_and_keeps_its_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single-file bind mount cannot be renamed over, so the content is copied in place with the file's mode."""
+    path = tmp_path / "config.yaml"
+    path.write_text("old\n", encoding="utf-8")
+    path.chmod(0o600)
+
+    def reject_rename(_source: Path, _target: Path) -> None:
+        raise OSError(errno.EBUSY, "Device or resource busy")
+
+    monkeypatch.setattr(pathlib.Path, "replace", reject_rename)
+
+    yaml_io.write_text_atomic(path, "new\n", copy_when_rename_fails=True)
+
+    assert path.read_text(encoding="utf-8") == "new\n"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_text_atomic_refuses_a_bind_mount_unless_copying_is_allowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the copy fallback a failed rename leaves the old content and no temp file."""
+    path = tmp_path / "config.yaml"
+    path.write_text("old\n", encoding="utf-8")
+
+    def reject_rename(_source: Path, _target: Path) -> None:
+        raise OSError(errno.EBUSY, "Device or resource busy")
+
+    monkeypatch.setattr(pathlib.Path, "replace", reject_rename)
+
+    with pytest.raises(OSError, match="busy"):
+        yaml_io.write_text_atomic(path, "new\n")
+
+    assert path.read_text(encoding="utf-8") == "old\n"
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_text_atomic_creates_a_missing_file_readable_only_by_its_owner(tmp_path: Path) -> None:
+    """A file that does not exist yet gets owner-only permissions."""
+    path = tmp_path / "config.yaml"
+
+    yaml_io.write_text_atomic(path, "new\n", copy_when_rename_fails=True)
+
+    assert path.read_text(encoding="utf-8") == "new\n"
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_prefers_libyaml_classes_when_available() -> None:

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from mindroom import constants
+from mindroom import yaml_io
 from mindroom.config.legacy_access import validate_access_migration_source
 from mindroom.config.load_attempt import raw_source_fingerprint
 from mindroom.config.main import (
@@ -96,9 +96,7 @@ def write_config_commit(
         _raise_when_roster_names_collide(runtime_paths, commit.config.authored_model_dump())
         if loaded is not None and _current_file_fingerprint(runtime_paths) != loaded.source_fingerprint:
             raise ConfigFileChangedError
-        tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
-        tmp_path.write_text(commit.source, encoding="utf-8")
-        constants.safe_replace(tmp_path, config_path)
+        yaml_io.write_text_atomic(config_path, commit.source, copy_when_rename_fails=True)
 
 
 def _current_file_fingerprint(runtime_paths: RuntimePaths) -> str | None:
