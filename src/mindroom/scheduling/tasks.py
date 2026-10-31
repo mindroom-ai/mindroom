@@ -7,7 +7,7 @@ import hashlib
 import json
 import typing
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from weakref import WeakValueDictionary
@@ -682,6 +682,19 @@ async def get_scheduled_task(
     return task
 
 
+async def require_scheduled_task(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+    runtime_paths: RuntimePaths,
+) -> ScheduledTaskRecord:
+    """Return a stored runtime-authored task, or raise ScheduledTaskNotFoundError when the room does not store it."""
+    task = await get_scheduled_task(client, room_id, task_id, runtime_paths)
+    if task is None:
+        raise ScheduledTaskNotFoundError(task_id)
+    return task
+
+
 def _serialize_scheduled_task_created_at(created_at: datetime | str | None) -> str:
     """Normalize persisted scheduled-task timestamps."""
     if isinstance(created_at, datetime):
@@ -850,8 +863,6 @@ def _raise_unless_editable(task: ScheduledTaskRecord) -> None:
 
 async def save_edited_scheduled_task(
     client: nio.AsyncClient,
-    room_id: str,
-    task_id: str,
     workflow: ScheduledWorkflow,
     existing_task: ScheduledTaskRecord,
     runtime_paths: RuntimePaths,
@@ -859,11 +870,15 @@ async def save_edited_scheduled_task(
     config: Config,
     writers: ScheduledTaskRuntime | None = None,
 ) -> ScheduledTaskRecord:
-    """Persist edits to an existing task without touching runtime task runners."""
+    """Persist `workflow` as the new content of `existing_task`, unless the task changed since it was read.
+
+    Runtime task runners are untouched; they pick the edit up from the stored state.
+    """
     _raise_unless_editable(existing_task)
     if workflow.schedule_type != existing_task.workflow.schedule_type:
         raise SchedulingError(_SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
 
+    room_id, task_id = existing_task.room_id, existing_task.task_id
     async with schedule_edit_lock(client, room_id, task_id):
         current_task = await get_scheduled_task(client, room_id, task_id, runtime_paths)
         if current_task is None or current_task.status != "pending":
@@ -885,15 +900,7 @@ async def save_edited_scheduled_task(
             writers=writers,
         )
 
-    return ScheduledTaskRecord(
-        task_id=task_id,
-        room_id=room_id,
-        status="pending",
-        created_at=existing_task.created_at,
-        workflow=workflow,
-        revision=revision,
-        owner_id=current_task.owner_id,
-    )
+    return replace(current_task, workflow=workflow, revision=revision)
 
 
 def _existing_task_parse_context(workflow: ScheduledWorkflow) -> str:
@@ -1228,8 +1235,6 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         if existing_task:
             await save_edited_scheduled_task(
                 client=client,
-                room_id=room_id,
-                task_id=task_id,
                 workflow=workflow_result,
                 config=config,
                 existing_task=existing_task,
@@ -1320,7 +1325,6 @@ def _parse_send_time(execute_at: str) -> datetime:
 async def _checked_scheduled_call(
     runtime: SchedulingRuntime,
     *,
-    thread_id: str | None,
     scheduled_by: str,
     agent_name: str,
     call: LiveFunction,
@@ -1331,9 +1335,6 @@ async def _checked_scheduled_call(
     """Return the send time and approver for a call that may be pre-approved, or raise why it may not."""
     config = runtime.config
     runtime_paths = runtime.runtime_paths
-    if thread_id is None:
-        msg = "Pre-approved tool calls must be scheduled from a thread."
-        raise SchedulingError(msg)
     if agent_name not in config.agents:
         msg = "Only an agent, not a team, can schedule a pre-approved tool call."
         raise SchedulingError(msg)
@@ -1382,10 +1383,12 @@ async def schedule_approved_tool_call(
         SchedulingError: Why the call was not scheduled.
 
     """
+    if thread_id is None:
+        msg = "Pre-approved tool calls must be scheduled from a thread."
+        raise SchedulingError(msg)
     config = runtime.config
     send_at, approver_id = await _checked_scheduled_call(
         runtime,
-        thread_id=thread_id,
         scheduled_by=scheduled_by,
         agent_name=agent_name,
         call=call,
@@ -1393,7 +1396,6 @@ async def schedule_approved_tool_call(
         arguments=arguments,
         execute_at=execute_at,
     )
-    assert thread_id is not None
 
     task_id = str(uuid.uuid4())[:8]
     timezone = entity_timezone(config, agent_name)
@@ -1496,14 +1498,7 @@ async def edit_scheduled_task(
         SchedulingError: Why the task was not edited; ScheduledTaskNotFoundError when the room does not store it.
 
     """
-    existing_task = await get_scheduled_task(
-        client=runtime.client,
-        room_id=room_id,
-        task_id=task_id,
-        runtime_paths=runtime.runtime_paths,
-    )
-    if not existing_task:
-        raise ScheduledTaskNotFoundError(task_id)
+    existing_task = await require_scheduled_task(runtime.client, room_id, task_id, runtime.runtime_paths)
     # Refused before the request is parsed, which costs a model call.
     _raise_unless_editable(existing_task)
 

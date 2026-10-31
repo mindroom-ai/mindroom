@@ -345,8 +345,6 @@ async def test_edit_during_membership_lookup_survives_stale_departure(
             await lookup_started.wait()
             await scheduling.save_edited_scheduled_task(
                 client,
-                "!test:server",
-                "owner123",
                 updated,
                 existing,
                 runtime_paths,
@@ -396,8 +394,6 @@ async def test_edit_cannot_resurrect_schedule_while_cancellation_is_persisting(
         with pytest.raises(SchedulingError, match="cannot be edited"):
             await scheduling.save_edited_scheduled_task(
                 api_client,
-                "!test:server",
-                "owner123",
                 workflow.model_copy(update={"message": "Late edit"}),
                 existing,
                 owner_membership_runtime_paths,
@@ -445,8 +441,6 @@ async def test_edit_during_cancellation_retry_invalidates_old_departure(
         client.room_put_state.side_effect = write_state
         await scheduling.save_edited_scheduled_task(
             client,
-            "!test:server",
-            "owner123",
             updated,
             existing,
             owner_membership_runtime_paths,
@@ -481,8 +475,6 @@ async def test_stale_edit_cannot_overwrite_a_newer_workflow(owner_membership_run
     updated = workflow.model_copy(update={"message": "First edit"})
     await scheduling.save_edited_scheduled_task(
         client,
-        "!test:server",
-        "owner123",
         updated,
         existing,
         owner_membership_runtime_paths,
@@ -492,8 +484,6 @@ async def test_stale_edit_cannot_overwrite_a_newer_workflow(owner_membership_run
     with pytest.raises(SchedulingError, match="changed"):
         await scheduling.save_edited_scheduled_task(
             client,
-            "!test:server",
-            "owner123",
             workflow,
             existing,
             owner_membership_runtime_paths,

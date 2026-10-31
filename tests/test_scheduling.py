@@ -2390,8 +2390,6 @@ async def test_save_edited_scheduled_task_preserves_created_at(tmp_path: Path) -
     )
     updated_task = await save_edited_scheduled_task(
         client=client,
-        room_id="!test:server",
-        task_id="task123",
         workflow=updated_workflow,
         existing_task=existing_task,
         runtime_paths=_test_runtime_paths(tmp_path),
@@ -2451,8 +2449,6 @@ async def test_save_edited_scheduled_task_is_state_only(tmp_path: Path) -> None:
     )
     updated_task = await save_edited_scheduled_task(
         client=client,
-        room_id="!test:server",
-        task_id="task123",
         workflow=updated_workflow,
         existing_task=existing_task,
         runtime_paths=_test_runtime_paths(tmp_path),
@@ -2495,8 +2491,6 @@ async def test_save_edited_scheduled_task_rejects_schedule_type_change(tmp_path:
     with pytest.raises(SchedulingError, match="Changing schedule_type is not supported"):
         await save_edited_scheduled_task(
             client=client,
-            room_id="!test:server",
-            task_id="task123",
             workflow=updated_workflow,
             existing_task=existing_task,
             runtime_paths=_test_runtime_paths(tmp_path),

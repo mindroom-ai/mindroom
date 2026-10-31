@@ -187,7 +187,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
 
     with (
         patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
         response = test_client.put(
@@ -212,8 +212,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     assert data["new_thread"] is True
     assert data["silent"] is True
     save_mock.assert_awaited_once()
-    assert save_mock.await_args.kwargs["task_id"] == "abc12345"
-    assert save_mock.await_args.kwargs["room_id"] == "test_room"
+    assert save_mock.await_args.kwargs["existing_task"] is existing_task
     assert save_mock.await_args.kwargs["workflow"].new_thread is True
     assert save_mock.await_args.kwargs["workflow"].silent is True
     assert save_mock.await_args.kwargs["config"].timezone == "UTC"
@@ -232,7 +231,7 @@ def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> Non
 
     with (
         patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(
             "/api/schedules/cronbad1",
@@ -306,7 +305,7 @@ def test_update_schedule_once_to_cron(test_client: TestClient) -> None:
 
     with (
         patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
         response = test_client.put(
@@ -336,7 +335,7 @@ def test_update_schedule_cron_to_once(test_client: TestClient) -> None:
 
     with (
         patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
         response = test_client.put(
@@ -365,7 +364,7 @@ def test_update_schedule_conflicting_fields(test_client: TestClient) -> None:
 
     with (
         patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(
             "/api/schedules/conflict1",
@@ -390,7 +389,7 @@ def test_update_schedule_empty_message(test_client: TestClient) -> None:
 
     with (
         patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.require_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(
             "/api/schedules/empty_msg",
@@ -481,7 +480,7 @@ def test_edit_of_a_missing_task_is_not_found(test_client: TestClient) -> None:
     )
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "Task `abc12345` not found"
+    assert response.json()["detail"] == "Task `abc12345` not found."
 
 
 def test_edit_of_a_cancelled_task_is_a_bad_request(test_client: TestClient) -> None:

@@ -623,8 +623,6 @@ async def test_an_edit_by_another_agent_keeps_the_owner_its_runner_and_who_fails
         assert existing is not None
         await save_edited_scheduled_task(
             editor.client,
-            ROOM_ID,
-            TASK_ID,
             workflow.model_copy(update={"message": "Water the plants twice"}),
             existing,
             runtime_paths,
@@ -735,8 +733,6 @@ async def test_task_saved_without_an_owner_restores_under_the_rule_over_its_writ
         assert existing is not None
         await save_edited_scheduled_task(
             agent.client,
-            ROOM_ID,
-            TASK_ID,
             workflow,
             existing,
             runtime_paths,

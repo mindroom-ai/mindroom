@@ -417,6 +417,7 @@ async def _run_schedule_command(
     command: Command,
     requester_user_id: str,
 ) -> str:
+    """Run one schedule command and return its reply, raising ``SchedulingError`` when the operation did not happen."""
     thread_id = context.stable_target.resolved_thread_id
     if command.type == CommandType.SCHEDULE:
         mentioned_agents, _, _ = check_agent_mentioned(
@@ -464,20 +465,6 @@ async def _run_schedule_command(
         runtime_paths=context.runtime_paths,
         task_runtime=context.scheduled_tasks,
     )
-
-
-async def _schedule_command_response(
-    context: CommandHandlerContext,
-    room: nio.MatrixRoom,
-    event: _CommandEvent,
-    command: Command,
-    requester_user_id: str,
-) -> str:
-    """Run one schedule command and return its reply; a failed operation replies with its reason after ❌."""
-    try:
-        return await _run_schedule_command(context, room, event, command, requester_user_id)
-    except SchedulingError as error:
-        return f"❌ {error}"
 
 
 async def handle_command(  # noqa: C901, PLR0912, PLR0915
@@ -553,7 +540,10 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             )
 
     elif command.type in _SCHEDULE_COMMAND_TYPES:
-        response_text = await _schedule_command_response(context, room, event, command, requester_user_id)
+        try:
+            response_text = await _run_schedule_command(context, room, event, command, requester_user_id)
+        except SchedulingError as error:
+            response_text = f"❌ {error}"
 
     elif command.type in {CommandType.JOBS, CommandType.CANCEL_JOB}:
         # A command sent outside any thread speaks for the whole room, though its reply opens a thread.

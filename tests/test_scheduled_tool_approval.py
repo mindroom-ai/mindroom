@@ -1808,8 +1808,6 @@ async def test_pre_approved_task_cannot_be_edited() -> None:
     ):
         await save_edited_scheduled_task(
             client=client,
-            room_id="!test:server",
-            task_id="task1234",
             workflow=workflow.model_copy(update={"execute_at": datetime.now(UTC) + timedelta(hours=2)}),
             existing_task=existing,
             runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
