@@ -943,7 +943,7 @@ async def test_sync_room_avatars_skips_rooms_without_an_available_avatar(
     monkeypatch: pytest.MonkeyPatch,
     workspace_avatar_dir: Path,
 ) -> None:
-    """A room whose stock avatar cannot be downloaded is counted as skipped, not failed."""
+    """A room without a downloadable stock avatar counts as skipped, not failed; unmanaged room references are not synced."""
     raw_config = {
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
