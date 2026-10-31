@@ -43,7 +43,13 @@ from mindroom.script_runs.reasons import (
     SUPERVISOR_UNAVAILABLE,
 )
 from mindroom.script_runs.recovery import script_recovery_signature
-from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore, mint_script_capability
+from mindroom.script_runs.store import (
+    MAX_RUN_ERROR_BYTES,
+    MAX_RUN_OUTPUT_BYTES,
+    ScriptRunNotFoundError,
+    ScriptRunStore,
+    mint_script_capability,
+)
 from mindroom.script_runs.supervised import (
     ScriptSnapshot,
     launch_supervised_script,
@@ -84,7 +90,6 @@ __all__ = [
 
 logger = get_logger(__name__)
 
-_MAX_OUTPUT_BYTES = 64 * 1024
 _LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
 _WORKER_EXECUTION_MODES = frozenset({"all", "sandbox_all", "selective", "sandbox_selective"})
 
@@ -530,7 +535,7 @@ class ScriptRunManager:
                     run,
                     reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
                 )
-            except ScriptRunManagerError:
+            except (ScriptRunManagerError, ScriptWorkerError):
                 pending = await self._owned_run(context, run.run_id)
                 if pending.finished_at is not None:
                     return ScriptRunStatus(run=pending, output=pending.output)
@@ -1286,14 +1291,14 @@ def _validated_name(name: str | None) -> str | None:
 
 
 def _bounded_error(exc: BaseException) -> str:
-    return failure_text(exc).encode("utf-8")[: 64 * 1024].decode("utf-8", errors="ignore")
+    return failure_text(exc).encode("utf-8")[:MAX_RUN_ERROR_BYTES].decode("utf-8", errors="ignore")
 
 
 def _bounded_output(output: str) -> str:
     encoded = output.encode("utf-8")
-    if len(encoded) <= _MAX_OUTPUT_BYTES:
+    if len(encoded) <= MAX_RUN_OUTPUT_BYTES:
         return output
-    return encoded[-_MAX_OUTPUT_BYTES:].decode("utf-8", errors="ignore")
+    return encoded[-MAX_RUN_OUTPUT_BYTES:].decode("utf-8", errors="ignore")
 
 
 def _raise_concurrent_run_limit() -> None:

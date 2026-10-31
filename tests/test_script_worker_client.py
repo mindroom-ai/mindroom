@@ -10,6 +10,9 @@ import pytest
 
 from mindroom.script_runs.wire import (
     SCRIPT_PROTOCOL_VERSION,
+    SandboxScriptCancelResponse,
+    SandboxScriptRunResponse,
+    SandboxScriptStatusResponse,
     ScriptWorkerError,
     WorkerScriptCancel,
     WorkerScriptStatus,
@@ -172,6 +175,68 @@ async def test_script_worker_client_accepts_only_exact_receipt_types(
     request = getattr(_client(handler), operation)
     with pytest.raises(ScriptWorkerError, match=f"Invalid script worker message: {field}"):
         await request(_handle(), run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "receipt", "expected"),
+    [
+        ("launch", {"ok": True, "error": None, "failure_kind": None}, None),
+        (
+            "status",
+            {"ok": True, "state": "running", "output": "Status: RUNNING", "exit_code": None, "failure_kind": None},
+            WorkerScriptStatus(state="running", output="Status: RUNNING"),
+        ),
+        ("status", {"ok": True, "state": "unknown"}, WorkerScriptStatus.unknown_handle()),
+        (
+            "cancel",
+            {"ok": True, "cancel_requested": True, "error": None, "failure_kind": None},
+            WorkerScriptCancel(cancel_requested=True, already_finished=False, unknown_handle=False),
+        ),
+    ],
+)
+async def test_script_worker_client_reads_receipts_from_an_older_worker(
+    operation: str,
+    receipt: dict[str, object],
+    expected: object,
+) -> None:
+    """A worker image from before this primary answers with `failure_kind` and leaves defaults out; both parse."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=receipt)
+
+    client = _client(handler)
+    if operation == "launch":
+        result = await client.launch(
+            _handle(),
+            run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            source_digest="a" * 64,
+            gateway_url="http://primary.test/api/script-gateway",
+            max_runtime_seconds=3600,
+        )
+    else:
+        result = await getattr(client, operation)(_handle(), run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+    assert result == expected
+
+
+def test_script_worker_receipts_keep_every_field_an_older_primary_reads() -> None:
+    """An older primary requires these fields, and reads a missing `failure_kind` as the worker failure it was."""
+    assert set(SandboxScriptRunResponse(ok=True).model_dump()) == {"ok", "error"}
+    assert set(SandboxScriptStatusResponse(ok=True, state="exited", exit_code=0).model_dump()) == {
+        "ok",
+        "error",
+        "state",
+        "output",
+        "exit_code",
+    }
+    assert set(SandboxScriptCancelResponse(ok=True, cancel_requested=True).model_dump()) == {
+        "ok",
+        "error",
+        "cancel_requested",
+        "already_finished",
+        "unknown_handle",
+    }
 
 
 @pytest.mark.asyncio

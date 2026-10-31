@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.script_runs.manager import ScriptRunLimits, ScriptRunManagerError
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 
 if TYPE_CHECKING:
     from mindroom.script_runs.manager import ScriptRunManager
@@ -57,7 +58,7 @@ class ScriptTools(Toolkit):
         source: str | None = None,
         path: str | None = None,
         name: str | None = None,
-        resource_profile: Literal["small", "standard", "large"] | None = None,
+        resource_profile: ScriptResourceProfileName | None = None,
     ) -> str:
         """Run a Python script in the background.
 

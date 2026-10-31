@@ -8,7 +8,7 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from mindroom.http_error_detail import error_detail_from_response
+from mindroom.http_error_detail import error_detail_from_response, validation_error_detail
 from mindroom.script_runs.wire import (
     SCRIPT_PROTOCOL_VERSION,
     SandboxScriptCancelResponse,
@@ -144,10 +144,7 @@ def _parsed[ModelT: BaseModel](model: type[ModelT], data: object) -> ModelT:
     try:
         return model.model_validate(data)
     except ValidationError as exc:
-        fields = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc']) or model.__name__}: {error['msg']}"
-            for error in exc.errors(include_url=False, include_input=False)
-        )
-        message = f"Invalid script worker message: {fields}"
+        detail = validation_error_detail(exc.errors(include_url=False, include_input=False), fallback=model.__name__)
+        message = f"Invalid script worker message: {detail}"
         # The validation error itself holds the rejected values, which can include the config snapshot.
         raise ScriptWorkerError(message) from None

@@ -57,7 +57,12 @@ from mindroom.script_runs.models import (
     ScriptRunState,
     ScriptToolGrant,
 )
-from mindroom.script_runs.store import ScriptCallConflictError, ScriptRunStore, mint_script_capability
+from mindroom.script_runs.store import (
+    ScriptCallConflictError,
+    ScriptCapabilityError,
+    ScriptRunStore,
+    mint_script_capability,
+)
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 from mindroom.tool_system.worker_routing import (
@@ -393,6 +398,33 @@ async def test_script_broker_acceptance_returns_the_durable_call_record(tmp_path
     accepted = await broker.accept_authenticated(_request(), f"Bearer {token}")
 
     assert isinstance(accepted, ScriptCallRecord)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retried", [False, True])
+async def test_script_broker_refuses_a_call_of_a_run_revoked_while_its_owner_is_checked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retried: bool,
+) -> None:
+    """A run revoked after its capability verified accepts neither a new call nor a retry of an accepted one."""
+    broker, token = _broker(tmp_path, events=[])
+    if retried:
+        completed = await _call_through_gateway(broker, _request(call_id="accepted"), token)
+        assert completed.state is ScriptCallState.COMPLETED
+    resolver = cast("_RuntimeResolver", broker.runtime_resolver)
+    check_owner = resolver.is_authorized
+
+    def revoke_while_checking(run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
+        broker.store.request_cancel(run.run_id, reason="Revoked while the owner was checked.")
+        return check_owner(run, config=config)
+
+    monkeypatch.setattr(resolver, "is_authorized", revoke_while_checking)
+
+    with pytest.raises(ScriptCapabilityError):
+        await broker.accept_authenticated(_request(call_id="accepted" if retried else "new"), f"Bearer {token}")
+
+    assert [call.call_id for call in broker.store.pending_calls("run-1")] == []
 
 
 @pytest.mark.asyncio

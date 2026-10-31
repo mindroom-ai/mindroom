@@ -1419,6 +1419,39 @@ async def test_post_spawn_store_read_failure_signals_local_process_before_failin
 
 
 @pytest.mark.asyncio
+async def test_local_status_reports_pending_cancellation_when_its_supervisor_falters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervisor error while confirming a cancellation leaves the run pending and reports its latest output."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    context = _context(tmp_path, mode="local")
+    unavailable = "Error: Shell supervisor is unavailable: [Errno 111] Connection refused"
+    status_replies = [unavailable, "Status: RUNNING (PID 7, elapsed 1.0s)\nPartial output:\nstill working"]
+
+    async def launch_local(*_args: object, **kwargs: object) -> ShellRunResult:
+        return ShellRunResult(message="Started background process", handle=str(kwargs["handle"]))
+
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", lambda *_args, **_kwargs: unavailable)
+    monkeypatch.setattr(
+        supervised_module,
+        "check_command_via_supervisor",
+        lambda *_args, **_kwargs: status_replies.pop(0),
+    )
+    run = await manager.run(context, source="print('ok')\n")
+    manager.store.request_cancel(run.run_id, reason="Cancellation requested by the owning agent.")
+
+    status = await manager.status(context, run_id=run.run_id)
+
+    assert status.run.state is ScriptRunState.RUNNING
+    assert status.run.cancel_requested_at is not None
+    assert status.output.endswith("still working")
+    assert status_replies == []
+
+
+@pytest.mark.asyncio
 async def test_post_spawn_task_cancellation_signals_local_process_before_propagating(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

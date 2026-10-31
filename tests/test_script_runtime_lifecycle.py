@@ -35,6 +35,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
+from mindroom.orchestration.runtime import cancel_task
 from mindroom.orchestration.script_runtime import (
     _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
     ScriptRuntimeLifecycle,
@@ -854,6 +855,73 @@ async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(t
     assert served_at_shutdown == [None]
 
 
+def _served_lifecycle(tmp_path: Path, *, api_enabled: bool = True) -> ScriptRuntimeLifecycle:
+    runtime_paths = _runtime_paths(tmp_path)
+    return ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=ScriptRunStore(runtime_paths),
+        broker=_mock_broker(),
+        manager=_manager_stub(
+            begin_shutdown=AsyncMock(),
+            begin_startup_reconciliation=AsyncMock(),
+            end_startup_reconciliation=AsyncMock(),
+            gateway_url="",
+        ),
+        resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda _locator: None,
+        api_enabled=api_enabled,
+    )
+
+
+@pytest.mark.asyncio
+async def test_shutdown_stops_serving_script_tools_before_it_cancels_background_work(tmp_path: Path) -> None:
+    """A tool call that arrives while shutdown waits for its background tasks finds the runtime not ready."""
+    runtime = _served_lifecycle(tmp_path)
+    await runtime.start()
+    runtime.bind_api("http://primary.test/api/script-gateway")
+    assert runtime._startup_task is not None
+    await asyncio.wait_for(runtime._startup_task, timeout=SETTLE_TIMEOUT_SECONDS)
+    assert runtime.tool_manager is runtime.manager
+    cancelling = asyncio.Event()
+    release = asyncio.Event()
+
+    async def finish_slowly_when_cancelled() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelling.set()
+            await release.wait()
+            raise
+
+    maintenance_task, runtime._maintenance_task = (
+        runtime._maintenance_task,
+        asyncio.create_task(
+            finish_slowly_when_cancelled(),
+        ),
+    )
+    await cancel_task(maintenance_task)
+    shutdown = asyncio.create_task(runtime.shutdown())
+    await asyncio.wait_for(cancelling.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    assert runtime.tool_manager is None
+
+    release.set()
+    await shutdown
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_without_the_api_never_serves_script_tools(tmp_path: Path) -> None:
+    """Without the gateway API no script could call back, so the tool stays unavailable after activation."""
+    runtime = _served_lifecycle(tmp_path, api_enabled=False)
+
+    await runtime.start()
+
+    assert runtime._started is True
+    assert runtime.tool_manager is None
+    await runtime.shutdown()
+
+
 @dataclass
 class _RecoveringBackend(_Backend):
     backend_name: str = "kubernetes"
@@ -1077,6 +1145,31 @@ async def test_active_runs_treat_an_unresolved_worker_backend_as_interruptible(t
     active = await runtime.active_runs()
 
     assert [(info.run_id, info.recoverable) for info in active] == [(run.run_id, False)]
+
+
+def test_recovery_signature_of_a_fixed_authority_is_stable_across_releases() -> None:
+    """A primary upgrade adopts a still-running worker only if the same authority signs to the same digest."""
+
+    class _Backend:
+        def script_recovery_signature(self) -> str:
+            return "stable-worker-authority"
+
+        def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
+            return {
+                "profile": resource_profile,
+                "requests": {"cpu": "250m", "memory": "512Mi"},
+                "limits": {"cpu": "1", "memory": "2Gi"},
+            }
+
+    signature = script_recovery_signature(
+        backend=_Backend(),  # type: ignore[arg-type]
+        config=Config(agents={"watcher": {"display_name": "Watcher", "tools": ["script"]}}, defaults={"tools": []}),
+        agent_name="watcher",
+        gateway_url="http://primary.test/api/script-gateway/",
+        resource_profile="standard",
+    )
+
+    assert signature == "v2:e623e91def532ed4b84fcc39ab9ef0512597e7d2d8a7bb393a4ad37dd5b17e23"
 
 
 def test_recovery_requires_a_persisted_signature(tmp_path: Path) -> None:

@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 
 
 _MAX_RECEIPT_BYTES = 64 * 1024
-_MAX_RUN_ERROR_BYTES = 64 * 1024
-_MAX_RUN_OUTPUT_BYTES = 64 * 1024
+MAX_RUN_ERROR_BYTES = 64 * 1024
+MAX_RUN_OUTPUT_BYTES = 64 * 1024
 _CONTROL_STATE_UNAVAILABLE = "Background script control state is unavailable."
 _REVOKED_CAPABILITY = "Background script capability has been revoked."
 _CALLS_NOT_ACCEPTED = "Background script run cannot accept new calls."
@@ -185,8 +185,15 @@ class ScriptRunStore:
         grant: ScriptToolGrant,
         arguments_digest: str,
     ) -> ScriptCallClaim:
-        """Create one call claim or return its stable duplicate receipt."""
+        """Create one call claim or return its stable duplicate receipt, only while the run accepts calls."""
         with self._write_transaction() as connection:
+            run_row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
+            if run_row is None:
+                raise ScriptRunNotFoundError(run_id)
+            run = _run_from_row(run_row)
+            # Checked first, so a retried call of a run revoked since its capability was verified is refused too.
+            if not run.accepts_calls:
+                raise ScriptCapabilityError(_CALLS_NOT_ACCEPTED)
             existing = connection.execute(
                 "SELECT * FROM script_calls WHERE run_id = ? AND call_id = ?",
                 (run_id, call_id),
@@ -198,12 +205,6 @@ class ScriptRunStore:
                     raise ScriptCallConflictError(msg)
                 return ScriptCallClaim(call=existing_call, created=False)
 
-            run_row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
-            if run_row is None:
-                raise ScriptRunNotFoundError(run_id)
-            run = _run_from_row(run_row)
-            if not run.accepts_calls:
-                raise ScriptCapabilityError(_CALLS_NOT_ACCEPTED)
             if grant not in run.grants:
                 raise ScriptCapabilityError(_GRANT_NOT_GRANTED)
             now = _utc_now()
@@ -796,14 +797,14 @@ def _grants_from_json(grants_json: str) -> tuple[ScriptToolGrant, ...]:
 
 
 def _validate_run_error(error: str | None) -> None:
-    if error is not None and len(error.encode("utf-8")) > _MAX_RUN_ERROR_BYTES:
-        msg = f"Script run error exceeds the {_MAX_RUN_ERROR_BYTES}-byte limit."
+    if error is not None and len(error.encode("utf-8")) > MAX_RUN_ERROR_BYTES:
+        msg = f"Script run error exceeds the {MAX_RUN_ERROR_BYTES}-byte limit."
         raise ScriptRunStoreError(msg)
 
 
 def _validate_run_output(output: str) -> None:
-    if len(output.encode("utf-8")) > _MAX_RUN_OUTPUT_BYTES:
-        msg = f"Script run output exceeds the {_MAX_RUN_OUTPUT_BYTES}-byte limit."
+    if len(output.encode("utf-8")) > MAX_RUN_OUTPUT_BYTES:
+        msg = f"Script run output exceeds the {MAX_RUN_OUTPUT_BYTES}-byte limit."
         raise ScriptRunStoreError(msg)
 
 
