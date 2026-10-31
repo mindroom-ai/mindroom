@@ -59,7 +59,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_agno_tool_wrapping.py",
         "test_ai_provider_retry.py",
         "test_approval_dynamic_tools.py",
-        "test_approved_egress_tool.py",
         "test_background_subagents.py",
         "test_bot_media_dispatch.py",
         "test_browser_mcp_outputs.py",
