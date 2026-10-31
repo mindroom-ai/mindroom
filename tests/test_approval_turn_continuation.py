@@ -32,7 +32,7 @@ from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.provider import ToolCallReady
-from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import Presentation, Segment, decode_presentation, encode_presentation
@@ -82,9 +82,15 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
 
 
-def _continue_call(call_id: str, metrics: MessageMetrics | None = None) -> list[ScriptStep]:
-    """Return a next-turn switch to the current model, which ends the step and continues the same turn."""
-    return calls(tool_call("switch_thread_model", call_id, model_name="default", when="next-turn"), metrics=metrics)
+def _continue_call(
+    call_id: str,
+    metrics: MessageMetrics | None = None,
+    *,
+    model_name: str = "default",
+) -> list[ScriptStep]:
+    """Return a switch of the current response to the model it runs on, which ends the step and continues the turn."""
+    switch = tool_call("switch_thread_model", call_id, model_name=model_name, when="after-toolcall")
+    return calls(switch, metrics=metrics)
 
 
 def _deferred_call(call_id: str, function_name: str, **arguments: object) -> list[ScriptStep]:
@@ -288,6 +294,9 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         turns[1:1] = [_call("add", "approved-again", a=4, b=5)]
     if switch_when:
         turns.insert(1, _call("switch_thread_model", "switcher", model_name="alternate", when=switch_when))
+    if switch_when == "after-toolcall":
+        # The step after the switch continues on the model the switch moved the response to.
+        turns[2] = _continue_call("continue", model_name="alternate")
     model = _CheckedModel(turns)
     models: list[str] = []
 
@@ -414,7 +423,8 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         assert executed == ["add"]
         assert not model.turns
         return
-    assert len(run_ids) == (2 if switch_when else 1)
+    # Only a switch for the current response starts an attempt of its own; a next-turn switch is answered in its run.
+    assert len(run_ids) == (2 if switch_when == "after-toolcall" else 1)
     assert run_ids[0] != paused.run_id
     if outcome in {"pause", "pause_limit"} or switch_when:
         assert isinstance(result, PausedAttempt)
@@ -423,7 +433,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         assert result.run_id == run_ids[-1]
         assert result.runtime_model_name == ("alternate" if switch_when == "after-toolcall" else "default")
         assert [tool.tool_name for tool in result.tools] == ["sleep"]
-        assert result.continuation_count == (2 if switch_when else 1)
+        assert result.continuation_count == (2 if switch_when == "after-toolcall" else 1)
         assert "need confirmation" not in result.response_text
         continuation = replace(
             continuation,
@@ -466,7 +476,9 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     expected_tools = ["add", *(["switch_thread_model"] if switch_when else []), "switch_thread_model", "sleep"]
     assert [entry.tool_name for entry in trace] == (expected_tools if show_tool_calls else [])
     receipt_requests = [index for index, request in enumerate(model.requests) if carries_approval_receipt(request)]
-    assert receipt_requests == resume_starts
+    # Each resumed run's requests read its receipt; the first resumed run answers a next-turn switch in a second one.
+    first, *later = resume_starts
+    assert receipt_requests == [first, *([first + 1] if switch_when == "next-turn" else []), *later]
 
 
 def _finished(
@@ -614,7 +626,7 @@ async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: st
         tool_call_id="old-continue",
         tool_name="switch_thread_model",
         result=json.dumps(
-            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
+            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "after-toolcall"},
         ),
     )
     presentation = CollectedStreamPresentation(show_tool_calls=False)
@@ -1323,7 +1335,12 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         yield TextDelta(" Next, publishing.")
         yield ToolStarted(gated.call)
         raise ResponsePausedForApproval(
-            PausedAttempt(session_id="session", run_id="run-fresh", tools=(gated,), toolkit_owners={}),
+            PausedAttempt(
+                session_id="session",
+                run_id="run-fresh",
+                requirements=(RunRequirement(gated),),
+                toolkit_owners={},
+            ),
         )
 
     monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)

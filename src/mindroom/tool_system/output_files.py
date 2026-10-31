@@ -558,11 +558,13 @@ def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> T
 
     Its schema offers the argument as its last, optional property. The entrypoint takes the argument out of each call,
     runs the call with the rest, and saves or redirects its output. A strict function keeps its schema as its author
-    made it, and a function that takes the argument itself, by its entrypoint or its schema, stays as it is too.
+    made it, and a function that takes the argument itself, by its entrypoint or its schema, stays as it is too. So does
+    a function that can stop the run (``controls_run``): its result answers the run, and a saved one would be a receipt
+    that no longer stops it.
     """
     parameters = inspect.signature(function.entrypoint).parameters
     properties = function.parameters.get("properties")
-    if function.strict:
+    if function.strict or function.controls_run:
         return function
     if OUTPUT_PATH_ARGUMENT in parameters or (isinstance(properties, Mapping) and OUTPUT_PATH_ARGUMENT in properties):
         logger.debug(

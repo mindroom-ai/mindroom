@@ -86,7 +86,7 @@ from mindroom.bot import AgentBot
 from mindroom.coalescing.batch import PendingEvent
 from mindroom.coalescing.gate import CoalescingDrainResult
 from mindroom.command_turn_executor import CommandTurnExecutor
-from mindroom.config.load_attempt import ConfigLoad, ConfigLoadResult
+from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, load_config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
@@ -2545,10 +2545,10 @@ def load_config_yaml(config_path: Path) -> Config:
 def published_config_load(config: Config) -> ConfigLoad:
     """Return a successful load of ``config`` that no newer API commit superseded."""
     return ConfigLoad(
-        result=ConfigLoadResult(success=True, uses_includes=config.uses_includes),
         config=config,
         source_fingerprint=config.source_fingerprint,
         source_files=config.source_files,
+        uses_includes=config.uses_includes,
     )
 
 

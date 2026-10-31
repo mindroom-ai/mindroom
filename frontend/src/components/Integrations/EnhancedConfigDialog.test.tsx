@@ -83,6 +83,38 @@ describe("EnhancedConfigDialog", () => {
     });
   });
 
+  it("shows saved boolean credentials checked and masks secret-named fields", async () => {
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ credentials: { enabled: "true", api_key: "abc" } }),
+    });
+
+    render(
+      <EnhancedConfigDialog
+        open={true}
+        onClose={vi.fn()}
+        service="example"
+        displayName="Example"
+        description="Example integration"
+        configFields={[
+          { name: "enabled", label: "Enabled", type: "boolean" },
+          { name: "api_key", label: "API key", type: "text" },
+        ]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("checkbox")).toHaveAttribute(
+        "data-state",
+        "checked",
+      );
+    });
+    expect(document.getElementById("api_key")).toHaveAttribute(
+      "type",
+      "password",
+    );
+  });
+
   it("rejects untouched required fields without defaults", async () => {
     const onClose = vi.fn();
     const onSuccess = vi.fn();

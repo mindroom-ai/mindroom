@@ -68,6 +68,7 @@ class KnowledgeGraphConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Model alias that extracts entities and facts; required when any agent enables the graph",
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     extraction_instructions: str = Field(
         default="",

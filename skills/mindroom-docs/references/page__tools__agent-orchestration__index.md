@@ -199,7 +199,7 @@ Tools that can run as background jobs accept an optional `background_after` argu
 It is how many seconds the call may hold the reply before it continues in the background, separate from a tool's own execution or network timeout.
 The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
-Tools that stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
+Tools that can stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
 Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
 
@@ -299,7 +299,7 @@ The reply waits for the decision for `background_tool_jobs.approval_wait_timeout
 The setting is a non-negative number of seconds, defaulting to `300`; `0` goes on at once, and `null` waits until the decision or a newer human message.
 A call's own `background_after`, or a newer human message, releases the reply the same way.
 Cancelling the job before the decision denies its card.
-Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that stop the current model step or ask the user for input, run-connected toolkits, excluded toolkits, subagent calls, and minimal mode.
+Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that can stop the current model step (such as model switching) or ask the user for input, run-connected toolkits, excluded toolkits, subagent calls, and minimal mode.
 
 A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
 Cancelling the job denies its open cards.

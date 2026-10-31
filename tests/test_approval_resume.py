@@ -19,7 +19,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, child_execution_identity
 from mindroom.event_journal import approval_arguments_digest
 from mindroom.llm.provider import TurnCompleted
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.approval_continuation_helpers import receipt_call_ids
@@ -81,7 +81,6 @@ async def test_a_paused_approval_resumes_into_a_completed_run(
             decided=approved_call(waiting, PRODUCT),
             added=[result(call, PRODUCT)],
             answered=_answered(case.code),
-            confirmation=True,
         )
     else:
         reason = "Alice declined the multiplication."
@@ -90,8 +89,6 @@ async def test_a_paused_approval_resumes_into_a_completed_run(
             decided=denied_call(waiting, reason),
             added=[result(call, reason, is_error=True)],
             answered=_answered(case.code),
-            confirmation=False,
-            confirmation_note=reason,
         )
     expected = as_stored(expected)
     stored = run.stored()
@@ -136,7 +133,6 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
                 decided=approved_call(child_waiting, PRODUCT),
                 added=[result(child_call, PRODUCT)],
                 answered=_answered(case.helper),
-                confirmation=True,
             ),
         ),
     )
@@ -152,7 +148,6 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
             decided=replace(waiting, result=handed_over, external_execution_required=False),
             added=[result(call, handed_over, is_error=None)],
             answered=_answered(case.code),
-            external_execution_result=handed_over,
         ),
     )
     stored = run.stored()
@@ -166,7 +161,6 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
         hooks={call_id: replace(hook, after_called=True) for call_id, hook in paused_state.hooks.items()},
         pending_tools=[],
         pending_tool_sources={},
-        pending_requirements=[],
         pending_child_id=None,
         pending_agent_name=None,
     )
@@ -300,7 +294,6 @@ async def test_a_resume_refuses_tampered_or_incomplete_decisions_before_anything
             external_execution_required=tampering == "outstanding_external",
         )
         tampered.tools = [*(tampered.tools or ()), extra]
-        tampered.requirements = [*(tampered.requirements or ()), RunRequirement(deepcopy(extra))]
         _save(run, tampered)
         run.paused = run.stored()
     elif tampering == "mismatched_digest":
@@ -327,8 +320,6 @@ async def test_a_waiting_call_marked_confirmed_in_the_store_is_refused_even_when
     run = await setup_resume(tmp_path, monkeypatch, thread="$approved", run_id="run-approved", code=code)
     [call] = run.calls()
     tampered = deepcopy(run.paused)
-    [requirement] = tampered.requirements or ()
-    requirement.tool_execution.confirmed = True
     [tool] = tampered.tools or ()
     tool.confirmed = True
     _save(run, tampered)

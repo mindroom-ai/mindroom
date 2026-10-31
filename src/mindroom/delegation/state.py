@@ -100,7 +100,10 @@ def _optional_names(value: object) -> bool:
 
 @dataclass(kw_only=True)
 class DelegationChild:
-    """One parent requirement and its stable child execution identity."""
+    """One parent delegation call and its stable child execution identity.
+
+    ``parent_requirement_id`` is the parent call's ``pause_id``.
+    """
 
     delegation_id: str
     parent_tool_call_id: str
@@ -170,14 +173,19 @@ class DelegationPendingTool:
 
 @dataclass
 class DelegationState:
-    """Persisted parent waits; workspace exports never own this state."""
+    """Persisted parent waits; workspace exports never own this state.
+
+    ``hooks`` are keyed by the ``pause_id`` of the delegation call they run for. ``pending_tools`` are the calls the
+    current approval asks about when the parent does not hold them: a delegation call's gate, under its card id, or
+    the calls of the child it waits on (``pending_child_id``), under ``child_card_id``s. An approval of the parent's
+    own calls lists none, since the parent's paused tool entries are those calls.
+    """
 
     children: list[DelegationChild] = field(default_factory=list)
     gates: dict[str, bool] = field(default_factory=dict)
     hooks: dict[str, DelegationHookState] = field(default_factory=dict)
     pending_tools: list[dict[str, Any]] = field(default_factory=list)
     pending_tool_sources: dict[str, DelegationPendingTool] = field(default_factory=dict)
-    pending_requirements: list[dict[str, Any]] = field(default_factory=list)
     pending_agent_name: str | None = None
     pending_child_id: str | None = None
     storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
@@ -209,7 +217,6 @@ class DelegationState:
                 )
                 for call_id, source in snapshot.get("pending_tool_sources", {}).items()
             },
-            pending_requirements=list(snapshot.get("pending_requirements", [])),
             pending_agent_name=snapshot.get("pending_agent_name"),
             pending_child_id=snapshot.get("pending_child_id"),
             storage_bindings=dict(snapshot.get("storage_bindings", {})),
@@ -219,7 +226,6 @@ class DelegationState:
         """Clear only the presented approval generation, retaining sibling results."""
         self.pending_tools = []
         self.pending_tool_sources = {}
-        self.pending_requirements = []
         self.pending_agent_name = None
         self.pending_child_id = None
 

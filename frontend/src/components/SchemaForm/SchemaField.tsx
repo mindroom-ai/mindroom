@@ -23,6 +23,11 @@ import {
   type JsonSchema,
   type SchemaNode,
 } from "@/lib/configSchema";
+import {
+  toolEntriesForNames,
+  toolNames,
+  type ToolEntry,
+} from "@/lib/toolEntry";
 import { cn } from "@/lib/utils";
 
 import {
@@ -521,8 +526,7 @@ function NestedValue({
   );
 }
 
-// Reference-hinted lists hold names; the store normalizes structured tool
-// entries in defaults.tools to names before they reach the form.
+// Reference-hinted lists hold names.
 function isStringItems(
   node: SchemaNode,
   root: JsonSchema,
@@ -569,6 +573,19 @@ function ListEditor({
 }) {
   const references = useReferenceOptions();
   const [itemKeys, setItemKeys] = useItemKeys(value.length);
+  if (node.hint.reference === "tool") {
+    // Tool lists hold complete entries; the list edits their names and keeps
+    // the entry of every tool it still lists.
+    const entries = value as ToolEntry[];
+    return (
+      <StringListEditor
+        label={label}
+        values={toolNames(entries)}
+        suggestions={references.tool}
+        onChange={(names) => onChange(toolEntriesForNames(names, entries))}
+      />
+    );
+  }
   if (isStringItems(node, root, value)) {
     return (
       <StringListEditor
