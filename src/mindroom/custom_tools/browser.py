@@ -48,7 +48,6 @@ from mindroom.path_confinement import (
 )
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.server_fetch_url import validate_server_fetch_url
-from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -78,8 +77,7 @@ _DEFAULT_PROFILE = "mindroom"
 _DEFAULT_SNAPSHOT_LIMIT = 200
 _DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
 _DEFAULT_TIMEOUT_MS = 30_000
-# Playwright bounds neither a page script nor a wait, so a host call that holds its reply stops at the limit a worker
-# gives it by default.
+# Playwright bounds neither a page script nor a wait, so a host call stops at the limit a worker gives it by default.
 _HOST_CALL_TIMEOUT_SECONDS = 120.0
 _MAX_CONSOLE_ENTRIES = 200
 # A self-contained page an agent wrote, with embedded images; a larger file is not a page to check.
@@ -336,9 +334,8 @@ class _LaunchSettings:
 class _BrowserSession:
     """The running profiles of one profile root and the locks every toolkit using them shares.
 
-    Calls are not serialized: a call may run until its time limit, or without one as a job's call, so one slow call would
-    hold every other reply's calls. A stop or a settings restart therefore closes pages another call may still be using,
-    which fails.
+    Calls are not serialized: a call may run until its time limit, so one slow call would hold every other reply's calls
+    that long. A stop or a settings restart therefore closes pages another call may still be using, which fails.
     """
 
     profiles: dict[str, _BrowserProfileState] = field(default_factory=dict)
@@ -1050,12 +1047,12 @@ class BrowserTools(Toolkit):
 
     @asynccontextmanager
     async def _host_call_deadline(self, action: str) -> AsyncIterator[None]:
-        """Stop a host call that holds its reply at its time limit.
+        """Stop a host call at its time limit, a job's call included, since the reply that started the job may wait for it.
 
-        A job's call runs as long as its tool does, and a sandbox runner bounds the calls it runs itself.
+        A sandbox runner bounds the calls it runs itself.
         """
-        unbounded = job_owns_execution() or self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
-        deadline = asyncio.timeout(None if unbounded else _HOST_CALL_TIMEOUT_SECONDS)
+        runner = self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
+        deadline = asyncio.timeout(None if runner else _HOST_CALL_TIMEOUT_SECONDS)
         try:
             async with deadline:
                 yield

@@ -12,7 +12,7 @@ import shutil
 import socket
 import stat
 import threading
-from contextlib import nullcontext, suppress
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -678,34 +678,45 @@ async def test_host_call_that_never_settles_stops_at_its_time_limit(
 
     try:
         await tool.browser(action="start")
-        monkeypatch.setattr("mindroom.custom_tools.browser._HOST_CALL_TIMEOUT_SECONDS", 0.5)
-        with pytest.raises(TimeoutError, match=r"^Browser action=act did not finish within 0\.5 seconds"):
-            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-                await evaluate(tool, "() => new Promise(() => {})")
+        with monkeypatch.context() as patch:
+            patch.setattr("mindroom.custom_tools.browser._HOST_CALL_TIMEOUT_SECONDS", 0.5)
+            with pytest.raises(TimeoutError, match=r"^Browser action=act did not finish within 0\.5 seconds"):
+                async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                    await evaluate(tool, "() => new Promise(() => {})")
         assert await evaluate(tool, "() => 1 + 1") == 2
         assert await evaluate(other_reply, "() => 2 + 2") == 4
     finally:
         await tool.aclose()
 
 
+async def _slow_act(**_kwargs: object) -> dict[str, str]:
+    await asyncio.sleep(0.2)
+    return {"status": "ok"}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("caller", ["job", "runner"])
-async def test_job_and_runner_host_calls_run_past_the_time_limit(
-    monkeypatch: pytest.MonkeyPatch,
-    caller: str,
-) -> None:
-    """A job's call runs as long as its tool does, and a sandbox runner bounds the calls it runs itself."""
-    process_env = {"MINDROOM_SANDBOX_RUNNER_MODE": "true"} if caller == "runner" else {}
-    tool = BrowserTools(resolve_primary_runtime_paths(config_path=Path("config.yaml"), process_env=process_env))
-
-    async def slow_act(**_kwargs: object) -> dict[str, str]:
-        await asyncio.sleep(0.2)
-        return {"status": "ok"}
-
-    monkeypatch.setattr(tool, "_act", slow_act)
+async def test_a_jobs_host_call_stops_at_the_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A job's call stops at the time limit too, since the reply that started the job may wait for it."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    monkeypatch.setattr(tool, "_act", _slow_act)
     monkeypatch.setattr("mindroom.custom_tools.browser._HOST_CALL_TIMEOUT_SECONDS", 0.01)
-    with job_control_context(JobControl()) if caller == "job" else nullcontext():
-        result = await tool.browser(action="act", request={"kind": "wait", "timeMs": 200})
+
+    with job_control_context(JobControl()), pytest.raises(TimeoutError, match=r"^Browser action=act did not finish"):
+        await tool.browser(action="act", request={"kind": "wait", "timeMs": 200})
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_runners_host_call_runs_past_the_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sandbox runner bounds the calls it runs itself."""
+    paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
+    )
+    tool = BrowserTools(paths)
+    monkeypatch.setattr(tool, "_act", _slow_act)
+    monkeypatch.setattr("mindroom.custom_tools.browser._HOST_CALL_TIMEOUT_SECONDS", 0.01)
+
+    result = await tool.browser(action="act", request={"kind": "wait", "timeMs": 200})
 
     assert json.loads(result) == {"status": "ok"}
 
