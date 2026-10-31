@@ -6,6 +6,7 @@ file-watcher reload effects, and the concurrent-writer commit protocol.
 """
 
 import copy
+import errno
 import hashlib
 import threading
 from functools import partial
@@ -629,13 +630,29 @@ def test_a_request_never_rebinds_onto_another_runtime(loaded_app: FastAPI, tmp_p
 
 
 @pytest.mark.parametrize("writer", ["structured", "raw"])
+@pytest.mark.parametrize("bind_mount", [False, True], ids=["renamed", "single_file_bind_mount"])
 def test_a_dashboard_save_keeps_the_config_file_mode(
     loaded_app: FastAPI,
     runtime_paths: constants.RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
     writer: str,
+    bind_mount: bool,
 ) -> None:
-    """A save replaces the config's content, never its permissions, because the file can hold API keys."""
-    runtime_paths.config_path.chmod(0o600)
+    """A save replaces the config's content, never its permissions, because the file can hold API keys.
+
+    A single-file bind mount cannot be renamed over, so the save copies the content in place instead.
+    """
+    config_path = runtime_paths.config_path
+    config_path.chmod(0o640)
+    if bind_mount:
+        rename = Path.replace
+
+        def refuse_renaming_onto_the_config(source: Path, target: Path) -> Path:
+            if Path(target) == config_path:
+                raise OSError(errno.EBUSY, "Device or resource busy")
+            return rename(source, target)
+
+        monkeypatch.setattr(Path, "replace", refuse_renaming_onto_the_config)
     edited = copy.deepcopy(VALID_CONFIG)
     edited["agents"]["test_agent"]["role"] = "An edited test agent"
 
@@ -644,10 +661,9 @@ def test_a_dashboard_save_keeps_the_config_file_mode(
     else:
         save_raw_config(request_for(loaded_app), yaml.dump(edited))
 
-    assert yaml.safe_load(runtime_paths.config_path.read_text())["agents"]["test_agent"]["role"] == (
-        "An edited test agent"
-    )
-    assert runtime_paths.config_path.stat().st_mode & 0o777 == 0o600
+    assert yaml.safe_load(config_path.read_text())["agents"]["test_agent"]["role"] == "An edited test agent"
+    assert config_path.stat().st_mode & 0o777 == 0o640
+    assert list(config_path.parent.glob(f".{config_path.name}.*.tmp")) == []
 
 
 @pytest.mark.parametrize("writer", ["structured", "raw"])
@@ -658,8 +674,7 @@ def test_a_dashboard_save_that_cannot_write_the_file_is_a_server_error(
 ) -> None:
     """A valid save whose file write fails is not reported as an invalid config."""
 
-    def fail_write(_path: Path, _content: str, *, copy_when_rename_fails: bool) -> None:
-        assert copy_when_rename_fails
+    def fail_write(_path: Path, _content: str, **_options: object) -> None:
         message = "read-only file system"
         raise PermissionError(message)
 

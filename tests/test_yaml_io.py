@@ -161,7 +161,7 @@ def test_write_text_atomic_copies_into_a_bind_mount_and_keeps_its_mode(
     """A single-file bind mount cannot be renamed over, so the content is copied in place with the file's mode."""
     path = tmp_path / "config.yaml"
     path.write_text("old\n", encoding="utf-8")
-    path.chmod(0o600)
+    path.chmod(0o640)
 
     def reject_rename(_source: Path, _target: Path) -> None:
         raise OSError(errno.EBUSY, "Device or resource busy")
@@ -171,7 +171,7 @@ def test_write_text_atomic_copies_into_a_bind_mount_and_keeps_its_mode(
     yaml_io.write_text_atomic(path, "new\n", copy_when_rename_fails=True)
 
     assert path.read_text(encoding="utf-8") == "new\n"
-    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.stat().st_mode & 0o777 == 0o640
     assert list(tmp_path.iterdir()) == [path]
 
 
