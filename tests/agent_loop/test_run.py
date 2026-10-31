@@ -782,7 +782,7 @@ async def test_an_external_result_resumes_into_a_completed_run_that_answers_the_
 async def test_a_run_an_earlier_release_paused_with_its_call_stored_twice_resumes_after_the_upgrade(
     tmp_path: Path,
 ) -> None:
-    """v2026.10.744 and earlier stored the paused call in the run's tools and again in its requirements.
+    """v2026.10.752 and earlier stored the paused call in the run's tools and again in its requirements.
 
     Layout version 8 keeps the call once, so the run waits on it alone and its approval resumes the run.
     """

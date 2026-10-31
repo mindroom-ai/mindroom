@@ -142,7 +142,7 @@ def expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def stored_requirement(tool: ToolExecution, requirement_id: str, **fields: object) -> dict[str, Any]:
-    """Return the ``requirements`` entry a release up to v2026.10.744 stored for the paused call ``tool``.
+    """Return the ``requirements`` entry a release up to v2026.10.752 stored for the paused call ``tool``.
 
     ``fields`` are its other keys, such as a team row's ``member_agent_id`` and ``member_run_id``.
     """

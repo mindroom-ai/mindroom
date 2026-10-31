@@ -62,7 +62,7 @@ def test_a_delegation_payload_keeps_its_call_once_and_its_pause_id() -> None:
 
 
 def test_an_older_payload_reads_its_pending_calls_and_delegation_id() -> None:
-    """A payload a release up to v2026.10.744 saved held each pending call as a requirement, and the delegation's too."""
+    """A payload a release up to v2026.10.752 saved held each pending call as a requirement, and the delegation's too."""
     pending = {"tool_call_id": "child:c1", "tool_name": "add", "requires_confirmation": True}
     delegation = {"tool_call_id": "call", "tool_name": "run_subagent", "tool_args": {"task": "x"}}
     older: dict[str, object] = {

@@ -932,7 +932,7 @@ async def test_a_waiting_delegation_under_a_call_id_an_earlier_request_used_is_a
 async def test_a_team_row_an_earlier_release_paused_with_its_member_call_copied_resumes_after_the_upgrade(
     tmp_path: Path,
 ) -> None:
-    """v2026.10.744 and earlier stored a member's paused call on the member row and again on the team row.
+    """v2026.10.752 and earlier stored a member's paused call on the member row and again on the team row.
 
     Layout version 8 keeps the call once, on the member row, which the paused team row waits on and resumes.
     """

@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 #   whose delegation calls the driver answered stored the answers, and a failed one's ``tool_call_error``, only on
 #   these copies. A run's delegation state also listed its pending calls as ``pending_requirements`` beside
 #   ``pending_tools``.
-# Last legacy release: v2026.10.744, which wrote them as every earlier release did; replacement: the next release,
+# Last legacy release: v2026.10.752, which wrote them as every earlier release did; replacement: the next release,
 #   which stores each paused call once, as its tool execution, a delegation call with the id as ``pause_id``, and reads
 #   a paused team's member calls from its paused member rows.
 # Handling: in the step to layout version 8, each entry whose copy still waits folds into a paused tool row of the run

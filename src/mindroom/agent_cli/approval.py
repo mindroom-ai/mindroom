@@ -104,7 +104,7 @@ def _pending_calls(payload: dict[str, object]) -> tuple[object, object]:
     # Legacy format: an `agent_cli` payload in an approval continuation's `cli_call` whose `requirements` list holds
     #   one requirement dict per pending call, each with the call as `tool_execution`, and whose
     #   `external_requirement` holds the delegation call's requirement dict, `id` and `tool_execution`, or null.
-    # Last legacy release: v2026.10.744, which wrote them as every earlier release did; replacement: the next release,
+    # Last legacy release: v2026.10.752, which wrote them as every earlier release did; replacement: the next release,
     #   whose payload holds `pending_calls` and `delegation_pause_id`.
     # Handling: the pending calls are the requirements' `tool_execution`s, and the delegation call keeps the stored
     #   requirement's `id` as its pause id; the call itself is read from the payload's own call fields, which the
