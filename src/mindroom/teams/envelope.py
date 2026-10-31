@@ -388,7 +388,7 @@ class _TeamTurn:
 
     @property
     def entity_name(self) -> str:
-        """The name the team's stored notices and logs carry: the configured team, or the materialized label."""
+        """The name the team's run records and request logs carry: the configured team, or the materialized label."""
         return self.configured_team_name or self.ctx.entity_label
 
     @property
