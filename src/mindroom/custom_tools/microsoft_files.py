@@ -222,25 +222,20 @@ def _cell_count(values: list[Any]) -> int:
     return len(values) * max((len(row) for row in values if isinstance(row, list)), default=0)
 
 
-def _values(rows: list[list[Any]]) -> list[list[Any]]:
-    if not rows or any(len(row) != len(rows[0]) for row in rows):
+def _range_write(address: str, values: list[list[Any]]) -> str:
+    """Return the checked address of a range write; the values must be equally long rows of the address's shape."""
+    target = _address(address)
+    shape = _address_shape(target)
+    if not values or any(len(row) != len(values[0]) for row in values):
         raise MicrosoftGraphError(
             code="invalid_argument",
             message="values must be a non-empty list of equally long rows of text, numbers, booleans, or nulls.",
         )
-    return rows
-
-
-def _range_write(address: str, values: list[list[Any]]) -> tuple[str, list[list[Any]]]:
-    """Return the checked address and rows of a range write; the rows must have the address's shape."""
-    target = _address(address)
-    shape = _address_shape(target)
-    rows = _values(values)
-    if (len(rows), len(rows[0])) != shape:
-        msg = f"values have {len(rows)} rows of {len(rows[0])} cells, but {target} covers {shape[0]} by {shape[1]}."
+    if (len(values), len(values[0])) != shape:
+        msg = f"values have {len(values)} rows of {len(values[0])} cells, but {target} covers {shape[0]} by {shape[1]}."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     _checked_range_size(*shape)
-    return target, rows
+    return target
 
 
 def _range(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -613,7 +608,7 @@ class MicrosoftFilesTools(Toolkit):
         """
         try:
             sheet = _worksheet(worksheet)
-            target, rows = _range_write(address, values)
+            target = _range_write(address, values)
         except MicrosoftGraphError as exc:
             return graph_error_payload(_TOOL_NAME, exc)
 
@@ -623,7 +618,7 @@ class MicrosoftFilesTools(Toolkit):
             payload = session.json(
                 "PATCH",
                 f"{item.path}/workbook/worksheets/{sheet}/range(address='{target}')",
-                json={"values": rows},
+                json={"values": values},
             )
             return {"range": _range(payload)}
 
