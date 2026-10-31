@@ -382,6 +382,25 @@ def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(
     assert artifact.read_bytes() == b"capture"
 
 
+def _storage_context(runtime_paths: RuntimePaths, storage_path: Path) -> ToolRuntimeContext:
+    """A room-timeline tool context for Alice whose agent state lives at storage_path."""
+    return make_test_tool_runtime_context(
+        agent_name="general",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
+        requester_id="@alice:example.org",
+        client=MagicMock(),
+        config=MagicMock(),
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        storage_path=storage_path,
+    )
+
+
 def test_resolve_output_dir_does_not_reuse_previous_context_storage_path(tmp_path: Path) -> None:
     """Reusable browser tools should write artifacts under the active context."""
     runtime_paths = resolve_primary_runtime_paths(
@@ -391,30 +410,13 @@ def test_resolve_output_dir_does_not_reuse_previous_context_storage_path(tmp_pat
     )
     tool = BrowserTools(runtime_paths)
 
-    def runtime_context(storage_path: Path) -> ToolRuntimeContext:
-        return make_test_tool_runtime_context(
-            agent_name="general",
-            target=MessageTarget.resolve(
-                room_id="!room:example.org",
-                thread_id=None,
-                reply_to_event_id=None,
-            ),
-            requester_id="@alice:example.org",
-            client=MagicMock(),
-            config=MagicMock(),
-            runtime_paths=runtime_paths,
-            relations=make_relation_lookup(),
-            conversation_reader=make_conversation_reader_mock(),
-            storage_path=storage_path,
-        )
-
     first_storage_path = tmp_path / "first-context"
     second_storage_path = tmp_path / "second-context"
 
-    with tool_runtime_context(runtime_context(first_storage_path)):
+    with tool_runtime_context(_storage_context(runtime_paths, first_storage_path)):
         assert tool._resolve_output_dir() == (first_storage_path / "browser").resolve()
 
-    with tool_runtime_context(runtime_context(second_storage_path)):
+    with tool_runtime_context(_storage_context(runtime_paths, second_storage_path)):
         assert tool._resolve_output_dir() == (second_storage_path / "browser").resolve()
 
 
@@ -426,23 +428,6 @@ async def test_browser_refuses_actions_outside_its_vocabulary(action: str) -> No
 
     with pytest.raises(ValidationError, match="'act', 'actions'"):
         await toolkit_offers(tool, "browser_control").entrypoint(action=action)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["help", "actions"])
-async def test_browser_discovery_actions_return_action_table(action: str) -> None:
-    """The browser tool should expose callable discovery paths."""
-    tool = BrowserTools(TEST_RUNTIME_PATHS)
-
-    payload = json.loads(await tool.browser(action=action))
-
-    assert payload["action"] == action
-    assert payload["status"] == "ok"
-    assert "act" in payload["actions"]
-    assert "help" in payload["actions"]
-    assert "click" in payload["actKinds"]
-    assert "evaluate" in payload["actKinds"]
-    assert any(entry["action"] == "act" for entry in payload["actionTable"])
 
 
 @pytest.mark.asyncio
@@ -484,14 +469,19 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_browser_help_agrees_with_the_function_schema() -> None:
-    """Help lists the schema's actions and reads the act request shapes from the schema."""
+@pytest.mark.parametrize("action", ["help", "actions"])
+async def test_browser_help_agrees_with_the_function_schema(action: str) -> None:
+    """Both discovery actions list the schema's actions and act kinds and read the act request shapes from the schema."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
     properties = toolkit_offers(tool, "browser_control").parameters["properties"]
 
-    payload = json.loads(await tool.browser(action="help"))
+    payload = json.loads(await tool.browser(action=action))
 
+    assert payload["action"] == action
+    assert payload["status"] == "ok"
     assert payload["actions"] == properties["action"]["enum"]
+    assert "click" in payload["actKinds"]
+    assert "evaluate" in payload["actKinds"]
     assert sorted(row["action"] for row in payload["actionTable"]) == payload["actions"]
     assert payload["actRequestDescription"] == properties["request"]["description"]
 
@@ -750,14 +740,35 @@ async def test_browser_rejects_unsupported_or_unconfigured_targets() -> None:
         await configured_tool.browser(action="status", target="desktop")
 
 
-@pytest.mark.asyncio
-async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One browser surface selects the Matrix extension backend without changing agent vocabulary."""
-    context = SimpleNamespace(
+def _desktop_browser(
+    monkeypatch: pytest.MonkeyPatch,
+    request: AsyncMock,
+    *,
+    context: object | None = None,
+) -> BrowserTools:
+    """A browser that defaults to the pinned desktop and sends its Matrix round trips to request."""
+    runtime_context = context or SimpleNamespace(
         requester_id="@alice:example.org",
         agent_name="computer",
         client=object(),
     )
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: runtime_context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    return BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+
+@pytest.mark.asyncio
+async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One browser surface selects the Matrix extension backend without changing agent vocabulary."""
     request = AsyncMock(
         side_effect=[
             DesktopResponse(
@@ -780,18 +791,7 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
             ),
         ],
     )
-    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
-    monkeypatch.setattr(
-        "mindroom.custom_tools.browser.desktop_response_router",
-        lambda _client: SimpleNamespace(request=request),
-    )
-    tool = BrowserTools(
-        TEST_RUNTIME_PATHS,
-        default_target="desktop",
-        device_user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        device_ed25519="fingerprint",
-    )
+    tool = _desktop_browser(monkeypatch, request)
 
     plain_snapshot = await tool.browser(action="snapshot", maxChars=1000)
     opened = await tool.browser(action="open", targetUrl="https://example.com")
@@ -839,17 +839,7 @@ async def test_desktop_target_rejects_page_control_before_any_round_trip(
 ) -> None:
     """Page control the extension cannot bind to a stable page fails before URL checks or a Matrix send."""
     request = AsyncMock()
-    monkeypatch.setattr(
-        "mindroom.custom_tools.browser.desktop_response_router",
-        lambda _client: SimpleNamespace(request=request),
-    )
-    tool = BrowserTools(
-        TEST_RUNTIME_PATHS,
-        default_target="desktop",
-        device_user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        device_ed25519="fingerprint",
-    )
+    tool = _desktop_browser(monkeypatch, request)
 
     with pytest.raises(ValueError, match=f"does not support action={action}") as exc_info:
         await tool.browser(action=action, **arguments)
@@ -880,20 +870,8 @@ async def test_desktop_target_rejects_unsupported_host_arguments(
     expected: str,
 ) -> None:
     """Desktop routing fails closed, before a Matrix send, on arguments it cannot honor."""
-    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
     request = AsyncMock()
-    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
-    monkeypatch.setattr(
-        "mindroom.custom_tools.browser.desktop_response_router",
-        lambda _client: SimpleNamespace(request=request),
-    )
-    tool = BrowserTools(
-        TEST_RUNTIME_PATHS,
-        default_target="desktop",
-        device_user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        device_ed25519="fingerprint",
-    )
+    tool = _desktop_browser(monkeypatch, request)
 
     with pytest.raises(ValueError, match=expected):
         await tool.browser(action=action, **arguments)
@@ -904,44 +882,20 @@ async def test_desktop_target_rejects_unsupported_host_arguments(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("arguments", "expected"),
-    [({"depth": 8, "maxChars": 1000}, {"depth": 8, "maxChars": 1000}), ({"depth": 0, "maxChars": 0}, {})],
+    [
+        ({"depth": 8, "maxChars": 1000}, {"depth": 8, "maxChars": 1000}),
+        ({"depth": 0, "maxChars": 0}, {}),
+        ({"interactive": False}, {}),
+        ({"compact": False}, {}),
+        ({"labels": False}, {}),
+    ],
 )
-async def test_desktop_snapshot_forwards_only_positive_limits(
+async def test_desktop_snapshot_forwards_only_what_the_extension_honors(
     monkeypatch: pytest.MonkeyPatch,
-    arguments: dict[str, int],
-    expected: dict[str, int],
+    arguments: dict[str, object],
+    expected: dict[str, object],
 ) -> None:
-    """A zero depth or text limit leaves the extension's default instead of asking it for nothing."""
-    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
-    response = DesktopResponse(request_id="snapshot", session_id="session", ok=True, result={"action": "snapshot"})
-    request = AsyncMock(return_value=response)
-    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
-    monkeypatch.setattr(
-        "mindroom.custom_tools.browser.desktop_response_router",
-        lambda _client: SimpleNamespace(request=request),
-    )
-    tool = BrowserTools(
-        TEST_RUNTIME_PATHS,
-        default_target="desktop",
-        device_user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        device_ed25519="fingerprint",
-    )
-
-    await tool.browser(action="snapshot", **arguments)
-
-    command = request.await_args.args[1]
-    assert command.parameters == {"browser_action": "snapshot", "browser_parameters": expected}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("arguments", [{"interactive": False}, {"compact": False}, {"labels": False}])
-async def test_desktop_target_accepts_false_noop_host_hints(
-    monkeypatch: pytest.MonkeyPatch,
-    arguments: dict[str, bool],
-) -> None:
-    """Explicit false values for host-only hints preserve the desktop default behavior."""
-    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    """A zero depth or text limit leaves the extension's default, and false host-only hints change nothing."""
     response = DesktopResponse(
         request_id="snapshot",
         session_id="session",
@@ -949,25 +903,14 @@ async def test_desktop_target_accepts_false_noop_host_hints(
         result={"action": "snapshot", "provider": "playwright_mcp_extension"},
     )
     request = AsyncMock(return_value=response)
-    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
-    monkeypatch.setattr(
-        "mindroom.custom_tools.browser.desktop_response_router",
-        lambda _client: SimpleNamespace(request=request),
-    )
-    tool = BrowserTools(
-        TEST_RUNTIME_PATHS,
-        default_target="desktop",
-        device_user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        device_ed25519="fingerprint",
-    )
+    tool = _desktop_browser(monkeypatch, request)
 
     result = await tool.browser(action="snapshot", **arguments)
 
     assert json.loads(result) == {"action": "snapshot", "provider": "playwright_mcp_extension"}
     command = request.await_args.args[1]
     assert command.action == "browser_observe"
-    assert command.parameters == {"browser_action": "snapshot", "browser_parameters": {}}
+    assert command.parameters == {"browser_action": "snapshot", "browser_parameters": expected}
 
 
 @pytest.mark.asyncio
@@ -1003,21 +946,14 @@ async def test_desktop_target_returns_decrypted_browser_screenshot(
         result={"action": "screenshot", "provider": "playwright_mcp_extension"},
         screenshot=DESKTOP_MEDIA,
     )
+    tool = _desktop_browser(monkeypatch, AsyncMock(return_value=response), context=context)
     monkeypatch.setattr(
-        "mindroom.custom_tools.browser.desktop_response_router",
-        lambda _client: SimpleNamespace(request=AsyncMock(return_value=response)),
-    )
-    decrypt = AsyncMock(return_value=PNG_BYTES)
-    monkeypatch.setattr("mindroom.custom_tools.browser.download_encrypted_screenshot", decrypt)
-    tool = BrowserTools(
-        TEST_RUNTIME_PATHS,
-        device_user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        device_ed25519="fingerprint",
+        "mindroom.custom_tools.browser.download_encrypted_screenshot",
+        AsyncMock(return_value=PNG_BYTES),
     )
 
     with tool_runtime_context(context):
-        result = await tool.browser(action="screenshot", target="desktop")
+        result = await tool.browser(action="screenshot")
 
     assert not isinstance(result, str)
     assert result.images
@@ -1047,23 +983,13 @@ async def test_desktop_browser_screenshot_can_return_sendable_attachment(
         result={"action": "screenshot", "provider": "playwright_mcp_extension"},
         screenshot=DESKTOP_MEDIA,
     )
-    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
-    monkeypatch.setattr(
-        "mindroom.custom_tools.browser.desktop_response_router",
-        lambda _client: SimpleNamespace(request=AsyncMock(return_value=response)),
-    )
+    tool = _desktop_browser(monkeypatch, AsyncMock(return_value=response), context=context)
     monkeypatch.setattr(
         "mindroom.custom_tools.browser.download_encrypted_screenshot",
         AsyncMock(return_value=PNG_BYTES),
     )
-    tool = BrowserTools(
-        TEST_RUNTIME_PATHS,
-        device_user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        device_ed25519="fingerprint",
-    )
 
-    result = await tool.browser(action="screenshot", target="desktop", returnAttachment=True)
+    result = await tool.browser(action="screenshot", returnAttachment=True)
 
     assert not isinstance(result, str)
     payload = json.loads(result.content)
@@ -1298,34 +1224,17 @@ def test_browser_upload_roots_do_not_reuse_previous_context_output_dir(tmp_path:
     )
     tool = BrowserTools(runtime_paths)
 
-    def runtime_context(storage_path: Path) -> ToolRuntimeContext:
-        return make_test_tool_runtime_context(
-            agent_name="general",
-            target=MessageTarget.resolve(
-                room_id="!room:example.org",
-                thread_id=None,
-                reply_to_event_id=None,
-            ),
-            requester_id="@alice:example.org",
-            client=MagicMock(),
-            config=MagicMock(),
-            runtime_paths=runtime_paths,
-            relations=make_relation_lookup(),
-            conversation_reader=make_conversation_reader_mock(),
-            storage_path=storage_path,
-        )
-
     first_storage_path = tmp_path / "first-context"
     second_storage_path = tmp_path / "second-context"
     first_file = first_storage_path / "browser" / "artifact.txt"
     first_file.parent.mkdir(parents=True)
     first_file.write_text("from first context", encoding="utf-8")
 
-    with tool_runtime_context(runtime_context(first_storage_path)):
+    with tool_runtime_context(_storage_context(runtime_paths, first_storage_path)):
         assert tool._resolve_output_dir() == first_file.parent.resolve()
 
     with (
-        tool_runtime_context(runtime_context(second_storage_path)),
+        tool_runtime_context(_storage_context(runtime_paths, second_storage_path)),
         pytest.raises(ValueError, match="requires an agent workspace"),
     ):
         tool._resolve_upload_path(str(first_file))
@@ -2309,22 +2218,10 @@ async def test_desktop_url_validation_resolves_hostnames_off_event_loop(monkeypa
         "mindroom.custom_tools.browser.validate_server_fetch_url",
         _recording_validation(threads),
     )
-    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
     request = AsyncMock(
         return_value=DesktopResponse(request_id="open", session_id="session", ok=True, result={"action": "open"}),
     )
-    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
-    monkeypatch.setattr(
-        "mindroom.custom_tools.browser.desktop_response_router",
-        lambda _client: SimpleNamespace(request=request),
-    )
-    tool = BrowserTools(
-        TEST_RUNTIME_PATHS,
-        default_target="desktop",
-        device_user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        device_ed25519="fingerprint",
-    )
+    tool = _desktop_browser(monkeypatch, request)
 
     await tool.browser(action="open", targetUrl="https://slow-dns.example")
 
@@ -2559,22 +2456,12 @@ async def test_ensure_profile_rewrites_playwright_browser_revision_error(
         "╚════════════════════════════════════════════════════════════╝"
     )
 
-    class _FakeChromium:
-        async def launch_persistent_context(self, **_kwargs: object) -> _FakeContext:
-            raise PlaywrightError(playwright_message)
-
-    class _FakePlaywright:
-        def __init__(self) -> None:
-            self.chromium = _FakeChromium()
-            self.stop = AsyncMock()
-
-    playwright = _FakePlaywright()
-
-    class _FakePlaywrightStarter:
-        async def start(self) -> _FakePlaywright:
-            return playwright
-
-    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: _FakePlaywrightStarter())
+    _launch_kwargs, playwright = _install_fake_persistent_playwright(monkeypatch, context=_FakeContext())
+    monkeypatch.setattr(
+        playwright.chromium,
+        "launch_persistent_context",
+        AsyncMock(side_effect=PlaywrightError(playwright_message)),
+    )
 
     with pytest.raises(RuntimeError) as exc_info:
         await tool._ensure_profile("mindroom")
@@ -3123,32 +3010,16 @@ async def test_worker_browser_sandbox_failure_does_not_retry_without_sandbox(
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
     browser = BrowserTools(paths)
     browser.bind_worker_display(":99", tmp_path / "workspace")
-    launch_calls: list[dict[str, object]] = []
     sandbox_error = "No usable sandbox"
-
-    class _FailingChromium:
-        async def launch_persistent_context(self, **kwargs: object) -> _FakeContext:
-            launch_calls.append(kwargs)
-            raise PlaywrightError(sandbox_error)
-
-    class _FailingPlaywright:
-        def __init__(self) -> None:
-            self.chromium = _FailingChromium()
-            self.stop = AsyncMock()
-
-    playwright = _FailingPlaywright()
-
-    class _FailingStarter:
-        async def start(self) -> _FailingPlaywright:
-            return playwright
-
-    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: _FailingStarter())
+    _launch_kwargs, playwright = _install_fake_persistent_playwright(monkeypatch, context=_FakeContext())
+    launch = AsyncMock(side_effect=PlaywrightError(sandbox_error))
+    monkeypatch.setattr(playwright.chromium, "launch_persistent_context", launch)
 
     with pytest.raises(PlaywrightError, match=sandbox_error):
         await browser._ensure_profile("mindroom")
 
-    assert len(launch_calls) == 1
-    assert launch_calls[0]["chromium_sandbox"] is True
+    launch.assert_awaited_once()
+    assert launch.await_args.kwargs["chromium_sandbox"] is True
     playwright.stop.assert_awaited_once_with()
 
 
