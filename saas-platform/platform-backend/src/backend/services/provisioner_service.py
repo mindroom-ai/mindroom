@@ -1194,7 +1194,7 @@ async def uninstall_instance(instance_id: int) -> dict[str, Any]:
 
 
 def _deployment_status(deployment: Mapping[str, Any]) -> str:
-    """Return the instance status a deployment shows: running only once every desired pod is ready."""
+    """Return the status a deployment shows: running once every desired pod is ready, available, and updated."""
     desired = int(deployment["spec"]["replicas"])
     if desired == 0:
         return "stopped"
