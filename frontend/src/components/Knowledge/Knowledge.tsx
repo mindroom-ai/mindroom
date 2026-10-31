@@ -30,7 +30,7 @@ import {
 } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { ParsedInput } from "@/components/shared/ParsedInput";
+import { ParsedInput, ParsedTextarea } from "@/components/shared/ParsedInput";
 import { Textarea } from "@/components/ui/textarea";
 import {
   FolderOpen,
@@ -1622,17 +1622,13 @@ export function Knowledge() {
                       >
                         Include Patterns (optional)
                       </label>
-                      <Textarea
+                      <ParsedTextarea
                         id="knowledge-git-include-patterns"
-                        value={formatPatternsForTextarea(
-                          settings.git.include_patterns,
-                        )}
-                        onChange={(event) =>
-                          updateGitSettings({
-                            include_patterns: parsePatternsFromTextarea(
-                              event.target.value,
-                            ),
-                          })
+                        value={settings.git.include_patterns}
+                        format={formatPatternsForTextarea}
+                        parse={parsePatternsFromTextarea}
+                        onChange={(include_patterns) =>
+                          updateGitSettings({ include_patterns })
                         }
                         placeholder="docs/**"
                         className="min-h-[96px]"
@@ -1650,17 +1646,13 @@ export function Knowledge() {
                       >
                         Exclude Patterns (optional)
                       </label>
-                      <Textarea
+                      <ParsedTextarea
                         id="knowledge-git-exclude-patterns"
-                        value={formatPatternsForTextarea(
-                          settings.git.exclude_patterns,
-                        )}
-                        onChange={(event) =>
-                          updateGitSettings({
-                            exclude_patterns: parsePatternsFromTextarea(
-                              event.target.value,
-                            ),
-                          })
+                        value={settings.git.exclude_patterns}
+                        format={formatPatternsForTextarea}
+                        parse={parsePatternsFromTextarea}
+                        onChange={(exclude_patterns) =>
+                          updateGitSettings({ exclude_patterns })
                         }
                         placeholder="docs/private/**"
                         className="min-h-[96px]"

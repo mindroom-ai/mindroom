@@ -1488,6 +1488,29 @@ describe("Knowledge", () => {
     ).toHaveDisplayValue(String(storedOverlap));
   });
 
+  it("keeps a new line typed into the git include patterns", async () => {
+    const store = await mockStatefulStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        git: { repo_url: "https://github.com/org/repo", branch: "main" },
+      },
+    });
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    const include = screen.getByLabelText("Include Patterns (optional)");
+    for (const value of ["docs/**", "docs/**\n", "docs/**\nguides/**"]) {
+      fireEvent.change(include, { target: { value } });
+      expect(include).toHaveDisplayValue(value);
+    }
+    expect(
+      store.getState().config?.knowledge_bases?.docs?.git?.include_patterns,
+    ).toEqual(["docs/**", "guides/**"]);
+  });
+
   it("keeps git settings typed key by key", async () => {
     const store = await mockStatefulStore({
       docs: {

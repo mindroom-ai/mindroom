@@ -7,7 +7,10 @@ This record holds the decisions behind making the dashboard's zustand store the 
 - The editors render from the store entity and write through store actions; no editor keeps a form copy.
   React Hook Form came with the original dashboard to sync form and store through a watcher, that watcher was removed because it caused re-render loops, and what stayed only mirrored the store and reset itself after every edit.
   The room, memory, and knowledge base editors kept the same kind of copy in component state with an effect that copied the store back after every write.
-- A local text buffer is kept only where unfinished input cannot be a valid value yet, such as a compaction threshold percent while `0.` is typed, and tool override fields in the tool settings panel.
+- A field whose value the store holds normalized (trimmed, clamped, defaulted, or parsed into a list) stores the normalized value on every keystroke and keeps the typed text while the stored value is the one it sent; leaving the field shows the stored value, and a value stored from elsewhere replaces the text.
+  Rendering the stored value instead ate what was being typed: a trailing space or comma, a new line, a cleared field that came back with its default, or a number clamped at its first digit.
+  The compaction threshold percent keeps its own buffer, because invalid text there must store nothing, and the tool settings panel keeps its override-field drafts.
+  Room names are kept as typed in the draft and trimmed at save instead, because a cleared room name shows a derived default that the field cannot produce.
 - `agents.<id>.tools` and `defaults.tools` hold complete authored entries in the draft, and widgets derive names from them.
   The load response always uses the compact entry forms (a bare name or a single-key mapping), because a dashboard save writes the validated config's authored dump, so keeping entries verbatim in the draft changes no saved file.
 - Unchecking a tool, or removing it from `defaults.tools`, discards its settings; checking it again starts from a bare entry.
