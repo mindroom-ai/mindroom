@@ -1,11 +1,12 @@
 # Dashboard drafts: one store, complete tool entries
 
-This record holds the decisions behind making the dashboard's zustand store the only owner of agent, team, and room drafts, with complete tool entries as the draft's only tool state.
+This record holds the decisions behind making the dashboard's zustand store the only owner of agent, team, room, memory, and knowledge base drafts, with complete tool entries as the draft's only tool state.
 
 ## Decisions
 
 - The editors render from the store entity and write through store actions; no editor keeps a form copy.
   React Hook Form came with the original dashboard to sync form and store through a watcher, that watcher was removed because it caused re-render loops, and what stayed only mirrored the store and reset itself after every edit.
+  The room, memory, and knowledge base editors kept the same kind of copy in component state with an effect that copied the store back after every write.
 - A local text buffer is kept only where unfinished input cannot be a valid value yet, such as a compaction threshold percent while `0.` is typed, and tool override fields in the tool settings panel.
 - `agents.<id>.tools` and `defaults.tools` hold complete authored entries in the draft, and widgets derive names from them.
   The load response always uses the compact entry forms (a bare name or a single-key mapping), because a dashboard save writes the validated config's authored dump, so keeping entries verbatim in the draft changes no saved file.
