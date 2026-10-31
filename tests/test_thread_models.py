@@ -31,7 +31,10 @@ from mindroom.thread_models import (
     clear_thread_model_override,
     set_thread_model_override,
 )
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
@@ -53,6 +56,7 @@ from tests.test_model_selection_scope import ROOM, USER
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
 
 THREAD_ID = "$thread-root:localhost"
 ROOM_ID = "!room:localhost"
@@ -610,6 +614,46 @@ def test_thread_model_switch_may_stop_the_run_but_does_not_stop_every_call() -> 
     assert function.parameters["properties"]["model_name"]["type"] == "string"
     assert function.parameters["properties"]["when"]["enum"] == ["after-toolcall", "next-turn"]
     assert function.parameters["required"] == ["model_name"]
+
+
+def _configured_thread_model_functions(context: ToolRuntimeContext, workspace: Path) -> dict[str, ToolFunction]:
+    """Return the thread-model functions as an agent with a workspace is offered them, auto-saving any output."""
+    toolkit = get_tool_by_name(
+        "thread_model",
+        context.runtime_paths,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+        tool_output_workspace_root=workspace,
+        tool_output_auto_save_threshold_bytes=1,
+    )
+    return {function.name: function for function in adapt_toolkit(toolkit, key="thread_model").functions}
+
+
+def test_a_configured_switch_offers_no_output_path(tmp_path: Path) -> None:
+    """A switch's result is for its run, so the model cannot ask to save it to a file, as it can for the other calls."""
+    functions = _configured_thread_model_functions(_make_tool_context(), tmp_path / "workspace")
+
+    assert OUTPUT_PATH_ARGUMENT not in functions["switch_thread_model"].parameters["properties"]
+    assert OUTPUT_PATH_ARGUMENT in functions["get_thread_model"].parameters["properties"]
+
+
+@pytest.mark.asyncio
+async def test_a_configured_switch_for_the_current_response_is_never_auto_saved(tmp_path: Path) -> None:
+    """A saved result would answer with a receipt, which no longer stops the run or names the new model."""
+    context = _make_tool_context()
+    switch = _configured_thread_model_functions(context, tmp_path / "workspace")["switch_thread_model"]
+
+    with tool_runtime_context(context):
+        outcome = await execute_tool_call(
+            switch,
+            {"model_name": "large", "when": "after-toolcall"},
+            ToolCallContext(run_id="run", session_id="session", call_id="call-switch", user_id=None),
+            middleware=(),
+        )
+
+    assert outcome.stop_after_call is True
+    assert json.loads(outcome.content)["model"] == "large"
+    assert not (tmp_path / "workspace").exists()
 
 
 @pytest.mark.asyncio
