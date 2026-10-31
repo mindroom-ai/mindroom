@@ -77,6 +77,8 @@ def load_config_attempt(runtime_paths: RuntimePaths) -> ConfigLoad:
     source_fingerprint: str | None = None
     source_files: frozenset[Path] | None = None
     uses_includes: bool | None = None
+    config: Config | None = None
+    error: Exception | None = None
     try:
         source_bytes = runtime_paths.config_path.read_bytes()
         source_fingerprint = raw_source_fingerprint(source_bytes)
@@ -99,11 +101,10 @@ def load_config_attempt(runtime_paths: RuntimePaths) -> ConfigLoad:
         source_files = frozenset(source_digests)
         source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        detail = config_error_detail(exc)
         logger.warning(
             "Failed to load config due to validation",
             config_path=str(runtime_paths.config_path),
-            errors=detail,
+            errors=config_error_detail(exc),
         )
         if source_files is None:
             # A parse-time failure never reached the full set; the files read
@@ -111,31 +112,22 @@ def load_config_attempt(runtime_paths: RuntimePaths) -> ConfigLoad:
             source_files = partial_source_files(exc)
         if uses_includes is None:
             uses_includes = partial_source_uses_includes(exc)
-        return ConfigLoad(
-            config=None,
-            source_fingerprint=source_fingerprint,
-            source_files=source_files,
-            uses_includes=uses_includes,
-            error=exc,
-        )
+        error = exc
     except Exception as exc:
         logger.exception("Failed to load config", config_path=str(runtime_paths.config_path))
-        return ConfigLoad(
-            config=None,
-            source_fingerprint=source_fingerprint,
-            source_files=source_files,
-            uses_includes=uses_includes,
-            error=exc,
+        error = exc
+    else:
+        config = runtime_config
+        logger.info(
+            "loaded_agent_configuration",
+            path=str(runtime_paths.config_path),
+            source_file_count=len(source_files),
         )
-    logger.info(
-        "loaded_agent_configuration",
-        path=str(runtime_paths.config_path),
-        source_file_count=len(source_files),
-    )
-    logger.info("loaded_agent_configuration_count", agent_count=len(runtime_config.agents))
+        logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
     return ConfigLoad(
-        config=runtime_config,
+        config=config,
         source_fingerprint=source_fingerprint,
         source_files=source_files,
         uses_includes=uses_includes,
+        error=error,
     )
