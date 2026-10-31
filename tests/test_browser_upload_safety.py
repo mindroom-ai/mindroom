@@ -22,6 +22,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.browser_lifecycle_helpers import UNCOMPARED_LAUNCH_SETTINGS
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
@@ -58,7 +59,7 @@ def _upload_tool(
     state = _BrowserProfileState(
         playwright=SimpleNamespace(stop=AsyncMock()),
         context=SimpleNamespace(close=AsyncMock()),
-        launch_settings=None,
+        launch_settings=UNCOMPARED_LAUNCH_SETTINGS,
         tabs={"tab-1": tab},
     )
     tool._session.profiles["mindroom"] = state
@@ -691,7 +692,7 @@ async def test_upload_bytes_survive_tool_return_in_real_browser(
         context = await browser.new_context()
         page = await context.new_page()
         await page.set_content('<input type="file">')
-        state = _BrowserProfileState(playwright=playwright, context=context, launch_settings=None)
+        state = _BrowserProfileState(playwright=playwright, context=context, launch_settings=UNCOMPARED_LAUNCH_SETTINGS)
         tool._session.profiles["mindroom"] = state
         monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=state))
         target_id = tool._register_tab(state, page)

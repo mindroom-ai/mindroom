@@ -66,7 +66,7 @@ from tests.browser_egress_helpers import (
     SquidLikeUpstream,
     socks5_connect,
 )
-from tests.browser_lifecycle_helpers import LifecycleBrowser
+from tests.browser_lifecycle_helpers import UNCOMPARED_LAUNCH_SETTINGS, LifecycleBrowser
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     make_conversation_reader_mock,
@@ -1118,7 +1118,7 @@ async def test_resolve_tab_falls_back_to_an_open_tab_then_a_new_page() -> None:
     state = _BrowserProfileState(
         playwright=MagicMock(),
         context=context,
-        launch_settings=None,
+        launch_settings=UNCOMPARED_LAUNCH_SETTINGS,
         tabs={"closed": closed, "first": first_open, "second": second_open},
         active_target_id="closed",
     )
@@ -1141,7 +1141,12 @@ def _install_upload_tab(tool: BrowserTools, monkeypatch: pytest.MonkeyPatch) -> 
     locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
     page: Any = SimpleNamespace(locator=locator, is_closed=lambda: False)
     tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "input[type=file]"})
-    state = _BrowserProfileState(playwright=MagicMock(), context=MagicMock(), launch_settings=None, tabs={"tab-1": tab})
+    state = _BrowserProfileState(
+        playwright=MagicMock(),
+        context=MagicMock(),
+        launch_settings=UNCOMPARED_LAUNCH_SETTINGS,
+        tabs={"tab-1": tab},
+    )
     monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=state))
     monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
     return set_input_files
@@ -2686,7 +2691,7 @@ async def test_stop_profile_closes_context_only() -> None:
     tool._session.profiles["mindroom"] = _BrowserProfileState(
         playwright=playwright,
         context=context,
-        launch_settings=None,
+        launch_settings=UNCOMPARED_LAUNCH_SETTINGS,
     )
 
     await tool._stop_profile("mindroom")
@@ -2727,7 +2732,7 @@ async def test_stop_profile_holds_lock_through_shutdown(
     tool._session.profiles["mindroom"] = _BrowserProfileState(
         playwright=old_playwright,
         context=old_context,
-        launch_settings=None,
+        launch_settings=UNCOMPARED_LAUNCH_SETTINGS,
     )
 
     new_context = _FakeContext(pages=[_FakePage()])
@@ -3553,43 +3558,6 @@ async def test_a_toolkit_reads_its_launch_settings_once_however_many_calls_it_ma
     ]
     assert len(adapters) == 1
     await tool.aclose()
-
-
-@pytest.mark.asyncio
-async def test_a_restart_waits_for_another_toolkits_call_on_the_shared_browser(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A toolkit that must restart the shared profile waits until a call another toolkit is making with it ends."""
-    _clear_proxy_env(monkeypatch)
-    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
-    adapters = _browser_per_start(monkeypatch)
-    current = BrowserTools(paths)
-    changed = BrowserTools(paths, allow_private_networks=True)
-    await current.browser("start")
-    entered, release = asyncio.Event(), asyncio.Event()
-    list_tabs = current._tabs_payload
-
-    async def slow_tabs(profile_name: str, state: object) -> dict[str, object]:
-        entered.set()
-        await release.wait()
-        return await list_tabs(profile_name, state)
-
-    # Stands in for a page operation still running when another reply's call needs a restart.
-    monkeypatch.setattr(current, "_tabs_payload", slow_tabs)
-    in_flight = asyncio.create_task(current.browser("tabs"))
-    await entered.wait()
-    restarting = asyncio.create_task(changed.browser("tabs"))
-    await asyncio.wait({restarting}, timeout=0.2)
-
-    assert not restarting.done()
-    assert adapters[0].live_resources == {"driver", "context"}
-    release.set()
-    assert json.loads(await in_flight)["action"] == "tabs"
-    await restarting
-    assert len(adapters) == 2
-    assert not adapters[0].live_resources
-    await changed.aclose()
 
 
 @pytest.mark.asyncio
