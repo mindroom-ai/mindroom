@@ -56,6 +56,16 @@ def _blank_as_none(value: str | None) -> str | None:
 OptionalNonBlankStr = Annotated[str | None, AfterValidator(_blank_as_none)]
 
 
+def _validate_credential_service_name(value: str) -> str:
+    # why-lazy: credentials.manager loads cryptography, which slim entry points that import this module must not.
+    from mindroom.credentials.manager import validate_service_name  # noqa: PLC0415
+
+    return validate_service_name(value)
+
+
+CredentialServiceName = Annotated[str, AfterValidator(_validate_credential_service_name)]
+
+
 def _validate_timezone_name(value: str) -> str:
     """Return ``value`` when it names an IANA timezone, such as ``Europe/Amsterdam``."""
     try:

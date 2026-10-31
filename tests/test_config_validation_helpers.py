@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.models import DefaultsConfig, ToolConfigEntry
+from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig
+from mindroom.config.knowledge import KnowledgeRerankerConfig
+from mindroom.config.models import DefaultsConfig, EmbedderConfig, ToolConfigEntry
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
+from mindroom.config.voice import SpeechServiceConfig, VoiceSTTConfig
 
 
 def test_duplicate_items_preserves_first_duplicate_encounter_order() -> None:
@@ -58,6 +62,31 @@ def test_duplicate_validators_preserve_error_order(factory: object, match: str) 
     """Config duplicate validators should preserve encounter-ordered duplicate names."""
     with pytest.raises(ValueError, match=match):
         factory()
+
+
+@pytest.mark.parametrize(
+    ("model", "required"),
+    [
+        (EmbedderConfig, {}),
+        (KnowledgeRerankerConfig, {"provider": "cohere", "model": "rerank-v3.5"}),
+        (OpenAIDecisionsJudgmentConfig, {"provider": "openai_decisions"}),
+        (SpeechServiceConfig, {"model": "whisper-1", "api_key": "key"}),
+        (VoiceSTTConfig, {"api_key": "key"}),
+    ],
+)
+def test_optional_credential_service_references_are_validated(
+    model: type[BaseModel],
+    required: dict[str, object],
+) -> None:
+    """Every optional credentials_service may stay unset, is trimmed, and rejects an invalid service name."""
+
+    def service(value: str | None) -> object:
+        return model.model_validate({**required, "credentials_service": value}).model_dump()["credentials_service"]
+
+    assert service(None) is None
+    assert service(" ops ") == "ops"
+    with pytest.raises(ValidationError, match="Service name can only include"):
+        service("bad name")
 
 
 @pytest.mark.parametrize(

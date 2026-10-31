@@ -16,6 +16,7 @@ from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import (
+    CredentialServiceName,
     OptionalNonBlankStr,
     non_empty_stripped,
     validate_history_limit_choice,
@@ -656,7 +657,7 @@ class EmbedderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str = Field(default=OPENAI_EMBEDDING_SMALL, description="Model name for embeddings")
-    credentials_service: str | None = Field(
+    credentials_service: CredentialServiceName | None = Field(
         default=None,
         description=(
             "Optional credential service used only by this embedder, for the openai provider. When omitted, legacy "
@@ -694,12 +695,6 @@ class EmbedderConfig(BaseModel):
             "prompt (EmbeddingGemma 2: 'title: none | text: ')"
         ),
     )
-
-    @field_validator("credentials_service")
-    @classmethod
-    def _validate_credentials_service(cls, value: str | None) -> str | None:
-        """Normalize an optional named credential reference."""
-        return None if value is None else validate_service_name(value)
 
 
 def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict[str, Any]:

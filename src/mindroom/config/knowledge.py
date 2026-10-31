@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from mindroom.config.schema_hints import dashboard_hint
-from mindroom.credentials.manager import validate_service_name
+from mindroom.config.validation import CredentialServiceName  # noqa: TC001
 from mindroom.path_globs import validate_safe_relative_pattern
 
 KnowledgeBaseMode = Literal["semantic", "files"]
@@ -43,16 +43,10 @@ class KnowledgeRerankerConfig(BaseModel):
         description="API key for the 'cohere' provider; above credentials_service",
         json_schema_extra=dashboard_hint(secret=True),
     )
-    credentials_service: str | None = Field(
+    credentials_service: CredentialServiceName | None = Field(
         default=None,
         description="Credential service holding the 'cohere' provider's API key; defaults to 'cohere'",
     )
-
-    @field_validator("credentials_service")
-    @classmethod
-    def _validate_credentials_service(cls, value: str | None) -> str | None:
-        """Normalize an optional named credential reference."""
-        return None if value is None else validate_service_name(value)
 
 
 class KnowledgeGitConfig(BaseModel):

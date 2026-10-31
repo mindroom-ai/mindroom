@@ -9594,7 +9594,7 @@ visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.config.judgment"
-depends_on = ["mindroom.config.schema_hints", "mindroom.credentials.manager"]
+depends_on = ["mindroom.config.schema_hints", "mindroom.config.validation"]
 
 [[modules]]
 path = "mindroom.judgment.execution"

@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.schema_hints import dashboard_hint
-from mindroom.credentials.manager import validate_service_name
+from mindroom.config.validation import CredentialServiceName  # noqa: TC001
 from mindroom.model_defaults import OPENAI_TRANSCRIPTION
 
 _RESERVED_SPEECH_OPTION_NAMES = frozenset({"api_key", "base_url", "client", "model"})
@@ -42,7 +42,7 @@ class SpeechServiceConfig(BaseModel):
         description="Optional service-specific API key",
         json_schema_extra=dashboard_hint(secret=True),
     )
-    credentials_service: str | None = Field(
+    credentials_service: CredentialServiceName | None = Field(
         default=None,
         description="Optional named credential service containing the speech API key",
     )
@@ -61,12 +61,6 @@ class SpeechServiceConfig(BaseModel):
             return value
         normalized = value.strip()
         return normalized or None
-
-    @field_validator("credentials_service")
-    @classmethod
-    def _validate_credentials_service(cls, value: str | None) -> str | None:
-        """Normalize an explicitly selected speech credential service."""
-        return None if value is None else validate_service_name(value)
 
     @field_validator("host")
     @classmethod
@@ -107,7 +101,7 @@ class VoiceSTTConfig(SpeechServiceConfig):
     """Voice-message STT configuration with its historical model default."""
 
     model: str = Field(default=OPENAI_TRANSCRIPTION, description="STT model name")
-    credentials_service: str | None = Field(
+    credentials_service: CredentialServiceName | None = Field(
         default_factory=_default_voice_stt_credentials_service,
         description="Named speech credential service, defaulting to OpenAI for cloud STT",
     )
