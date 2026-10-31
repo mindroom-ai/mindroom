@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from mindroom.external_triggers.store import require_human_owner
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 
@@ -12,15 +13,11 @@ class ExternalTriggerContextError(RuntimeError):
 
 
 def require_external_trigger_owner_context(tool_name: str) -> ToolRuntimeContext:
-    """Return the primary-runtime context for one human-owned trigger tool call."""
+    """Return the live-config context of one trigger tool call whose requester may own triggers."""
     context = get_tool_runtime_context()
     if context is None:
         msg = f"{tool_name} requires live Matrix tool context."
         raise ExternalTriggerContextError(msg)
-    if context.runtime_paths.control_state_root is None:
-        msg = f"{tool_name} requires primary control state."
-        raise ExternalTriggerContextError(msg)
-    if not context.requester_id or context.requester_id == context.client.user_id:
-        msg = "External trigger owner must be a human Matrix requester."
-        raise ExternalTriggerContextError(msg)
-    return replace(context, config=context.current_config, config_provider=None)
+    context = replace(context, config=context.current_config, config_provider=None)
+    require_human_owner(context.requester_id, context.config, context.runtime_paths)
+    return context

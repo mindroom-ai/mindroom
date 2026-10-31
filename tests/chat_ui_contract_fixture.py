@@ -127,7 +127,6 @@ class _ContractCase:
 
 def _contract_cases() -> tuple[_ContractCase, ...]:
     actions = (
-        _ContractCase("show_computer", "", "show_computer"),
         *(
             _ContractCase(f"open_settings/{section}", "", "open_settings", section)
             for section in get_args(get_type_hints(ChatUITools.open_settings)["section"])
@@ -158,8 +157,6 @@ def _contract_cases() -> tuple[_ContractCase, ...]:
 
 
 async def _invoke_contract_case(tool: ChatUITools, case: _ContractCase) -> str:
-    if case.action == "show_computer":
-        return await tool.show_computer()
     if case.action == "open_settings":
         return await tool.open_settings(section=case.argument)  # type: ignore[arg-type]
     if case.action == "show_canvas":

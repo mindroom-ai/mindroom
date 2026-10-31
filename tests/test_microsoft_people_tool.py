@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
@@ -16,7 +16,10 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
+    assert_refused_by_call_validation,
+    model_description,
     publish_grant,
+    raw_path,
     runtime_paths,
     save_client_config,
     worker_target,
@@ -78,7 +81,7 @@ def _routes(routes: dict[str, httpx.Response]) -> Callable[[httpx.Request], http
     """Answer each request by its raw path, as Graph would for the first matching resource."""
 
     def answer(request: httpx.Request) -> httpx.Response:
-        return routes[_raw_path(request)]
+        return routes[raw_path(request)]
 
     return answer
 
@@ -99,19 +102,6 @@ def _tools(
         runtime_config=None,
     )
     return tools, graph
-
-
-def _payload(result: str) -> dict[str, Any]:
-    return json.loads(result)
-
-
-def _raw_path(request: httpx.Request) -> str:
-    return request.url.raw_path.split(b"?")[0].decode("ascii")
-
-
-def _description(tools: MicrosoftPeopleTools, name: str) -> str:
-    """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join((toolkit_offers(tools, name).description or "").split())
 
 
 def test_registered_metadata_declares_a_read_only_requester_scoped_tool() -> None:
@@ -140,7 +130,7 @@ def test_search_asks_graph_for_matching_names_and_email_addresses(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": [_user()]}))
 
-    result = _payload(tools.microsoft_people_search("  Dana  "))
+    result = json.loads(tools.microsoft_people_search("  Dana  "))
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("GET", "/v1.0/users")
@@ -178,7 +168,7 @@ def test_search_returns_only_the_directory_fields(tmp_path: Path, monkeypatch: p
     ]
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({"value": users}))
 
-    people = _payload(tools.microsoft_people_search("example"))["people"]
+    people = json.loads(tools.microsoft_people_search("example"))["people"]
 
     assert people == [
         _person(email="dana.example@example.onmicrosoft.com", business_phones=["+1 425 555 0100"]),
@@ -194,28 +184,48 @@ def test_search_returns_only_the_directory_fields(tmp_path: Path, monkeypatch: p
     assert all("mobile" not in json.dumps(person) for person in people)
 
 
-@pytest.mark.parametrize("query", ["", "   ", 5, None, "x" * 101])
+@pytest.mark.parametrize("query", ["", "   ", "x" * 101])
 def test_search_refuses_an_empty_or_overlong_query_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    query: object,
+    query: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    assert _payload(tools.microsoft_people_search(query))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert json.loads(tools.microsoft_people_search(query))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
-@pytest.mark.parametrize("limit", [0, 51, True, "5", 2.5])
+@pytest.mark.parametrize("limit", [0, 51])
 def test_search_refuses_a_limit_outside_one_to_fifty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    limit: object,
+    limit: int,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    assert _payload(tools.microsoft_people_search("Dana", limit=limit))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert json.loads(tools.microsoft_people_search("Dana", limit=limit))["code"] == "invalid_argument"
     assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("microsoft_people_search", {"query": "Dana", "limit": 2.5}),
+        ("microsoft_people_search", {"query": 5}),
+        ("microsoft_people_search", {"query": None}),
+    ],
+)
+def test_malformed_arguments_fail_call_validation_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Arguments that disagree with a function's signature fail call validation before its body runs."""
+    tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
+
+    assert_refused_by_call_validation(tools, graph, name, arguments)
 
 
 def test_get_profile_returns_the_person_and_their_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,9 +241,9 @@ def test_get_profile_returns_the_person_and_their_manager(tmp_path: Path, monkey
         ),
     )
 
-    result = _payload(tools.microsoft_people_get_profile("dana@example.com"))
+    result = json.loads(tools.microsoft_people_get_profile("dana@example.com"))
 
-    assert [(request.method, _raw_path(request)) for request in graph.requests] == [
+    assert [(request.method, raw_path(request)) for request in graph.requests] == [
         ("GET", "/v1.0/users/dana@example.com"),
         ("GET", f"/v1.0/users/{DANA}/manager"),
     ]
@@ -252,7 +262,7 @@ def test_get_profile_reports_no_manager_when_graph_finds_none(tmp_path: Path, mo
         ),
     )
 
-    result = _payload(tools.microsoft_people_get_profile(DANA))
+    result = json.loads(tools.microsoft_people_get_profile(DANA))
 
     assert len(graph.requests) == 2
     assert result["status"] == "ok"
@@ -272,7 +282,7 @@ def test_get_profile_leaves_out_a_manager_that_is_not_a_user(tmp_path: Path, mon
         ),
     )
 
-    assert _payload(tools.microsoft_people_get_profile(DANA))["manager"] is None
+    assert json.loads(tools.microsoft_people_get_profile(DANA))["manager"] is None
 
 
 def test_get_profile_finds_an_email_address_that_is_not_the_sign_in_name(
@@ -293,9 +303,9 @@ def test_get_profile_finds_an_email_address_that_is_not_the_sign_in_name(
         ),
     )
 
-    result = _payload(tools.microsoft_people_get_profile(address))
+    result = json.loads(tools.microsoft_people_get_profile(address))
 
-    assert [_raw_path(request) for request in graph.requests] == [
+    assert [raw_path(request) for request in graph.requests] == [
         "/v1.0/users/o%27brien@example.com",
         "/v1.0/users",
         f"/v1.0/users/{DANA}",
@@ -322,7 +332,7 @@ def test_get_profile_reports_not_found_unless_exactly_one_user_has_the_address(
         ),
     )
 
-    result = _payload(tools.microsoft_people_get_profile("dana@example.com"))
+    result = json.loads(tools.microsoft_people_get_profile("dana@example.com"))
 
     assert (result["status"], result["code"]) == ("error", "not_found")
     assert len(graph.requests) == 2
@@ -341,9 +351,9 @@ def test_get_profile_reads_the_requester_and_their_manager_as_me(
         _routes({"/v1.0/me": httpx.Response(200, json=_user()), "/v1.0/me/manager": httpx.Response(200, json=manager)}),
     )
 
-    result = _payload(tools.microsoft_people_get_profile(me))
+    result = json.loads(tools.microsoft_people_get_profile(me))
 
-    assert [(_raw_path(request), dict(request.url.params)) for request in graph.requests] == [
+    assert [(raw_path(request), dict(request.url.params)) for request in graph.requests] == [
         ("/v1.0/me", {"$select": SELECT}),
         ("/v1.0/me/manager", {"$select": SELECT}),
     ]
@@ -358,7 +368,7 @@ def test_get_profile_reports_no_manager_for_me(tmp_path: Path, monkeypatch: pyte
         _routes({"/v1.0/me": httpx.Response(200, json=_user()), "/v1.0/me/manager": _not_found()}),
     )
 
-    result = _payload(tools.microsoft_people_get_profile("me"))
+    result = json.loads(tools.microsoft_people_get_profile("me"))
 
     assert (result["status"], result["person"], result["manager"]) == ("ok", _person(), None)
 
@@ -382,7 +392,7 @@ def test_get_profile_reports_a_throttled_email_lookup_as_throttled(
         ),
     )
 
-    result = _payload(tools.microsoft_people_get_profile("dana@example.com"))
+    result = json.loads(tools.microsoft_people_get_profile("dana@example.com"))
 
     assert (result["code"], result["retry_after_seconds"]) == ("throttled", 7)
     assert len(graph.requests) == 2
@@ -391,7 +401,7 @@ def test_get_profile_reports_a_throttled_email_lookup_as_throttled(
 def test_get_profile_does_not_look_up_an_id_by_email(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, lambda _request: _not_found())
 
-    result = _payload(tools.microsoft_people_get_profile(DANA))
+    result = json.loads(tools.microsoft_people_get_profile(DANA))
 
     assert (result["code"], result["graph_code"]) == ("not_found", "Request_ResourceNotFound")
     assert len(graph.requests) == 1
@@ -412,7 +422,7 @@ def test_get_profile_reports_a_manager_lookup_refusal(tmp_path: Path, monkeypatc
         ),
     )
 
-    result = _payload(tools.microsoft_people_get_profile(DANA))
+    result = json.loads(tools.microsoft_people_get_profile(DANA))
 
     assert (result["status"], result["code"]) == ("error", "forbidden")
 
@@ -428,10 +438,10 @@ def test_list_direct_reports_returns_only_users(tmp_path: Path, monkeypatch: pyt
     }
     tools, graph = _tools(tmp_path, monkeypatch, _answer(reports))
 
-    result = _payload(tools.microsoft_people_list_direct_reports(SAM))
+    result = json.loads(tools.microsoft_people_list_direct_reports(SAM))
 
     [request] = graph.requests
-    assert (request.method, _raw_path(request)) == ("GET", f"/v1.0/users/{SAM}/directReports")
+    assert (request.method, raw_path(request)) == ("GET", f"/v1.0/users/{SAM}/directReports")
     assert dict(request.url.params) == {"$select": SELECT}
     assert result["direct_reports"] == [_person()]
     assert result["next_page_token"] == NEXT_REPORTS
@@ -440,7 +450,7 @@ def test_list_direct_reports_returns_only_users(tmp_path: Path, monkeypatch: pyt
 def test_list_direct_reports_follows_its_own_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    result = _payload(tools.microsoft_people_list_direct_reports(SAM, page_token=NEXT_REPORTS))
+    result = json.loads(tools.microsoft_people_list_direct_reports(SAM, page_token=NEXT_REPORTS))
 
     assert (result["direct_reports"], result["next_page_token"]) == ([], None)
     [request] = graph.requests
@@ -467,7 +477,7 @@ def test_list_direct_reports_refuses_a_foreign_page_token_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    result = _payload(tools.microsoft_people_list_direct_reports(SAM, page_token=page_token))
+    result = json.loads(tools.microsoft_people_list_direct_reports(SAM, page_token=page_token))
 
     assert result["code"] == "invalid_page_token"
     assert graph.requests == []
@@ -483,13 +493,13 @@ def test_list_direct_reports_of_me_pages_from_the_requester(tmp_path: Path, monk
     )
     tools, graph = _tools(tmp_path, monkeypatch, lambda _request: next(pages))
 
-    first = _payload(tools.microsoft_people_list_direct_reports("Me"))
-    second = _payload(tools.microsoft_people_list_direct_reports("Me", page_token=first["next_page_token"]))
+    first = json.loads(tools.microsoft_people_list_direct_reports("Me"))
+    second = json.loads(tools.microsoft_people_list_direct_reports("Me", page_token=first["next_page_token"]))
 
     assert first["next_page_token"] == next_page
     assert (first["direct_reports"], second["direct_reports"]) == ([_person()], [_person(SAM, name="Sam Example")])
     assert second["next_page_token"] is None
-    assert [(_raw_path(request), dict(request.url.params)) for request in graph.requests] == [
+    assert [(raw_path(request), dict(request.url.params)) for request in graph.requests] == [
         ("/v1.0/me/directReports", {"$select": SELECT}),
         ("/v1.0/me/directReports", {"$select": SELECT, "$skiptoken": "mine2"}),
     ]
@@ -511,9 +521,9 @@ def test_list_direct_reports_finds_an_email_address_that_is_not_the_sign_in_name
         ),
     )
 
-    result = _payload(tools.microsoft_people_list_direct_reports("sam@example.com"))
+    result = json.loads(tools.microsoft_people_list_direct_reports("sam@example.com"))
 
-    assert [_raw_path(request) for request in graph.requests] == [
+    assert [raw_path(request) for request in graph.requests] == [
         "/v1.0/users/sam@example.com/directReports",
         "/v1.0/users",
         f"/v1.0/users/{SAM}/directReports",
@@ -526,7 +536,7 @@ def test_people_are_escaped_as_single_path_segments(tmp_path: Path, monkeypatch:
 
     tools.microsoft_people_list_direct_reports("kim+test@example.com")
 
-    assert _raw_path(graph.requests[0]) == "/v1.0/users/kim%2Btest@example.com/directReports"
+    assert raw_path(graph.requests[0]) == "/v1.0/users/kim%2Btest@example.com/directReports"
 
 
 def test_guest_sign_in_names_reach_graph_with_encoded_hashes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -544,29 +554,29 @@ def test_guest_sign_in_names_reach_graph_with_encoded_hashes(tmp_path: Path, mon
         ),
     )
 
-    assert _payload(tools.microsoft_people_get_profile(guest))["status"] == "ok"
-    assert _payload(tools.microsoft_people_list_direct_reports(guest))["status"] == "ok"
-    assert [_raw_path(request) for request in graph.requests] == [
+    assert json.loads(tools.microsoft_people_get_profile(guest))["status"] == "ok"
+    assert json.loads(tools.microsoft_people_list_direct_reports(guest))["status"] == "ok"
+    assert [raw_path(request) for request in graph.requests] == [
         encoded,
         f"/v1.0/users/{DANA}/manager",
         f"{encoded}/directReports",
     ]
 
 
-@pytest.mark.parametrize("bad_person", ["", " ", "..", "a/b", "a\\b", "a?b", "#", "a##b", "a\nb", 7, None])
+@pytest.mark.parametrize("bad_person", ["", " ", "..", "a/b", "a\\b", "a?b", "#", "a##b", "a\nb"])
 def test_malformed_people_are_refused_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    bad_person: object,
+    bad_person: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
 
     results = [
-        tools.microsoft_people_get_profile(bad_person),  # type: ignore[arg-type]
-        tools.microsoft_people_list_direct_reports(bad_person),  # type: ignore[arg-type]
+        tools.microsoft_people_get_profile(bad_person),
+        tools.microsoft_people_list_direct_reports(bad_person),
     ]
 
-    assert [_payload(result)["code"] for result in results] == ["invalid_argument", "invalid_argument"]
+    assert [json.loads(result)["code"] for result in results] == ["invalid_argument", "invalid_argument"]
     assert graph.requests == []
 
 
@@ -576,7 +586,7 @@ def test_descriptions_point_the_agent_at_the_ids_and_addresses_it_needs(
 ) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
 
-    assert "ask the requester which one they mean" in _description(tools, "microsoft_people_search")
+    assert "ask the requester which one they mean" in model_description(tools, "microsoft_people_search")
     person = toolkit_offers(tools, "microsoft_people_get_profile").parameters["properties"]["person"]
     assert "email address" in person["description"]
     assert '"me" for the requester' in person["description"]
@@ -586,7 +596,7 @@ def test_descriptions_point_the_agent_at_the_ids_and_addresses_it_needs(
 def test_graph_errors_keep_their_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, code: str) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({"error": {"code": "Authorization_RequestDenied"}}, status))
 
-    result = _payload(tools.microsoft_people_search("Dana"))
+    result = json.loads(tools.microsoft_people_search("Dana"))
 
     assert (result["status"], result["code"], result["graph_code"]) == ("error", code, "Authorization_RequestDenied")
 
@@ -598,6 +608,6 @@ def test_throttling_reports_the_retry_delay(tmp_path: Path, monkeypatch: pytest.
         lambda _request: httpx.Response(429, headers={"Retry-After": "7"}, json={"error": {"code": "TooManyRequests"}}),
     )
 
-    result = _payload(tools.microsoft_people_list_direct_reports(SAM))
+    result = json.loads(tools.microsoft_people_list_direct_reports(SAM))
 
     assert (result["code"], result["retry_after_seconds"]) == ("throttled", 7)

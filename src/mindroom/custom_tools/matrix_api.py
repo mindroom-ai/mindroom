@@ -187,65 +187,36 @@ class MatrixApiTools(Toolkit):
         return str(response), None
 
     @staticmethod
-    def _normalize_action(action: str) -> str:
-        return action.strip().lower() if isinstance(action, str) else ""
-
-    @staticmethod
     def _resolve_room_id(
         context: ToolRuntimeContext,
-        room_id: object | None,
-    ) -> tuple[str | None, str | None]:
+        room_id: str | None,
+    ) -> tuple[str, str | None]:
         if room_id is None:
             return context.room_id, None
-        if not isinstance(room_id, str):
-            return None, "room_id must be omitted or a non-empty Matrix room ID string."
-
         normalized_room_id = room_id.strip()
         if not normalized_room_id:
-            return None, "room_id must be omitted or a non-empty Matrix room ID string."
+            return normalized_room_id, "room_id must be omitted or a non-empty Matrix room ID string."
         if not normalized_room_id.startswith("!"):  # room version 12 IDs carry no ":server" part
-            return None, "room_id must be a Matrix room ID starting with !, not an alias."
+            return normalized_room_id, "room_id must be a Matrix room ID starting with !, not an alias."
         return normalized_room_id, None
 
     @staticmethod
-    def _validate_bool(
-        value: object,
-        *,
-        field_name: str,
-    ) -> tuple[bool | None, str | None]:
-        if isinstance(value, bool):
-            return value, None
-        return None, f"{field_name} must be a boolean."
-
-    @staticmethod
     def _validate_non_empty_string(
-        value: object,
+        value: str | None,
         *,
         field_name: str,
     ) -> tuple[str | None, str | None]:
-        if not isinstance(value, str):
-            return None, f"{field_name} is required and must be a non-empty string."
-        normalized_value = value.strip()
+        normalized_value = (value or "").strip()
         if not normalized_value:
             return None, f"{field_name} is required and must be a non-empty string."
         return normalized_value, None
-
-    @staticmethod
-    def _resolve_state_key(
-        state_key: str | None,
-    ) -> tuple[str, str | None]:
-        if state_key is None:
-            return "", None
-        if not isinstance(state_key, str):
-            return "", "state_key must be a string."
-        return state_key, None
 
     @classmethod
     def _validate_content(
         cls,
         content: dict[str, object] | None,
     ) -> tuple[dict[str, object] | None, str | None]:
-        if not isinstance(content, dict):
+        if content is None:
             return None, "content must be a JSON object (dict)."
         try:
             json.dumps(content, sort_keys=True)
@@ -344,34 +315,20 @@ class MatrixApiTools(Toolkit):
             normalized_value[key] = item
         return normalized_value
 
-    @staticmethod
-    def _validate_string_list(
-        value: object,
-        *,
-        field_name: str,
-    ) -> list[str]:
-        error_message = f"{field_name} must be a list of non-empty strings."
-        if not isinstance(value, list):
-            raise ValueError(error_message)  # noqa: TRY004
-
-        normalized_items: list[str] = []
-        for item in value:
-            if not isinstance(item, str) or not item.strip():
-                raise ValueError(error_message)
-            normalized_items.append(item.strip())
-        return normalized_items
-
     @classmethod
-    def _validate_search_order_by(cls, order_by: object) -> str:
+    def _validate_search_order_by(cls, order_by: str) -> str:
         error_message = "order_by must be one of: rank, recent."
-        normalized_order_by = order_by.strip().lower() if isinstance(order_by, str) else ""
+        normalized_order_by = order_by.strip().lower()
         if normalized_order_by not in cls._SEARCH_ALLOWED_ORDER_BY:
             raise ValueError(error_message)
         return normalized_order_by
 
     @classmethod
-    def _validate_search_keys(cls, keys: object) -> list[str]:
-        normalized_keys = cls._validate_string_list(keys, field_name="keys")
+    def _validate_search_keys(cls, keys: list[str]) -> list[str]:
+        normalized_keys = [key.strip() for key in keys]
+        if not all(normalized_keys):
+            error_message = "keys must be a list of non-empty strings."
+            raise ValueError(error_message)
         invalid_keys = [key for key in normalized_keys if key not in cls._SEARCH_ALLOWED_KEYS]
         if invalid_keys:
             allowed_keys = ", ".join(cls._SEARCH_ALLOWED_KEYS)
@@ -380,38 +337,11 @@ class MatrixApiTools(Toolkit):
         return normalized_keys
 
     @classmethod
-    def _validate_search_limit(cls, limit: object) -> int:
+    def _validate_search_limit(cls, limit: int) -> int:
         error_message = f"limit must be an integer between 1 and {cls._SEARCH_LIMIT_CAP}."
-        if not isinstance(limit, int) or isinstance(limit, bool) or not 0 < limit <= cls._SEARCH_LIMIT_CAP:
+        if not 0 < limit <= cls._SEARCH_LIMIT_CAP:
             raise ValueError(error_message)
         return limit
-
-    @staticmethod
-    def _validate_optional_dict(
-        value: object,
-        *,
-        field_name: str,
-    ) -> dict[str, object] | None:
-        if value is None:
-            return None
-        normalized_value = MatrixApiTools._copy_string_keyed_dict(value)
-        if normalized_value is None:
-            error_message = f"{field_name} must be a JSON object (dict) when provided."
-            raise ValueError(error_message)
-        return normalized_value
-
-    @staticmethod
-    def _validate_optional_string(
-        value: object,
-        *,
-        field_name: str,
-    ) -> str | None:
-        if value is None:
-            return None
-        if not isinstance(value, str) or not value.strip():
-            error_message = f"{field_name} must be omitted or a non-empty string."
-            raise ValueError(error_message)
-        return value.strip()
 
     @classmethod
     def _truncate_snippet(cls, text: object) -> str:
@@ -522,12 +452,12 @@ class MatrixApiTools(Toolkit):
         cls,
         *,
         room_id: str,
-        search_term: object,
-        keys: object,
-        order_by: object,
-        limit: object,
-        search_filter: object,
-        event_context: object,
+        search_term: str | None,
+        keys: list[str] | None,
+        order_by: str,
+        limit: int,
+        search_filter: dict[str, object] | None,
+        event_context: dict[str, object] | None,
     ) -> dict[str, object]:
         normalized_search_term, search_term_error = cls._validate_non_empty_string(
             search_term,
@@ -538,26 +468,26 @@ class MatrixApiTools(Toolkit):
 
         resolved_order_by = cls._validate_search_order_by(order_by)
         resolved_limit = cls._validate_search_limit(limit)
-        resolved_filter = cls._validate_optional_dict(search_filter, field_name="filter")
-        resolved_event_context = cls._validate_optional_dict(event_context, field_name="event_context")
 
         room_events: dict[str, object] = {
             "search_term": normalized_search_term,
-            "filter": cls._build_search_filter(room_id=room_id, raw_filter=resolved_filter, limit=resolved_limit),
+            "filter": cls._build_search_filter(room_id=room_id, raw_filter=search_filter, limit=resolved_limit),
             "order_by": resolved_order_by,
         }
         if keys is not None:
             room_events["keys"] = cls._validate_search_keys(keys)
-        if resolved_event_context is not None:
-            room_events["event_context"] = resolved_event_context
+        if event_context is not None:
+            room_events["event_context"] = event_context
         return {"search_categories": {"room_events": room_events}}
 
-    @classmethod
-    def _build_search_path(cls, next_batch: object) -> str:
-        resolved_next_batch = cls._validate_optional_string(next_batch, field_name="next_batch")
-        if resolved_next_batch is None:
+    @staticmethod
+    def _build_search_path(next_batch: str | None) -> str:
+        if next_batch is None:
             return nio.Api._build_path(["search"])
-        return nio.Api._build_path(["search"], {"next_batch": resolved_next_batch})
+        if not next_batch.strip():
+            error_message = "next_batch must be omitted or a non-empty string."
+            raise ValueError(error_message)
+        return nio.Api._build_path(["search"], {"next_batch": next_batch.strip()})
 
     @classmethod
     def _check_rate_limit(
@@ -880,22 +810,7 @@ class MatrixApiTools(Toolkit):
                 operation="matrix_api_send_event",
             )
         except Exception as exc:
-            self._audit_write(
-                context=context,
-                room_id=room_id,
-                action="send_event",
-                status="error",
-                event_type=normalized_event_type,
-                content=normalized_content,
-                response=exc,
-            )
-            return self._error_payload(
-                action="send_event",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                message="Failed to send Matrix event.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, nio.RoomSendResponse):
             self._audit_write(
@@ -931,7 +846,7 @@ class MatrixApiTools(Toolkit):
             response=response,
         )
 
-    async def _get_state(  # noqa: PLR0911
+    async def _get_state(
         self,
         context: ToolRuntimeContext,
         *,
@@ -949,14 +864,7 @@ class MatrixApiTools(Toolkit):
                 room_id=room_id,
                 message=event_type_error,
             )
-        resolved_state_key, state_key_error = self._resolve_state_key(state_key)
-        if state_key_error is not None:
-            return self._error_payload(
-                action="get_state",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                message=state_key_error,
-            )
+        resolved_state_key = state_key or ""
 
         assert normalized_event_type is not None
 
@@ -967,14 +875,7 @@ class MatrixApiTools(Toolkit):
                 state_key=resolved_state_key,
             )
         except Exception as exc:
-            return self._error_payload(
-                action="get_state",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                state_key=resolved_state_key,
-                message="Failed to fetch Matrix state event.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
             return self._payload(
@@ -1034,14 +935,7 @@ class MatrixApiTools(Toolkit):
                 room_id=room_id,
                 message=event_type_error,
             )
-        resolved_state_key, state_key_error = self._resolve_state_key(state_key)
-        if state_key_error is not None:
-            return self._error_payload(
-                action="put_state",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                message=state_key_error,
-            )
+        resolved_state_key = state_key or ""
         normalized_content, content_error = self._validate_content(content)
         if content_error is not None:
             return self._error_payload(
@@ -1099,25 +993,7 @@ class MatrixApiTools(Toolkit):
                 content=normalized_content,
             )
         except Exception as exc:
-            self._audit_write(
-                context=context,
-                room_id=room_id,
-                action="put_state",
-                status="error",
-                event_type=normalized_event_type,
-                state_key=resolved_state_key,
-                dangerous=dangerous,
-                content=normalized_content,
-                response=exc,
-            )
-            return self._error_payload(
-                action="put_state",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                state_key=resolved_state_key,
-                message="Failed to write Matrix state event.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, nio.RoomPutStateResponse):
             self._audit_write(
@@ -1195,7 +1071,7 @@ class MatrixApiTools(Toolkit):
             allow_dangerous=allow_dangerous,
         )
 
-    async def _redact(  # noqa: PLR0911
+    async def _redact(
         self,
         context: ToolRuntimeContext,
         *,
@@ -1209,26 +1085,23 @@ class MatrixApiTools(Toolkit):
             event_id,
             field_name="event_id",
         )
-        normalized_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
-        error_message = event_id_error
-        if error_message is not None:
+        normalized_reason = (reason or "").strip() or None
+        if event_id_error is not None:
             return self._error_payload(
                 action="redact",
                 room_id=room_id,
-                message=error_message,
+                message=event_id_error,
             )
 
         assert normalized_event_id is not None
 
-        thread_resolution_error = await self._redaction_thread_resolution_error(
+        error_message = await self._redaction_thread_resolution_error(
             context,
             room_id=room_id,
             event_id=normalized_event_id,
         )
         dangerous = False
-        if thread_resolution_error is not None:
-            error_message = thread_resolution_error
-        else:
+        if error_message is None:
             state_policy_error, dangerous = await self._redaction_state_policy_error(
                 context,
                 room_id=room_id,
@@ -1238,14 +1111,18 @@ class MatrixApiTools(Toolkit):
             if state_policy_error is not None:
                 return state_policy_error
 
+        if not dry_run and (limit_error := self._check_rate_limit(context, room_id, action="redact")) is not None:
+            error_message = limit_error
+
+        if error_message is not None:
+            return self._error_payload(
+                action="redact",
+                room_id=room_id,
+                target_event_id=normalized_event_id,
+                message=error_message,
+            )
+
         if dry_run:
-            if error_message is not None:
-                return self._error_payload(
-                    action="redact",
-                    room_id=room_id,
-                    target_event_id=normalized_event_id,
-                    message=error_message,
-                )
             return self._payload(
                 "ok",
                 action="redact",
@@ -1259,17 +1136,6 @@ class MatrixApiTools(Toolkit):
                 },
             )
 
-        if (limit_error := self._check_rate_limit(context, room_id, action="redact")) is not None:
-            error_message = limit_error
-
-        if error_message is not None:
-            return self._error_payload(
-                action="redact",
-                room_id=room_id,
-                target_event_id=normalized_event_id,
-                message=error_message,
-            )
-
         try:
             response = await context.client.room_redact(
                 room_id=room_id,
@@ -1277,23 +1143,7 @@ class MatrixApiTools(Toolkit):
                 reason=normalized_reason,
             )
         except Exception as exc:
-            self._audit_write(
-                context=context,
-                room_id=room_id,
-                action="redact",
-                status="error",
-                target_event_id=normalized_event_id,
-                reason=normalized_reason,
-                dangerous=dangerous,
-                response=exc,
-            )
-            return self._error_payload(
-                action="redact",
-                room_id=room_id,
-                target_event_id=normalized_event_id,
-                message="Failed to redact Matrix event.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, nio.RoomRedactResponse):
             self._audit_write(
@@ -1355,13 +1205,7 @@ class MatrixApiTools(Toolkit):
         try:
             response = await context.client.room_get_event(room_id, normalized_event_id)
         except Exception as exc:
-            return self._error_payload(
-                action="get_event",
-                room_id=room_id,
-                event_id=normalized_event_id,
-                message="Failed to fetch Matrix event.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
             return self._payload(
@@ -1408,13 +1252,13 @@ class MatrixApiTools(Toolkit):
         context: ToolRuntimeContext,
         *,
         room_id: str,
-        search_term: object,
-        keys: object,
-        order_by: object,
-        limit: object,
-        next_batch: object,
-        search_filter: object,
-        event_context: object,
+        search_term: str | None,
+        keys: list[str] | None,
+        order_by: str,
+        limit: int,
+        next_batch: str | None,
+        search_filter: dict[str, object] | None,
+        event_context: dict[str, object] | None,
     ) -> str:
         try:
             request_body = self._build_search_request_body(
@@ -1442,12 +1286,7 @@ class MatrixApiTools(Toolkit):
                 nio.Api.to_json(request_body),
             )
         except Exception as exc:
-            return self._error_payload(
-                action="search",
-                room_id=room_id,
-                message="Failed to search Matrix room events.",
-                response=exc,
-            )
+            response = exc
 
         if isinstance(response, _MatrixSearchResponse):
             normalized_results: list[dict[str, object]] = []
@@ -1481,7 +1320,7 @@ class MatrixApiTools(Toolkit):
             response=response,
         )
 
-    async def matrix_api(  # noqa: C901, PLR0911, PLR0912
+    async def matrix_api(  # noqa: C901, PLR0911
         self,
         action: str = "send_event",
         room_id: str | None = None,
@@ -1523,46 +1362,22 @@ class MatrixApiTools(Toolkit):
         if isinstance(context := tool_context_or_error(self._payload, "Matrix API"), str):
             return context
 
-        normalized_action = self._normalize_action(action)
+        normalized_action = action.strip().lower()
         if normalized_action not in self._VALID_ACTIONS:
             return self._error_payload(
-                action=normalized_action or str(action),
+                action=normalized_action or action,
                 message="Unsupported action. Use send_event, get_state, put_state, redact, get_event, or search.",
-            )
-
-        normalized_dry_run, dry_run_error = self._validate_bool(dry_run, field_name="dry_run")
-        if dry_run_error is not None:
-            return self._error_payload(
-                action=normalized_action,
-                message=dry_run_error,
-            )
-
-        normalized_allow_dangerous, allow_dangerous_error = self._validate_bool(
-            allow_dangerous,
-            field_name="allow_dangerous",
-        )
-        if allow_dangerous_error is not None:
-            return self._error_payload(
-                action=normalized_action,
-                message=allow_dangerous_error,
             )
 
         resolved_room_id, room_id_error = self._resolve_room_id(context, room_id)
         if room_id_error is not None:
-            room_id_payload: dict[str, object] = {}
-            if isinstance(room_id, str):
-                room_id_payload["room_id"] = room_id.strip()
             return self._error_payload(
                 action=normalized_action,
+                room_id=resolved_room_id,
                 message=room_id_error,
-                **room_id_payload,
             )
 
-        assert normalized_dry_run is not None
-        assert normalized_allow_dangerous is not None
-        assert resolved_room_id is not None
-
-        if normalized_action == "search" and (normalized_dry_run or normalized_allow_dangerous):
+        if normalized_action == "search" and (dry_run or allow_dangerous):
             return self._error_payload(
                 action="search",
                 room_id=resolved_room_id,
@@ -1582,7 +1397,7 @@ class MatrixApiTools(Toolkit):
                 room_id=resolved_room_id,
                 event_type=event_type,
                 content=content,
-                dry_run=normalized_dry_run,
+                dry_run=dry_run,
             )
         if normalized_action == "get_state":
             return await self._get_state(
@@ -1598,8 +1413,8 @@ class MatrixApiTools(Toolkit):
                 event_type=event_type,
                 state_key=state_key,
                 content=content,
-                dry_run=normalized_dry_run,
-                allow_dangerous=normalized_allow_dangerous,
+                dry_run=dry_run,
+                allow_dangerous=allow_dangerous,
             )
         if normalized_action == "redact":
             return await self._redact(
@@ -1607,8 +1422,8 @@ class MatrixApiTools(Toolkit):
                 room_id=resolved_room_id,
                 event_id=event_id,
                 reason=reason,
-                dry_run=normalized_dry_run,
-                allow_dangerous=normalized_allow_dangerous,
+                dry_run=dry_run,
+                allow_dangerous=allow_dangerous,
             )
         if normalized_action == "get_event":
             return await self._get_event(

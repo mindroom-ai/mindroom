@@ -1223,6 +1223,8 @@ def test_chat_ui_instructions_map_only_the_enabled_functions(
         assert (f"\n- {name}(" in prompt) is (name not in excluded)
     assert "open_panel(panel='computer') shows the Computer panel" in prompt
     assert "open_panel(panel='members') shows the Members panel" in prompt
+    # With show_canvas beside open_panel, the agent learns that a real website needs the Computer panel, not a canvas.
+    assert ("a canvas cannot." in prompt) is ("show_canvas" not in excluded)
 
 
 @pytest.mark.parametrize(
@@ -1261,14 +1263,13 @@ def test_excluding_a_disabled_chat_ui_function_keeps_the_toolkit(tmp_path: Path)
     assert sorted(function.name for function in _toolkit(agent, "chat_ui").functions) == [
         "open_panel",
         "open_settings",
-        "show_computer",
     ]
 
 
 @pytest.mark.parametrize(
     ("options", "available"),
     [
-        ({"include_tools": ["show_computer"]}, "show_computer"),
+        ({"include_tools": ["open_panel"]}, "open_panel"),
         ({"enable_show_canvas": True, "include_tools": ["show_canvas"]}, "show_canvas"),
     ],
 )
@@ -1291,6 +1292,7 @@ def test_chat_ui_instructions_never_point_at_a_missing_function(
     for name in set(builtin_tool_registry().entries["chat_ui"].function_names) - {available}:
         assert f"{name}(" not in instructions
         assert f"{name}(" not in description
+    assert "a canvas cannot." not in instructions
     assert f"- {available}(" in _build_prompt(agent)
 
 
@@ -1304,7 +1306,7 @@ def test_chat_ui_instructions_name_only_the_functions_a_narrowed_agent_is_offere
     raw["agents"]["code"]["tools"] = ["chat_ui"]  # type: ignore[index]
     if narrowed_by == "approval":
         raw["tool_approval"] = {
-            "rules": [{"match": name, "action": "require_approval"} for name in ("open_panel", "show_computer")],
+            "rules": [{"match": "open_panel", "action": "require_approval"}],
         }
     config = _validated_config(tmp_path, raw)
     narrowing: dict[str, Any] = {
@@ -1326,7 +1328,6 @@ def test_chat_ui_instructions_name_only_the_functions_a_narrowed_agent_is_offere
     assert [function.name for function in chat_ui.functions] == ["open_settings"]
     for text in (_build_prompt(agent), chat_ui.guidance or ""):
         assert "- open_settings(" in text
-        assert "show_computer(" not in text
         assert "open_panel(" not in text
 
 

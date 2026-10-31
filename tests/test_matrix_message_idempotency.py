@@ -270,7 +270,6 @@ async def test_completed_receipts_expire_but_pending_sends_do_not(
         {"idempotency_key": ""},
         {"idempotency_key": " "},
         {"idempotency_key": "x" * 257},
-        {"idempotency_key": 7},
         {"action": "read", "idempotency_key": "key"},
         {"action": "edit", "event_id": "$event", "idempotency_key": "key"},
         {"action": "react", "event_id": "$event", "idempotency_key": "key"},

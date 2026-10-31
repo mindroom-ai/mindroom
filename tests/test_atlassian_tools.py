@@ -366,7 +366,7 @@ async def test_jira_get_issue_lists_available_transitions(tmp_path: Path, monkey
         },
     )
 
-    result = json.loads(await tool.jira_get_issue(issue_key="proj-7", fields=["summary", "status"]))
+    result = json.loads(await tool.jira_get_issue(issue_key="proj-7", fields=["summary", " status "]))
     await tool.jira_get_issue(issue_key="PROJ-7")
 
     explicit, default = gateway.product_requests()
@@ -760,8 +760,11 @@ async def test_confluence_update_and_comment_use_v2_writes(tmp_path: Path, monke
             "confluence_create_page",
             {"space_key": "DOCS", "title": "t", "body_storage": "b", "parent_page_id": "1 OR 1"},
         ),
+        ("confluence_create_page", {"space_key": "DOCS/1", "title": "t", "body_storage": "b"}),
         ("confluence_search", {"cql": "type = page", "cursor": "abc\ndef"}),
         ("jira_search_issues", {"jql": " "}),
+        ("jira_search_issues", {"jql": "project = PROJ", "fields": ["summary", " "]}),
+        ("jira_search_issues", {"jql": "project = PROJ", "fields": []}),
     ],
 )
 async def test_unsafe_arguments_are_rejected_before_any_network_access(
