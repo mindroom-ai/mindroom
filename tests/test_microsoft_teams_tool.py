@@ -619,20 +619,6 @@ def test_chat_send_with_an_incomplete_member_list_is_refused(
     assert [request.method for request in graph.requests] == ["GET"]
 
 
-@pytest.mark.parametrize("recipients", ["alex@contoso.com", [None], None])
-def test_chat_recipients_that_are_not_a_list_of_addresses_are_refused_before_any_request(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    recipients: object,
-) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
-
-    result = _payload(tools.microsoft_teams_send_chat_message(CHAT, recipients, "hi"))
-
-    assert (result["code"], result["message"]) == ("invalid_argument", "recipients must be a list of email addresses.")
-    assert graph.requests == []
-
-
 @pytest.mark.parametrize(
     ("team", "channel"),
     [("Fabrikam Team", CHANNEL_NAME), (TEAM_NAME, "Random")],
@@ -744,6 +730,15 @@ def test_limits_outside_one_to_fifty_are_refused(
     [
         ("microsoft_teams_list_chats", {"limit": 2.5}),
         ("microsoft_teams_list_chat_messages", {"chat_id": CHAT, "page_token": 5}),
+        ("microsoft_teams_send_chat_message", {"chat_id": CHAT, "recipients": "alex@contoso.com", "text": "hi"}),
+        ("microsoft_teams_send_chat_message", {"chat_id": CHAT, "recipients": [None], "text": "hi"}),
+        ("microsoft_teams_send_chat_message", {"chat_id": CHAT, "recipients": None, "text": "hi"}),
+        ("microsoft_teams_send_chat_message", {"chat_id": CHAT, "recipients": RECIPIENTS, "text": None}),
+        ("microsoft_teams_start_chat", {"people": "sam@contoso.com", "message": "hi"}),
+        ("microsoft_teams_start_chat", {"people": [None], "message": "hi"}),
+        ("microsoft_teams_start_chat", {"people": ["sam@contoso.com"], "message": None}),
+        ("microsoft_teams_start_chat", {"people": ["sam@contoso.com", "jo@contoso.com"], "message": "hi", "topic": 5}),
+        ("microsoft_teams_get_presence", {"people": None}),
     ],
 )
 def test_malformed_arguments_fail_call_validation_before_any_request(
@@ -766,12 +761,11 @@ def test_malformed_arguments_fail_call_validation_before_any_request(
     [
         ("", "invalid_argument"),
         ("  \n ", "invalid_argument"),
-        (None, "invalid_argument"),
         ("é" * (microsoft_teams._MAX_MESSAGE_BYTES // 2 + 1), "too_large"),
         ("x" * (microsoft_teams._MAX_MESSAGE_BYTES + 1), "too_large"),
         ("<" * (microsoft_teams._MAX_MESSAGE_BYTES // 4 + 1), "too_large"),
     ],
-    ids=["empty", "blank", "none", "multibyte-over-limit", "ascii-over-limit", "escaped-over-limit"],
+    ids=["empty", "blank", "multibyte-over-limit", "ascii-over-limit", "escaped-over-limit"],
 )
 @pytest.mark.parametrize(
     "call",
@@ -791,9 +785,9 @@ def test_malformed_arguments_fail_call_validation_before_any_request(
 def test_empty_or_oversized_text_is_refused_before_sending(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    text: object,
+    text: str,
     code: str,
-    call: Callable[[MicrosoftTeamsTools, object], str],
+    call: Callable[[MicrosoftTeamsTools, str], str],
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
 
@@ -1013,10 +1007,7 @@ PEOPLE_MESSAGE = "people must be a list of 1 to 20 different sign-in addresses, 
 @pytest.mark.parametrize(
     "people",
     [
-        "sam@contoso.com",
-        None,
         [],
-        [None],
         ["sam"],
         ["sam@"],
         ["@contoso.com"],
@@ -1041,8 +1032,8 @@ PEOPLE_MESSAGE = "people must be a list of 1 to 20 different sign-in addresses, 
 def test_people_that_are_not_sign_in_addresses_are_refused_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    people: object,
-    call: Callable[[MicrosoftTeamsTools, object], str],
+    people: list[str],
+    call: Callable[[MicrosoftTeamsTools, list[str]], str],
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
 
@@ -1057,15 +1048,14 @@ def test_people_that_are_not_sign_in_addresses_are_refused_before_any_request(
     [
         (["sam@contoso.com"], "Launch", "topic names only a chat with two or more people."),
         (["sam@contoso.com", "jo@contoso.com"], "  ", "topic must be text, or left out."),
-        (["sam@contoso.com", "jo@contoso.com"], 5, "topic must be text, or left out."),
     ],
-    ids=["one-on-one", "blank", "not-text"],
+    ids=["one-on-one", "blank"],
 )
 def test_start_chat_with_an_unusable_topic_is_refused_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     people: list[str],
-    topic: object,
+    topic: str,
     message: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
@@ -1080,15 +1070,14 @@ def test_start_chat_with_an_unusable_topic_is_refused_before_any_request(
     ("text", "code"),
     [
         ("", "invalid_argument"),
-        (None, "invalid_argument"),
         ("x" * (microsoft_teams._MAX_MESSAGE_BYTES + 1), "too_large"),
     ],
-    ids=["empty", "none", "over-limit"],
+    ids=["empty", "over-limit"],
 )
 def test_start_chat_with_an_empty_or_oversized_message_is_refused_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    text: object,
+    text: str,
     code: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))

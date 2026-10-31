@@ -101,9 +101,9 @@ def _top(limit: int) -> str:
     return str(graph_int(limit, "limit", maximum=_MAX_LIMIT))
 
 
-def _text_body(text: object, field_name: str = "text") -> dict[str, object]:
+def _text_body(text: str, field_name: str = "text") -> dict[str, object]:
     """Return text as an escaped HTML message body, so model text is never rendered as markup and keeps its lines."""
-    if not isinstance(text, str) or not text.strip():
+    if not text.strip():
         raise MicrosoftGraphError(code="invalid_argument", message=f"{field_name} must not be empty.")
     content = text_to_html(text)
     size = len(content.encode("utf-8"))
@@ -188,14 +188,6 @@ def _chat(chat: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _addresses(recipients: object) -> frozenset[str]:
-    if isinstance(recipients, list):
-        addresses = [address.lower() for address in recipients if isinstance(address, str)]
-        if len(addresses) == len(recipients):
-            return frozenset(addresses)
-    raise MicrosoftGraphError(code="invalid_argument", message="recipients must be a list of email addresses.")
-
-
 def _check_members(chat_id: object, addresses: frozenset[str], session: GraphSession) -> None:
     """Refuse a chat send when a member has no email address or one not in addresses, compared without case.
 
@@ -213,18 +205,17 @@ def _check_members(chat_id: object, addresses: frozenset[str], session: GraphSes
         raise MicrosoftGraphError(code="recipients_mismatch", message=msg, members=members)
 
 
-def _sign_in_names(people: object) -> tuple[str, ...]:
-    if isinstance(people, list):
-        names = tuple(person for person in people if isinstance(person, str) and _SIGN_IN_NAME.fullmatch(person))
-        distinct = {name.lower() for name in names}
-        if len(names) == len(people) == len(distinct) and 1 <= len(names) <= _MAX_PEOPLE:
-            return names
+def _sign_in_names(people: list[str]) -> tuple[str, ...]:
+    names = tuple(person for person in people if _SIGN_IN_NAME.fullmatch(person))
+    distinct = {name.lower() for name in names}
+    if len(names) == len(people) == len(distinct) and 1 <= len(names) <= _MAX_PEOPLE:
+        return names
     msg = f"people must be a list of 1 to {_MAX_PEOPLE} different sign-in addresses, such as sam@contoso.com."
     raise MicrosoftGraphError(code="invalid_argument", message=msg)
 
 
-def _topic(topic: object, people: tuple[str, ...]) -> str | None:
-    if topic is not None and (not isinstance(topic, str) or not topic.strip()):
+def _topic(topic: str | None, people: tuple[str, ...]) -> str | None:
+    if topic is not None and not topic.strip():
         raise MicrosoftGraphError(code="invalid_argument", message="topic must be text, or left out.")
     if topic is not None and len(people) < 2:
         raise MicrosoftGraphError(code="invalid_argument", message="topic names only a chat with two or more people.")
@@ -678,7 +669,7 @@ class MicrosoftTeamsTools(Toolkit):
                 "POST",
                 f"{_chat_path(chat_id)}/messages",
                 body=_text_body(text),
-                check=partial(_check_members, chat_id, _addresses(recipients)),
+                check=partial(_check_members, chat_id, frozenset(address.lower() for address in recipients)),
             ),
             lambda payload: {"message": _message(payload)},
         )
