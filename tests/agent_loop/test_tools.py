@@ -7,6 +7,7 @@ import asyncio
 import contextvars
 import json
 import threading
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -17,6 +18,7 @@ from agno.tools.function import ToolResult
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.tools import (
+    _PROGRESS_FLUSH_SECONDS,
     MEDIA_FOLLOW_UP_TEXT,
     PreparedTools,
     RefusedCall,
@@ -396,6 +398,33 @@ async def test_a_calls_progress_stays_with_the_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_call_reporting_faster_than_frames_go_out_yields_at_most_ten_events_a_second() -> None:
+    """Live frames go out ten times a second, so more reports than that only cost the loop events nobody sees."""
+
+    async def stream(count: int) -> str:
+        """Report every hundredth of a second, then finish.
+
+        Args:
+            count: How many reports to make.
+
+        """
+        for index in range(count):
+            report_tool_progress(f"report {index}")
+            await asyncio.sleep(0.01)
+        return "done"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(stream)).functions, tool_call("stream", "c1", count=40))
+
+    started = time.monotonic()
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+    elapsed = time.monotonic() - started
+
+    reports = [item for item in items if isinstance(item, ToolProgress)]
+    assert len(reports) <= int(elapsed / 0.1) + 2
+    assert reports[-1].text == "report 39"
+
+
+@pytest.mark.asyncio
 async def test_a_flood_of_progress_reports_costs_a_few_events_and_keeps_the_latest() -> None:
     """A call that reports far faster than the loop turns, as untrusted worker code can, yields only its newest reports."""
 
@@ -412,12 +441,17 @@ async def test_a_flood_of_progress_reports_costs_a_few_events_and_keeps_the_late
 
     planned = _planned(spec(ScriptedModel([]), toolkit(flood)).functions, tool_call("flood", "c1", count=20000))
 
-    with patch("mindroom.agent_loop.tools.redact_sensitive_text", wraps=redact_sensitive_text) as redact:
+    loop = asyncio.get_running_loop()
+    with (
+        patch("mindroom.agent_loop.tools.redact_sensitive_text", wraps=redact_sensitive_text) as redact,
+        patch.object(loop, "call_soon_threadsafe", wraps=loop.call_soon_threadsafe) as hop,
+    ):
         items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
 
     reports = [item for item in items if isinstance(item, ToolProgress)]
     assert 0 < len(reports) < 1000
     assert redact.call_count == len(reports)
+    assert hop.call_count < 1000
     assert reports[-1].text == "report 19999"
 
 
@@ -494,7 +528,7 @@ async def test_progress_a_call_reports_after_it_returned_is_dropped() -> None:
     first = await anext(stream)
     report_later.set()
     await asyncio.to_thread(reported.wait, 5)
-    await asyncio.sleep(0)
+    await asyncio.sleep(2 * _PROGRESS_FLUSH_SECONDS)
     release_other.set()
     rest = [item async for item in stream]
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
@@ -37,6 +38,8 @@ _LIMIT_ERROR_TEXT = "Tool call limit reached. Tool call {name} not executed. Don
 # The model writes the name of a tool it was not offered, so the log keeps only this much of it.
 _MAX_LOGGED_TOOL_NAME = 100
 MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
+# Live frames go out ten times a second; reports a call makes between two of them would never be seen.
+_PROGRESS_FLUSH_SECONDS = 0.1
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -275,43 +278,45 @@ async def _run_call(
     execution = call.execution
     context = run.call_context(execution.tool_call_id)
     loop = asyncio.get_running_loop()
-    loop_thread = threading.get_ident()
-    returned = False
-    latest_lock = threading.Lock()
+    lock = threading.Lock()
     latest: str | None = None
-
-    def deliver(text: str) -> None:
-        # A thread that outlives the call cannot report for it. Output can print credentials; mask them as the call's
-        # result preview does, before the cut can drop the label that identifies a long one.
-        if not returned:
-            emit(ToolProgress(execution.tool_call_id, cap_progress(redact_sensitive_text(text))))
+    flush_scheduled = False
+    returned = False
+    last_flush = -math.inf
 
     def flush() -> None:
-        nonlocal latest
-        with latest_lock:
-            text, latest = latest, None
+        nonlocal latest, flush_scheduled, last_flush
+        with lock:
+            text, latest, flush_scheduled = latest, None, False
+        last_flush = loop.time()
         if text is not None:
-            deliver(text)
+            # Output can print credentials; mask them as the call's result preview does, before the cut can drop the
+            # label that identifies a long one.
+            emit(ToolProgress(execution.tool_call_id, cap_progress(redact_sensitive_text(text))))
+
+    def schedule_flush() -> None:
+        loop.call_later(max(0.0, last_flush + _PROGRESS_FLUSH_SECONDS - loop.time()), flush)
 
     def report(text: str) -> None:
-        # A report made on the loop lands before the call can return. Threads, which can run untrusted worker code,
-        # can report faster than the loop turns: keep only their newest report and flush it once per loop turn, still
-        # ahead of the call's result.
-        nonlocal latest
-        if threading.get_ident() == loop_thread:
-            deliver(text)
-            return
-        with latest_lock:
-            flush_pending = latest is not None
+        # Any thread may report, and a tool, such as untrusted worker code, may report far faster than anyone can
+        # watch: keep only the newest report and flush it at most as often as live frames go out.
+        nonlocal latest, flush_scheduled
+        with lock:
+            if returned:
+                return  # A thread that outlives the call cannot report for it.
             latest = text
-        if not flush_pending:
-            loop.call_soon_threadsafe(flush)
+            if flush_scheduled:
+                return
+            flush_scheduled = True
+        loop.call_soon_threadsafe(schedule_flush)
 
     try:
         with tool_progress_reporter(report):
             outcome = await execute_tool_call(call.function, execution.tool_args, context, middleware=middleware)
     finally:
-        returned = True
+        with lock:
+            returned = True
+        flush()  # The latest report lands before the result.
     execution.result = outcome.content
     execution.is_error = outcome.is_error
     execution.stop_after_call = outcome.stop_after_call

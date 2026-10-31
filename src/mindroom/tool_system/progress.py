@@ -24,8 +24,13 @@ _REPORTER: ContextVar[Callable[[str], None] | None] = ContextVar("tool_progress_
 
 
 def cap_progress(text: str) -> str:
-    """Keep only the latest characters of one report."""
+    """Keep only the latest characters of one report that are shown."""
     return text[-_MAX_PROGRESS_CHARS:]
+
+
+def cap_report(text: str) -> str:
+    """Keep only the latest characters a report carries, enough for whoever shows it to mask a long credential."""
+    return text[-_REPORT_WINDOW_CHARS:]
 
 
 def report_tool_progress(text: str) -> None:
@@ -36,7 +41,7 @@ def report_tool_progress(text: str) -> None:
     """
     reporter = _REPORTER.get()
     if reporter is not None:
-        reporter(text[-_REPORT_WINDOW_CHARS:])
+        reporter(cap_report(text))
 
 
 @contextmanager
