@@ -86,6 +86,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "role",
         "room_thread_modes",
         "rooms",
+        "show_reasoning",
         "show_tool_calls",
         "skill_learning",
         "skills",

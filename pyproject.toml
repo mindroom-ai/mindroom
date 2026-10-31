@@ -585,6 +585,9 @@ build-constraint-dependencies = [
   "vcs-versioning==2.5.0",
   "wheel==0.48.0",
 ]
+[tool.uv.sources]
+# room_encrypt and room_send_ephemeral (mindroom-ai/mindroom-nio#95); pin the released version once it ships.
+mindroom-nio = { git = "https://github.com/mindroom-ai/mindroom-nio", rev = "4d57fa3df4f4c4ab12b0663ab5159b09608beaa6" }
 
 [tool.ruff]
 target-version = "py312"

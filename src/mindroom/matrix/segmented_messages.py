@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import STREAM_VISIBLE_BODY_KEY, TOOL_TRACE_CONTENT_KEY
+from mindroom.constants import REASONING_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY, TOOL_TRACE_CONTENT_KEY
 from mindroom.matrix.large_messages import calculate_event_size, is_edit_message
 from mindroom.matrix.message_builder import build_thread_relation, markdown_to_html
 from mindroom.tool_system.events import (
@@ -35,8 +35,9 @@ _SEGMENT_TARGET_ENCRYPTED_PLAINTEXT_BYTES = 30_000
 _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES = 16_000
 _SEGMENT_SHRINK_MARGIN = 0.9
 # Rebuilt per segment after sizing (the tool trace) or not part of the visible
-# answer, so tool metadata can never split an answer or push it into a sidecar.
-_INTERNAL_STREAM_KEYS = frozenset({TOOL_TRACE_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY})
+# answer, so metadata can never split an answer or push it into a sidecar. A split
+# reply keeps no reasoning, which would otherwise repeat on every segment.
+_INTERNAL_STREAM_KEYS = frozenset({TOOL_TRACE_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY, REASONING_CONTENT_KEY})
 # Rebuilt per segment from the chunk it carries, or dropped as internal.
 _SEGMENT_DROPPED_KEYS = _INTERNAL_STREAM_KEYS | {
     "body",
@@ -227,6 +228,11 @@ def _with_tool_trace(
     return build(strip_visible_tool_markers(renumbered))
 
 
+def first_segment_target_bytes(content: dict[str, Any], *, room_encrypted: bool) -> int:
+    """Return the size above which the split strategy segments one payload."""
+    return _segment_target_bytes(room_encrypted=room_encrypted, is_edit=is_edit_message(content))
+
+
 def _segment_target_bytes(*, room_encrypted: bool, is_edit: bool) -> int:
     """Return a conservative per-event budget for one response segment."""
     budgets = {
@@ -412,4 +418,4 @@ def segment_matrix_content(
     return SegmentedMatrixContent(first=first, continuations=continuations)
 
 
-__all__ = ["SegmentedMatrixContent", "segment_matrix_content"]
+__all__ = ["SegmentedMatrixContent", "first_segment_target_bytes", "segment_matrix_content"]
