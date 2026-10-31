@@ -22,6 +22,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
+from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -300,6 +301,11 @@ async def test_approval_gated_tools_stay_native_only(
     listing = _tool_output(provider).replace(" ", "")
     assert '"function":"subtract"' in listing, listing
     assert '"function":"add"' not in listing, listing
+
+
+def test_the_model_switch_is_not_offered_to_the_cli() -> None:
+    """A switch for the current response stops the run, which a call a shell command makes cannot do."""
+    assert not _cli_callable(toolkit_offers(ThreadModelTools(), "switch_thread_model"))
 
 
 def test_the_job_controls_are_not_offered_to_the_cli(tmp_path: Path) -> None:

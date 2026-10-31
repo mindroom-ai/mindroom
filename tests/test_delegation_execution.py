@@ -1821,6 +1821,40 @@ async def _approve_the_child_s_pending_call(
 
 
 @pytest.mark.asyncio
+async def test_an_approved_child_s_switch_for_the_current_response_continues_it_on_the_new_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resumed run stops after the switch, and the child's continuation runs on the model the switch names."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=("report", "thread_model"))
+    config.models["alternate"] = ModelConfig(provider="openai", id="alternate-model")
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")), answer("Parent done")],
+    )
+    switch = tool_call("switch_thread_model", "call-switch", model_name="alternate", when="after-toolcall")
+    code = ScriptedModel([calls(tool_call("write_report", "same-call")), calls(switch), answer("child result")])
+    agents = ScriptedAgents({"leader": leader, "code": code})
+    agents.install(monkeypatch)
+
+    with registered_report_tool():
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=_leader_identity(),
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        result = await _approve_the_child_s_pending_call(config, paths, paused, "card-0")
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert len(code.requests) == 3
+    assert agents.built_models[-1] == "alternate"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("before", ["empty_retry", "model_switch"])
 @pytest.mark.parametrize("after", ["answered", "continued"])
 async def test_a_child_record_reports_the_usage_of_the_attempt_its_turn_spent_before_its_approval_pause(

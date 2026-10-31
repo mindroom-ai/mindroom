@@ -70,7 +70,9 @@ def test_continuation_decision_switches_model_after_tool_call() -> None:
     [
         _model_switch_execution("next-turn").result,
         _rejected_execution().result,
-        json.dumps({"action": "switch", "model": "large", "status": "error", "tool": "thread_model"}),
+        json.dumps(
+            {"action": "switch", "model": "large", "status": "error", "tool": "thread_model", "when": "after-toolcall"},
+        ),
         "not-json",
     ],
     ids=["next-turn", "rejected", "not-ok-naming-a-model", "malformed"],
