@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,6 +19,7 @@ from mindroom.history.replay import scope_visible_runs
 from mindroom.history.storage import (
     has_queued_force_compaction,
     read_scope_seen_event_ids,
+    read_scope_state,
     set_force_compaction,
     with_force_compaction,
 )
@@ -27,7 +27,6 @@ from mindroom.history.types import (
     HistoryScope,
 )
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
-from mindroom.session_storage import store as store_module
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import (
@@ -37,6 +36,7 @@ from tests.history_helpers import (
     _completed_run,
     _session,
     _team_session,
+    trace_store_statements,
 )
 
 if TYPE_CHECKING:
@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def storage(tmp_path: Path) -> ConversationStore:
-    """Conversation storage for reading seen ids, which include the summary rows'."""
+    """The test agent's conversation storage."""
     return create_agent_state_storage("test_agent", tmp_path / "seen")
 
 
@@ -67,6 +67,49 @@ def test_the_force_flag_is_set_and_cleared_beside_the_seen_ids(storage: Conversa
     set_force_compaction(storage, session=session, forced=False)
     assert session.metadata == {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$kept"]}}
     assert with_force_compaction(None) == {MINDROOM_HISTORY_METADATA_KEY: {"force_compact_before_next_run": True}}
+
+
+def test_clearing_the_force_flag_through_a_stale_session_lands_on_the_freshest_row(storage: ConversationStore) -> None:
+    """The clear applies to the stored row's latest metadata, keeps what another writer stored, and syncs the session."""
+    stale_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
+
+    concurrent_session = storage.load_session("session-1")
+    assert concurrent_session is not None
+    storage.update_metadata(concurrent_session, lambda metadata: {**with_force_compaction(metadata), "other": "kept"})
+    storage.save_run(concurrent_session, _completed_run("run-2"), record_usage=False)
+
+    set_force_compaction(storage, session=stale_session, forced=False)
+
+    persisted_session = storage.load_session("session-1")
+    assert persisted_session is not None
+    assert persisted_session.metadata == {"other": "kept"}
+    assert stale_session.metadata == persisted_session.metadata
+    assert [run.run_id for run in persisted_session.runs] == ["run-1", "run-2"]
+
+
+@pytest.mark.parametrize("forced", [True, False], ids=["already-forced", "never-forced"])
+def test_a_force_flag_update_that_changes_nothing_writes_nothing(
+    storage: ConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    forced: bool,
+) -> None:
+    """Setting the flag to what the freshest row holds writes nothing, and the session then holds that row's metadata."""
+    stale_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
+    if forced:
+        concurrent_session = storage.load_session("session-1")
+        assert concurrent_session is not None
+        storage.update_metadata(concurrent_session, with_force_compaction)
+    statements = trace_store_statements(monkeypatch)
+
+    set_force_compaction(storage, session=stale_session, forced=forced)
+
+    assert read_scope_state(stale_session).force_compact_before_next_run is forced
+    assert statements
+    assert not [statement for statement in statements if statement.lstrip().upper().startswith("UPDATE")]
+    persisted_session = storage.load_session("session-1")
+    assert persisted_session is not None
+    assert stale_session.metadata == persisted_session.metadata
 
 
 def test_scope_seen_event_ids_include_persisted_response_event_ids(storage: ConversationStore) -> None:
@@ -136,15 +179,7 @@ def test_queued_force_compaction_reads_the_session_row_without_its_runs(
     flagged.metadata = with_force_compaction(flagged.metadata)
     for session in (flagged, _session("idle", runs=[_completed_run("run-2")])):
         seed_session(storage, session)
-    statements: list[str] = []
-    connect = store_module.connect_conversation_database
-
-    def traced_connect(path: Path) -> sqlite3.Connection:
-        connection = connect(path)
-        connection.set_trace_callback(statements.append)
-        return connection
-
-    monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
+    statements = trace_store_statements(monkeypatch)
 
     assert has_queued_force_compaction(storage, "flagged") is True
     assert has_queued_force_compaction(storage, "idle") is False

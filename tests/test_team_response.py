@@ -79,10 +79,12 @@ from tests.team_turn_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Awaitable, Iterator, Sequence
     from pathlib import Path
 
+    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.teams.envelope import TeamStreamChunk
+    from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
     from mindroom.tool_system.events import StructuredStreamChunk
 
 
@@ -149,13 +151,13 @@ def _leader(team: TeamTurn) -> ScriptedModel:
     return team.models["default"]
 
 
-def _contents(request_messages: Sequence[Message]) -> list[tuple[str, str]]:
-    return [(message.role, str(message.content)) for message in request_messages]
-
-
 def _leader_turn_messages(team: TeamTurn, request: int = 0) -> list[tuple[str, str]]:
     """Return one leader request, the first by default, after its system message: the replayed history, then the turn."""
-    return _contents([message for message in _leader(team).requests[request].messages if message.role != "system"])
+    return [
+        (message.role, str(message.content))
+        for message in _leader(team).requests[request].messages
+        if message.role != "system"
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +770,7 @@ async def test_a_private_member_is_refused_without_a_matrix_requester(
     text = await team.respond()
 
     assert text == "Team request includes agent 'general' that could not be materialized for this request."
-    assert team.models["default"].requests == []
+    assert _leader(team).requests == []
 
 
 @pytest.mark.asyncio
@@ -851,12 +853,12 @@ class _PendingMessages:
         return (QueuedMessage("$pending", None),)
 
 
-def _notice(response_turn_id: str, *, marker: bool | str = True, text: str = QUEUED_MESSAGE_NOTICE_TEXT) -> Message:
+def _notice(response_turn_id: str) -> Message:
     return Message(
         role="user",
-        content=text,
+        content=QUEUED_MESSAGE_NOTICE_TEXT,
         provider_data={
-            "mindroom_queued_message_notice": marker,
+            "mindroom_queued_message_notice": True,
             "mindroom_queued_message_notice_response_turn_id": response_turn_id,
         },
     )
@@ -902,15 +904,8 @@ async def test_a_team_turn_recovers_an_earlier_reply_s_notice_and_keeps_its_own_
     assert _notices(team, notice_context.response_turn_id) == [("run-1", "persisted", "Custom team queued notice.")]
 
 
-@pytest.mark.asyncio
-async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A caller that prepares the turn itself, as the OpenAI-compatible API does, recovers the live notice too."""
-    team = _team(tmp_path, monkeypatch)
-    _seed_history(team, messages=[Message(role="user", content="Earlier"), _notice("prior-response")])
-    members = resolve_team_members(
+def _resolved_members(team: TeamTurn) -> ResolvedExactTeamMembers:
+    return resolve_team_members(
         list(team.member_names),
         team.orchestrator,
         team.identity,
@@ -920,15 +915,9 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
         active_model_names=dict.fromkeys(team.member_names, "default"),
     )
 
-    scope_context = load_bound_scope_session(
-        member_names=team.member_names,
-        team_name=None,
-        session_id=SESSION_ID,
-        runtime_paths=team.runtime_paths,
-        config=team.config,
-        execution_identity=team.identity,
-    )
-    built = build_team_spec(
+
+def _built_spec(team: TeamTurn, members: ResolvedExactTeamMembers, scope_context: ScopeSessionContext) -> BuiltTeam:
+    return build_team_spec(
         members=members,
         mode=team.mode,
         config=team.config,
@@ -939,6 +928,27 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
         configured_team_name=None,
         timezone="UTC",
     )
+
+
+@pytest.mark.asyncio
+async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that prepares the turn itself, as the OpenAI-compatible API does, recovers the live notice too."""
+    team = _team(tmp_path, monkeypatch)
+    _seed_history(team, messages=[Message(role="user", content="Earlier"), _notice("prior-response")])
+    members = _resolved_members(team)
+
+    scope_context = load_bound_scope_session(
+        member_names=team.member_names,
+        team_name=None,
+        session_id=SESSION_ID,
+        runtime_paths=team.runtime_paths,
+        config=team.config,
+        execution_identity=team.identity,
+    )
+    built = _built_spec(team, members, scope_context)
     await prepare_materialized_team_execution(
         team.ctx(),
         scope_context=scope_context,
@@ -962,30 +972,12 @@ def test_a_member_s_roster_role_is_its_authored_role_not_its_rendered_prompt(
 ) -> None:
     """The leader reads the role the member's config authors, whatever the member's own prompt renders around it."""
     team = _team(tmp_path, monkeypatch)
-    members = resolve_team_members(
-        list(team.member_names),
-        team.orchestrator,
-        team.identity,
-        config=team.config,
-        configured_team_name=None,
-        reason_prefix="Team request",
-        active_model_names=dict.fromkeys(team.member_names, "default"),
-    )
+    members = _resolved_members(team)
     build = members.build("general", members.model_names["general"])
     assert build.prompt.role is not None
     assert build.prompt.role != "Answers."
 
-    built = build_team_spec(
-        members=members,
-        mode=team.mode,
-        config=team.config,
-        runtime_paths=team.runtime_paths,
-        scope_context=unstored_team_scope_context(team.config, team.member_names, team_name=None),
-        execution_identity=team.identity,
-        model_name="default",
-        configured_team_name=None,
-        timezone="UTC",
-    )
+    built = _built_spec(team, members, unstored_team_scope_context(team.config, team.member_names, team_name=None))
 
     assert [member.role for member in built.spec.members] == ["Answers."]
 
@@ -999,15 +991,10 @@ async def test_a_notice_delivered_before_the_team_run_failed_is_not_left_live(
 
     The turn driver stores the failed turn as its interrupted record, in the failed run's place.
     """
-
-    async def fail() -> None:
-        msg = "boom"
-        raise ProviderError(msg, provider="Synthetic")
-
     team = _team(
         tmp_path,
         monkeypatch,
-        leader=[delegate("call-team", "general", "Work"), [Await(fail)]],
+        leader=[delegate("call-team", "general", "Work"), _raises(ProviderError("boom", provider="Synthetic"))],
         general=[answer("Worked.")],
     )
     _seed_history(team)
@@ -1039,17 +1026,17 @@ async def test_a_notice_delivered_before_the_team_run_failed_is_not_left_live(
 
 async def _stopped(
     team: TeamTurn,
-    ready: asyncio.Event,
+    ready: Awaitable[object],
     *,
     chunks: list[TeamStreamChunk] | None = None,
     **kwargs: Any,  # noqa: ANN401
 ) -> None:
-    """Stop the reply once ``ready`` is set, as the Stop button cancels the reply's task.
+    """Stop the reply once ``ready`` completes, as the Stop button cancels the reply's task.
 
     ``chunks`` collects the reply's chunks; the last one is the message the stopped reply leaves.
     """
     task = asyncio.create_task(team.stream(chunks=chunks, **kwargs))
-    await asyncio.wait_for(ready.wait(), timeout=5)
+    await asyncio.wait_for(ready, timeout=5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -1099,7 +1086,7 @@ async def test_a_stop_after_a_member_s_finished_call_records_its_text_and_both_c
 
     live: list[TeamStreamChunk] = []
 
-    await _stopped(team, ready, chunks=live, show_tool_calls=False, thread_history=thread_history)
+    await _stopped(team, ready.wait(), chunks=live, show_tool_calls=False, thread_history=thread_history)
 
     snapshot = team.recorder.interrupted_snapshot()
     assert snapshot.user_message == "Hello"
@@ -1112,7 +1099,7 @@ async def test_a_stop_after_a_member_s_finished_call_records_its_text_and_both_c
         '- The `touch` tool finished with input preview "label=pwd" and output preview "touched pwd".\n'
         f"{_DELEGATION_RUNNING}"
     )
-    assert snapshot.run_metadata["matrix_seen_event_ids"] == [EVENT_ID, "$event-2"]
+    assert snapshot.run_metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] == [EVENT_ID, "$event-2"]
     record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.cancelled)
     assert record.metadata is not None
@@ -1133,7 +1120,7 @@ async def test_a_stop_during_a_member_s_call_records_the_call_as_still_running(
         general=[calls(tool_call("touch", "call-touch", label="ls", wait=True), content="Half done")],
     )
 
-    await _stopped(team, probe.waiting, show_tool_calls=False)
+    await _stopped(team, probe.waiting.wait(), show_tool_calls=False)
 
     snapshot = team.recorder.interrupted_snapshot()
     assert _render_interrupted_replay_content(snapshot) == (
@@ -1154,7 +1141,7 @@ async def test_a_stop_before_any_call_records_the_streamed_text_so_far(
     ready = asyncio.Event()
     team = _team(tmp_path, monkeypatch, leader=[[TextDelta("Half done"), _waits(ready)]])
 
-    await _stopped(team, ready)
+    await _stopped(team, ready.wait())
 
     snapshot = team.recorder.interrupted_snapshot()
     assert _render_interrupted_replay_content(snapshot) == (
@@ -1183,11 +1170,7 @@ async def test_a_stop_tells_apart_same_named_calls_by_member_and_by_call(
         members=("general", "research"),
         mode=TeamMode.COLLABORATE,
     )
-    task = asyncio.create_task(team.stream(show_tool_calls=False))
-    await asyncio.wait_for(asyncio.gather(general_waiting.wait(), probe.waiting.wait()), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await _stopped(team, asyncio.gather(general_waiting.wait(), probe.waiting.wait()), show_tool_calls=False)
 
     snapshot = team.recorder.interrupted_snapshot()
     assert [(tool.tool_name, tool.args_preview) for tool in snapshot.completed_tools] == [
@@ -1450,7 +1433,7 @@ async def test_a_team_request_logs_the_messages_its_leader_was_sent(
     await team.respond(message="First question")
     await team.respond(message="Second question")
 
-    sent = [message for message in team.models["default"].requests[-1].messages if message.role != "system"]
+    sent = [message for message in _leader(team).requests[-1].messages if message.role != "system"]
     assert "assistant" in {message.role for message in sent}
     assert logged == [render_prepared_messages_text(sent)]
 
@@ -1522,7 +1505,7 @@ async def test_a_resume_whose_decisions_do_not_match_the_pause_runs_nothing(
         )
 
     assert probe.calls == []
-    assert (team.models["default"].requests, team.models["general-model"].requests) == ([], [])
+    assert (_leader(team).requests, team.models["general-model"].requests) == ([], [])
     record, _members = team.stored_runs()
     assert record.status is RunStatus.paused
 

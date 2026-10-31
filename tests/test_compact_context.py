@@ -24,17 +24,11 @@ from mindroom.history.storage import (
     read_scope_state,
     with_force_compaction,
 )
-from mindroom.history.types import (
-    CompactionLifecycleStart,
-    CompactionOutcome,
-    HistoryScope,
-)
+from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
-from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -42,20 +36,23 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
-from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
-    TEST_PASSWORD,
     bind_runtime_paths,
-    delivered_matrix_side_effect,
     install_model_providers,
-    install_runtime_journal_support,
     make_conversation_reader_mock,
     make_relation_lookup,
     prepare_history_for_run_for_test,
     seed_session,
 )
 from tests.fakes.summary_model import summary_model
-from tests.history_helpers import RecordingCompactionLifecycle, _runtime_paths, completed_outcome, folded_run_ids
+from tests.history_helpers import (
+    RecordingCompactionLifecycle,
+    _runtime_paths,
+    _session,
+    completed_outcome,
+    folded_run_ids,
+)
+from tests.history_helpers import _make_config as _history_config
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,30 +63,13 @@ if TYPE_CHECKING:
 COMPACT_CONTEXT_SUCCESS = "Compaction will run before the next reply in this conversation scope."
 
 
-def _make_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
-    return _make_config_with_context_window(tmp_path, context_window=48_000)
-
-
-def _make_config_with_context_window(
+def _make_config(
     tmp_path: Path,
     *,
-    context_window: int | None,
+    context_window: int | None = 48_000,
     compaction: CompactionConfig | None = None,
 ) -> tuple[Config, RuntimePaths]:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "test_agent": AgentConfig(
-                    display_name="Test Agent",
-                ),
-            },
-            defaults=DefaultsConfig(tools=[], compaction=compaction),
-            models={"default": ModelConfig(provider="openai", id="test-model", context_window=context_window)},
-        ),
-        runtime_paths,
-    )
-    return config, runtime_paths
+    return _history_config(tmp_path, context_window=context_window, defaults_compaction=compaction)
 
 
 def _completed_run(run_id: str, *, agent_id: str) -> RunRecord:
@@ -100,17 +80,7 @@ def _completed_run(run_id: str, *, agent_id: str) -> RunRecord:
     )
 
 
-def _session(session_id: str, *, runs: list[RunRecord] | None = None) -> ConversationSession:
-    return ConversationSession(
-        session_id=session_id,
-        kind="agent",
-        owner_id="test_agent",
-        runs=list(runs or []),
-        created_at=1,
-    )
-
-
-def _execution_identity(session_id: str = "session-1", *, agent_name: str = "test_agent") -> ToolExecutionIdentity:
+def _execution_identity(*, agent_name: str = "test_agent") -> ToolExecutionIdentity:
     return ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,
@@ -118,7 +88,7 @@ def _execution_identity(session_id: str = "session-1", *, agent_name: str = "tes
         room_id="!room:localhost",
         thread_id=None,
         resolved_thread_id=None,
-        session_id=session_id,
+        session_id="session-1",
         tenant_id=None,
         account_id=None,
     )
@@ -165,7 +135,7 @@ def _load_scope_context(
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity,
 ) -> ScopeSessionContext:
     scope_context = load_scope_session(
         scope=scope,
@@ -179,30 +149,6 @@ def _load_scope_context(
 
 
 @pytest.mark.asyncio
-async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -> None:
-    """Schedule agent-scope compaction before the next reply."""
-    config, runtime_paths = _make_config(tmp_path)
-    identity = _execution_identity()
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
-    seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
-
-    tool = CompactContextTools(
-        agent_name="test_agent",
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=identity,
-    )
-
-    result = await tool.compact_context()
-
-    persisted = storage.load_session("session-1")
-    assert persisted is not None
-    state = read_scope_state(persisted)
-    assert state.force_compact_before_next_run is True
-    assert result == COMPACT_CONTEXT_SUCCESS
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "compaction",
     [None, CompactionConfig(enabled=False), CompactionConfig()],
@@ -213,7 +159,7 @@ async def test_request_compaction_before_next_reply_is_public_manual_seam(
     compaction: CompactionConfig | None,
 ) -> None:
     """Manual compaction is scheduled without the tool adapter, whether or not compaction runs automatically."""
-    config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=48_000, compaction=compaction)
+    config, runtime_paths = _make_config(tmp_path, compaction=compaction)
     identity = _execution_identity()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
@@ -229,21 +175,42 @@ async def test_request_compaction_before_next_reply_is_public_manual_seam(
         room_id=None,
     )
 
-    persisted = storage.load_session("session-1")
-    assert persisted is not None
-    state = read_scope_state(persisted)
-    assert state.force_compact_before_next_run is True
+    assert has_queued_force_compaction(storage, "session-1")
     assert result == COMPACT_CONTEXT_SUCCESS
 
 
 @pytest.mark.asyncio
-async def test_compact_context_requires_compaction_window(tmp_path: Path) -> None:
-    """Manual compaction should fail fast when no usable model window is configured."""
-    config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=None)
+@pytest.mark.parametrize(
+    ("context_window", "expected_error"),
+    [
+        (
+            None,
+            "Error: Compaction is unavailable for this scope because no context_window is configured on the "
+            "active model.",
+        ),
+        (
+            4096,
+            "Error: Compaction is unavailable for this scope because the active compaction model leaves no "
+            "usable summary input budget after reserve and prompt overhead.",
+        ),
+        (
+            10_000,
+            "Error: Compaction is unavailable for this scope because the summary input budget must exceed "
+            "2,000 tokens to provide meaningful headroom for a smaller retry.",
+        ),
+    ],
+    ids=["no-context-window", "no-summary-input-budget", "no-retry-headroom"],
+)
+async def test_compact_context_refuses_a_scope_without_a_usable_summary_budget(
+    tmp_path: Path,
+    context_window: int | None,
+    expected_error: str,
+) -> None:
+    """A request that manual validation refuses never opens the scope's store, so it leaves the session untouched."""
+    config, runtime_paths = _make_config(tmp_path, context_window=context_window)
     identity = _execution_identity()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
-
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
@@ -251,35 +218,12 @@ async def test_compact_context_requires_compaction_window(tmp_path: Path) -> Non
         execution_identity=identity,
     )
 
-    result = await tool.compact_context()
-
-    persisted = storage.load_session("session-1")
-    assert persisted is not None
-    state = read_scope_state(persisted)
-    assert state.force_compact_before_next_run is False
-    assert result == (
-        "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
-    )
-
-
-@pytest.mark.asyncio
-async def test_compact_context_saves_nothing_after_budget_error(tmp_path: Path) -> None:
-    """A request that manual validation refuses never opens the scope's store, so it leaves the session untouched."""
-    config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=None)
-    tool = CompactContextTools(
-        agent_name="test_agent",
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=_execution_identity(),
-    )
-
     with patch("mindroom.history.manual.create_scope_session_storage") as open_store:
         result = await tool.compact_context()
 
-    assert result == (
-        "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
-    )
+    assert result == expected_error
     open_store.assert_not_called()
+    assert not has_queued_force_compaction(storage, "session-1")
 
 
 @pytest.mark.asyncio
@@ -341,82 +285,18 @@ async def test_compact_context_writes_the_request_in_the_database_s_lane(
 
 
 @pytest.mark.asyncio
-async def test_compact_context_requires_positive_summary_input_budget(tmp_path: Path) -> None:
-    """Manual compaction should fail fast when the compaction model cannot fit any summary input."""
-    config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=4096)
-    identity = _execution_identity()
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
-    seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
-
-    tool = CompactContextTools(
-        agent_name="test_agent",
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=identity,
-    )
-
-    result = await tool.compact_context()
-
-    persisted = storage.load_session("session-1")
-    assert persisted is not None
-    state = read_scope_state(persisted)
-    assert state.force_compact_before_next_run is False
-    assert result == (
-        "Error: Compaction is unavailable for this scope because the active compaction model leaves no "
-        "usable summary input budget after reserve and prompt overhead."
-    )
-
-
-@pytest.mark.asyncio
-async def test_compact_context_requires_summary_input_budget_with_retry_headroom(tmp_path: Path) -> None:
-    """Manual compaction should not set the force flag when the summary budget cannot shrink."""
-    config, runtime_paths = _make_config_with_context_window(
-        tmp_path,
-        context_window=10_000,
-    )
-    identity = _execution_identity()
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
-    seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
-
-    tool = CompactContextTools(
-        agent_name="test_agent",
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=identity,
-    )
-
-    result = await tool.compact_context()
-
-    persisted = storage.load_session("session-1")
-    assert persisted is not None
-    state = read_scope_state(persisted)
-    assert state.force_compact_before_next_run is False
-    assert result == (
-        "Error: Compaction is unavailable for this scope because the summary input budget must exceed "
-        "2,000 tokens to provide meaningful headroom for a smaller retry."
-    )
-
-
-@pytest.mark.asyncio
 async def test_compact_context_can_use_compaction_model_window_when_active_model_has_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Manual compaction should work when only the selected compaction model declares a context window."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={"test_agent": AgentConfig(display_name="Test Agent")},
-            defaults=DefaultsConfig(
-                tools=[],
-                compaction=CompactionConfig(model="summary-model"),
-            ),
-            models={
-                "default": ModelConfig(provider="openai", id="test-model", context_window=None),
-                "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=32_000),
-            },
-        ),
-        runtime_paths,
+    config, runtime_paths = _history_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(model="summary-model"),
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=None),
+            "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=32_000),
+        },
     )
     identity = _execution_identity()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
@@ -464,8 +344,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == "merged summary"
-    state = read_scope_state(persisted)
-    assert state.force_compact_before_next_run is False
+    assert not has_queued_force_compaction(storage, "session-1")
     assert prepared.compaction_reply_outcome == "success"
     outcome = completed_outcome(lifecycle)
     assert outcome.window_tokens == 0
@@ -479,22 +358,13 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
 @pytest.mark.asyncio
 async def test_compact_context_follows_the_agents_own_compaction_config(tmp_path: Path) -> None:
     """An agent's own compaction model makes manual compaction available where the defaults leave no window."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "test_agent": AgentConfig(
-                    display_name="Test Agent",
-                    compaction=CompactionOverrideConfig(model="summary-model"),
-                ),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            models={
-                "default": ModelConfig(provider="openai", id="test-model", context_window=None),
-                "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=32_000),
-            },
-        ),
-        runtime_paths,
+    config, runtime_paths = _history_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(model="summary-model"),
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=None),
+            "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=32_000),
+        },
     )
     tool = CompactContextTools(
         agent_name="test_agent",
@@ -504,87 +374,6 @@ async def test_compact_context_follows_the_agents_own_compaction_config(tmp_path
     )
 
     assert await tool.compact_context() == COMPACT_CONTEXT_SUCCESS
-
-
-@pytest.mark.asyncio
-async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path: Path) -> None:
-    """Lifecycle completion edits should reuse the outcome notice text."""
-    config, runtime_paths = _make_config(tmp_path)
-    bot = make_test_agent_bot(
-        agent_user=AgentMatrixUser(
-            agent_name="test_agent",
-            password=TEST_PASSWORD,
-            display_name="Test Agent",
-            user_id="@mindroom_test_agent:localhost",
-        ),
-        config=config,
-        runtime_paths=runtime_paths,
-        rooms=["!room:localhost"],
-    )
-    bot.client = AsyncMock()
-    install_runtime_journal_support(bot)
-    outcome = CompactionOutcome(
-        mode="auto",
-        session_id="session-1",
-        scope="agent:test_agent",
-        summary="Merged summary",
-        summary_model="summary-model",
-        before_tokens=30_000,
-        after_tokens=12_000,
-        window_tokens=100_000,
-        threshold_tokens=80_000,
-        runs_before=20,
-        runs_after=8,
-        compacted_run_count=12,
-        compacted_at="2026-01-01T00:00:00Z",
-        history_budget_tokens=100_000,
-    )
-
-    target = MessageTarget.resolve("!room:localhost", None, "$reply")
-    with (
-        patch(
-            "mindroom.delivery_gateway.send_message_outcome",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
-        ) as mock_send,
-        patch(
-            "mindroom.delivery_gateway.edit_message_outcome",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice-edit")),
-        ) as mock_edit,
-    ):
-        event_id = await bot._delivery_gateway._send_compaction_lifecycle_start(
-            target=target,
-            reply_to_event_id="$reply",
-            event=CompactionLifecycleStart(
-                mode="auto",
-                session_id="session-1",
-                scope="agent:test_agent",
-                summary_model="summary-model",
-                before_tokens=30_000,
-                history_budget_tokens=100_000,
-                runs_before=20,
-                threshold_tokens=80_000,
-            ),
-        )
-        await bot._delivery_gateway._edit_compaction_lifecycle_success(
-            target=target,
-            outcome=replace(outcome, lifecycle_notice_event_id=event_id, duration_ms=123),
-        )
-
-    assert event_id == "$notice"
-    assert mock_send.await_args is not None
-    start_content = mock_send.await_args.args[2]
-    assert start_content["io.mindroom.compaction"]["threshold_tokens"] == 80_000
-    assert mock_edit.await_args is not None
-    sent_content = mock_edit.await_args.args[3]
-    assert sent_content["io.mindroom.compaction"]["version"] == 3
-    assert sent_content["io.mindroom.compaction"]["history_budget_tokens"] == 100_000
-    assert sent_content["io.mindroom.compaction"]["threshold_tokens"] == 80_000
-    assert sent_content["io.mindroom.compaction"]["duration_ms"] == 123
-    assert sent_content["body"] == outcome.format_notice()
-    assert sent_content["body"] == ("\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget")
-    assert sent_content["formatted_body"] == (
-        "<em>\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget</em>"
-    )
 
 
 @pytest.mark.asyncio
@@ -615,20 +404,8 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
     with tool_runtime_context(_member_runtime_context(config, runtime_paths)):
         await _compact_as_team_member(tool, team_scope)
 
-    persisted = storage.load_session("session-1")
-    assert persisted is not None
-    direct_state = read_scope_state(persisted)
-    reloaded_team_context = _load_scope_context(
-        scope=team_scope,
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=identity,
-    )
-    assert reloaded_team_context.session is not None
-    team_state = read_scope_state(reloaded_team_context.session)
-    assert direct_state.force_compact_before_next_run is False
-    assert team_state.force_compact_before_next_run is True
+    assert not has_queued_force_compaction(storage, "session-1")
+    assert has_queued_force_compaction(team_context.storage, "session-1")
 
 
 @pytest.mark.asyncio
@@ -663,8 +440,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(
     persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
-    state = read_scope_state(persisted)
-    assert state.force_compact_before_next_run is False
+    assert not has_queued_force_compaction(storage, "session-1")
     assert prepared.compaction_reply_outcome == "failed"
     summary_mock.assert_not_awaited()
 
@@ -709,8 +485,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(
     assert persisted.summary is not None
     assert persisted.summary.text == "single run summary"
     assert persisted.runs == []
-    state = read_scope_state(persisted)
-    assert state.force_compact_before_next_run is False
+    assert not has_queued_force_compaction(storage, "session-1")
     assert len(folded_run_ids(storage)) == 1
     assert prepared.compaction_reply_outcome == "success"
 
@@ -746,9 +521,7 @@ async def test_a_request_survives_the_requesting_runs_terminal_save_and_a_concur
     stored = storage.load_session("session-1")
     assert stored is not None
     assert stored.session_state == {"tool": "state"}
-    assert stored.metadata is not None
-    assert stored.metadata["other"] == "kept"
-    assert has_queued_force_compaction(storage, "session-1")
+    assert stored.metadata == with_force_compaction({"other": "kept"})
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="summary")):
         prepared = await prepare_history_for_run_for_test(
@@ -854,24 +627,19 @@ async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_path: Path) -> None:
     """Team-scoped compaction should honor the actual per-run model override."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={"test_agent": AgentConfig(display_name="Test Agent")},
-            teams={
-                "team_123": TeamConfig(
-                    display_name="Test Team",
-                    role="Coordinate work",
-                    agents=["test_agent"],
-                ),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            models={
-                "default": ModelConfig(provider="openai", id="default-model", context_window=None),
-                "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
-            },
-        ),
-        runtime_paths,
+    config, runtime_paths = _history_config(
+        tmp_path,
+        teams={
+            "team_123": TeamConfig(
+                display_name="Test Team",
+                role="Coordinate work",
+                agents=["test_agent"],
+            ),
+        },
+        models={
+            "default": ModelConfig(provider="openai", id="default-model", context_window=None),
+            "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
+        },
     )
     identity = _execution_identity()
     tool = CompactContextTools(
@@ -897,16 +665,7 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
     with tool_runtime_context(runtime_context):
         result = await _compact_as_team_member(tool, team_scope)
 
-    reloaded_team_context = _load_scope_context(
-        scope=team_scope,
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=identity,
-    )
-    assert reloaded_team_context.session is not None
-    team_state = read_scope_state(reloaded_team_context.session)
-    assert team_state.force_compact_before_next_run is True
+    assert has_queued_force_compaction(team_context.storage, "session-1")
     assert result == COMPACT_CONTEXT_SUCCESS
 
 
@@ -963,16 +722,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
     with tool_runtime_context(runtime_context):
         result = await _compact_as_team_member(tool, team_scope)
 
-    reloaded_team_context = _load_scope_context(
-        scope=team_scope,
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=identity,
-    )
-    assert reloaded_team_context.session is not None
-    team_state = read_scope_state(reloaded_team_context.session)
-    assert team_state.force_compact_before_next_run is True
+    assert has_queued_force_compaction(team_context.storage, "session-1")
     assert result == COMPACT_CONTEXT_SUCCESS
 
 
@@ -1025,14 +775,5 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
     with tool_runtime_context(runtime_context):
         result = await tool.compact_context()
 
-    reloaded_scope_context = _load_scope_context(
-        scope=_AGENT_SCOPE,
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=identity,
-    )
-    assert reloaded_scope_context.session is not None
-    agent_state = read_scope_state(reloaded_scope_context.session)
-    assert agent_state.force_compact_before_next_run is True
+    assert has_queued_force_compaction(scope_context.storage, "session-1")
     assert result == COMPACT_CONTEXT_SUCCESS

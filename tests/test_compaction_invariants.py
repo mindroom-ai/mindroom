@@ -11,7 +11,6 @@ These tests exercise the owning interfaces directly, not the bot runtime.
 
 from __future__ import annotations
 
-import sqlite3
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +27,7 @@ from mindroom.constants import (
     RuntimePaths,
 )
 from mindroom.history.compaction import (
+    Summarizer,
     SummaryModel,
     _summarize_chunk,
     clear_manual_compaction_request,
@@ -36,7 +36,6 @@ from mindroom.history.compaction import (
 from mindroom.history.storage import (
     has_queued_force_compaction,
     read_scope_state,
-    set_force_compaction,
     with_force_compaction,
 )
 from mindroom.history.summary_call import (
@@ -46,12 +45,12 @@ from mindroom.history.summary_call import (
     SummaryRetryDecision,
     SummaryRetryPolicy,
     _CompactionSummaryEmptyResultError,
-    build_summary_request_messages,
     generate_compaction_summary,
 )
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
+    CompactionOutcome,
     HistoryScope,
     HistoryScopeState,
 )
@@ -61,7 +60,6 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.errors import classify_provider_error, provider_failure
-from mindroom.session_storage import store as store_module
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.token_budget import estimate_compaction_input_tokens
@@ -79,6 +77,7 @@ from tests.history_helpers import (
 
 if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider, StopReason
+    from mindroom.session_storage.store import ConversationStore
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 _HISTORY_SETTINGS = replay_settings()
@@ -101,14 +100,13 @@ def _retry_budget_value(
     attempt: int,
     budget: int,
     input_tokens: int,
-    minimum_progress_input_tokens: int = 0,
     error: Exception,
 ) -> int | None:
     decision = policy.retry_budget(
         attempt=attempt,
         budget=budget,
         input_tokens=input_tokens,
-        minimum_progress_input_tokens=minimum_progress_input_tokens,
+        minimum_progress_input_tokens=0,
         error=error,
     )
     return None if decision is None else decision.budget
@@ -121,7 +119,6 @@ def _chars_per_token_estimator(value: str) -> int:
 def _make_config(
     tmp_path: Path,
     *,
-    compaction: CompactionConfig | None = None,
     context_window: int = 64_000,
 ) -> tuple[Config, RuntimePaths]:
     runtime_paths = _runtime_paths(tmp_path)
@@ -133,7 +130,7 @@ def _make_config(
                     compaction=CompactionOverrideConfig(enabled=True),
                 ),
             },
-            defaults=DefaultsConfig(tools=[], compaction=compaction or CompactionConfig()),
+            defaults=DefaultsConfig(tools=[], compaction=CompactionConfig()),
             models={
                 "default": ModelConfig(provider="openai", id="test-model", context_window=context_window),
             },
@@ -164,6 +161,29 @@ def _session(runs: list[RunRecord]) -> ConversationSession:
         runs=list(runs),
         metadata=None,
         created_at=1,
+    )
+
+
+async def _compact(
+    storage: ConversationStore,
+    session: ConversationSession,
+    summarizer: Summarizer,
+    *,
+    replay_window_tokens: int = 64_000,
+) -> CompactionOutcome | None:
+    """Compact ``session`` with ``summarizer``, reporting through the test lifecycle."""
+    return await compact_scope_history(
+        storage=storage,
+        session=session,
+        state=read_scope_state(session),
+        summarizer=summarizer,
+        available_history_budget=None,
+        replay_window_tokens=replay_window_tokens,
+        threshold_tokens=None,
+        before_tokens=0,
+        progress=None,
+        complete=_reported,
+        replay_estimator=None,
     )
 
 
@@ -213,78 +233,20 @@ def test_a_stale_save_of_a_folded_run_and_its_member_runs_changes_neither(tmp_pa
     assert [run.run_id for run in persisted.runs] == ["kept"]
 
 
-def test_clearing_the_force_flag_through_a_stale_session_lands_on_the_freshest_row(tmp_path: Path) -> None:
-    """The clear applies to the stored row's latest metadata, keeps what another writer stored, and syncs the session."""
-    config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    stale_session = _session([_completed_run("run-1")])
-    seed_session(storage, stale_session)
-
-    concurrent_session = storage.load_session("session-1")
-    assert concurrent_session is not None
-    storage.update_metadata(concurrent_session, lambda metadata: {**with_force_compaction(metadata), "other": "kept"})
-    storage.save_run(concurrent_session, _completed_run("run-2"), record_usage=False)
-
-    set_force_compaction(storage, session=stale_session, forced=False)
-
-    persisted_session = storage.load_session("session-1")
-    assert persisted_session is not None
-    assert persisted_session.metadata == {"other": "kept"}
-    assert stale_session.metadata == persisted_session.metadata
-    assert [run.run_id for run in persisted_session.runs] == ["run-1", "run-2"]
-
-
 @pytest.mark.asyncio
 async def test_a_reply_that_read_no_request_leaves_one_made_meanwhile(tmp_path: Path) -> None:
-    """Only the request a reply read clears, so one made while that reply ran stays for the next reply."""
+    """A reply that read no request leaves a request made while it ran for the next reply."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1")])
     seed_session(storage, session)
-    state = read_scope_state(session)
     concurrent_session = storage.load_session("session-1")
     assert concurrent_session is not None
     storage.update_metadata(concurrent_session, with_force_compaction)
 
-    await clear_manual_compaction_request(storage=storage, session=session, state=state)
+    await clear_manual_compaction_request(storage=storage, session=session, state=HistoryScopeState())
 
     assert has_queued_force_compaction(storage, "session-1")
-
-
-@pytest.mark.parametrize("forced", [True, False], ids=["already-forced", "never-forced"])
-def test_a_force_flag_update_that_changes_nothing_writes_nothing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    forced: bool,
-) -> None:
-    """Setting the flag to what the freshest row holds writes nothing, and the session then holds that row's metadata."""
-    config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    stale_session = _session([_completed_run("run-1")])
-    seed_session(storage, stale_session)
-    if forced:
-        concurrent_session = storage.load_session("session-1")
-        assert concurrent_session is not None
-        storage.update_metadata(concurrent_session, with_force_compaction)
-    statements: list[str] = []
-    connect = store_module.connect_conversation_database
-
-    def traced_connect(path: Path) -> sqlite3.Connection:
-        connection = connect(path)
-        connection.set_trace_callback(statements.append)
-        return connection
-
-    monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
-
-    set_force_compaction(storage, session=stale_session, forced=forced)
-
-    assert read_scope_state(stale_session).force_compact_before_next_run is forced
-    assert statements
-    assert not [statement for statement in statements if statement.lstrip().upper().startswith("UPDATE")]
-    persisted_session = storage.load_session("session-1")
-    assert persisted_session is not None
-    assert stale_session.metadata == persisted_session.metadata
 
 
 # --- Invariant 2: chunk progress survives interruption ------------------------
@@ -322,23 +284,10 @@ async def test_chunk_progress_survives_interruption_and_restart(
         ),
         pytest.raises(RuntimeError, match="provider exploded"),
     ):
-        await compact_scope_history(
-            storage=storage,
-            session=session,
-            state=read_scope_state(session),
-            summarizer=_summarizer(
-                summary_model(),
-                10_000,
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
-            available_history_budget=None,
-            replay_window_tokens=64_000,
-            threshold_tokens=None,
-            before_tokens=0,
-            progress=None,
-            complete=_reported,
-            replay_estimator=None,
+        await _compact(
+            storage,
+            session,
+            _summarizer(summary_model(), 10_000),
         )
 
     interrupted = storage.load_session("session-1")
@@ -453,39 +402,19 @@ async def test_generate_compaction_summary_accepts_a_finished_summary(stop_reaso
     assert summary == "durable summary ended cleanly."
 
 
-def test_build_summary_request_messages_is_the_single_request_seam() -> None:
-    messages = build_summary_request_messages(summary_prompt="prompt", summary_input="input")
-
-    assert [(message.role, message.content) for message in messages] == [
-        ("system", "prompt"),
-        ("user", "input"),
-    ]
-
-
 # --- Invariant 4: deterministic retry on provider failure ----------------------
 
 
-def test_retry_policy_shrinks_on_timeout_and_output_limit() -> None:
-    policy = DEFAULT_SUMMARY_RETRY_POLICY
-
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(TimeoutError(), id="timeout"),
+        pytest.param(CompactionSummaryOutputLimitError("renamed owned output-limit signal"), id="output-limit"),
+    ],
+)
+def test_retry_policy_shrinks_on_timeout_and_output_limit(error: Exception) -> None:
     assert (
-        _retry_budget_value(
-            policy,
-            attempt=1,
-            budget=16_000,
-            input_tokens=16_000,
-            error=TimeoutError(),
-        )
-        == 8_000
-    )
-    assert (
-        _retry_budget_value(
-            policy,
-            attempt=1,
-            budget=16_000,
-            input_tokens=16_000,
-            error=CompactionSummaryOutputLimitError("renamed owned output-limit signal"),
-        )
+        _retry_budget_value(DEFAULT_SUMMARY_RETRY_POLICY, attempt=1, budget=16_000, input_tokens=16_000, error=error)
         == 8_000
     )
 
@@ -535,12 +464,6 @@ def test_retry_policy_does_not_shrink_safeguard_refusal() -> None:
         )
         is None
     )
-
-
-def test_retry_policy_should_shrink_for_empty_result() -> None:
-    policy = DEFAULT_SUMMARY_RETRY_POLICY
-
-    assert policy.should_shrink(_CompactionSummaryEmptyResultError("summary generation returned no result")) is True
 
 
 def test_retry_policy_shrinks_from_actual_serialized_input_size() -> None:
@@ -593,9 +516,7 @@ def test_retry_policy_shrink_classification_precedes_transient_status() -> None:
         error=error,
     )
 
-    assert decision is not None
-    assert decision.budget == 3_000
-    assert decision.kind == "shrink"
+    assert decision == SummaryRetryDecision(budget=3_000, kind="shrink")
 
 
 def test_retry_policy_falls_through_to_transient_retry_when_input_cannot_shrink() -> None:
@@ -608,9 +529,7 @@ def test_retry_policy_falls_through_to_transient_retry_when_input_cannot_shrink(
         error=error,
     )
 
-    assert decision is not None
-    assert decision.budget == 16_000
-    assert decision.kind == "same-budget-transient"
+    assert decision == SummaryRetryDecision(budget=16_000, kind="same-budget-transient")
     assert (
         _retry_budget_value(
             DEFAULT_SUMMARY_RETRY_POLICY,
@@ -623,25 +542,16 @@ def test_retry_policy_falls_through_to_transient_retry_when_input_cannot_shrink(
     )
 
 
-def test_retry_policy_does_not_resend_non_transient_shrink_errors_at_floor() -> None:
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(CompactionSummaryOutputLimitError("renamed owned output-limit signal"), id="output-limit"),
+        pytest.param(TimeoutError(), id="timeout"),
+    ],
+)
+def test_retry_policy_does_not_resend_non_transient_shrink_errors_at_floor(error: Exception) -> None:
     assert (
-        _retry_budget_value(
-            DEFAULT_SUMMARY_RETRY_POLICY,
-            attempt=1,
-            budget=16_000,
-            input_tokens=1_000,
-            error=CompactionSummaryOutputLimitError("renamed owned output-limit signal"),
-        )
-        is None
-    )
-    assert (
-        _retry_budget_value(
-            DEFAULT_SUMMARY_RETRY_POLICY,
-            attempt=1,
-            budget=16_000,
-            input_tokens=1_000,
-            error=TimeoutError(),
-        )
+        _retry_budget_value(DEFAULT_SUMMARY_RETRY_POLICY, attempt=1, budget=16_000, input_tokens=1_000, error=error)
         is None
     )
 
@@ -657,9 +567,7 @@ def test_retry_policy_retries_transient_provider_errors_at_same_budget(status_co
         error=error,
     )
 
-    assert decision is not None
-    assert decision.budget == 16_000
-    assert decision.kind == "same-budget-transient"
+    assert decision == SummaryRetryDecision(budget=16_000, kind="same-budget-transient")
     assert (
         _retry_budget_value(
             DEFAULT_SUMMARY_RETRY_POLICY,
@@ -743,25 +651,13 @@ def test_retry_policy_shrinks_on_typed_size_errors_not_on_wording() -> None:
     assert retry_budget(classify_provider_error("input too large to cache", provider="fake", status_code=500)) == 16_000
 
 
-def test_retry_policy_gives_up_on_non_retryable_errors() -> None:
+@pytest.mark.parametrize(
+    "error",
+    [pytest.param(RuntimeError("boom"), id="runtime-error"), pytest.param(ValueError("401"), id="value-error")],
+)
+def test_retry_policy_gives_up_on_non_retryable_errors(error: Exception) -> None:
     assert (
-        _retry_budget_value(
-            DEFAULT_SUMMARY_RETRY_POLICY,
-            attempt=1,
-            budget=16_000,
-            input_tokens=4_000,
-            error=RuntimeError("boom"),
-        )
-        is None
-    )
-    assert (
-        _retry_budget_value(
-            DEFAULT_SUMMARY_RETRY_POLICY,
-            attempt=1,
-            budget=16_000,
-            input_tokens=4_000,
-            error=ValueError("401"),
-        )
+        _retry_budget_value(DEFAULT_SUMMARY_RETRY_POLICY, attempt=1, budget=16_000, input_tokens=4_000, error=error)
         is None
     )
 
@@ -828,12 +724,7 @@ async def test_summary_chunk_propagates_original_error_when_rebuilt_input_is_not
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _summarize_chunk(
-            _summarizer(
-                summary_model(),
-                4_000,
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
+            _summarizer(summary_model(), 4_000),
             None,
             [run],
         )
@@ -866,12 +757,7 @@ async def test_summary_chunk_honors_transient_fallthrough_for_shrink_message_at_
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
     ):
         generated = await _summarize_chunk(
-            _summarizer(
-                summary_model(),
-                4_000,
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
+            _summarizer(summary_model(), 4_000),
             None,
             [run],
         )
@@ -888,13 +774,7 @@ async def test_summary_chunk_honors_transient_fallthrough_for_shrink_message_at_
 
 @pytest.mark.asyncio
 async def test_summary_chunk_shrinks_around_a_large_durable_summary() -> None:
-    """A durable summary above half the failed input still gets a strictly smaller second attempt.
-
-    Regression: the halved shrink target used to fall below the previous-summary
-    block, the rebuild came back run-less, and the original error propagated
-    without any smaller attempt — so the next turn reselected required
-    compaction and resent the identical failing request.
-    """
+    """A durable summary above half the failed input still gets a strictly smaller second attempt that keeps a run."""
     previous_summary = "s" * 24_000
     runs = [_completed_run(f"run-{index}", padding=2_000) for index in range(3)]
     summary_input_budget = 10_000
@@ -919,12 +799,7 @@ async def test_summary_chunk_shrinks_around_a_large_durable_summary() -> None:
         patch("mindroom.history.compaction._compaction_sizing", return_value=(_chars_per_token_estimator, "chars")),
     ):
         generated = await _summarize_chunk(
-            _summarizer(
-                summary_model(),
-                summary_input_budget,
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
+            _summarizer(summary_model(), summary_input_budget),
             previous_summary,
             runs,
         )
@@ -961,12 +836,7 @@ async def test_summary_chunk_propagates_error_when_no_smaller_progress_input_exi
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _summarize_chunk(
-            _summarizer(
-                summary_model(),
-                summary_input_budget,
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
+            _summarizer(summary_model(), summary_input_budget),
             previous_summary,
             runs,
         )
@@ -1069,23 +939,11 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(side_effect=record_summary),
     ):
-        outcome = await compact_scope_history(
-            storage=storage,
-            session=session,
-            state=read_scope_state(session),
-            summarizer=_summarizer(
-                summary_model(model_id="claude-sonnet-5", claude=True),
-                summary_input_limit,
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
-            available_history_budget=None,
+        outcome = await _compact(
+            storage,
+            session,
+            _summarizer(summary_model(model_id="claude-sonnet-5", claude=True), summary_input_limit),
             replay_window_tokens=200_000,
-            threshold_tokens=None,
-            before_tokens=0,
-            progress=None,
-            complete=_reported,
-            replay_estimator=None,
         )
 
     assert outcome is not None
@@ -1128,23 +986,10 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(side_effect=flaky_summary),
     ):
-        outcome = await compact_scope_history(
-            storage=storage,
-            session=session,
-            state=read_scope_state(session),
-            summarizer=_summarizer(
-                summary_model(),
-                10_000,
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
-            available_history_budget=None,
-            replay_window_tokens=64_000,
-            threshold_tokens=None,
-            before_tokens=0,
-            progress=None,
-            complete=_reported,
-            replay_estimator=None,
+        outcome = await _compact(
+            storage,
+            session,
+            _summarizer(summary_model(), 10_000),
         )
 
     assert outcome is not None
@@ -1182,9 +1027,7 @@ async def test_summary_chunk_switches_to_fallback_once_with_unchanged_prompt_and
                 primary,
                 4_000,
                 fallback=SummaryModel(fallback, "fallback-model", 4_000),
-                history_settings=_HISTORY_SETTINGS,
                 timeout_seconds=420.0,
-                scope=_SCOPE,
             ),
             None,
             [run],
@@ -1208,26 +1051,17 @@ async def test_summary_chunk_switches_to_fallback_once_with_unchanged_prompt_and
     assert [call.kwargs["timeout_seconds"] for call in generate_summary.await_args_list] == [420.0, 420.0]
     retry_sleep.assert_not_awaited()
     # Structured request/failure/completion logs identify the actual serving model.
-    assert [
-        call.kwargs["model_name"]
-        for call in logger_mock.info.call_args_list
-        if call.args[0] == "Compaction summary chunk request"
-    ] == ["summary-model", "fallback-model"]
-    assert [
-        call.kwargs["timeout_seconds"]
-        for call in logger_mock.info.call_args_list
-        if call.args[0] == "Compaction summary chunk request"
-    ] == [420.0, 420.0]
-    assert [
-        call.kwargs["model_name"]
-        for call in logger_mock.warning.call_args_list
-        if call.args[0] == "Compaction summary chunk failed"
-    ] == ["summary-model"]
-    assert [
-        call.kwargs["model_name"]
-        for call in logger_mock.info.call_args_list
-        if call.args[0] == "Compaction summary chunk completed"
-    ] == ["fallback-model"]
+
+    def logged(log: MagicMock, event: str, field: str) -> list[object]:
+        return [call.kwargs[field] for call in log.call_args_list if call.args[0] == event]
+
+    assert logged(logger_mock.info, "Compaction summary chunk request", "model_name") == [
+        "summary-model",
+        "fallback-model",
+    ]
+    assert logged(logger_mock.info, "Compaction summary chunk request", "timeout_seconds") == [420.0, 420.0]
+    assert logged(logger_mock.warning, "Compaction summary chunk failed", "model_name") == ["summary-model"]
+    assert logged(logger_mock.info, "Compaction summary chunk completed", "model_name") == ["fallback-model"]
 
 
 @pytest.mark.asyncio
@@ -1256,13 +1090,7 @@ async def test_summary_chunk_propagates_fallback_refusal_or_failure(fallback_err
         pytest.raises(type(fallback_error)) as raised,
     ):
         await _summarize_chunk(
-            _summarizer(
-                primary,
-                4_000,
-                fallback=SummaryModel(fallback, "fallback-model", 4_000),
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
+            _summarizer(primary, 4_000, fallback=SummaryModel(fallback, "fallback-model", 4_000)),
             None,
             [run],
         )
@@ -1294,13 +1122,7 @@ async def test_summary_chunk_refusal_after_transient_retry_propagates_within_att
         pytest.raises(ModelSafeguardRefusal) as raised,
     ):
         await _summarize_chunk(
-            _summarizer(
-                primary,
-                4_000,
-                fallback=SummaryModel(fallback, "fallback-model", 4_000),
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
+            _summarizer(primary, 4_000, fallback=SummaryModel(fallback, "fallback-model", 4_000)),
             None,
             [run],
         )
@@ -1338,24 +1160,10 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(side_effect=flaky_summary),
     ):
-        outcome = await compact_scope_history(
-            storage=storage,
-            session=session,
-            state=read_scope_state(session),
-            summarizer=_summarizer(
-                primary,
-                100_000,
-                fallback=SummaryModel(fallback, "fallback-model", 10_000),
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
-            available_history_budget=None,
-            replay_window_tokens=64_000,
-            threshold_tokens=None,
-            before_tokens=0,
-            progress=None,
-            complete=_reported,
-            replay_estimator=None,
+        outcome = await _compact(
+            storage,
+            session,
+            _summarizer(primary, 100_000, fallback=SummaryModel(fallback, "fallback-model", 10_000)),
         )
 
     assert outcome is not None
@@ -1384,40 +1192,20 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
     session = _session([_completed_run("run-1", marker="RUN1-MARKER")])
     session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
-    attempts: list[str] = []
-
-    async def refuse_summary(*, summary_input: str, **_kwargs: object) -> str:
-        attempts.append(summary_input)
-        raise ModelSafeguardRefusal(provider="fake", usage=MessageMetrics())
+    refuse_summary = AsyncMock(side_effect=ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()))
 
     with (
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(side_effect=refuse_summary),
-        ),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=refuse_summary),
         pytest.raises(ModelSafeguardRefusal),
     ):
-        await compact_scope_history(
-            storage=storage,
-            session=session,
-            state=read_scope_state(session),
-            summarizer=_summarizer(
-                summary_model(),
-                10_000,
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
-            available_history_budget=None,
-            replay_window_tokens=64_000,
-            threshold_tokens=None,
-            before_tokens=0,
-            progress=None,
-            complete=_reported,
-            replay_estimator=None,
+        await _compact(
+            storage,
+            session,
+            _summarizer(summary_model(), 10_000),
         )
 
-    assert len(attempts) == 1
-    assert estimate_compaction_input_tokens(attempts[0]) < 1_000
+    refuse_summary.assert_awaited_once()
+    assert estimate_compaction_input_tokens(refuse_summary.await_args.kwargs["summary_input"]) < 1_000
     persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
@@ -1453,23 +1241,10 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
             wraps=build_summary_input,
         ) as build_summary_input_spy,
     ):
-        outcome = await compact_scope_history(
-            storage=storage,
-            session=session,
-            state=read_scope_state(session),
-            summarizer=_summarizer(
-                summary_model(),
-                summary_input_budget,
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
-            available_history_budget=None,
-            replay_window_tokens=64_000,
-            threshold_tokens=None,
-            before_tokens=0,
-            progress=None,
-            complete=_reported,
-            replay_estimator=None,
+        outcome = await _compact(
+            storage,
+            session,
+            _summarizer(summary_model(), summary_input_budget),
         )
 
     assert outcome is not None
@@ -1492,10 +1267,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
 ) -> None:
     """A degenerate plan is unavailable and cannot repeatedly select a compaction rewrite."""
     summary_input_budget = COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
-    config, runtime_paths = _make_config(
-        tmp_path,
-        context_window=10_000,
-    )
+    config, runtime_paths = _make_config(tmp_path, context_window=10_000)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     previous_summary = ("word " * 975) + "TAIL-FACT-MUST-SURVIVE"
     session = _session([_completed_run("run-1", marker="RUN1-MARKER")])
@@ -1510,24 +1282,11 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
         "mindroom.history.compaction.generate_compaction_summary",
         new=generate_summary,
     ):
-        outcome = await compact_scope_history(
-            storage=storage,
-            session=session,
-            state=read_scope_state(session),
-            summarizer=_summarizer(
-                summary_model(),
-                summary_input_budget,
-                name="default",
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
-            available_history_budget=None,
+        outcome = await _compact(
+            storage,
+            session,
+            _summarizer(summary_model(), summary_input_budget, name="default"),
             replay_window_tokens=summary_input_budget,
-            threshold_tokens=None,
-            before_tokens=0,
-            progress=None,
-            complete=_reported,
-            replay_estimator=None,
         )
 
     assert outcome is None
@@ -1580,17 +1339,10 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=16_000)])
     session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
-    attempts: list[str] = []
-
-    async def time_out_summary(*, summary_input: str, **_kwargs: object) -> str:
-        attempts.append(summary_input)
-        raise TimeoutError
+    time_out_summary = AsyncMock(side_effect=TimeoutError)
 
     install_model_providers(monkeypatch, {"default": summary_model()})
-    with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
-        new=AsyncMock(side_effect=time_out_summary),
-    ):
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=time_out_summary):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1602,6 +1354,7 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
             session=session,
         )
 
+    attempts = [call.kwargs["summary_input"] for call in time_out_summary.await_args_list]
     assert len(attempts) == 2
     assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
     assert prepared.compaction_reply_outcome == "timeout"
@@ -1653,23 +1406,10 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
         ),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
     ):
-        outcome = await compact_scope_history(
-            storage=storage,
-            session=session,
-            state=read_scope_state(session),
-            summarizer=_summarizer(
-                summary_model(),
-                10_000,
-                history_settings=_HISTORY_SETTINGS,
-                scope=_SCOPE,
-            ),
-            available_history_budget=None,
-            replay_window_tokens=64_000,
-            threshold_tokens=None,
-            before_tokens=0,
-            progress=None,
-            complete=_reported,
-            replay_estimator=None,
+        outcome = await _compact(
+            storage,
+            session,
+            _summarizer(summary_model(), 10_000),
         )
 
     assert outcome is not None
