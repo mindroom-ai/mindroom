@@ -39,6 +39,7 @@ from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE
 from mindroom.desktop.session import DesktopMatrixSession
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest
 from mindroom.matrix.device_identity import PinnedMatrixDevice
+from tests.desktop_helpers import IdleSource
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,16 +71,6 @@ def _runtime_paths(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None)
 
 
-class _IdleSource:
-    """Durable source with no Matrix traffic."""
-
-    async def run(self) -> None:
-        await asyncio.Event().wait()
-
-    async def wait_for_work(self) -> None:
-        await asyncio.Event().wait()
-
-
 class _Owner:
     """Owned Matrix session stand-in that records closing."""
 
@@ -88,7 +79,7 @@ class _Owner:
             "https://matrix.example.org",
             config=nio.AsyncClientConfig(encryption_enabled=False),
         )
-        self.source = source or _IdleSource()
+        self.source = source or IdleSource()
         self.lifecycle = lifecycle
 
     async def close(self) -> None:
@@ -137,9 +128,8 @@ def login_environment(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
 
 
 class _RecordingBrowser:
-    def __init__(self, lifecycle: list[str], **_kwargs: object) -> None:
+    def __init__(self, lifecycle: list[str]) -> None:
         self.lifecycle = lifecycle
-        self.running = False
 
     async def close(self) -> None:
         self.lifecycle.append("browser_close")
@@ -169,7 +159,7 @@ async def test_failed_construction_closes_every_built_provider_and_the_matrix_ow
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopShell", RecordingShell)
     monkeypatch.setattr(
         "mindroom.desktop.bridge_session.PlaywrightMCPBrowserProvider",
-        lambda **kwargs: _RecordingBrowser(lifecycle, **kwargs),
+        lambda **_kwargs: _RecordingBrowser(lifecycle),
     )
     (tmp_path / "desktop_bridge" / "commands.sqlite3").mkdir(parents=True)
     owner = _Owner(lifecycle)
@@ -294,6 +284,7 @@ async def test_session_admits_before_acknowledging_and_closes_in_dependency_orde
     """Admission is registered before the controller check, persists before ack, and close drains before releasing."""
     lifecycle: list[str] = []
     admitted = asyncio.Event()
+    acked = asyncio.Event()
     ready = asyncio.Event()
     ready.set()
     event = AuthenticatedToDeviceEvent(
@@ -304,10 +295,7 @@ async def test_session_admits_before_acknowledging_and_closes_in_dependency_orde
     )
     batch = SyncBatch(uuid4(), 1, (SyncRecord(RecordKind.TO_DEVICE, None, event.source),))
 
-    class Source:
-        async def run(self) -> None:
-            await asyncio.Event().wait()
-
+    class Source(IdleSource):
         async def wait_for_work(self) -> None:
             await ready.wait()
 
@@ -321,6 +309,7 @@ async def test_session_admits_before_acknowledging_and_closes_in_dependency_orde
         async def ack(self, _batch: SyncBatch) -> None:
             assert admitted.is_set()
             lifecycle.append("ack")
+            acked.set()
 
     class Bridge(DesktopBridge):
         async def on_to_device_event(self, event: object) -> None:  # noqa: ARG002
@@ -361,11 +350,7 @@ async def test_session_admits_before_acknowledging_and_closes_in_dependency_orde
         _config(selected_root, shell=False),
         _offline(owner, AsyncMock(side_effect=prepare)),
     )
-    await asyncio.wait_for(admitted.wait(), 5)
-    for _ in range(100):
-        if "ack" in lifecycle:
-            break
-        await asyncio.sleep(0.01)
+    await asyncio.wait_for(acked.wait(), 5)
     assert session.live
     await session.close()
 
@@ -396,7 +381,7 @@ async def test_startup_failure_before_workers_releases_everything_without_stoppi
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", Bridge)
     monkeypatch.setattr(
         "mindroom.desktop.bridge_session.PlaywrightMCPBrowserProvider",
-        lambda **kwargs: _RecordingBrowser(lifecycle, **kwargs),
+        lambda **_kwargs: _RecordingBrowser(lifecycle),
     )
     owner = _Owner(lifecycle)
     prepare = AsyncMock(side_effect=RuntimeError("controller device changed"))
@@ -451,6 +436,30 @@ async def test_concurrent_closes_share_one_teardown_that_a_cancelled_caller_cann
 
 
 @pytest.mark.asyncio
+async def test_close_fences_admission_and_ends_control_before_it_yields(
+    tmp_path: Path,
+    selected_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing revokes the control lease and stops the bridge at once, before any release step can yield."""
+    monkeypatch.setitem(sys.modules, "mindroom.desktop.login_environment", None)
+    session = await _start(
+        tmp_path,
+        _config(selected_root, shell=False),
+        _offline(_Owner([])),
+        control_lease_seconds=600,
+    )
+    assert session.bridge.policy.allow_control is True
+
+    closing = asyncio.create_task(session.close())
+    await asyncio.sleep(0)
+
+    assert session.bridge.policy.allow_control is False
+    assert session.bridge.local_status()["gui_mode"] == "stopped"
+    await closing
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("login_environment")
 async def test_a_failing_release_still_releases_the_rest_and_is_the_close_outcome(
     tmp_path: Path,
@@ -468,7 +477,7 @@ async def test_a_failing_release_still_releases_the_rest_and_is_the_close_outcom
 
     monkeypatch.setattr(
         "mindroom.desktop.bridge_session.PlaywrightMCPBrowserProvider",
-        lambda **kwargs: FailingBrowser(lifecycle, **kwargs),
+        lambda **_kwargs: FailingBrowser(lifecycle),
     )
     session = await _start(tmp_path, _config(selected_root, browser=True), _offline(_Owner(lifecycle)))
 

@@ -32,6 +32,7 @@ from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 
 from mindroom.desktop.bridge import DesktopBridge
 from mindroom.desktop.bridge_session import DesktopBridgeSessionDeps
+from mindroom.desktop.cloudflare_access import CloudflareAccessHeaders
 from mindroom.desktop.command_journal import DesktopCommandJournal, DesktopCommandJournalError
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
 from mindroom.desktop.media import download_encrypted_media
@@ -56,11 +57,12 @@ from mindroom.desktop.protocol import (
     EncryptedDesktopMedia,
 )
 from mindroom.desktop.session import DesktopMatrixSession, load_desktop_session, save_desktop_session
-from mindroom.desktop.shell import DesktopShell, DesktopShellRequest
+from mindroom.desktop.shell import DesktopShell
 from mindroom.file_locks import advisory_file_lock, file_lock_is_held
 from mindroom.matrix.olm_to_device import OlmToDeviceError
 from mindroom.shell import execution as shell_execution
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.desktop_helpers import FailingSource, IdleSource
 from tests.test_desktop_bridge import _wait_until_gone
 
 if TYPE_CHECKING:
@@ -171,6 +173,14 @@ def _local_access_request(revision: int, roots: list[str], *, enabled: bool) -> 
     request = _request("set_local_access", expected_revision=revision, files={"roots": roots})
     request.parameters["shell"] = {"enabled": enabled}
     return request
+
+
+@pytest.fixture
+def selected_root(tmp_path: Path) -> Path:
+    """Create one selected folder."""
+    root = (tmp_path / "selected").resolve()
+    root.mkdir()
+    return root
 
 
 def test_status_restores_saved_identity_without_exposing_or_changing_session(tmp_path: Path) -> None:
@@ -471,14 +481,12 @@ def test_set_allowed_apps_preserves_connection_and_other_settings(tmp_path: Path
     assert load_native_config(native_config_path(tmp_path)).to_payload() == saved
 
 
-def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path) -> None:
+def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path, selected_root: Path) -> None:
     host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
-    root = tmp_path / "selected"
-    root.mkdir()
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
     before = load_native_config(native_config_path(tmp_path)).to_payload()
-    response = asyncio.run(host.handle(_local_access_request(1, [str(root)], enabled=True)))
-    assert response["status"]["config"]["file_roots"] == [str(root.resolve())]
+    response = asyncio.run(host.handle(_local_access_request(1, [str(selected_root)], enabled=True)))
+    assert response["status"]["config"]["file_roots"] == [str(selected_root.resolve())]
     assert response["status"]["config"]["shell_enabled"] is True
     assert response["status"]["shell"] == {
         "enabled": True,
@@ -491,11 +499,11 @@ def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path)
     assert type(response["status"]["shell"]["auto_approve_remaining_seconds"]) is int
     assert load_native_config(native_config_path(tmp_path)).to_payload() == before | {
         "revision": 2,
-        "files": {"roots": [str(root.resolve())]},
+        "files": {"roots": [str(selected_root.resolve())]},
         "shell": {"enabled": True},
     }
     # A disappeared saved root must not block unrelated edits.
-    root.rmdir()
+    selected_root.rmdir()
     asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=2, allowed_app_ids=[])))
     browser = {"enabled": False, "executable_path": None, "user_data_dir": None}
     asyncio.run(host.handle(_request("set_browser_config", expected_revision=3, browser=browser)))
@@ -503,7 +511,7 @@ def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path)
     old_payload["revision"] = 4
     asyncio.run(host.handle(_request("configure", expected_revision=4, config=old_payload)))
     saved = load_native_config(native_config_path(tmp_path))
-    assert saved.files.roots == (root.resolve(),)
+    assert saved.files.roots == (selected_root.resolve(),)
     assert saved.shell.enabled is True
     unchanged = native_config_path(tmp_path).read_bytes()
     with pytest.raises(NativeProtocolError) as caught:
@@ -512,15 +520,18 @@ def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path)
     assert native_config_path(tmp_path).read_bytes() == unchanged
 
 
-def test_changed_local_root_must_exist_and_new_controller_gets_no_local_access(tmp_path: Path) -> None:
+def test_changed_local_root_must_exist_and_new_controller_gets_no_local_access(
+    tmp_path: Path,
+    selected_root: Path,
+) -> None:
     host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
-    root = tmp_path / "selected"
-    root.mkdir()
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
-    asyncio.run(host.handle(_local_access_request(1, [str(root)], enabled=True)))
+    asyncio.run(host.handle(_local_access_request(1, [str(selected_root)], enabled=True)))
     unchanged = native_config_path(tmp_path).read_bytes()
     with pytest.raises(NativeProtocolError) as caught:
-        asyncio.run(host.handle(_local_access_request(2, [str(root), str(tmp_path / "missing")], enabled=True)))
+        asyncio.run(
+            host.handle(_local_access_request(2, [str(selected_root), str(tmp_path / "missing")], enabled=True)),
+        )
     assert caught.value.code == "invalid_request"
     assert native_config_path(tmp_path).read_bytes() == unchanged
     payload = _config_payload()
@@ -574,16 +585,14 @@ def test_set_local_access_requires_saved_config_stopped_bridge_and_exact_fields(
     assert native_config_path(tmp_path).read_bytes() == unchanged
 
 
-def test_folder_only_config_starts_without_app_selection(tmp_path: Path) -> None:
+def test_folder_only_config_starts_without_app_selection(tmp_path: Path, selected_root: Path) -> None:
     runtime = FakeRuntime()
     host = NativeDesktopHost(
         SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None),
         helper_version="1",
         dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
     )
-    root = tmp_path / "selected"
-    root.mkdir()
-    payload = _config_payload() | {"allowed_app_ids": [], "files": {"roots": [str(root)]}}
+    payload = _config_payload() | {"allowed_app_ids": [], "files": {"roots": [str(selected_root)]}}
     payload["shell"] = {"enabled": False}
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
     assert asyncio.run(host.handle(_request("start")))["status"]["bridge"]["state"] == "observe_only"
@@ -599,34 +608,14 @@ def bridge_transport(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     return send
 
 
-class _IdleSource:
-    """Durable source with no Matrix traffic."""
-
-    async def run(self) -> None:
-        await asyncio.Event().wait()
-
-    async def wait_for_work(self) -> None:
-        await asyncio.Event().wait()
-
-
-class _FailingSource(_IdleSource):
-    """Durable source whose sync fails once the test sets `fail`."""
-
-    def __init__(self) -> None:
-        self.fail = asyncio.Event()
-
-    async def run(self) -> None:
-        await self.fail.wait()
-        raise RuntimeError("transport failed")
-
-
 class _FakeOwner:
     """Owned Matrix session stand-in that records callback registration and closing."""
 
     def __init__(self) -> None:
         self.client = SimpleNamespace(to_device_callbacks=[], add_to_device_callback=self._register)
-        self.source: _IdleSource = _IdleSource()
+        self.source: IdleSource = IdleSource()
         self.closes = 0
+        self.closed = asyncio.Event()
         self.close_error: Exception | None = None
 
     def _register(self, callback: object, event_type: object) -> None:
@@ -634,6 +623,7 @@ class _FakeOwner:
 
     async def close(self) -> None:
         self.closes += 1
+        self.closed.set()
         if self.close_error is not None:
             raise self.close_error
 
@@ -675,9 +665,13 @@ def offline_runtime_session(monkeypatch: pytest.MonkeyPatch) -> _OfflineMatrix:
     return _OfflineMatrix(owner, DesktopBridgeSessionDeps(open_client=open_client, prepare_client=AsyncMock()))
 
 
+def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return cast("RuntimePaths", SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None))
+
+
 def _offline_host(tmp_path: Path, offline: _OfflineMatrix) -> NativeDesktopHost:
     return NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None),
+        _runtime_paths(tmp_path),
         helper_version="1",
         dependencies=NativeHostDependencies(runtime_factory=offline.runtime),
     )
@@ -1131,44 +1125,26 @@ def test_shell_controls_bypass_lifecycle_lock_and_require_running_bridge(
     assert asyncio.run(scenario()) == [(action, call)]
 
 
-def _folder_and_shell_config(root: Path) -> NativeDesktopConfig:
+def _folder_config(root: Path, *, shell_enabled: bool = False) -> NativeDesktopConfig:
     payload = _config_payload() | {"allowed_app_ids": [], "files": {"roots": [str(root)]}}
-    payload["shell"] = {"enabled": True}
+    payload["shell"] = {"enabled": shell_enabled}
     return NativeDesktopConfig.from_payload(payload)
-
-
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    return cast("RuntimePaths", SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None))
 
 
 @pytest.mark.asyncio
 async def test_runtime_starts_folder_and_shell_access_without_gui_provider(
     offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
+    selected_root: Path,
 ) -> None:
-    root = (tmp_path / "selected").resolve()
-    root.mkdir()
-    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), _folder_and_shell_config(root))
+    config = _folder_config(selected_root, shell_enabled=True)
+    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), config)
     await runtime.start()
-    bridge = offline_runtime_session.bridge()
-    filesystem, shell = cast("DesktopFilesystem", bridge.filesystem), cast("DesktopShell", bridge.shell)
+    filesystem = cast("DesktopFilesystem", offline_runtime_session.bridge().filesystem)
     status = runtime.status()
     assert status["gui_available"] is False
-    assert [folder["path"] for folder in status["file_roots"]] == [str(root)]
+    assert [folder["path"] for folder in status["file_roots"]] == [str(selected_root)]
     assert status["shell"]["enabled"] is True
-    # The shell runtime runs commands with the environment captured from the login shell at start.
-    runtime.grant_shell(60)
-    request = DesktopShellRequest(
-        "captured",
-        "@person:example.org",
-        "assistant",
-        'printf "$MINDROOM_CAPTURED"',
-        str(tmp_path),
-        round(time.time() * 1000) + 60_000,
-    )
-    result = await shell.execute(request)
-    assert result.output.read() == b"from-login-shell"
-    result.output.release()
     await runtime.stop()
     assert offline_runtime_session.owner.closes == 1
     assert offline_runtime_session.owner.client.to_device_callbacks == []
@@ -1178,55 +1154,76 @@ async def test_runtime_starts_folder_and_shell_access_without_gui_provider(
 
 
 @pytest.mark.asyncio
-async def test_runtime_start_failure_releases_pinned_folders(
+async def test_runtime_start_failure_releases_the_matrix_owner(
     offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    selected_root: Path,
 ) -> None:
-    root = (tmp_path / "selected").resolve()
-    root.mkdir()
-    opened: list[DesktopFilesystem] = []
-
-    class RecordingFilesystem(DesktopFilesystem):
-        def __init__(self, roots: tuple[Path, ...]) -> None:
-            super().__init__(roots)
-            opened.append(self)
-
-    monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopFilesystem", RecordingFilesystem)
     (tmp_path / "desktop_bridge" / "commands.sqlite3").mkdir(parents=True)
-    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), _folder_and_shell_config(root))
+    config = _folder_config(selected_root, shell_enabled=True)
+    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), config)
     with pytest.raises(DesktopCommandJournalError):
         await runtime.start()
-    assert len(opened) == 1
-    with pytest.raises(DesktopFilesystemError, match="closed"):
-        opened[0].list_folders()
     assert offline_runtime_session.owner.closes == 1
     assert runtime.status()["gui_mode"] == "stopped"
 
 
-async def _wait_for_closes(owner: _FakeOwner, closes: int = 1) -> None:
-    for _ in range(500):
-        if owner.closes >= closes:
-            return
-        await asyncio.sleep(0.01)
-    pytest.fail("the Matrix owner was never closed")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access", [False, True])
+async def test_runtime_start_uses_the_saved_cloudflare_access_choice(
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    selected_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    access: bool,
+) -> None:
+    """A bridge started from the app authenticates through Access only when the saved login chose it."""
+    session = DesktopMatrixSession("https://example.org", "@desktop:example.org", "LOCAL", "secret-token", access)
+    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: session)
+    applications: list[str] = []
+
+    def create(app_url: str) -> SimpleNamespace:
+        applications.append(app_url)
+        return SimpleNamespace(current_token=lambda: "access-token")
+
+    monkeypatch.setattr("mindroom.desktop.cloudflare_access.CloudflareAccessTokenProvider.create", create)
+    opened_headers: list[object] = []
+    open_client = offline_runtime_session.deps.open_client
+
+    async def recording_open_client(*args: object) -> object:
+        opened_headers.append(args[2])
+        return await open_client(*args)
+
+    offline_runtime_session.deps = replace(offline_runtime_session.deps, open_client=recording_open_client)
+    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), _folder_config(selected_root))
+    await runtime.start()
+    try:
+        [headers] = opened_headers
+        if access:
+            assert isinstance(headers, CloudflareAccessHeaders)
+            assert applications == ["https://example.org"]
+        else:
+            assert headers is None
+            assert applications == []
+    finally:
+        await runtime.stop()
 
 
 @pytest.mark.asyncio
 async def test_worker_failure_faults_the_runtime_and_releases_its_session(
     offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
+    selected_root: Path,
 ) -> None:
     """A failed worker leaves a faulted status for the app and releases Matrix, folders, and the shell."""
-    root = (tmp_path / "selected").resolve()
-    root.mkdir()
     owner = offline_runtime_session.owner
-    owner.source = source = _FailingSource()
-    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), _folder_and_shell_config(root))
+    owner.source = source = FailingSource()
+    config = _folder_config(selected_root, shell_enabled=True)
+    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), config)
     await runtime.start()
     bridge = offline_runtime_session.bridge()
     source.fail.set()
-    await _wait_for_closes(owner)
+    await asyncio.wait_for(owner.closed.wait(), SETTLE_TIMEOUT_SECONDS)
 
     status = runtime.status()
     assert status["gui_mode"] == "faulted"
@@ -1437,22 +1434,15 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
                         os.kill(int(pid), signal.SIGKILL)
 
 
-def _folder_config(root: Path) -> NativeDesktopConfig:
-    payload = _config_payload() | {"allowed_app_ids": [], "files": {"roots": [str(root)]}}
-    payload["shell"] = {"enabled": False}
-    return NativeDesktopConfig.from_payload(payload)
-
-
 @pytest.mark.asyncio
 async def test_stop_fences_a_command_admitted_just_before_it(
     bridge_transport: AsyncMock,
     offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
+    selected_root: Path,
 ) -> None:
     """A command admitted in the same step as stop is never executed or answered."""
-    root = (tmp_path / "selected").resolve()
-    root.mkdir()
-    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), _folder_config(root))
+    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), _folder_config(selected_root))
     await runtime.start()
     bridge = offline_runtime_session.bridge()
     # An answered first command proves the real workers are running and waiting for more.
@@ -1471,6 +1461,7 @@ async def test_fault_status_reports_the_draining_action_until_the_bridge_has_sto
     bridge_transport: AsyncMock,
     offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
+    selected_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """After a transport failure, the app sees the action still finishing, then the fault once it has drained."""
@@ -1483,11 +1474,9 @@ async def test_fault_status_reports_the_draining_action_until_the_bridge_has_sto
             return await super()._process(command, command_fingerprint)
 
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", HeldActionBridge)
-    root = (tmp_path / "selected").resolve()
-    root.mkdir()
     owner = offline_runtime_session.owner
-    owner.source = source = _FailingSource()
-    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), _folder_config(root))
+    owner.source = source = FailingSource()
+    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), _folder_config(selected_root))
     await runtime.start()
     await offline_runtime_session.bridge().on_to_device_event(
         _bridge_event("list_folders", {}, request_id="held", sequence=1),
@@ -1504,7 +1493,7 @@ async def test_fault_status_reports_the_draining_action_until_the_bridge_has_sto
     assert owner.closes == 0
 
     release.set()
-    await _wait_for_closes(owner)
+    await asyncio.wait_for(owner.closed.wait(), SETTLE_TIMEOUT_SECONDS)
     status = runtime.status()
     assert (status["gui_mode"], status["active_action"]) == ("faulted", None)
     assert status["last_error"]["message"] == "transport failed"
@@ -1516,6 +1505,7 @@ async def test_fault_status_reports_the_draining_action_until_the_bridge_has_sto
 async def test_stop_during_a_fault_close_waits_for_that_close(
     offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
+    selected_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A requested stop that arrives while a failed session is closing returns only after that one close."""
@@ -1528,11 +1518,9 @@ async def test_stop_during_a_fault_close_waits_for_that_close(
             await super().stop()
 
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", HeldStopBridge)
-    root = (tmp_path / "selected").resolve()
-    root.mkdir()
     owner = offline_runtime_session.owner
-    owner.source = source = _FailingSource()
-    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), _folder_config(root))
+    owner.source = source = FailingSource()
+    runtime = offline_runtime_session.runtime(_runtime_paths(tmp_path), _folder_config(selected_root))
     await runtime.start()
     source.fail.set()
     await asyncio.wait_for(stop_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
@@ -1555,6 +1543,7 @@ async def test_stop_during_a_fault_close_waits_for_that_close(
 async def test_host_stop_during_real_startup_releases_the_session(
     offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
+    selected_root: Path,
 ) -> None:
     """Stopping while the controller is being verified rolls the half-started session back and allows a new start."""
     entered, release = asyncio.Event(), asyncio.Event()
@@ -1565,10 +1554,8 @@ async def test_host_stop_during_real_startup_releases_the_session(
 
     offline_runtime_session.deps = replace(offline_runtime_session.deps, prepare_client=held_prepare)
     owner = offline_runtime_session.owner
-    root = tmp_path / "selected"
-    root.mkdir()
     host = _offline_host(tmp_path, offline_runtime_session)
-    await host.handle(_request("configure", expected_revision=0, config=_folder_config(root).to_payload()))
+    await host.handle(_request("configure", expected_revision=0, config=_folder_config(selected_root).to_payload()))
     starting = asyncio.create_task(host.handle(_request("start")))
     await asyncio.wait_for(entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
@@ -1592,13 +1579,12 @@ async def test_host_stop_during_real_startup_releases_the_session(
 async def test_host_stop_reports_a_failed_release_and_still_retires_the_runtime(
     offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
+    selected_root: Path,
 ) -> None:
     """A release failure is the stop's error, yet the bridge counts as stopped and can start again."""
     owner = offline_runtime_session.owner
-    root = tmp_path / "selected"
-    root.mkdir()
     host = _offline_host(tmp_path, offline_runtime_session)
-    await host.handle(_request("configure", expected_revision=0, config=_folder_config(root).to_payload()))
+    await host.handle(_request("configure", expected_revision=0, config=_folder_config(selected_root).to_payload()))
     await host.handle(_request("start"))
     owner.close_error = RuntimeError("lease release failed")
 

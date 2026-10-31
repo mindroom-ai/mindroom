@@ -37,8 +37,24 @@ from mindroom.desktop.provider import DesktopProviderError
 from mindroom.desktop.session import DesktopMatrixSession, save_desktop_session
 from mindroom.desktop.shell import DesktopShellError
 from mindroom.matrix.device_identity import PinnedMatrixDevice
+from tests.desktop_helpers import FailingSource, IdleSource
 
 runner = CliRunner()
+_RUN_ARGS = [
+    "run",
+    "--controller-user-id",
+    "@cloud:example.org",
+    "--controller-device-id",
+    "CLOUD",
+    "--controller-ed25519",
+    "fingerprint",
+    "--allow-requester",
+    "@alice:example.org",
+    "--allow-agent",
+    "computer",
+    "--allow-app",
+    "com.example.Editor",
+]
 
 
 @pytest.fixture
@@ -539,26 +555,7 @@ def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, 
     )
     monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
-    result = runner.invoke(
-        desktop_app,
-        [
-            "run",
-            "--controller-user-id",
-            "@cloud:example.org",
-            "--controller-device-id",
-            "CLOUD",
-            "--controller-ed25519",
-            "fingerprint",
-            "--allow-requester",
-            "@alice:example.org",
-            "--allow-agent",
-            "computer",
-            "--allow-app",
-            "com.example.Editor",
-            "--matrix-http-headers-file",
-            str(headers_path),
-        ],
-    )
+    result = runner.invoke(desktop_app, [*_RUN_ARGS, "--matrix-http-headers-file", str(headers_path)])
 
     assert result.exit_code == 0, result.output
     ensure_dependencies.assert_called_once_with(runtime_paths)
@@ -582,24 +579,7 @@ def test_desktop_run_restores_saved_cloudflare_access_mode(
     monkeypatch.setattr("mindroom.desktop.session.desktop_http_headers", access_headers)
     monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
-    result = runner.invoke(
-        desktop_app,
-        [
-            "run",
-            "--controller-user-id",
-            "@cloud:example.org",
-            "--controller-device-id",
-            "CLOUD",
-            "--controller-ed25519",
-            "fingerprint",
-            "--allow-requester",
-            "@alice:example.org",
-            "--allow-agent",
-            "computer",
-            "--allow-app",
-            "com.example.Editor",
-        ],
-    )
+    result = runner.invoke(desktop_app, _RUN_ARGS)
 
     assert result.exit_code == 0, result.output
     access_headers.assert_called_once_with("https://matrix.example.org", None, cloudflare_access=True)
@@ -703,24 +683,7 @@ def test_run_command_preserves_unexpected_environment_errors(
 
     monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", denied)
 
-    result = runner.invoke(
-        desktop_app,
-        [
-            "run",
-            "--controller-user-id",
-            "@cloud:example.org",
-            "--controller-device-id",
-            "CLOUD",
-            "--controller-ed25519",
-            "fingerprint",
-            "--allow-requester",
-            "@alice:example.org",
-            "--allow-agent",
-            "computer",
-            "--allow-app",
-            "com.example.Editor",
-        ],
-    )
+    result = runner.invoke(desktop_app, _RUN_ARGS)
 
     assert isinstance(result.exception, PermissionError)
 
@@ -738,26 +701,7 @@ def test_run_refuses_mindroom_itself_as_a_one_run_app(
     monkeypatch.setattr("mindroom.logging_config.setup_logging", lambda **_kwargs: None)
     monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
-    result = runner.invoke(
-        desktop_app,
-        [
-            "run",
-            "--controller-user-id",
-            "@cloud:example.org",
-            "--controller-device-id",
-            "CLOUD",
-            "--controller-ed25519",
-            "fingerprint",
-            "--allow-requester",
-            "@alice:example.org",
-            "--allow-agent",
-            "computer",
-            "--allow-app",
-            "com.example.Editor",
-            "--allow-app",
-            app_id,
-        ],
-    )
+    result = runner.invoke(desktop_app, [*_RUN_ARGS, "--allow-app", app_id])
 
     assert result.exit_code == 1
     assert f"control MindRoom itself ({app_id})" in " ".join(result.output.split())
@@ -770,16 +714,8 @@ def _offline_run_deps(owner: object, **session: object) -> desktop_cli._BridgeRu
     return desktop_cli._BridgeRunDeps(session=DesktopBridgeSessionDeps(**deps))
 
 
-class _IdleSource:
-    async def run(self) -> None:
-        await asyncio.Event().wait()
-
-    async def wait_for_work(self) -> None:
-        await asyncio.Event().wait()
-
-
 @pytest.mark.asyncio
-async def test_screenshot_only_run_loads_no_posix_module_and_ends_as_a_failure_when_a_worker_returns(
+async def test_run_without_shell_loads_no_shell_module_and_ends_as_a_failure_when_a_worker_returns(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     selected_root: Path,
@@ -801,7 +737,7 @@ async def test_screenshot_only_run_loads_no_posix_module_and_ends_as_a_failure_w
         owner_closed.set()
         await client.close()
 
-    owner = SimpleNamespace(client=client, source=_IdleSource(), close=close_owner)
+    owner = SimpleNamespace(client=client, source=IdleSource(), close=close_owner)
     monkeypatch.setitem(sys.modules, "mindroom.desktop.shell_prompt", None)
     monkeypatch.setitem(sys.modules, "mindroom.desktop.login_environment", None)
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", Bridge)
@@ -839,24 +775,7 @@ def test_desktop_run_reports_a_stopped_worker_as_a_failure(monkeypatch: pytest.M
     )
     monkeypatch.setattr(desktop_cli, "_run_bridge", AsyncMock(side_effect=DesktopWorkerStoppedError()))
 
-    result = runner.invoke(
-        desktop_app,
-        [
-            "run",
-            "--controller-user-id",
-            "@cloud:example.org",
-            "--controller-device-id",
-            "CLOUD",
-            "--controller-ed25519",
-            "fingerprint",
-            "--allow-requester",
-            "@alice:example.org",
-            "--allow-agent",
-            "computer",
-            "--allow-app",
-            "com.example.Editor",
-        ],
-    )
+    result = runner.invoke(desktop_app, _RUN_ARGS)
 
     assert result.exit_code == 1
     assert "Desktop bridge failed: A desktop worker stopped unexpectedly." in " ".join(result.output.split())
@@ -873,7 +792,6 @@ async def test_cli_drains_native_work_before_releasing_owner(
     """Neither transport failure nor cancellation may release ownership over live input."""
     started = asyncio.Event()
     shutdown_started = asyncio.Event()
-    fail_transport = asyncio.Event()
     release_native = threading.Event()
     native_finished = threading.Event()
     owner_closed = False
@@ -895,22 +813,14 @@ async def test_cli_drains_native_work_before_releasing_owner(
             shutdown_started.set()
             await super().stop()
 
-    class Source:
-        async def run(self) -> None:
-            await fail_transport.wait()
-            msg = "transport failed"
-            raise RuntimeError(msg)
-
-        async def wait_for_work(self) -> None:
-            await asyncio.Event().wait()
-
     async def close_owner() -> None:
         nonlocal owner_closed
         owner_closed = True
         shutdown_started.set()
         await client.close()
 
-    owner = SimpleNamespace(client=client, source=Source(), close=close_owner)
+    source = FailingSource()
+    owner = SimpleNamespace(client=client, source=source, close=close_owner)
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", ActiveBridge)
     task = asyncio.create_task(
         desktop_cli._run_bridge(
@@ -927,7 +837,7 @@ async def test_cli_drains_native_work_before_releasing_owner(
         if shutdown == "cancellation":
             task.cancel()
         else:
-            fail_transport.set()
+            source.fail.set()
         await asyncio.wait_for(shutdown_started.wait(), 2)
         assert not owner_closed
         assert not native_finished.is_set()
@@ -992,7 +902,7 @@ async def test_folder_and_shell_bridge_revokes_shell_access_on_stop(
     async def prepare_client(*_args: object) -> None:
         prepared.set()
 
-    owner = SimpleNamespace(client=client, source=_IdleSource(), close=client.close)
+    owner = SimpleNamespace(client=client, source=IdleSource(), close=client.close)
     monkeypatch.setattr(
         "mindroom.desktop.login_environment.capture_login_environment",
         AsyncMock(return_value={"PATH": "/usr/bin:/bin"}),
@@ -1060,7 +970,7 @@ async def test_terminal_approver_stops_reading_before_the_bridge_settles_pending
         finally:
             lifecycle.append("approvals_stopped")
 
-    owner = SimpleNamespace(client=client, source=_IdleSource(), close=client.close)
+    owner = SimpleNamespace(client=client, source=IdleSource(), close=client.close)
     monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", Bridge)
     monkeypatch.setattr("mindroom.desktop.shell_prompt.serve_terminal_shell_approvals", approvals)
     monkeypatch.setattr(

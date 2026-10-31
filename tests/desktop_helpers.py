@@ -70,6 +70,31 @@ MEDIA = EncryptedDesktopMedia(
 )
 
 
+class IdleSource:
+    """Durable source with no Matrix traffic."""
+
+    async def run(self) -> None:
+        """Idle until cancelled."""
+        await asyncio.Event().wait()
+
+    async def wait_for_work(self) -> None:
+        """Never report work."""
+        await asyncio.Event().wait()
+
+
+class FailingSource(IdleSource):
+    """Durable source whose sync fails once the test sets `fail`."""
+
+    def __init__(self) -> None:
+        self.fail = asyncio.Event()
+
+    async def run(self) -> None:
+        """Fail the sync once `fail` is set."""
+        await self.fail.wait()
+        msg = "transport failed"
+        raise RuntimeError(msg)
+
+
 @dataclass
 class FakeProvider:
     """Record the local operations requested of the GUI provider."""

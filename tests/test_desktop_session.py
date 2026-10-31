@@ -302,6 +302,7 @@ def test_http_headers_file_loads_string_mapping(tmp_path: Path) -> None:
     assert desktop_http_headers("https://matrix.example.org", path, cloudflare_access=False) == {
         "X-Access-Client": "test-secret",
     }
+    assert desktop_http_headers("https://matrix.example.org", None, cloudflare_access=False) is None
 
 
 def test_cloudflare_access_adds_its_token_for_the_homeserver_to_the_file_headers(
@@ -323,8 +324,7 @@ def test_cloudflare_access_adds_its_token_for_the_homeserver_to_the_file_headers
     headers = desktop_http_headers("https://matrix.example.org", path, cloudflare_access=True)
 
     assert applications == ["https://matrix.example.org"]
-    assert dict(headers or {}) == {"X-Access-Client": "test-secret", "cf-access-token": "access-token"}
-    assert desktop_http_headers("https://matrix.example.org", None, cloudflare_access=False) is None
+    assert dict(headers) == {"X-Access-Client": "test-secret", "cf-access-token": "access-token"}
 
 
 @pytest.mark.skipif(
