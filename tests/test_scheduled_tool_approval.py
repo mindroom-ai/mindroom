@@ -2784,7 +2784,7 @@ async def test_a_model_switch_is_never_a_scheduled_call() -> None:
     with (
         tool_runtime_context(context),
         _responders(context.config, "general"),
-        pytest.raises(RuntimeError, match="needs live input or conversation control"),
+        pytest.raises(SchedulingError, match="needs live input or conversation control"),
     ):
         await _LiveRun(((ThreadModelTools(), "thread_model"),)).call(
             "schedule_tool_call",
