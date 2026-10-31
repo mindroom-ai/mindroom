@@ -30,19 +30,16 @@ from enum import Enum, unique
 from typing import (
     TYPE_CHECKING,
     Any,
-    cast,
 )
 from uuid import UUID
 
 if TYPE_CHECKING:
-    from .events.account_data import PushAction, PushCondition
+    pass
 
 try:
-    from urllib.parse import quote, urlencode, urlparse
+    from urllib.parse import quote, urlencode
 except ImportError:
     from urllib import quote, urlencode  # type: ignore
-
-    from urlparse import urlparse  # type: ignore
 
 
 MATRIX_API_PATH_V1: str = "/_matrix/client/v1"
@@ -175,134 +172,6 @@ class Api:
             separators=(",", ":"),
             sort_keys=True,
         )
-
-    @staticmethod
-    def mimetype_to_msgtype(mimetype: str) -> str:
-        """Turn a mimetype into a matrix message type."""
-        if mimetype.startswith("image"):
-            return "m.image"
-        elif mimetype.startswith("video"):
-            return "m.video"
-        elif mimetype.startswith("audio"):
-            return "m.audio"
-
-        return "m.file"
-
-    @staticmethod
-    def mxc_to_http(
-        mxc: str, homeserver: str | None = None, access_token: str | None = None
-    ) -> str | None:
-        """Convert a matrix content URI to a HTTP URI."""
-        url = urlparse(mxc)
-
-        if url.scheme != "mxc":
-            return None
-
-        if not url.netloc or not url.path:
-            return None
-
-        parsed_homeserver = urlparse(homeserver) if homeserver else None
-
-        if not access_token:
-            # Unauthenticated media
-            http_url = ("{homeserver}{path}/download/{server_name}{mediaId}").format(
-                homeserver=(
-                    parsed_homeserver.geturl()
-                    if parsed_homeserver
-                    else f"https://{url.netloc}"
-                ),
-                path=MATRIX_MEDIA_API_PATH,
-                server_name=url.hostname,
-                mediaId=url.path,
-            )
-            return http_url
-
-        # Authenticated media
-        return "{homeserver}{path}".format(
-            homeserver=(
-                parsed_homeserver.geturl()
-                if parsed_homeserver
-                else f"https://{url.netloc}"
-            ),
-            path=Api._build_path(
-                ["download", cast(str, url.hostname), url.path.lstrip("/")],
-                {"access_token": access_token},
-                base_path=MATRIX_MEDIA_API_PATH,
-            ),
-        )
-
-    @staticmethod
-    def encrypted_mxc_to_plumb(
-        mxc,
-        key: str,
-        hash: str,
-        iv: str,
-        homeserver: str | None = None,
-        mimetype: str | None = None,
-        access_token: str | None = None,
-    ) -> str | None:
-        """Convert a matrix content URI to a encrypted mxc URI.
-
-        The return value of this function will have a URI schema of emxc://.
-        The path of the URI will be converted just like the mxc_to_http()
-        function does, but it will also contain query parameters that are
-        necessary to decrypt the payload the URI is pointing to.
-
-        This function is useful to present a clickable URI that can be passed
-        to a plumber program that will download and decrypt the content that
-        the matrix content URI is pointing to.
-
-        The returned URI should never be converted to http and opened directly,
-        as that would expose the decryption parameters to any middleman or ISP.
-
-        Args:
-            mxc (str): The matrix content URI.
-            key (str): The encryption key that can be used to decrypt the
-                payload the URI is pointing to.
-            hash (str): The hash of the payload.
-            iv (str): The initial value needed to decrypt the payload.
-            mimetype (str): The mimetype of the payload.
-        """
-        url = urlparse(mxc)
-
-        if url.scheme != "mxc":
-            return None
-
-        if not url.netloc or not url.path:
-            return None
-
-        parsed_homeserver = urlparse(homeserver) if homeserver else None
-
-        host = (
-            parsed_homeserver._replace(scheme="emxc").geturl()
-            if parsed_homeserver
-            else None
-        )
-
-        if access_token is None:
-            _path = "/_matrix/media/v3"
-        else:
-            _path = MATRIX_MEDIA_API_PATH
-        plumb_url = ("{homeserver}{_path}/download/{server_name}{mediaId}").format(
-            homeserver=host or f"emxc://{url.netloc}",
-            _path=_path,
-            server_name=url.hostname,
-            mediaId=url.path,
-        )
-
-        query_parameters = {
-            "key": key,
-            "hash": hash,
-            "iv": iv,
-        }
-        if mimetype is not None:
-            query_parameters["mimetype"] = mimetype
-        if access_token:
-            query_parameters["access_token"] = access_token
-
-        plumb_url += f"?{urlencode(query_parameters)}"
-
-        return plumb_url
 
     @staticmethod
     def _build_path(
@@ -471,39 +340,6 @@ class Api:
             content_dict["initial_device_display_name"] = device_name
 
         return "POST", Api._build_path(path), Api.to_json(content_dict)
-
-    @staticmethod
-    def login_raw(
-        auth_dict: dict[str, Any],
-    ) -> tuple[str, str, str]:
-        """Login to the homeserver using a raw dictionary.
-
-        Returns the HTTP method, HTTP path and data for the request.
-
-        Args:
-            auth_dict (Dict[str, Any): The authentication dictionary
-                containing the elements for the logon.
-                See the example below and here
-                 https://matrix.org/docs/spec/client_server/r0.6.0#authentication-types
-                for detailed documentation
-
-        Example:
-                >>> auth_dict = {
-                >>>     "type": "m.login.password",
-                >>>     "identifier": {
-                >>>         "type": "m.id.thirdparty",
-                >>>         "medium": "email",
-                >>>         "address": "testemail@mail.org"
-                >>>     },
-                >>>     "password": "PASSWORDABCD",
-                >>>     "initial_device_display_name": "Test user"
-                >>> }
-        """
-        if auth_dict is None or auth_dict == {}:
-            raise ValueError("Auth dictionary cannot be empty")
-        path = ["login"]
-
-        return "POST", Api._build_path(path), Api.to_json(auth_dict)
 
     @staticmethod
     def logout(
@@ -702,47 +538,6 @@ class Api:
         path = ["rooms", room_id, "send", event_type, str(tx_id)]
 
         return "PUT", Api._build_path(path, query_parameters), Api.to_json(body)
-
-    @staticmethod
-    def space_get_hierarchy(
-        access_token: str,
-        space_id: str,
-        from_page: str | None = None,
-        limit: int | None = None,
-        max_depth: int | None = None,
-        suggested_only: bool = False,
-    ) -> tuple[str, str]:
-        """Get rooms/spaces that are a part of the provided space.
-
-        Returns the HTTP method and HTTP path for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            space_id (str): The ID of the space to get the hierarchy for.
-            from_page (str, optional): Pagination token from a previous request
-                to this endpoint.
-            limit (int, optional): The maximum number of rooms to return.
-            max_depth (int, optional): The maximum depth of the returned tree.
-            suggested_only (bool, optional): Whether to only return
-                rooms that are considered suggested. Defaults to False.
-        """
-        query_parameters: dict[str, str | int | bool] = {"access_token": access_token}
-
-        if from_page:
-            query_parameters["from"] = from_page
-
-        if limit:
-            query_parameters["limit"] = limit
-
-        if max_depth:
-            query_parameters["max_depth"] = max_depth
-
-        if suggested_only:
-            query_parameters["suggested_only"] = suggested_only
-
-        path = ["rooms", space_id, "hierarchy"]
-
-        return "GET", Api._build_path(path, query_parameters, "/_matrix/client/v1")
 
     @staticmethod
     def direct_room_list(access_token: str, user_id: str) -> tuple[str, str]:
@@ -1004,83 +799,6 @@ class Api:
         return "POST", Api._build_path(path, query_parameters), Api.to_json(body)
 
     @staticmethod
-    def room_ban(
-        access_token: str,
-        room_id: str,
-        user_id: str,
-        reason: str | None = None,
-    ) -> tuple[str, str, str]:
-        """Ban a user from a room.
-
-        Returns the HTTP method, HTTP path and data for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            room_id (str): The room id of the room that the user will be
-                banned from.
-            user_id (str): The user_id of the user that should be banned.
-            reason (str, optional): A reason for which the user is banned.
-        """
-
-        path = ["rooms", room_id, "ban"]
-        query_parameters = {"access_token": access_token}
-        body = {"user_id": user_id}
-
-        if reason:
-            body["reason"] = reason
-
-        return "POST", Api._build_path(path, query_parameters), Api.to_json(body)
-
-    @staticmethod
-    def room_unban(
-        access_token: str,
-        room_id: str,
-        user_id: str,
-    ) -> tuple[str, str, str]:
-        """Unban a user from a room.
-
-        Returns the HTTP method, HTTP path and data for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            room_id (str): The room id of the room that the user will be
-                unbanned from.
-            user_id (str): The user_id of the user that should be unbanned.
-        """
-
-        path = ["rooms", room_id, "unban"]
-        query_parameters = {"access_token": access_token}
-        body = {"user_id": user_id}
-
-        return "POST", Api._build_path(path, query_parameters), Api.to_json(body)
-
-    @staticmethod
-    def room_knock(
-        access_token: str,
-        room_id: str,
-        reason: str | None = None,
-    ) -> tuple[str, str, str]:
-        """Knocks on a room for the user.
-
-        Returns the HTTP method, HTTP path and data for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            room_id (str): The room id of the room that the user will be
-                knocking on.
-            reason (str, optional): The reason the user is knocking.
-        """
-
-        path = ["knock", room_id]
-        query_parameters = {"access_token": access_token}
-        body = {}
-
-        if reason:
-            body["reason"] = reason
-
-        return "POST", Api._build_path(path, query_parameters), Api.to_json(body)
-
-    @staticmethod
     def room_invite(
         access_token: str, room_id: str, user_id: str
     ) -> tuple[str, str, str]:
@@ -1265,21 +983,6 @@ class Api:
         return "POST", Api._build_path(path, query_parameters)
 
     @staticmethod
-    def room_forget(access_token: str, room_id: str) -> tuple[str, str]:
-        """Forget a room.
-
-        Returns the HTTP method, HTTP path and data for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            room_id (str): The room id of the room that will be forgotten.
-        """
-        path = ["rooms", room_id, "forget"]
-        query_parameters = {"access_token": access_token}
-
-        return "POST", Api._build_path(path, query_parameters)
-
-    @staticmethod
     def room_messages(
         access_token: str,
         room_id: str,
@@ -1447,25 +1150,6 @@ class Api:
         return "GET", Api._build_path(path, query_parameters)
 
     @staticmethod
-    def update_device(
-        access_token: str, device_id: str, content: dict[str, str]
-    ) -> tuple[str, str, str]:
-        """Update the metadata of the given device.
-
-        Returns the HTTP method, HTTP path and data for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            device_id (str): The device for which the metadata will be updated.
-            content (Dict): A dictionary of metadata values that will be
-                updated for the device.
-        """
-        query_parameters = {"access_token": access_token}
-        path = ["devices", device_id]
-
-        return "PUT", Api._build_path(path, query_parameters), Api.to_json(content)
-
-    @staticmethod
     def delete_devices(
         access_token: str,
         devices: list[str],
@@ -1541,21 +1225,6 @@ class Api:
         return "GET", Api._build_path(path)
 
     @staticmethod
-    def room_delete_alias(access_token: str, room_alias: str) -> tuple[str, str]:
-        """Delete a room alias.
-
-        Returns the HTTP method and HTTP path for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            room_alias (str): The alias to delete
-        """
-        query_parameters = {"access_token": access_token}
-        path = ["directory", "room", room_alias]
-
-        return "DELETE", Api._build_path(path, query_parameters)
-
-    @staticmethod
     def room_put_alias(
         access_token: str, room_alias: str, room_id: str
     ) -> tuple[str, str, str]:
@@ -1622,72 +1291,6 @@ class Api:
             content["timeout"] = timeout  # type: ignore
 
         return "PUT", Api._build_path(path, query_parameters), Api.to_json(content)
-
-    @staticmethod
-    def update_receipt_marker(
-        access_token: str,
-        room_id: str,
-        event_id: str,
-        receipt_type: ReceiptType = ReceiptType.read,
-        thread_id: str = "main",
-    ) -> tuple[str, str, str]:
-        """Update the marker of given `receipt_type` to specified `event_id`.
-
-        Returns the HTTP method and HTTP path for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            room_id (str): Room id of the room where the marker should
-                be updated
-            event_id (str): The event ID the read marker should be located at
-            receipt_type (ReceiptType): The type of receipt to send. Currently, only
-                `m.read` is supported by the Matrix specification.
-            thread_id (str): The thread root's event ID. Defaults to "main"
-                to indicate the main timeline, and thus not in a thread.
-        """
-        query_parameters = {"access_token": access_token}
-        path = ["rooms", room_id, "receipt", receipt_type.value, event_id]
-        content = {"thread_id": thread_id}
-
-        return "POST", Api._build_path(path, query_parameters), Api.to_json(content)
-
-    @staticmethod
-    def room_read_markers(
-        access_token: str,
-        room_id: str,
-        fully_read_event: str,
-        read_event: str | None = None,
-        private_read_event: str | None = None,
-    ) -> tuple[str, str, str]:
-        """Update fully read marker and optionally read marker for a room.
-
-        This sets the position of the read marker for a given room,
-        and optionally the location of the read receipt and private read receipt.
-
-        Returns the HTTP method, HTTP path and data for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            room_id (str): Room id of the room where the read
-                markers should be updated
-            fully_read_event (str): The event ID the read marker should be
-                located at.
-            read_event (Optional[str]): The event ID to set the read receipt
-                location at.
-            private_read_event (Optional[str]): The event ID to set the private
-                read receipt location at.
-        """
-        query_parameters = {"access_token": access_token}
-        path = ["rooms", room_id, "read_markers"]
-
-        content = {ReceiptType.fully_read.value: fully_read_event}
-
-        if read_event:
-            content[ReceiptType.read.value] = read_event
-        if private_read_event:
-            content[ReceiptType.read_private.value] = private_read_event
-
-        return "POST", Api._build_path(path, query_parameters), Api.to_json(content)
 
     @staticmethod
     def content_repository_config(access_token: str) -> tuple[str, str]:
@@ -1955,68 +1558,6 @@ class Api:
         return "GET", Api._build_path(path, query_parameters)
 
     @staticmethod
-    def public_rooms(
-        access_token: str | None = None,
-        limit: int | None = None,
-        server: str | None = None,
-        since: str | None = None,
-        filter_generic_search_term: str | None = None,
-        filter_room_types: list[str | None] | None = None,
-        include_all_networks: bool | None = None,
-        third_party_instance_id: str | None = None,
-    ) -> tuple[str, str, str | None]:
-        """Lists the public rooms on the server, with optional filters.
-        Returns the appropriate HTTP method/query params/body based off of the combination of arguments.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            limit (int, optional): The maximum number of rooms to return.
-            server (str, optional): The server to fetch the public room lists from. Defaults to the local server. Case sensitive.
-            since (str, optional): A pagination token from a previous request's `next_batch`/`prev_batch`
-            filter_generic_search_term (str, optional): An optional string to search for in the room metadata, e.g. name, topic, canonical alias, etc.
-            filter_room_types (list[str, None], optional): A list of room types to filter for; including `None` includes rooms without a type.
-            include_all_networks (boolean, optional): Whether to include all known networks/protocols from application services on the homeserver
-            third_party_instance_id (str, optional): The specific third-party network/protocol to request from the homeserver. Can only be used if `include_all_networks` is false
-        """
-        path = ["publicRooms"]
-        if any((
-            filter_generic_search_term,
-            filter_room_types,
-            include_all_networks,
-            third_party_instance_id,
-        )):
-            method = "POST"
-        else:
-            method = "GET"
-        query_parameters: dict[str, str | int] = {}
-        if access_token:
-            query_parameters["access_token"] = access_token
-        if server:
-            query_parameters["server"] = server
-        if method == "GET":
-            if limit is not None:
-                query_parameters["limit"] = limit
-            if since is not None:
-                query_parameters["since"] = since
-            return method, Api._build_path(path, query_parameters), None
-        content: dict[str, Any] = {}
-        if limit:
-            content["limit"] = limit
-        if since is not None:
-            content["since"] = since
-        if filter_generic_search_term is not None:
-            content.setdefault("filter", {})["generic_search_term"] = (
-                filter_generic_search_term
-            )
-        if filter_room_types:
-            content.setdefault("filter", {})["room_types"] = filter_room_types
-        if include_all_networks is not None:
-            content["include_all_networks"] = include_all_networks
-        if third_party_instance_id:
-            content["third_party_instance_id"] = third_party_instance_id
-        return method, Api._build_path(path, query_parameters), Api.to_json(content)
-
-    @staticmethod
     def room_context(
         access_token: str, room_id: str, event_id: str, limit: int | None = None
     ) -> tuple[str, str]:
@@ -2111,212 +1652,3 @@ class Api:
         query_parameters = {"access_token": access_token}
 
         return "POST", Api._build_path(path, query_parameters), Api.to_json({})
-
-    @staticmethod
-    def set_pushrule(
-        access_token: str,
-        scope: str,
-        kind: PushRuleKind,
-        rule_id: str,
-        before: str | None = None,
-        after: str | None = None,
-        actions: Sequence[PushAction] = (),
-        conditions: Sequence[PushCondition] | None = None,
-        pattern: str | None = None,
-    ) -> tuple[str, str, str]:
-        """Create or modify an existing user-created push rule.
-
-        Returns the HTTP method, HTTP path and data for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-
-            scope (str): The scope of this rule, e.g. ``"global"``.
-                Homeservers currently only process ``global`` rules for
-                event matching, while ``device`` rules are a planned feature.
-                It is up to clients to interpret any other scope name.
-
-            kind (PushRuleKind): The kind of rule.
-
-            rule_id (str): The identifier of the rule. Must be unique
-                within its scope and kind.
-                For rules of ``room`` kind, this is the room ID to match for.
-                For rules of ``sender`` kind, this is the user ID to match.
-
-            before (Optional[str]): Position this rule before the one matching
-                the given rule ID.
-                The rule ID cannot belong to a predefined server rule.
-                ``before`` and ``after`` cannot be both specified.
-
-            after (Optional[str]): Position this rule after the one matching
-                the given rule ID.
-                The rule ID cannot belong to a predefined server rule.
-                ``before`` and ``after`` cannot be both specified.
-
-            actions (Sequence[PushAction]): Actions to perform when the
-                conditions for this rule are met. The given actions replace
-                the existing ones.
-
-            conditions (Sequence[PushCondition]): Event conditions that must
-                hold true for the rule to apply to that event.
-                A rule with no conditions always hold true.
-                Only applicable to ``underride`` and ``override`` rules.
-
-            pattern (Optional[str]): Glob-style pattern to match against
-                for the event's content.
-                Only applicable to ``content`` rules.
-        """
-
-        path = ["pushrules", scope, kind.value, rule_id]
-        query_parameters = {"access_token": access_token}
-        content: dict[str, Any] = {"actions": [a.as_value for a in actions]}
-
-        if before is not None and after is not None:
-            raise TypeError("before and after cannot be both specified")
-        elif before is not None:
-            query_parameters["before"] = before
-        elif after is not None:
-            query_parameters["after"] = after
-
-        if pattern is not None:
-            if kind != PushRuleKind.content:
-                raise TypeError("pattern can only be set for content rules")
-
-            content["pattern"] = pattern
-
-        if conditions is not None:
-            if kind not in (PushRuleKind.override, PushRuleKind.underride):
-                raise TypeError(
-                    "conditions can only be set for override/underride rules",
-                )
-
-            content["conditions"] = [c.as_value for c in conditions]
-
-        return "PUT", Api._build_path(path, query_parameters), Api.to_json(content)
-
-    @staticmethod
-    def delete_pushrule(
-        access_token: str,
-        scope: str,
-        kind: PushRuleKind,
-        rule_id: str,
-    ) -> tuple[str, str]:
-        """Delete an existing user-created push rule.
-
-        Returns the HTTP method and HTTP path for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            scope (str): The scope of this rule, e.g. ``"global"``.
-            kind (PushRuleKind): The kind of rule.
-            rule_id (str): The identifier of the rule. Must be unique
-                within its scope and kind.
-        """
-
-        path = ["pushrules", scope, kind.value, rule_id]
-        query_parameters = {"access_token": access_token}
-
-        return "DELETE", Api._build_path(path, query_parameters)
-
-    @staticmethod
-    def enable_pushrule(
-        access_token: str,
-        scope: str,
-        kind: PushRuleKind,
-        rule_id: str,
-        enable: bool,
-    ) -> tuple[str, str, str]:
-        """Enable or disable an existing built-in or user-created push rule.
-
-        Returns the HTTP method, HTTP path and data for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            scope (str): The scope of this rule, e.g. ``"global"``.
-            kind (PushRuleKind): The kind of rule.
-            rule_id (str): The identifier of the rule. Must be unique
-                within its scope and kind.
-            enable (bool): Whether to enable or disable the rule.
-        """
-
-        path = ["pushrules", scope, kind.value, rule_id, "enabled"]
-        query_parameters = {"access_token": access_token}
-        content = {"enabled": enable}
-
-        return "PUT", Api._build_path(path, query_parameters), Api.to_json(content)
-
-    @staticmethod
-    def set_pushrule_actions(
-        access_token: str,
-        scope: str,
-        kind: PushRuleKind,
-        rule_id: str,
-        actions: Sequence[PushAction],
-    ) -> tuple[str, str, str]:
-        """Set the actions for an existing built-in or user-created push rule.
-
-        Unlike ``set_pushrule``, this method can edit built-in server rules.
-
-        Returns the HTTP method, HTTP path and data for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-
-            scope (str): The scope of this rule, e.g. ``"global"``.
-
-            kind (PushRuleKind): The kind of rule.
-
-            rule_id (str): The identifier of the rule. Must be unique
-                within its scope and kind.
-
-            actions (Sequence[PushAction]): Actions to perform when the
-                conditions for this rule are met. The given actions replace
-                the existing ones.
-        """
-
-        path = ["pushrules", scope, kind.value, rule_id, "actions"]
-        query_parameters = {"access_token": access_token}
-        content = {"actions": [a.as_value for a in actions]}
-
-        return "PUT", Api._build_path(path, query_parameters), Api.to_json(content)
-
-    @staticmethod
-    def delete_room_alias(access_token: str, alias: str) -> tuple[str, str]:
-        """Delete a room alias
-
-        Returns the HTTP method and HTTP path for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            alias (str): The room alias
-        """
-
-        query_parameters = {"access_token": access_token}
-        path = ["directory", "room", alias]
-
-        return "DELETE", Api._build_path(path, query_parameters)
-
-    @staticmethod
-    def put_room_alias(
-        access_token: str, alias: str, room_id: str
-    ) -> tuple[str, str, str]:
-        """Add an room alias
-
-        Returns the HTTP method, HTTP path and data for the request.
-
-        Args:
-            access_token (str): The access token to be used with the request.
-            alias (str): The room alias
-            room_id (str): The room to point to
-        """
-
-        query_parameters = {"access_token": access_token}
-        path = ["directory", "room", alias]
-        content = {}
-        content["room_id"] = room_id
-
-        return (
-            "PUT",
-            Api._build_path(path, query_parameters),
-            Api.to_json(content),
-        )

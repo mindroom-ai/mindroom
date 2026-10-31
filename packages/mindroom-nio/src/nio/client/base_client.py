@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections import defaultdict
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -347,16 +346,6 @@ class Client:
         assert self.olm
         return self.olm.device_store
 
-    @property  # type: ignore
-    @store_loaded
-    def olm_account_shared(self) -> bool:
-        """Check if the clients Olm account is shared with the server.
-
-        Returns True if the Olm account is shared, False otherwise.
-        """
-        assert self.olm
-        return self.olm.account.shared
-
     @property
     def users_for_key_query(self) -> set[str]:
         """Users for whom we should make a key query."""
@@ -565,33 +554,6 @@ class Client:
         if ENCRYPTION_ENABLED:
             self.load_store()
 
-    def room_contains_unverified(self, room_id: str) -> bool:
-        """Check if a room contains unverified devices.
-
-        Args:
-            room_id (str): Room id of the room that should be checked.
-
-        Returns True if the room contains unverified devices, false otherwise.
-        Returns False if no Olm session is loaded or if the room isn't
-        encrypted.
-        """
-        try:
-            room = self.rooms[room_id]
-        except KeyError:
-            raise LocalProtocolError(f"No room found with room id {room_id}")
-
-        if not room.encrypted:
-            return False
-
-        if not self.olm:
-            return False
-
-        for user in room.users:
-            if not self.olm.user_fully_verified(user):
-                return True
-
-        return False
-
     def _invalidate_session_for_member_event(self, room_id: str):
         if not self.olm:
             return
@@ -690,36 +652,6 @@ class Client:
         """
         assert self.olm
         return self._change_device_trust(device, self.olm.blacklist_device)
-
-    @store_loaded
-    def unblacklist_device(self, device: OlmDevice) -> bool:
-        """Unmark a device as blacklisted.
-
-        Args:
-            device (OlmDevice): The device which should be removed from the
-                blacklist.
-
-        Returns true if the device was removed, false if it wasn't on the
-        blacklist and no removal happened.
-        """
-        assert self.olm
-        return self._change_device_trust(device, self.olm.unblacklist_device)
-
-    @store_loaded
-    def ignore_device(self, device: OlmDevice) -> bool:
-        """Mark a device as ignored.
-
-        Ignored devices will still receive room encryption keys, despire not
-        being verified.
-
-        Args:
-            device (OlmDevice): the device to ignore
-
-        Returns true if device is ignored, or false if it is already on the
-        list of ignored devices.
-        """
-        assert self.olm
-        return self._change_device_trust(device, self.olm.ignore_device)
 
     @store_loaded
     def unignore_device(self, device: OlmDevice) -> bool:
@@ -825,10 +757,6 @@ class Client:
         if not replace_immediately:
             self._replace_decrypted_to_device(decrypted_to_device, response)
 
-    def _handle_to_device(self, response: SyncResponse):
-        for item in self._iter_to_device(response):
-            self._dispatch_sync_item(item)
-
     def _get_invited_room(self, room_id: str) -> MatrixInvitedRoom:
         if room_id not in self.invited_rooms:
             logger.info(f"New invited room {room_id}")
@@ -874,16 +802,6 @@ class Client:
 
         if join_info.unread_notifications:
             room.update_unread_notifications(join_info.unread_notifications)
-
-    def _handle_invited_rooms(self, response: SyncResponse):
-        for item in self._iter_invited_rooms(response):
-            self._dispatch_sync_item(item)
-
-    def _handle_joined_state(
-        self, room_id: str, join_info: RoomInfo, encrypted_rooms: set[str]
-    ):
-        for _item in self._iter_joined_state(room_id, join_info, encrypted_rooms):
-            pass
 
     def _handle_joined_state_event(
         self,
@@ -1007,10 +925,6 @@ class Client:
             self._project_presence(event)
             yield _SyncItem("presence", event)
 
-    def _handle_joined_rooms(self, response: SyncResponse):
-        for item in self._iter_joined_rooms(response):
-            self._dispatch_sync_item(item)
-
     def _iter_left_rooms(self, response: SyncResponse) -> Iterator[_SyncItem]:
         encrypted_rooms: set[str] = set()
         for room_id, info in response.rooms.leave.items():
@@ -1034,10 +948,6 @@ class Client:
         if encrypted_rooms and self.store:
             yield _SyncItem("encrypted_rooms", encrypted_rooms)
 
-    def _handle_presence_events(self, response: SyncResponse):
-        for item in self._iter_presence_events(response):
-            self._dispatch_sync_item(item)
-
     def _project_presence(self, event: PresenceEvent) -> None:
         for room in self.rooms.values():
             user = room.users.get(event.user_id)
@@ -1055,18 +965,10 @@ class Client:
         for event in response.account_data_events:
             yield _SyncItem("global_account_data", event)
 
-    def _handle_global_account_data_events(self, response: SyncResponse) -> None:
-        for item in self._iter_global_account_data_events(response):
-            self._dispatch_sync_item(item)
-
     def _iter_expired_verifications(self) -> Iterator[_SyncItem]:
         assert self.olm
         for event in self.olm.clear_verifications():
             yield _SyncItem("expired_verification", event)
-
-    def _handle_expired_verifications(self):
-        for item in self._iter_expired_verifications():
-            self._dispatch_sync_item(item)
 
     def _handle_olm_events(self, response: SyncResponse | SlidingSyncResponse) -> None:
         self._update_olm_sync_state(
@@ -1224,10 +1126,6 @@ class Client:
         assert self.olm
         for event in self.olm.collect_key_requests():
             yield _SyncItem("to_device", event)
-
-    def _collect_key_requests(self):
-        for item in self._iter_key_requests():
-            self._dispatch_sync_item(item)
 
     def _decrypt_event_array(self, array: list[Event | BadEventType]):
         if not self.olm:
@@ -1426,44 +1324,6 @@ class Client:
         return None
 
     @store_loaded
-    def export_keys(self, outfile: str, passphrase: str, count: int = 10000):
-        """Export all the Megolm decryption keys of this device.
-
-        The keys will be encrypted using the passphrase.
-
-        Note that this does not save other information such as the private
-        identity keys of the device.
-
-        Args:
-            outfile (str): The file to write the keys to.
-            passphrase (str): The encryption passphrase.
-            count (int): Optional. Round count for the underlying key
-                derivation. It is not recommended to specify it unless
-                absolutely sure of the consequences.
-        """
-        assert self.olm
-        self.olm.export_keys(outfile, passphrase, count=count)
-
-    @store_loaded
-    def import_keys(self, infile: str, passphrase: str):
-        """Import Megolm decryption keys.
-
-        The keys will be added to the current instance as well as written to
-        database.
-
-        Args:
-            infile (str): The file containing the keys.
-            passphrase (str): The decryption passphrase.
-
-        Raises `EncryptionError` if the file is invalid or couldn't be
-            decrypted.
-
-        Raises the usual file errors if the file couldn't be opened.
-        """
-        assert self.olm
-        self.olm.import_keys(infile, passphrase)
-
-    @store_loaded
     def get_missing_sessions(self, room_id: str) -> dict[str, list[str]]:
         """Get users and devices for which we don't have active Olm sessions.
 
@@ -1578,80 +1438,6 @@ class Client:
         cb = ClientCallback(callback, filter)
         self.event_callbacks.append(cb)
 
-    def add_ephemeral_callback(
-        self,
-        callback: Callable[
-            [MatrixRoom, EphemeralEvent],
-            Awaitable[None] | None,
-        ],
-        filter: type[EphemeralEvent] | tuple[type[EphemeralEvent], ...],
-    ) -> None:
-        """Add a callback that will be executed on ephemeral room events.
-
-        Args:
-            callback (Callable[MatrixRoom, EphemeralEvent]):
-                A function that will be
-                called if the event type in the filter argument is found in the
-                ephemeral room event list.
-
-            filter
-            (Union[Type[EphemeralEvent], Tuple[Type[EphemeralEvent], ...]]):
-                The event type or a tuple containing
-                multiple types for which the function will be called.
-
-        """
-        cb = ClientCallback(callback, filter)
-        self.ephemeral_callbacks.append(cb)
-
-    def add_global_account_data_callback(
-        self,
-        callback: Callable[[AccountDataEvent], Awaitable[None] | None],
-        filter: type[AccountDataEvent] | tuple[type[AccountDataEvent], ...],
-    ) -> None:
-        """Add a callback that will be executed on global account data events.
-
-        Args:
-            callback (Callable[[AccountDataEvent], Awaitable[None] | None]):
-                A function that will be
-                called if the event type in the filter argument is found in
-                the account data event list.
-
-            filter
-            (Union[Type[AccountDataEvent], Tuple[Type[AccountDataEvent, ...]]):
-                The event type or a tuple
-                containing multiple types for which the function
-                will be called.
-
-        """
-        cb = ClientCallback(callback, filter)
-        self.global_account_data_callbacks.append(cb)
-
-    def add_room_account_data_callback(
-        self,
-        callback: Callable[
-            [MatrixRoom, AccountDataEvent],
-            Awaitable[None] | None,
-        ],
-        filter: type[AccountDataEvent] | tuple[type[AccountDataEvent], ...],
-    ) -> None:
-        """Add a callback that will be executed on room account data events.
-
-        Args:
-            callback (Callable[[MatrixRoom, AccountDataEvent], Awaitable[None] | None]):
-                A function that will be
-                called if the event type in the filter argument is found in
-                the room account data event list.
-
-            filter
-            (Union[Type[AccountDataEvent], Tuple[Type[AccountDataEvent, ...]]):
-                The event type or a tuple
-                containing multiple types for which the function
-                will be called.
-
-        """
-        cb = ClientCallback(callback, filter)
-        self.room_account_data_callbacks.append(cb)
-
     def add_to_device_callback(
         self,
         callback: Callable[
@@ -1679,186 +1465,3 @@ class Client:
         """
         cb = ClientCallback(callback, filter)
         self.to_device_callbacks.append(cb)
-
-    def add_presence_callback(
-        self,
-        callback: Callable[[PresenceEvent], Awaitable[None] | None],
-        filter: type | tuple[type],
-    ) -> None:
-        """Add a callback that will be executed on presence events.
-
-        Args:
-            callback (Callable[[PresenceEvent], Awaitable[None] | None]): A
-                function that will be called if the event type in the filter
-                argument is found in the presence part of the sync response.
-            filter (Union[Type, Tuple[Type]]): The event type or a tuple
-                containing multiple types for which the function
-                will be called.
-
-        """
-        cb = ClientCallback(callback, filter)
-        self.presence_callbacks.append(cb)
-
-    @store_loaded
-    def create_key_verification(self, device: OlmDevice) -> ToDeviceMessage:
-        """Start a new key verification process with the given device.
-
-        Args:
-            device (OlmDevice): The device which we would like to verify
-
-        Returns a ``ToDeviceMessage`` that should be sent to to the homeserver.
-        """
-        assert self.olm
-        return self.olm.create_sas(device)
-
-    @store_loaded
-    def confirm_key_verification(self, transaction_id: str) -> ToDeviceMessage:
-        """Confirm that the short auth string of a key verification matches.
-
-        Args:
-            transaction_id (str): The transaction id of the interactive key
-                verification.
-
-        Returns a ``ToDeviceMessage`` that should be sent to the homeserver.
-
-        If the other user already confirmed the short auth string on their side
-        this function will also verify the device that is partaking in the
-        verification process.
-        """
-        if transaction_id not in self.key_verifications:
-            raise LocalProtocolError(
-                f"Key verification with the transaction id {transaction_id} does not exist."
-            )
-
-        sas = self.key_verifications[transaction_id]
-
-        sas.accept_sas()
-        message = sas.get_mac()
-
-        if sas.verified:
-            self.verify_device(sas.other_olm_device)
-
-        return message
-
-    def room_devices(self, room_id: str) -> dict[str, dict[str, OlmDevice]]:
-        """Get all Olm devices participating in a room.
-
-        Args:
-            room_id (str): The id of the room for which we would like to
-                collect all the devices.
-
-        Returns a dictionary holding the user as the key and a dictionary of
-        the device id as the key and OlmDevice as the value.
-
-        Raises LocalProtocolError if no room is found with the given room_id.
-        """
-        devices: dict[str, dict[str, OlmDevice]] = defaultdict(dict)
-
-        if not self.olm:
-            return devices
-
-        try:
-            room = self.rooms[room_id]
-        except KeyError:
-            raise LocalProtocolError(f"No room found with room id {room_id}")
-
-        if not room.encrypted:
-            return devices
-
-        users = room.users.keys()
-
-        for user in users:
-            user_devices = self.device_store.active_user_devices(user)
-            devices[user] = {d.id: d for d in user_devices}
-
-        return devices
-
-    @store_loaded
-    def get_active_key_requests(
-        self, user_id: str, device_id: str
-    ) -> list[RoomKeyRequest]:
-        """Get key requests from a device that are waiting for verification.
-
-        Args:
-            user_id (str): The id of the user for which we would like to find
-                the active key requests.
-            device_id (str): The id of the device for which we would like to
-                find the active key requests.
-
-        Example:
-            >>> # A to-device callback that verifies devices that
-            >>> # request room keys and continues the room key sharing process.
-            >>> # Note that a single user/device can have multiple key requests
-            >>> # queued up.
-            >>>   def key_share_cb(event):
-            ...       user_id = event.sender
-            ...       device_id = event.requesting_device_id
-            ...       device = client.device_store[user_id][device_id]
-            ...       client.verify_device(device)
-            ...       for request in client.get_active_key_requests(
-            ...           user_id, device_id):
-            ...           client.continue_key_share(request)
-            >>>   client.add_to_device_callback(key_share_cb)
-
-        Returns:
-            list: A list of actively waiting key requests from the given user.
-
-        """
-        assert self.olm
-        return self.olm.get_active_key_requests(user_id, device_id)
-
-    @store_loaded
-    def continue_key_share(self, event: RoomKeyRequest) -> bool:
-        """Continue a previously interrupted key share event.
-
-        To handle room key requests properly client users need to add a
-        callback for RoomKeyRequest:
-
-            >>> client.add_to_device_callback(callback, RoomKeyRequest)
-
-        This callback will be run only if a room key request needs user
-        interaction, that is if a room key request is coming from an untrusted
-        device.
-
-        After a user has verified the requesting device the key sharing can be
-        continued using this method:
-
-            >>> client.continue_key_share(room_key_request)
-
-        Args:
-            event (RoomKeyRequest): The event which we would like to continue.
-
-        If the key share event is continued successfully a to-device message
-        will be queued up in the `client.outgoing_to_device_messages` list
-        waiting to be sent out
-
-        Returns:
-            bool: True if the request was continued, False otherwise.
-
-        """
-        assert self.olm
-        if self._durable_session is not None:
-            return self._durable_session._outbound.change_key_share(event)
-        return self.olm.continue_key_share(event)
-
-    @store_loaded
-    def cancel_key_share(self, event: RoomKeyRequest) -> bool:
-        """Cancel a previously interrupted key share event.
-
-        This method is the counterpart to the `continue_key_share()` method. If
-        a user choses not to verify a device and does not want to share room
-        keys with such a device it should cancel the request with this method.
-
-            >>> client.cancel_key_share(room_key_request)
-
-        Args:
-            event (RoomKeyRequest): The event which we would like to cancel.
-
-        Returns:
-            bool: True if the request was cancelled, False otherwise.
-
-        """
-        assert self.olm
-        if self._durable_session is not None:
-            return self._durable_session._outbound.change_key_share(event, cancel=True)
-        return self.olm.cancel_key_share(event)

@@ -17,7 +17,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from enum import Enum
 from hashlib import sha256
-from itertools import zip_longest
 from uuid import uuid4
 
 import vodozemac
@@ -299,10 +298,6 @@ class Sas:
         """Is the device verified and the request done."""
         return self.state == SasState.mac_received and self.sas_accepted
 
-    def set_their_pubkey(self, pubkey: str) -> None:
-        # this was used for libolm sas and ist just kept to keep the api stable
-        self.establish_sas(pubkey)
-
     def establish_sas(self, their_public_key: str) -> None:
         """Prepare an EstablishedSas for byte generation."""
         self.established_sas = self.diffie_hellman(their_public_key)
@@ -313,35 +308,6 @@ class Sas:
         return self._sas.diffie_hellman(
             vodozemac.Curve25519PublicKey.from_base64(their_public_key)
         )
-
-    def accept_sas(self):
-        """Accept the short authentication string."""
-        if self.state == SasState.canceled:
-            raise LocalProtocolError(
-                "Key verification process was canceled "
-                "can't accept short authentication "
-                "string"
-            )
-
-        if not self.established_sas:
-            raise LocalProtocolError(
-                "Other public key isn't set yet, can't "
-                "generate nor accept a short "
-                "authentication string."
-            )
-        self.sas_accepted = True
-
-    def reject_sas(self):
-        """Reject the authentication string."""
-        if not self.established_sas:
-            raise LocalProtocolError(
-                "Other public key isn't set yet, can't "
-                "generate nor reject a short "
-                "authentication string."
-            )
-
-        self.state = SasState.canceled
-        self.cancel_code, self.cancel_reason = self._sas_mismatch_error
 
     def cancel(self):
         """Cancel the authentication process."""
@@ -355,80 +321,6 @@ class Sas:
             + Api.to_canonical_json(self.start_verification().content).encode()
         ).hexdigest()
         return self.commitment == calculated_commitment
-
-    def _grouper(self, iterable, n, fillvalue=None):
-        """Collect data into fixed-length chunks or blocks."""
-        # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx"
-        args = [iter(iterable)] * n
-        return zip_longest(*args, fillvalue=fillvalue)
-
-    @property
-    def _extra_info_v1(self) -> str:
-        device = self.other_olm_device
-        tx_id = self.transaction_id
-
-        our_info = f"{self.own_user}{self.own_device}"
-        their_info = f"{device.user_id}{device.device_id}"
-
-        if self.we_started_it:
-            return f"MATRIX_KEY_VERIFICATION_SAS{our_info}{their_info}{tx_id}"
-        else:
-            return f"MATRIX_KEY_VERIFICATION_SAS{their_info}{our_info}{tx_id}"
-
-    @property
-    def _extra_info_v2(self) -> str:
-        device = self.other_olm_device
-        tx_id = self.transaction_id
-
-        assert self.established_sas
-
-        our_info = f"{self.own_user}|{self.own_device}|{self.pubkey}"
-        their_info = f"{device.user_id}|{device.device_id}|{self.their_sas_key}"
-
-        if self.we_started_it:
-            return f"MATRIX_KEY_VERIFICATION_SAS|{our_info}|{their_info}|{tx_id}"
-        else:
-            return f"MATRIX_KEY_VERIFICATION_SAS|{their_info}|{our_info}|{tx_id}"
-
-    @property
-    def _extra_info(self) -> str:
-        if self.chosen_key_agreement == Sas._key_agreement_v1:
-            return self._extra_info_v1
-        elif self.chosen_key_agreement == Sas._key_agreement_v2:
-            return self._extra_info_v2
-
-        raise ValueError(f"Unknown key agreement protocol {self.chosen_key_agreement}")
-
-    def get_emoji(self) -> list[tuple[str, str]]:
-        """Get the emoji short authentication string.
-
-        Returns a list of tuples that contain the emoji and the description of
-        the emoji of the short authentication string.
-        """
-        return self._generate_emoji(self._extra_info)
-
-    def get_decimals(self) -> tuple[int, ...]:
-        """Get the decimal short authentication string.
-
-        Returns a tuple that contains three 4 digit integer numbers that
-        represent the short authentication string.
-        """
-        return self._generate_decimals(self._extra_info)
-
-    def _generate_emoji(self, extra_info: str) -> list[tuple[str, str]]:
-        """Create a list of emojies from our shared secret."""
-        assert self.established_sas
-        generated_bytes = self.established_sas.bytes(extra_info).emoji_indices
-        number = "".join([format(x, "08b") for x in generated_bytes])
-        return [
-            self.emoji[int(x, 2)]
-            for x in map("".join, list(self._grouper(number[:42], 6)))
-        ]
-
-    def _generate_decimals(self, extra_info: str) -> tuple[int, ...]:
-        """Create a decimal number from our shared secret."""
-        assert self.established_sas
-        return self.established_sas.bytes(extra_info).decimals
 
     def start_verification(self) -> ToDeviceMessage:
         """Create a content dictionary to start the verification."""
@@ -462,51 +354,6 @@ class Sas:
 
         return message
 
-    def accept_verification(self) -> ToDeviceMessage:
-        """Create a content dictionary to accept the verification offer."""
-        if self.we_started_it:
-            raise LocalProtocolError(
-                "Verification was started by us, can't accept offer."
-            )
-
-        if self.state == SasState.canceled:
-            raise LocalProtocolError(
-                "SAS verification was canceled, can't accept offer."
-            )
-
-        sas_methods = []
-
-        if "emoji" in self.short_auth_string:
-            sas_methods.append("emoji")
-
-        if "decimal" in self.short_auth_string:
-            sas_methods.append("decimal")
-
-        self.chosen_mac_method = self._mac_normal
-
-        if Sas._key_agreement_v2 in self.key_agreement_protocols:
-            self.chosen_key_agreement = Sas._key_agreement_v2
-        else:
-            self.chosen_key_agreement = Sas._key_agreement_v1
-
-        content = {
-            "transaction_id": self.transaction_id,
-            "key_agreement_protocol": self.chosen_key_agreement,
-            "hash": self._hash_v1,
-            "message_authentication_code": self.chosen_mac_method,
-            "short_authentication_string": sas_methods,
-            "commitment": self.commitment,
-        }
-
-        message = ToDeviceMessage(
-            "m.key.verification.accept",
-            self.other_olm_device.user_id,
-            self.other_olm_device.id,
-            content,
-        )
-
-        return message
-
     def share_key(self) -> ToDeviceMessage:
         """Create a dictionary containing our public key."""
         if self.state == SasState.canceled:
@@ -521,46 +368,6 @@ class Sas:
 
         message = ToDeviceMessage(
             "m.key.verification.key",
-            self.other_olm_device.user_id,
-            self.other_olm_device.id,
-            content,
-        )
-
-        return message
-
-    def get_mac(self) -> ToDeviceMessage:
-        """Create a dictionary containing our MAC."""
-        if not self.sas_accepted:
-            raise LocalProtocolError("SAS string wasn't yet accepted")
-
-        if self.state == SasState.canceled:
-            raise LocalProtocolError(
-                "SAS verification was canceled, can't generate MAC."
-            )
-
-        key_id = f"ed25519:{self.own_device}"
-
-        assert self.established_sas
-        assert self.chosen_mac_method
-
-        calculate_mac = self.established_sas.calculate_mac
-
-        info = (
-            "MATRIX_KEY_VERIFICATION_MAC"
-            f"{self.own_user}{self.own_device}"
-            f"{self.other_olm_device.user_id}{self.other_olm_device.id}{self.transaction_id}"
-        )
-
-        mac = {key_id: calculate_mac(self.own_fp_key, info + key_id)}
-
-        content = {
-            "mac": mac,
-            "keys": calculate_mac(key_id, info + "KEY_IDS"),
-            "transaction_id": self.transaction_id,
-        }
-
-        message = ToDeviceMessage(
-            "m.key.verification.mac",
             self.other_olm_device.user_id,
             self.other_olm_device.id,
             content,

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from ..api import Api
 from ..client.base_client import _SyncItem
 from ..event_builders import ToDeviceMessage
-from ..events import MegolmEvent, RoomKeyRequest
+from ..events import MegolmEvent
 from ..exceptions import LocalProtocolError, OlmUnverifiedDeviceError
 from ..responses import (
     ErrorResponse,
@@ -64,16 +64,6 @@ class OutboundCrypto:
             self.store.close()
             self.session._changed.set()
             raise
-
-    def change_key_share(self, event: RoomKeyRequest, cancel: bool = False) -> bool:
-        with self.transaction():
-            changed = self.crypto.change_key_share(event, cancel=cancel)
-        if changed:
-            self.maintenance_due = True
-        self.session._changed.set()
-        if changed and self.session._poll is not None:
-            self.session._poll.cancel()
-        return changed
 
     async def _send(self, request: CryptoRequest) -> Response:
         body = await self.session._transport.request(

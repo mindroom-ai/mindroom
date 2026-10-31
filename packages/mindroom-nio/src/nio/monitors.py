@@ -16,7 +16,7 @@
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from threading import Thread
 
 
@@ -147,31 +147,9 @@ class TransferMonitor:
             self.on_transferred(size)
 
     @property
-    def percent_done(self) -> float:
-        """Percentage of completion for the transfer."""
-        return self.transferred / self.total_size * 100
-
-    @property
     def remaining(self) -> int:
         """Number of remaining bytes to transfer."""
         return self.total_size - self.transferred
-
-    @property
-    def spent_time(self) -> timedelta:
-        """Time elapsed since the transfer started."""
-        return (self.end_time or datetime.now()) - self.start_time
-
-    @property
-    def remaining_time(self) -> timedelta | None:
-        """Estimated remaining time to complete the transfer.
-
-        Returns None (for infinity) if the current transfer speed is 0 bytes/s,
-        or the remaining time is so long it would cause an OverflowError.
-        """
-        try:
-            return timedelta(seconds=self.remaining / self.average_speed)
-        except (ZeroDivisionError, OverflowError):
-            return None
 
     @property
     def done(self) -> bool:

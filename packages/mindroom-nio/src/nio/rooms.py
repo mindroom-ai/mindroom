@@ -193,10 +193,6 @@ class MatrixRoom:
             return user.disambiguated_name
         return user.name
 
-    def user_name_clashes(self, name: str) -> list[str]:
-        """Get a list of users that have same display name."""
-        return self.names[name]
-
     def avatar_url(self, user_id: str) -> str | None:
         """Get avatar url for a user.
 
@@ -206,47 +202,6 @@ class MatrixRoom:
             return None
 
         return self.users[user_id].avatar_url
-
-    @property
-    def gen_avatar_url(self) -> str | None:
-        """
-        Get the calculated room's avatar url.
-
-        Either the room's avatar if one is set, or the avatar of the
-        first user that's not ourselves if the room is an unnamed group or
-        has exactly two users.
-        """
-        if self.room_avatar_url:
-            return self.room_avatar_url
-
-        try:
-            heroes, _, _ = self._summary_details()
-        except ValueError:
-            if self.is_group and len(self.users) == 2:
-                return self.avatar_url(
-                    next(
-                        u
-                        for u in sorted(
-                            self.users, key=lambda u: cast(str, self.user_name(u))
-                        )
-                        if u != self.own_user_id
-                    )
-                )
-            return None
-
-        if self.is_group and self.member_count == 2 and len(heroes) >= 1:
-            return self.avatar_url(heroes[0])
-
-        return None
-
-    @property
-    def machine_name(self) -> str:
-        """Calculate an unambiguous, unique machine name for a room.
-
-        Either use the more human-friendly canonical alias, if it exists, or
-        the internal room ID if not.
-        """
-        return self.canonical_alias or self.room_id
 
     @property
     def is_named(self) -> bool:

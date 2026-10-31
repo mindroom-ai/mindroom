@@ -51,8 +51,6 @@ __all__ = [
     "DeleteDevicesAuthResponse",
     "DeleteDevicesResponse",
     "DeleteDevicesError",
-    "DeletePushRuleError",
-    "DeletePushRuleResponse",
     "Device",
     "DeviceList",
     "DevicesResponse",
@@ -63,8 +61,6 @@ __all__ = [
     "DiskDownloadResponse",
     "DownloadResponse",
     "DownloadError",
-    "EnablePushRuleResponse",
-    "EnablePushRuleError",
     "ErrorResponse",
     "GetOpenIDTokenError",
     "GetOpenIDTokenResponse",
@@ -90,19 +86,13 @@ __all__ = [
     "LogoutError",
     "MemoryDownloadResponse",
     "Response",
-    "RoomBanResponse",
-    "RoomBanError",
     "RoomCreateResponse",
     "RoomCreateError",
-    "RoomDeleteAliasError",
-    "RoomDeleteAliasResponse",
     "RoomInfo",
     "RoomInviteResponse",
     "RoomInviteError",
     "RoomKickResponse",
     "RoomKickError",
-    "RoomKnockResponse",
-    "RoomKnockError",
     "RoomLeaveResponse",
     "RoomLeaveError",
     "RoomForgetResponse",
@@ -128,13 +118,7 @@ __all__ = [
     "RoomSendResponse",
     "RoomSendError",
     "RoomSummary",
-    "RoomUnbanResponse",
-    "RoomUnbanError",
     "Rooms",
-    "SetPushRuleError",
-    "SetPushRuleResponse",
-    "SetPushRuleActionsError",
-    "SetPushRuleActionsResponse",
     "ShareGroupSessionResponse",
     "ShareGroupSessionError",
     "SlidingSyncError",
@@ -146,12 +130,8 @@ __all__ = [
     "SyncResponse",
     "SyncError",
     "Timeline",
-    "UpdateDeviceResponse",
-    "UpdateDeviceError",
     "RoomTypingResponse",
     "RoomTypingError",
-    "RoomReadMarkersResponse",
-    "RoomReadMarkersError",
     "UploadResponse",
     "UploadError",
     "ProfileGetResponse",
@@ -178,12 +158,8 @@ __all__ = [
     "RoomContextError",
     "UploadFilterError",
     "UploadFilterResponse",
-    "UpdateReceiptMarkerError",
-    "UpdateReceiptMarkerResponse",
     "WhoamiError",
     "WhoamiResponse",
-    "SpaceGetHierarchyResponse",
-    "SpaceGetHierarchyError",
     "DirectRoomsResponse",
     "DirectRoomsErrorResponse",
 ]
@@ -632,12 +608,6 @@ class RoomResolveAliasError(ErrorResponse):
     pass
 
 
-class RoomDeleteAliasError(ErrorResponse):
-    """A response representing an unsuccessful room alias delete request."""
-
-    pass
-
-
 class RoomPutAliasError(ErrorResponse):
     """A response representing an unsuccessful room alias put request."""
 
@@ -668,25 +638,7 @@ class RoomTypingError(_ErrorWithRoomId):
     pass
 
 
-class UpdateReceiptMarkerError(ErrorResponse):
-    pass
-
-
-class RoomReadMarkersError(_ErrorWithRoomId):
-    """A response representing a unsuccessful room read markers request."""
-
-    pass
-
-
 class RoomKickError(ErrorResponse):
-    pass
-
-
-class RoomBanError(ErrorResponse):
-    pass
-
-
-class RoomUnbanError(ErrorResponse):
     pass
 
 
@@ -704,12 +656,6 @@ class JoinError(ErrorResponse):
     pass
 
 
-class RoomKnockError(ErrorResponse):
-    """A response representing a unsuccessful room knock request."""
-
-    pass
-
-
 class RoomLeaveError(ErrorResponse):
     pass
 
@@ -719,10 +665,6 @@ class RoomForgetError(_ErrorWithRoomId):
 
 
 class RoomMessagesError(_ErrorWithRoomId):
-    pass
-
-
-class SpaceGetHierarchyError(ErrorResponse):
     pass
 
 
@@ -784,10 +726,6 @@ class DeleteDevicesError(ErrorResponse):
     pass
 
 
-class UpdateDeviceError(ErrorResponse):
-    pass
-
-
 class JoinedMembersError(_ErrorWithRoomId):
     pass
 
@@ -816,12 +754,6 @@ class ProfileGetAvatarError(ErrorResponse):
 
 class PresenceGetError(ErrorResponse):
     """Response representing a unsuccessful get presence request."""
-
-    pass
-
-
-class PublicRoomsError(ErrorResponse):
-    """Response representing an unsuccessful public rooms request."""
 
     pass
 
@@ -1331,19 +1263,6 @@ class RoomResolveAliasResponse(Response):
 
 
 @dataclass
-class RoomDeleteAliasResponse(Response):
-    """A response containing the result of deleting an alias."""
-
-    room_alias: str = field()
-
-    @classmethod
-    def from_dict(
-        cls, parsed_dict: dict[Any, Any], room_alias: str
-    ) -> RoomDeleteAliasResponse | ErrorResponse:
-        return cls(room_alias)
-
-
-@dataclass
 class RoomPutAliasResponse(Response):
     """A response containing the result of adding an alias."""
 
@@ -1420,33 +1339,6 @@ class RoomThreadsResponse(Response):
         return cls(room_id, thread_roots, next_batch)
 
 
-@dataclass
-class SpaceGetHierarchyResponse(Response):
-    """A response indicating successful space get hierarchy request.
-
-    Attributes:
-        next_batch: The token to supply in the from parameter of the next call.
-        rooms: The rooms in the space.
-    """
-
-    next_batch: str | None = field()
-    rooms: list = field()
-
-    @classmethod
-    @verify(
-        Schemas.space_hierarchy,
-        SpaceGetHierarchyError,
-        pass_arguments=False,
-    )
-    def from_dict(
-        cls, parsed_dict: dict[str, Any]
-    ) -> SpaceGetHierarchyResponse | SpaceGetHierarchyError:
-        next_batch = parsed_dict.get("next_batch")
-        rooms = parsed_dict["rooms"]
-        resp = cls(next_batch, rooms)
-        return resp
-
-
 class EmptyResponse(Response):
     @staticmethod
     def create_error(parsed_dict):
@@ -1486,18 +1378,6 @@ class RoomKickResponse(EmptyResponse):
     @staticmethod
     def create_error(parsed_dict):
         return RoomKickError.from_dict(parsed_dict)
-
-
-class RoomBanResponse(EmptyResponse):
-    @staticmethod
-    def create_error(parsed_dict):
-        return RoomBanError.from_dict(parsed_dict)
-
-
-class RoomUnbanResponse(EmptyResponse):
-    @staticmethod
-    def create_error(parsed_dict):
-        return RoomUnbanError.from_dict(parsed_dict)
 
 
 class RoomInviteResponse(EmptyResponse):
@@ -1544,20 +1424,6 @@ class ShareGroupSessionResponse(Response):
 
 class RoomTypingResponse(_EmptyResponseWithRoomId):
     """A response representing a successful room typing request."""
-
-    @staticmethod
-    def create_error(parsed_dict, room_id):
-        return RoomTypingError.from_dict(parsed_dict, room_id)
-
-
-class UpdateReceiptMarkerResponse(EmptyResponse):
-    @staticmethod
-    def create_error(parsed_dict):
-        return UpdateReceiptMarkerError.from_dict(parsed_dict)
-
-
-class RoomReadMarkersResponse(_EmptyResponseWithRoomId):
-    """A response representing a successful room read markers request."""
 
     @staticmethod
     def create_error(parsed_dict, room_id):
@@ -1646,12 +1512,6 @@ class JoinResponse(RoomIdResponse):
     @staticmethod
     def create_error(parsed_dict):
         return JoinError.from_dict(parsed_dict)
-
-
-class RoomKnockResponse(RoomIdResponse):
-    @staticmethod
-    def create_error(parsed_dict):
-        return RoomKnockError.from_dict(parsed_dict)
 
 
 class RoomLeaveResponse(EmptyResponse):
@@ -1810,12 +1670,6 @@ class RoomKeyRequestResponse(Response):
         return cls(request_id, session_id, room_id, algorithm)
 
 
-class UpdateDeviceResponse(EmptyResponse):
-    @staticmethod
-    def create_error(parsed_dict):
-        return UpdateDeviceError.from_dict(parsed_dict)
-
-
 @dataclass
 class ProfileGetResponse(Response):
     """Response representing a successful get profile request.
@@ -1943,40 +1797,6 @@ class PresenceGetResponse(Response):
             parsed_dict.get("last_active_ago"),
             parsed_dict.get("currently_active"),
             parsed_dict.get("status_msg"),
-        )
-
-
-@dataclass
-class PublicRoom:
-    guest_can_join: bool
-    num_joined_members: int
-    room_id: str
-    world_readable: bool
-    avatar_url: str | None = None
-    canonical_alias: str | None = None
-    join_rule: str | None = None
-    name: str | None = None
-    room_type: str | None = None
-    topic: str | None = None
-
-
-@dataclass
-class PublicRoomsResponse(Response):
-    public_rooms: list[PublicRoom]
-    next_batch: str | None
-    prev_batch: str | None
-    total_room_count_estimate: int | None
-
-    @classmethod
-    @verify(Schemas.public_rooms_response, PublicRoomsError)
-    def from_dict(
-        cls, parsed_dict: dict[Any, Any]
-    ) -> PublicRoomsResponse | PublicRoomsError:
-        return cls(
-            [PublicRoom(**chunk) for chunk in parsed_dict["chunk"]],
-            parsed_dict.get("next_batch"),
-            parsed_dict.get("prev_batch"),
-            parsed_dict.get("total_room_count_estimate"),
         )
 
 
@@ -2439,85 +2259,3 @@ class WhoamiResponse(Response):
             parsed_dict.get("device_id"),
             parsed_dict.get("is_guest", False),
         )
-
-
-@dataclass
-class SetPushRuleResponse(EmptyResponse):
-    @staticmethod
-    def create_error(parsed_dict: dict[str, Any]):
-        return SetPushRuleError.from_dict(parsed_dict)
-
-
-class SetPushRuleError(ErrorResponse):
-    pass
-
-
-@dataclass
-class DeletePushRuleResponse(EmptyResponse):
-    @staticmethod
-    def create_error(parsed_dict: dict[str, Any]):
-        return DeletePushRuleError.from_dict(parsed_dict)
-
-
-class DeletePushRuleError(ErrorResponse):
-    pass
-
-
-@dataclass
-class EnablePushRuleResponse(EmptyResponse):
-    @staticmethod
-    def create_error(parsed_dict: dict[str, Any]):
-        return EnablePushRuleError.from_dict(parsed_dict)
-
-
-class EnablePushRuleError(ErrorResponse):
-    pass
-
-
-@dataclass
-class SetPushRuleActionsResponse(EmptyResponse):
-    @staticmethod
-    def create_error(parsed_dict: dict[str, Any]):
-        return SetPushRuleActionsError.from_dict(parsed_dict)
-
-
-class SetPushRuleActionsError(ErrorResponse):
-    pass
-
-
-@dataclass
-class DeleteAliasResponse(EmptyResponse):
-    @staticmethod
-    def create_error(parsed_dict: dict[str, Any]):
-        return DeletePushRuleError.from_dict(parsed_dict)
-
-
-class DeleteAliasError(ErrorResponse):
-    pass
-
-
-@dataclass
-class PutAliasResponse(EmptyResponse):
-    @staticmethod
-    def create_error(parsed_dict: dict[str, Any]):
-        return DeletePushRuleError.from_dict(parsed_dict)
-
-
-class PutAliasError(ErrorResponse):
-    pass
-
-
-class RoomUpdateAliasError(ErrorResponse):
-    pass
-
-
-class RoomUpdateAliasResponse(EmptyResponse):
-    pass
-
-
-class RoomUpgradeError(ErrorResponse):
-    pass
-
-
-class RoomUpgradeResponse(RoomCreateResponse):
-    pass

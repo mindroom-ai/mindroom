@@ -577,15 +577,6 @@ class MatrixStore:
         """
         raise NotImplementedError
 
-    def unblacklist_device(self, device: OlmDevice) -> bool:
-        """Unmark a device as blacklisted.
-
-        Args:
-            device (OlmDevice): The device that will be unmarked as blacklisted
-
-        """
-        raise NotImplementedError
-
     def verify_device(self, device: OlmDevice) -> bool:
         """Mark a device as verified.
 
@@ -625,17 +616,6 @@ class MatrixStore:
         Returns True if the device was unverified, False otherwise, e.g. if the
         device wasn't verified.
 
-        """
-        raise NotImplementedError
-
-    def ignore_device(self, device: OlmDevice) -> bool:
-        """Mark a device as ignored.
-
-        Args:
-            device (OlmDevice): The device that will be marked as blacklisted
-
-        Returns True if the device was ignored, False otherwise, e.g. if
-        the device was already ignored.
         """
         raise NotImplementedError
 
@@ -822,16 +802,6 @@ class DefaultStore(MatrixStore):
         return self.blacklist_db.add(key)
 
     @use_default_trust_sidecars
-    def unblacklist_device(self, device: OlmDevice) -> bool:
-        key = Key.from_olmdevice(device)
-
-        if self.blacklist_db.remove(key):
-            device.trust_state = TrustState.unset
-            return True
-
-        return False
-
-    @use_default_trust_sidecars
     def verify_device(self, device: OlmDevice) -> bool:
         key = Key.from_olmdevice(device)
         self.blacklist_db.remove(key)
@@ -858,14 +828,6 @@ class DefaultStore(MatrixStore):
             return True
 
         return False
-
-    @use_default_trust_sidecars
-    def ignore_device(self, device: OlmDevice) -> bool:
-        key = Key.from_olmdevice(device)
-        self.blacklist_db.remove(key)
-        self.trust_db.remove(key)
-        device.trust_state = TrustState.ignored
-        return self.ignore_db.add(key)
 
     @use_default_trust_sidecars
     def unignore_device(self, device: OlmDevice) -> bool:
@@ -1021,20 +983,6 @@ class SqliteStore(MatrixStore):
 
         return True
 
-    @use_database_atomic
-    def unblacklist_device(self, device: OlmDevice) -> bool:
-        if not self.is_device_blacklisted(device):
-            return False
-
-        d = self._get_device(device)
-        assert d
-
-        DeviceTrustState.replace(device=d, state=TrustState.unset).execute()
-
-        device.trust_state = TrustState.unset
-
-        return True
-
     @use_database
     def is_device_blacklisted(self, device: OlmDevice) -> bool:
         d = self._get_device(device)
@@ -1048,20 +996,6 @@ class SqliteStore(MatrixStore):
             return False
 
         return trust_state == TrustState.blacklisted
-
-    @use_database_atomic
-    def ignore_device(self, device: OlmDevice) -> bool:
-        if self.is_device_ignored(device):
-            return False
-
-        d = self._get_device(device)
-        assert d
-
-        DeviceTrustState.replace(device=d, state=TrustState.ignored).execute()
-
-        device.trust_state = TrustState.ignored
-
-        return True
 
     @use_database_atomic
     def unignore_device(self, device: OlmDevice) -> bool:

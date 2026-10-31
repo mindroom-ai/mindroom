@@ -141,11 +141,6 @@ class OlmAccount:
     def generate_one_time_keys(self, count: int) -> None:
         self._account.generate_one_time_keys(count)
 
-    def remove_one_time_keys(self, session: Session) -> None:
-        # not neccessary anymore in vodozemac, see
-        # https://docs.rs/vodozemac/latest/vodozemac/olm/struct.Account.html#method.remove_one_time_key
-        pass
-
     def sign(self, message: str) -> str:
         return self._account.sign(message.encode()).to_base64()
 

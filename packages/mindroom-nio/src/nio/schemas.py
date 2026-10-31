@@ -14,8 +14,6 @@
 # CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
-import re
-
 from jsonschema import Draft4Validator, FormatChecker, validators
 
 RoomRegex = "^!.+$"
@@ -41,31 +39,6 @@ def extend_with_default(validator_class):
 
 Validator = extend_with_default(Draft4Validator)
 Checker = FormatChecker()
-
-
-@Checker.checks("user_id", ValueError)
-def check_user_id(value: object) -> bool:
-    if not isinstance(value, str):
-        return True
-
-    if not value.startswith("@"):
-        raise ValueError("UserIDs start with @")
-
-    if ":" not in value:
-        raise ValueError("UserIDs must have a domain component, separated by a :")
-
-    return True
-
-
-@Checker.checks("http_url", ValueError)
-def check_http_url(value: object) -> bool:
-    if not isinstance(value, str):
-        return True
-
-    if not re.match(r"^https?://.+", value):
-        raise ValueError("Must be http://... or https://... URL")
-
-    return True
 
 
 def validate_json(instance, schema):

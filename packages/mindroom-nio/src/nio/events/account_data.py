@@ -140,10 +140,6 @@ class PushCondition:
 
         return PushUnknownCondition(cnd)
 
-    @property
-    def as_value(self) -> dict[str, Any]:
-        raise NotImplementedError
-
     def matches(
         self,
         event: Event,
@@ -176,14 +172,6 @@ class PushEventMatch(PushCondition):
     key: str = field()
     pattern: str = field()
 
-    @property
-    def as_value(self) -> dict[str, Any]:
-        return {
-            "kind": "event_match",
-            "key": self.key,
-            "pattern": self.pattern,
-        }
-
     def matches(
         self,
         event: Event,
@@ -211,10 +199,6 @@ class PushContainsDisplayName(PushCondition):
 
     This rule can only match unencrypted messages.
     """
-
-    @property
-    def as_value(self) -> dict[str, Any]:
-        return {"kind": "contains_display_name"}
 
     def matches(
         self,
@@ -251,11 +235,6 @@ class PushRoomMemberCount(PushCondition):
         op, num = re.findall(r"(==|<|>|<=|>=)?([0-9.-]+)", condition["is"])[0]
         return cls(int(num), op or "==")
 
-    @property
-    def as_value(self) -> dict[str, Any]:
-        operator = "" if self.operator == "==" else self.operator
-        return {"kind": "room_member_count", "is": f"{operator}{self.count}"}
-
     def matches(
         self,
         event: Event,
@@ -288,13 +267,6 @@ class PushSenderNotificationPermission(PushCondition):
 
     key: str = field()
 
-    @property
-    def as_value(self) -> dict[str, Any]:
-        return {
-            "kind": "sender_notification_permission",
-            "key": self.key,
-        }
-
     def matches(
         self,
         event: Event,
@@ -314,10 +286,6 @@ class PushUnknownCondition(PushCondition):
     """
 
     condition: dict[str, Any] = field()
-
-    @property
-    def as_value(self) -> dict[str, Any]:
-        return self.condition
 
 
 @dataclass
@@ -350,27 +318,15 @@ class PushAction:
 
         return PushUnknownAction(action)
 
-    @property
-    def as_value(self) -> str | dict[str, Any]:
-        raise NotImplementedError
-
 
 @dataclass
 class PushNotify(PushAction):
     """Cause the matching event to generate a notification."""
 
-    @property
-    def as_value(self) -> str:
-        return "notify"
-
 
 @dataclass
 class PushDontNotify(PushAction):
     """Prevents the matching event from generating a notification."""
-
-    @property
-    def as_value(self) -> str:
-        return "dont_notify"
 
 
 @dataclass
@@ -380,10 +336,6 @@ class PushCoalesce(PushAction):
     The behavior is homeserver-dependent. Homeservers not supporting this
     action should treat it as a ``PushNotify`` action.
     """
-
-    @property
-    def as_value(self) -> str:
-        return "coalesce"
 
 
 @dataclass
@@ -411,10 +363,6 @@ class PushSetTweak(PushAction):
     tweak: str = field()
     value: Any = None
 
-    @property
-    def as_value(self) -> dict[str, Any]:
-        return {"set_tweak": self.tweak, "value": self.value}
-
 
 @dataclass
 class PushUnknownAction(PushAction):
@@ -426,10 +374,6 @@ class PushUnknownAction(PushAction):
     """
 
     action: str | dict[str, Any] = field()
-
-    @property
-    def as_value(self) -> str | dict[str, Any]:
-        return self.action
 
 
 @dataclass
@@ -538,27 +482,6 @@ class PushRuleset:
     room: list[PushRule] = field(default_factory=list)
     sender: list[PushRule] = field(default_factory=list)
     underride: list[PushRule] = field(default_factory=list)
-
-    def matching_rule(
-        self,
-        event: Event,
-        room: MatrixRoom,
-        display_name: str,
-    ) -> PushRule | None:
-        """Return the push rule in this set that matches a room event, if any.
-
-        Args:
-            event (Event): The room event to match.
-            room (MatrixRoom): The room that this event is part of.
-            display_name (str): The display name of our own user in the room.
-        """
-
-        for kind in PushRuleKind:
-            for rule in getattr(self, kind.value):
-                if rule.matches(event, room, display_name):
-                    return rule
-
-        return None
 
     @classmethod
     @verify_or_none(Schemas.push_ruleset)

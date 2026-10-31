@@ -211,16 +211,3 @@ class SyncTokens(Model):
 
     class Meta:
         constraints = [SQL("UNIQUE(account_id)")]
-
-
-class TrackedUsers(Model):
-    user_id = TextField()
-    account = ForeignKeyField(
-        model=Accounts,
-        column_name="account_id",
-        on_delete="CASCADE",
-        backref="tracked_users",
-    )
-
-    class Meta:
-        constraints = [SQL("UNIQUE(account_id,user_id)")]

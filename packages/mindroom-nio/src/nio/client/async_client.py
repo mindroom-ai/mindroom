@@ -61,8 +61,6 @@ from ..api import (
     Api,
     EventFormat,
     MessageDirection,
-    PushRuleKind,
-    ReceiptType,
     RelationshipType,
     ResizingMethod,
     RoomPreset,
@@ -72,7 +70,6 @@ from ..api import (
 )
 from ..crypto import (
     AsyncDataT,
-    OlmDevice,
     async_encrypt_attachment,
     async_generator_from_data,
 )
@@ -88,8 +85,6 @@ from ..events import (
     Event,
     MegolmEvent,
     PresenceEvent,
-    PushAction,
-    PushCondition,
     ToDeviceEvent,
 )
 from ..exceptions import (
@@ -107,8 +102,6 @@ from ..responses import (
     DeleteDevicesAuthResponse,
     DeleteDevicesError,
     DeleteDevicesResponse,
-    DeletePushRuleError,
-    DeletePushRuleResponse,
     DevicesError,
     DevicesResponse,
     DirectRoomsErrorResponse,
@@ -117,8 +110,6 @@ from ..responses import (
     DiscoveryInfoResponse,
     DiskDownloadResponse,
     DownloadError,
-    EnablePushRuleError,
-    EnablePushRuleResponse,
     ErrorResponse,
     FileResponse,
     GetOpenIDTokenError,
@@ -156,21 +147,15 @@ from ..responses import (
     ProfileSetAvatarResponse,
     ProfileSetDisplayNameError,
     ProfileSetDisplayNameResponse,
-    PublicRoomsError,
-    PublicRoomsResponse,
     RegisterErrorResponse,
     RegisterInteractiveError,
     RegisterInteractiveResponse,
     RegisterResponse,
     Response,
-    RoomBanError,
-    RoomBanResponse,
     RoomContextError,
     RoomContextResponse,
     RoomCreateError,
     RoomCreateResponse,
-    RoomDeleteAliasError,
-    RoomDeleteAliasResponse,
     RoomEventRelationsResponse,
     RoomForgetError,
     RoomForgetResponse,
@@ -188,8 +173,6 @@ from ..responses import (
     RoomKeyRequestResponse,
     RoomKickError,
     RoomKickResponse,
-    RoomKnockError,
-    RoomKnockResponse,
     RoomLeaveError,
     RoomLeaveResponse,
     RoomMessagesError,
@@ -198,8 +181,6 @@ from ..responses import (
     RoomPutAliasResponse,
     RoomPutStateError,
     RoomPutStateResponse,
-    RoomReadMarkersError,
-    RoomReadMarkersResponse,
     RoomRedactError,
     RoomRedactResponse,
     RoomResolveAliasError,
@@ -209,31 +190,16 @@ from ..responses import (
     RoomThreadsResponse,
     RoomTypingError,
     RoomTypingResponse,
-    RoomUnbanResponse,
-    RoomUpdateAliasError,
-    RoomUpdateAliasResponse,
-    RoomUpgradeError,
-    RoomUpgradeResponse,
-    SetPushRuleActionsError,
-    SetPushRuleActionsResponse,
-    SetPushRuleError,
-    SetPushRuleResponse,
     ShareGroupSessionError,
     ShareGroupSessionResponse,
     SlidingSyncError,
     SlidingSyncResponse,
-    SpaceGetHierarchyError,
-    SpaceGetHierarchyResponse,
     SyncError,
     SyncResponse,
     ThumbnailError,
     ThumbnailResponse,
     ToDeviceError,
     ToDeviceResponse,
-    UpdateDeviceError,
-    UpdateDeviceResponse,
-    UpdateReceiptMarkerError,
-    UpdateReceiptMarkerResponse,
     UploadError,
     UploadFilterError,
     UploadFilterResponse,
@@ -680,34 +646,6 @@ class AsyncClient(Client):
         # Async callbacks historically see decrypted response entries immediately.
         return self._iter_decrypted_to_device(response, replace_immediately=True)
 
-    async def _handle_to_device(self, response: SyncResponse) -> None:
-        for item in self._iter_to_device(response):
-            await self._dispatch_sync_item(item)
-
-    async def _handle_invited_rooms(self, response: SyncResponse) -> None:
-        for item in self._iter_invited_rooms(response):
-            if item.route is not None:
-                await self._dispatch_sync_item(item)
-
-    async def _handle_joined_rooms(self, response: SyncResponse) -> None:
-        for item in self._iter_joined_rooms(response):
-            if item.route is not None:
-                await self._dispatch_sync_item(item)
-
-    async def _handle_presence_events(self, response: SyncResponse) -> None:
-        for item in self._iter_presence_events(response):
-            await self._dispatch_sync_item(item)
-
-    async def _handle_global_account_data_events(  # type: ignore
-        self, response: SyncResponse
-    ) -> None:
-        for item in self._iter_global_account_data_events(response):
-            await self._dispatch_sync_item(item)
-
-    async def _handle_expired_verifications(self):
-        for item in self._iter_expired_verifications():
-            await self._dispatch_sync_item(item)
-
     async def _on_to_device(
         self,
         event: ToDeviceEvent | BadEventType,
@@ -807,10 +745,6 @@ class AsyncClient(Client):
     ) -> None:
         with store.database.connection_context():
             store.save_encrypted_rooms(rooms)
-
-    async def _collect_key_requests(self):
-        for item in self._iter_key_requests():
-            await self._dispatch_sync_item(item)
 
     async def receive_response(self, response: Response) -> None:
         """Receive a Matrix Response and change the client state accordingly.
@@ -985,49 +919,6 @@ class AsyncClient(Client):
             trace_request_ctx=trace_context,
             timeout=request_timeout,
         )
-
-    async def mxc_to_http(
-        self,
-        mxc: str,
-        homeserver: str | None = None,
-    ) -> str | None:
-        """Convert a matrix content URI to a HTTP URI."""
-        return Api.mxc_to_http(
-            mxc, homeserver or self.homeserver, access_token=self.access_token
-        )
-
-    async def login_raw(self, auth_dict: dict[str, Any]) -> LoginResponse | LoginError:
-        """Login to the homeserver using a raw dictionary.
-
-        Calls receive_response() to update the client state if necessary.
-
-        Args:
-            auth_dict (Dict[str, Any]): The auth dictionary.
-                See the example below and here
-                 https://matrix.org/docs/spec/client_server/r0.6.0#authentication-types
-                for detailed documentation
-
-        Example:
-                >>> auth_dict = {
-                >>>     "type": "m.login.password",
-                >>>     "identifier": {
-                >>>         "type": "m.id.thirdparty",
-                >>>         "medium": "email",
-                >>>         "address": "testemail@mail.org"
-                >>>     },
-                >>>     "password": "PASSWORDABCD",
-                >>>     "initial_device_display_name": "Test user"
-                >>> }
-
-        Returns either a `LoginResponse` if the request was successful or
-        a `LoginError` if there was an error with the request.
-        """
-        if auth_dict is None or auth_dict == {}:
-            raise ValueError("Auth dictionary shall not be empty")
-
-        method, path, data = Api.login_raw(auth_dict)
-
-        return await self._send(LoginResponse, method, path, data)
 
     async def register_interactive(
         self,
@@ -1613,118 +1504,6 @@ class AsyncClient(Client):
                 raise
         self._stop_sync_forever = False
 
-    def stop_sync_forever(self):
-        """Request that a running `sync_forever` loop exits gracefully or the next
-        call returns immediately without doing any sync.
-
-        As the loop fully shuts down, an internal flag will be reset, allowing the
-        loop to be started again without shutting down. Also each call to
-        `sync_forever()` after the flag was set resets the flag.
-
-        If such a loop is running, it will finish its sync iteration and exit, leaving this `AsyncClient` in
-        a consistent state. In particular, it will be possible to run the loop again at a later point.
-        """
-        self._stop_sync_forever = True
-
-    @logged_in_async
-    @store_loaded
-    async def start_key_verification(
-        self, device: OlmDevice, tx_id: str | None = None
-    ) -> ToDeviceResponse | ToDeviceError:
-        """Start a interactive key verification with the given device.
-
-        Returns either a `ToDeviceResponse` if the request was successful or
-        a `ToDeviceError` if there was an error with the request.
-
-        Args:
-            device (OlmDevice): An device with which we would like to start the
-                interactive key verification process.
-        """
-        message = self.create_key_verification(device)
-        return await self.to_device(message, tx_id)
-
-    @logged_in_async
-    @store_loaded
-    async def cancel_key_verification(
-        self,
-        transaction_id: str,
-        reject: bool = False,
-        tx_id: str | None = None,
-    ) -> ToDeviceResponse | ToDeviceError:
-        """Cancel a interactive key verification with the given device.
-
-        Returns either a `ToDeviceResponse` if the request was successful or
-        a `ToDeviceError` if there was an error with the request.
-
-        Args:
-            transaction_id (str): An transaction id of a valid key verification
-                process.
-            reject (bool): Is the cancelation reason because we're rejecting
-                the short auth string and mark it as mismatching or a normal
-                user cancelation.
-
-        Raises a LocalProtocolError no verification process with the given
-        transaction ID exists or if reject is True and the short auth string
-        couldn't be shown yet because plublic keys weren't yet exchanged.
-        """
-        if transaction_id not in self.key_verifications:
-            raise LocalProtocolError(
-                f"Key verification with the transaction id {transaction_id} does not exist."
-            )
-
-        sas = self.key_verifications[transaction_id]
-
-        if reject:
-            sas.reject_sas()
-        else:
-            sas.cancel()
-
-        message = sas.get_cancellation()
-
-        return await self.to_device(message, tx_id)
-
-    @logged_in_async
-    @store_loaded
-    async def accept_key_verification(
-        self, transaction_id: str, tx_id: str | None = None
-    ) -> ToDeviceResponse | ToDeviceError:
-        """Accept a key verification start event.
-
-        Returns either a `ToDeviceResponse` if the request was successful or
-        a `ToDeviceError` if there was an error with the request.
-
-        Args:
-            transaction_id (str): An transaction id of a valid key verification
-                process.
-        """
-        if transaction_id not in self.key_verifications:
-            raise LocalProtocolError(
-                f"Key verification with the transaction id {transaction_id} does not exist."
-            )
-
-        sas = self.key_verifications[transaction_id]
-
-        message = sas.accept_verification()
-
-        return await self.to_device(message, tx_id)
-
-    @logged_in_async
-    @store_loaded
-    async def confirm_short_auth_string(
-        self, transaction_id: str, tx_id: str | None = None
-    ) -> ToDeviceResponse | ToDeviceError:
-        """Confirm a short auth string and mark it as matching.
-
-        Returns either a `ToDeviceResponse` if the request was successful or
-        a `ToDeviceError` if there was an error with the request.
-
-        Args:
-            transaction_id (str): An transaction id of a valid key verification
-                process.
-        """
-        message = self.confirm_key_verification(transaction_id)
-        return await self.to_device(message, tx_id)
-
     @logged_in_async
     @store_loaded
     async def encrypted_to_device(
@@ -2096,30 +1875,6 @@ class AsyncClient(Client):
         return await self._send(DevicesResponse, method, path)
 
     @logged_in_async
-    async def update_device(
-        self, device_id: str, content: dict[str, str]
-    ) -> UpdateDeviceResponse | UpdateDeviceError:
-        """Update the metadata of the given device.
-
-        Returns either a `UpdateDeviceResponse` if the request was successful or
-        a `UpdateDeviceError` if there was an error with the request.
-
-        Args:
-            device_id (str): The device for which the metadata will be updated.
-            content (Dict[str, str]): A dictionary of metadata values that will be
-                updated for the device.
-
-        Example:
-            >>> device_id = "QBUAZIFURK"
-            >>> content = {"display_name": "My new device"}
-            >>> await client.update_device(device_id, content)
-
-        """
-        method, path, data = Api.update_device(self.access_token, device_id, content)
-
-        return await self._send(UpdateDeviceResponse, method, path, data)
-
-    @logged_in_async
     async def delete_devices(
         self, devices: list[str], auth: dict[str, str] | None = None
     ) -> DeleteDevicesResponse | DeleteDevicesError:
@@ -2157,42 +1912,6 @@ class AsyncClient(Client):
         )
 
         return await self._send(DeleteDevicesResponse, method, path, data)
-
-    @logged_in_async
-    async def space_get_hierarchy(
-        self,
-        space_id: str,
-        from_page: str | None = None,
-        limit: int | None = None,
-        max_depth: int | None = None,
-        suggested_only: bool = False,
-    ) -> SpaceGetHierarchyResponse | SpaceGetHierarchyError:
-        """Gets the space's room hierarchy.
-
-        Calls receive_response() to update the client state if necessary.
-
-        Returns either a `SpaceGetHierarchyResponse` if the request was successful
-        or a `SpaceGetHierarchyError` if there was an error with the request.
-
-        Args:
-            space_id (str): The ID of the space to get the hierarchy for.
-            from_page (str, optional): Pagination token from a previous request
-                to this endpoint.
-            limit (int, optional): The maximum number of rooms to return.
-            max_depth (int, optional): The maximum depth of the returned tree.
-            suggested_only (bool, optional): Whether or not to only return
-                rooms that are considered suggested. Defaults to False.
-        """
-        method, path = Api.space_get_hierarchy(
-            self.access_token,
-            space_id,
-            from_page=from_page,
-            limit=limit,
-            max_depth=max_depth,
-            suggested_only=suggested_only,
-        )
-
-        return await self._send(SpaceGetHierarchyResponse, method, path)
 
     @logged_in_async
     async def joined_members(
@@ -2662,34 +2381,6 @@ class AsyncClient(Client):
         )
 
     @logged_in_async
-    async def room_delete_alias(
-        self,
-        room_alias: str,
-    ) -> RoomDeleteAliasResponse | RoomDeleteAliasError:
-        """Delete a room alias.
-
-        Calls receive_response() to update the client state if necessary.
-
-        Returns either a `RoomDeleteAliasResponse` if the request was
-        successful or a `RoomDeleteAliasError if there was an error
-        with the request.
-
-        Args:
-            room_alias (str): The alias to delete
-        """
-        method, path = Api.room_delete_alias(
-            self.access_token,
-            room_alias,
-        )
-
-        return await self._send(
-            RoomDeleteAliasResponse,
-            method,
-            path,
-            response_data=(room_alias,),
-        )
-
-    @logged_in_async
     async def room_put_alias(
         self,
         room_alias: str,
@@ -2925,68 +2616,6 @@ class AsyncClient(Client):
             await self.client_session.close()
             self.client_session = None
 
-    @store_loaded
-    async def export_keys(self, outfile: str, passphrase: str, count: int = 10000):
-        """Export all the Megolm decryption keys of this device.
-
-        The keys will be encrypted using the passphrase.
-
-        Note that this does not save other information such as the private
-        identity keys of the device.
-
-        Args:
-            outfile (str): The file to write the keys to.
-            passphrase (str): The encryption passphrase.
-            count (int): Optional. Round count for the underlying key
-                derivation. It is not recommended to specify it unless
-                absolutely sure of the consequences.
-        """
-        assert self.store
-        assert self.olm
-
-        loop = asyncio.get_event_loop()
-
-        inbound_group_store = self.store.load_inbound_group_sessions()
-        export_keys = partial(
-            self.olm.export_keys_static,
-            inbound_group_store,
-            outfile,
-            passphrase,
-            count,
-        )
-
-        await loop.run_in_executor(None, export_keys)
-
-    @store_loaded
-    async def import_keys(self, infile: str, passphrase: str):
-        """Import Megolm decryption keys.
-
-        The keys will be added to the current instance as well as written to
-        database.
-
-        Args:
-            infile (str): The file containing the keys.
-            passphrase (str): The decryption passphrase.
-
-        Raises `EncryptionError` if the file is invalid or couldn't be
-            decrypted.
-
-        Raises the usual file errors if the file couldn't be opened.
-        """
-        assert self.store
-        assert self.olm
-
-        loop = asyncio.get_event_loop()
-
-        import_keys = partial(self.olm.import_keys_static, infile, passphrase)
-        sessions = await loop.run_in_executor(None, import_keys)
-
-        for session in sessions:
-            # This could be improved by writing everything to db at once at
-            # the end
-            if self.olm.inbound_group_store.add(session):
-                self.store.save_inbound_group_session(session)
-
     @logged_in_async
     async def room_create(
         self,
@@ -3121,50 +2750,6 @@ class AsyncClient(Client):
         return await self._send(JoinResponse, method, path)
 
     @logged_in_async
-    async def room_knock(
-        self,
-        room_id: str,
-        reason: str | None = None,
-    ) -> RoomKnockResponse | RoomKnockError:
-        """Knock on a room.
-
-        Calls receive_response() to update the client state if necessary.
-
-        Returns either a `RoomKnockResponse` if the request was successful or
-        a `RoomKnockError` if there was an error with the request.
-
-        Args:
-            room_id (str): The room id of the room that the user is
-                knocking on.
-            reason (str, optional): The reason for the knock.
-        """
-        method, path, data = Api.room_knock(
-            self.access_token,
-            room_id,
-            reason,
-        )
-        return await self._send(RoomKnockResponse, method, path, data)
-
-    @logged_in_async
-    async def room_enable_knocking(
-        self,
-        room_id: str,
-    ) -> RoomPutStateResponse | RoomPutStateError:
-        """Enables knocking for a room.
-
-        Returns either a `RoomPutStateResponse` if the request was successful
-        or a `RoomPutStateError` if there was an error with the request.
-
-        Args:
-            room_id (str): The room id of the room to enable knocking for.
-        """
-        return await self.room_put_state(
-            room_id,
-            event_type="m.room.join_rules",
-            content={"join_rule": "knock"},
-        )
-
-    @logged_in_async
     async def room_invite(
         self,
         room_id: str,
@@ -3208,27 +2793,6 @@ class AsyncClient(Client):
         return await self._send(RoomLeaveResponse, method, path)
 
     @logged_in_async
-    async def room_forget(self, room_id: str) -> RoomForgetResponse | RoomForgetError:
-        """Forget a room.
-
-        This tells the server to forget the given room's history for our user.
-        If all users on a homeserver forget the room, the room will be
-        eligible for deletion from that homeserver.
-
-        Calls receive_response() to update the client state if necessary.
-
-        Returns either a `RoomForgetResponse` if the request was successful or
-        a `RoomForgetError` if there was an error with the request.
-
-        Args:
-            room_id (str): The room id of the room to forget.
-        """
-        method, path = Api.room_forget(self.access_token, room_id)
-        return await self._send(
-            RoomForgetResponse, method, path, response_data=(room_id,)
-        )
-
-    @logged_in_async
     async def room_kick(
         self,
         room_id: str,
@@ -3259,68 +2823,6 @@ class AsyncClient(Client):
             reason,
         )
         return await self._send(RoomKickResponse, method, path, data)
-
-    @logged_in_async
-    async def room_ban(
-        self,
-        room_id: str,
-        user_id: str,
-        reason: str | None = None,
-    ) -> RoomBanResponse | RoomBanError:
-        """Ban a user from a room.
-
-        When a user is banned from a room, they may not join it or be
-        invited to it until they are unbanned.
-        If they are currently in the room, they will be kicked or have their
-        invitation withdrawn first.
-
-        Calls receive_response() to update the client state if necessary.
-
-        Returns either a `RoomBanResponse` if the request was successful or
-        a `RoomBanError` if there was an error with the request.
-
-        Args:
-            room_id (str): The room id of the room that the user will be
-                banned from.
-            user_id (str): The user_id of the user that should be banned.
-            reason (str, optional): A reason for which the user is banned.
-        """
-
-        method, path, data = Api.room_ban(
-            self.access_token,
-            room_id,
-            user_id,
-            reason,
-        )
-        return await self._send(RoomBanResponse, method, path, data)
-
-    @logged_in_async
-    async def room_unban(
-        self,
-        room_id: str,
-        user_id: str,
-    ) -> RoomBanResponse | RoomBanError:
-        """Unban a user from a room.
-
-        This allows them to be invited and join the room again.
-
-        Calls receive_response() to update the client state if necessary.
-
-        Returns either a `RoomUnbanResponse` if the request was successful or
-        a `RoomUnbanError` if there was an error with the request.
-
-        Args:
-            room_id (str): The room id of the room that the user will be
-                unbanned from.
-            user_id (str): The user_id of the user that should be unbanned.
-        """
-
-        method, path, data = Api.room_unban(
-            self.access_token,
-            room_id,
-            user_id,
-        )
-        return await self._send(RoomUnbanResponse, method, path, data)
 
     @logged_in_async
     async def room_context(
@@ -3441,104 +2943,6 @@ class AsyncClient(Client):
 
         return await self._send(
             RoomTypingResponse, method, path, data, response_data=(room_id,)
-        )
-
-    @logged_in_async
-    async def update_receipt_marker(
-        self,
-        room_id: str,
-        event_id: str,
-        receipt_type: ReceiptType = ReceiptType.read,
-        thread_id: str = "main",
-    ) -> UpdateReceiptMarkerResponse | UpdateReceiptMarkerError:
-        """Update the marker of given the `receipt_type` to specified `event_id`.
-
-        Calls receive_response() to update the client state if necessary.
-
-        Returns either a `UpdateReceiptMarkerResponse` if the request was
-        successful or a `UpdateReceiptMarkerError` if there was an error with
-        the request.
-
-        Args:
-            room_id (str): Room id of the room where the marker should
-                be updated
-            event_id (str): The event ID the read marker should be located at
-            receipt_type (ReceiptType): The type of receipt to send.
-            thread_id (str): The thread root's event ID. Defaults to "main" to
-                indicate the main timeline, and thus not in any particular thread.
-        """
-        if not isinstance(receipt_type, ReceiptType):
-            warnings.warn(
-                f"Pass `nio.api.ReceiptType` instead of {type(receipt_type)} for `receipt_type`",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        method, path, data = Api.update_receipt_marker(
-            self.access_token,
-            room_id,
-            event_id,
-            receipt_type,
-            thread_id,
-        )
-
-        return await self._send(
-            UpdateReceiptMarkerResponse,
-            method,
-            path,
-            data,
-        )
-
-    @logged_in_async
-    async def room_read_markers(
-        self,
-        room_id: str,
-        fully_read_event: str,
-        read_event: str | None = None,
-        private_read_event: str | None = None,
-    ) -> RoomReadMarkersResponse | RoomReadMarkersError:
-        """Update the fully read marker (and optionally the read receipt
-        and/or private read receipt) for a room.
-
-        Calls receive_response() to update the client state if necessary.
-
-        Returns either a `RoomReadMarkersResponse` if the request was
-        successful or a `RoomReadMarkersError` if there was an error with
-        the request.
-
-        This sets the "up to" position of the read markers.
-
-        - `fully_read_event` is the latest event in the set of events that the
-          user has either fully read or indicated they aren't interested in. It
-          permits the implementation of a "jump to first unread message" kind
-          of feature. It is _private_ (not exposed to other room participants).
-
-        - `read_event` is the most recent message the user has read and is also
-          known as a _read receipt_. A read receipt being set on an event does
-          not imply that all previous events have been seen. This happens in
-          cases such as when a user comes back to a room after hundreds of
-          messages have been sent and _only_ reads the most recent message. The
-          read receipt is _public_ (exposed to other room participants).
-
-        - `private_read_event` is the same as `read_event`, is intended to clear
-         notifications without advertising read-up-to status to others, and is
-         _private_ (not exposed to other room participants) as the name implies.
-
-        Args:
-            room_id (str): The room ID of the room where the read markers should
-                be updated.
-            fully_read_event (str): The event ID that the user has fully read up
-                to.
-            read_event (Optional[str]): The event ID to set the read receipt
-                location at.
-            private_read_event (Optional[str]): The event ID to set the private
-                read receipt location at.
-        """
-        method, path, data = Api.room_read_markers(
-            self.access_token, room_id, fully_read_event, read_event, private_read_event
-        )
-
-        return await self._send(
-            RoomReadMarkersResponse, method, path, data, response_data=(room_id,)
         )
 
     @logged_in_async
@@ -4180,546 +3584,3 @@ class AsyncClient(Client):
 
         method, path = Api.whoami(self.access_token)
         return await self._send(WhoamiResponse, method, path)
-
-    async def list_public_rooms(
-        self,
-        limit: int | None = None,
-        server: str | None = None,
-        since: str | None = None,
-        filter_generic_search_term: str | None = None,
-        filter_room_types: list[str | None] | None = None,
-        include_all_networks: bool = False,
-        third_party_instance_id: str | None = None,
-    ) -> PublicRoomsResponse | PublicRoomsError:
-        """Lists the public rooms on the server, with optional filters.
-
-        This API returns paginated responses.
-        The rooms are ordered by the number of joined members, with the largest rooms first.
-        If including any arguments besides `limit`, `server`, or `filter`, the client must have a valid access token.
-
-        Args:
-            limit (int, optional): The maximum number of rooms to return.
-            server (str, optional): The server to fetch the public room lists from. Defaults to the local server. Case sensitive.
-            since (str, optional): A pagination token from a previous request's `next_batch`/`prev_batch`
-            filter_generic_search_term (str, optional): An optional string to search for in the room metadata, e.g. name, topic, canonical alias, etc.
-            filter_room_types (list[str, None], optional): A list of room types to filter for; including `None` includes rooms without a type.
-            include_all_networks (boolean, optional): Whether to include all known networks/protocols from application services on the homeserver
-            third_party_instance_id (str, optional): The specific third-party network/protocol to request from the homeserver. Can only be used if `include_all_networks` is false
-        """
-
-        method, path, data = Api.public_rooms(
-            self.access_token,
-            limit,
-            server,
-            since,
-            filter_generic_search_term,
-            filter_room_types,
-            include_all_networks,
-            third_party_instance_id,
-        )
-        return await self._send(PublicRoomsResponse, method, path, data)
-
-    @logged_in_async
-    async def set_pushrule(
-        self,
-        scope: str,
-        kind: PushRuleKind,
-        rule_id: str,
-        before: str | None = None,
-        after: str | None = None,
-        actions: Sequence[PushAction] = (),
-        conditions: Sequence[PushCondition] | None = None,
-        pattern: str | None = None,
-    ) -> SetPushRuleResponse | SetPushRuleError:
-        """Create or modify an existing push rule.
-
-        Returns either a `SetPushRuleResponse` if the request was
-        successful or a `SetPushRuleError` if there was an error
-        with the request.
-
-        Args:
-            scope (str): The scope of this rule, e.g. ``"global"``.
-                Homeservers currently only process ``global`` rules for
-                event matching, while ``device`` rules are a planned feature.
-                It is up to clients to interpret any other scope name.
-
-            kind (PushRuleKind): The kind of rule.
-
-            rule_id (str): The identifier of the rule. Must be unique
-                within its scope and kind.
-                For rules of ``room`` kind, this is the room ID to match for.
-                For rules of ``sender`` kind, this is the user ID to match.
-
-            before (Optional[str]): Position this rule before the one matching
-                the given rule ID.
-                The rule ID cannot belong to a predefined server rule.
-                ``before`` and ``after`` cannot be both specified.
-
-            after (Optional[str]): Position this rule after the one matching
-                the given rule ID.
-                The rule ID cannot belong to a predefined server rule.
-                ``before`` and ``after`` cannot be both specified.
-
-            actions (Sequence[PushAction]): Actions to perform when the
-                conditions for this rule are met. The given actions replace
-                the existing ones.
-
-            conditions (Sequence[PushCondition]): Event conditions that must
-                hold true for the rule to apply to that event.
-                A rule with no conditions always hold true.
-                Only applicable to ``underride`` and ``override`` rules.
-
-            pattern (Optional[str]): Glob-style pattern to match against
-                for the event's content.
-                Only applicable to ``content`` rules.
-
-        Example:
-            >>> client.set_pushrule(
-            ...     scope = "global",
-            ...     kind = PushRuleKind.room,
-            ...     rule_id = "!foo123:example.org",
-            ...     actions = [PushNotify(), PushSetTweak("sound", "default")],
-            ... )
-            ...
-            ... client.set_pushrule(
-            ...     scope = "global",
-            ...     kind = PushRuleKind.override,
-            ...     rule_id = "silence_large_rooms",
-            ...     actions = [],
-            ...     conditions = [PushRoomMemberCount(10, ">")],
-            ... )
-            ...
-            ... client.set_pushrule(
-            ...     scope = "global",
-            ...     kind = PushRuleKind.content,
-            ...     rule_id = "highlight_messages_containing_nio_word",
-            ...     actions = [PushNotify(), PushSetTweak("highlight", True)],
-            ...     pattern = "nio"
-            ... )
-
-        """
-
-        method, path, data = Api.set_pushrule(
-            self.access_token,
-            scope,
-            kind,
-            rule_id,
-            before,
-            after,
-            actions,
-            conditions,
-            pattern,
-        )
-
-        return await self._send(SetPushRuleResponse, method, path, data)
-
-    @logged_in_async
-    async def delete_pushrule(
-        self,
-        scope: str,
-        kind: PushRuleKind,
-        rule_id: str,
-    ) -> DeletePushRuleResponse | DeletePushRuleError:
-        """Delete an existing push rule.
-
-        Returns either a `DeletePushRuleResponse` if the request was
-        successful or a `DeletePushRuleError` if there was an error
-        with the request.
-
-        Args:
-            scope (str): The scope of this rule, e.g. ``"global"``.
-                Homeservers currently only process ``global`` rules for
-                event matching, while ``device`` rules are a planned feature.
-                It is up to clients to interpret any other scope name.
-
-            kind (PushRuleKind): The kind of rule.
-
-            rule_id (str): The identifier of the rule. Must be unique
-                within its scope and kind.
-        """
-
-        method, path = Api.delete_pushrule(
-            self.access_token,
-            scope,
-            kind,
-            rule_id,
-        )
-
-        return await self._send(DeletePushRuleResponse, method, path)
-
-    @logged_in_async
-    async def enable_pushrule(
-        self,
-        scope: str,
-        kind: PushRuleKind,
-        rule_id: str,
-        enable: bool,
-    ) -> EnablePushRuleResponse | EnablePushRuleError:
-        """Enable or disable an existing push rule.
-
-        Returns either a `EnablePushRuleResponse` if the request was
-        successful or a `EnablePushRuleError` if there was an error
-        with the request.
-
-        Args:
-            scope (str): The scope of this rule, e.g. ``"global"``.
-                Homeservers currently only process ``global`` rules for
-                event matching, while ``device`` rules are a planned feature.
-                It is up to clients to interpret any other scope name.
-
-            kind (PushRuleKind): The kind of rule.
-
-            rule_id (str): The identifier of the rule. Must be unique
-                within its scope and kind.
-
-            enable (bool): Whether to enable or disable this rule.
-        """
-
-        method, path, data = Api.enable_pushrule(
-            self.access_token,
-            scope,
-            kind,
-            rule_id,
-            enable,
-        )
-
-        return await self._send(EnablePushRuleResponse, method, path, data)
-
-    @logged_in_async
-    async def set_pushrule_actions(
-        self,
-        scope: str,
-        kind: PushRuleKind,
-        rule_id: str,
-        actions: Sequence[PushAction],
-    ) -> SetPushRuleActionsResponse | SetPushRuleActionsError:
-        """Set the actions for an existing built-in or user-created push rule.
-
-        Unlike ``set_pushrule``, this method can edit built-in server rules.
-
-        Returns the HTTP method, HTTP path and data for the request.
-        Returns either a `SetPushRuleActionsResponse` if the request was
-        successful or a `SetPushRuleActionsError` if there was an error
-        with the request.
-
-        Args:
-            scope (str): The scope of this rule, e.g. ``"global"``.
-                Homeservers currently only process ``global`` rules for
-                event matching, while ``device`` rules are a planned feature.
-                It is up to clients to interpret any other scope name.
-
-            kind (PushRuleKind): The kind of rule.
-
-            rule_id (str): The identifier of the rule. Must be unique
-                within its scope and kind.
-
-            actions (Sequence[PushAction]): Actions to perform when the
-                conditions for this rule are met. The given actions replace
-                the existing ones.
-        """
-
-        method, path, data = Api.set_pushrule_actions(
-            self.access_token,
-            scope,
-            kind,
-            rule_id,
-            actions,
-        )
-
-        return await self._send(SetPushRuleActionsResponse, method, path, data)
-
-    @logged_in_async
-    async def room_update_aliases(
-        self,
-        room_id: str,
-        canonical_alias: str | None = None,
-        alt_aliases: list[str] | None = None,
-    ):
-        """Update the aliases of an existing room.
-           This method will not transfer aliases from one room to another!
-           Remove the old alias before trying to assign it again
-
-        Args:
-            room_id (str): Room-ID of the room to assign / remove aliases from
-
-            canonical_alias (str, None): The main alias of the room
-
-            alt_aliases (list[str], None): List of alternative aliases for the room
-
-            If None is passed as canonical_alias or alt_aliases the existing aliases
-             will be removed without assigning new aliases.
-        """
-        alt_aliases = alt_aliases or []
-        # Concentrate new aliases
-        if canonical_alias is None:
-            new_aliases = []
-        else:
-            new_aliases = alt_aliases + [canonical_alias]
-
-        # Get current aliases
-        current_aliases = []
-        current_alias_event = await self.room_get_state_event(
-            room_id, "m.room.canonical_alias"
-        )
-        if isinstance(current_alias_event, RoomGetStateEventResponse):
-            current_aliases.append(current_alias_event.content["alias"])
-            if "alt_aliases" in current_alias_event.content:
-                alt_aliases = current_alias_event.content["alt_aliases"]
-                current_aliases.extend(alt_aliases)
-
-        # Unregister old aliases
-        for alias in current_aliases:
-            if alias not in new_aliases:
-                if isinstance(
-                    await self.room_delete_alias(alias), RoomDeleteAliasError
-                ):
-                    return RoomUpdateAliasError(f"Could not delete alias {alias}")
-
-        # Register new aliases
-        for alias in new_aliases:
-            if isinstance(
-                await self.room_put_alias(alias, room_id), RoomDeleteAliasError
-            ):
-                return RoomUpdateAliasError(f"Could not put alias {alias}")
-
-        # Send m.room.canonical_alias event
-        put_alias_event = await self.room_put_state(
-            room_id,
-            "m.room.canonical_alias",
-            {"alias": canonical_alias, "alt_aliases": alt_aliases},
-        )
-        if isinstance(put_alias_event, RoomPutStateError):
-            return RoomUpdateAliasError("Failed to put m.room.canonical_alias")
-        return RoomUpdateAliasResponse()
-
-    @logged_in_async
-    async def room_upgrade(
-        self,
-        old_room_id: str,
-        new_room_version: str,
-        copy_events: list = [
-            "m.room.server_acl",
-            "m.room.encryption",
-            "m.room.name",
-            "m.room.avatar",
-            "m.room.topic",
-            "m.room.guest_access",
-            "m.room.history_visibility",
-            "m.room.join_rules",
-            "m.room.power_levels",
-        ],
-        room_upgrade_message: str = "This room has been replaced",
-        room_power_level_overwrite: dict[str, Any] | None = None,
-    ) -> RoomUpgradeResponse | RoomUpgradeError:
-        """Upgrade an existing room.
-
-        Args:
-            old_room_id (str): Room-ID of the old room
-
-            new_room_version (str): The new room version
-
-            copy_events (list): List of state-events to copy from the old room
-                                Defaults m.room.server_acl, m.room.encryption, m.room.name,
-                                         m.room.avatar, m.room.topic, m.room.guest_access,
-                                         m.room.history_visibility, m.room.join_rules, m.room.power_levels
-
-            room_upgrade_message (str): Message inside the tombstone-event
-
-            room_power_level_overwrite (dict): A ``m.room.power_levels content`` dict
-                to override the default.
-                The dict will be applied on top of the generated
-                ``m.room.power_levels`` event before it is sent to the room.
-        """
-        # Check if we are allowed to tombstone a room
-        tombstone_permission = await self.has_event_permission(
-            old_room_id, "m.room.tombstone", "state"
-        )
-        if isinstance(tombstone_permission, ErrorResponse):
-            return RoomUpgradeError("Could not determine if allowed to upgrade room")
-        if not tombstone_permission:
-            return RoomUpgradeError("Not allowed to upgrade room")
-
-        # Get state events for the old room
-        old_room_state_events = await self.room_get_state(old_room_id)
-        if isinstance(old_room_state_events, RoomGetStateError):
-            return RoomUpgradeError("Failed to get room events")
-
-        # Get initial_state and power_level
-        old_room_power_levels = None
-        new_room_initial_state = []
-        for event in old_room_state_events.events:
-            if (
-                event["type"] in copy_events
-                and not event["type"] == "m.room.power_levels"
-            ):
-                new_room_initial_state.append(event)
-            if event["type"] == "m.room.power_levels":
-                old_room_power_levels = event["content"]
-
-        predecessor = {
-            "room_id": old_room_id,
-        }
-
-        if MatrixRoom._supports_room_version_12(new_room_version):
-            if not isinstance(old_room_power_levels, dict):
-                return RoomUpgradeError("Room has no usable power-level state")
-            who_am_i = await self.whoami()
-            if isinstance(who_am_i, ErrorResponse):
-                return RoomUpgradeError("Failed to identify the current user")
-            users = old_room_power_levels.get("users", {})
-            if not isinstance(users, dict):
-                return RoomUpgradeError("Room has no usable power-level state")
-            users.pop(who_am_i.user_id, None)
-        else:
-            # Get last known event from the old room
-            old_room_event = await self.room_messages(
-                start="", room_id=old_room_id, limit=1
-            )
-            if isinstance(old_room_event, RoomMessagesError):
-                return RoomUpgradeError("Failed to get last known event")
-
-            predecessor["event_id"] = old_room_event.chunk[0].event_id
-
-        # Overwrite power level if a new power level was passed
-        if room_power_level_overwrite is not None:
-            old_room_power_levels = room_power_level_overwrite
-
-        # Create new room
-        new_room = await self.room_create(
-            room_version=new_room_version,
-            power_level_override=old_room_power_levels,
-            initial_state=new_room_initial_state,
-            predecessor=predecessor,
-        )
-
-        if isinstance(new_room, RoomCreateError):
-            return RoomUpgradeError("Room creation failed")
-
-        # Send tombstone event to the old room
-        old_room_tombstone = await self.room_put_state(
-            old_room_id,
-            "m.room.tombstone",
-            {"body": room_upgrade_message, "replacement_room": new_room.room_id},
-        )
-        if isinstance(old_room_tombstone, RoomPutStateError):
-            return RoomUpgradeError("Failed to put m.room.tombstone")
-
-        # Get the old rooms aliases
-        old_room_alias = await self.room_get_state_event(
-            old_room_id, "m.room.canonical_alias"
-        )
-        if isinstance(old_room_alias, RoomGetStateEventResponse):
-            aliases = [old_room_alias.content["alias"]]
-            if "alt_aliases" in old_room_alias.content:
-                alt_aliases = old_room_alias.content["alt_aliases"]
-                aliases.extend(alt_aliases)
-            else:
-                alt_aliases = []
-
-            # Remove the old aliases
-            if isinstance(
-                await self.room_update_aliases(old_room_id), RoomDeleteAliasError
-            ):
-                return RoomUpgradeError("Could update the old rooms aliases")
-
-            # Assign new aliases
-            if isinstance(
-                await self.room_update_aliases(
-                    new_room.room_id,
-                    canonical_alias=old_room_alias.content["alias"],
-                    alt_aliases=alt_aliases,
-                ),
-                RoomDeleteAliasError,
-            ):
-                return RoomUpgradeError("Could update the new rooms aliases")
-
-        return RoomUpgradeResponse(new_room.room_id)
-
-    @logged_in_async
-    async def update_room_topic(
-        self,
-        room_id: str,
-        topic: str,
-    ) -> RoomPutStateResponse | RoomPutStateError:
-        """Update the room topic
-
-        Returns either a `RoomPutStateResponse` if the request was successful
-        or a `RoomPutStateError` if there was an error with the request.
-
-        If you wish to send a `state_key` along with the request, use the `room_put_state` method instead.
-
-        Args:
-            room_id (str): The room id of the room to be updated.
-            topic (str): The new room topic.
-        """
-
-        return await self.room_put_state(
-            room_id,
-            event_type="m.room.topic",
-            content={"topic": topic},
-        )
-
-    @logged_in_async
-    async def has_event_permission(
-        self, room_id: str, event_name: str, event_type: str = "event"
-    ) -> bool | ErrorResponse:
-        who_am_i = await self.whoami()
-        if isinstance(who_am_i, ErrorResponse):
-            return who_am_i
-
-        # TODO: why does this function use whoami instead of self.user_id?
-        # Does that also mean that it shouldn't use MatrixRoom.creators?
-        if who_am_i.user_id in self.rooms[room_id].creators:
-            return True
-
-        power_levels = await self.room_get_state_event(room_id, "m.room.power_levels")
-
-        try:
-            user_power_level = power_levels.content["users"][who_am_i.user_id]
-        except KeyError:
-            user_power_level = power_levels.content.get("users_default", 0)
-        except Exception:
-            return ErrorResponse("Couldn't get user power levels")
-
-        try:
-            event_power_level = power_levels.content["events"][event_name]
-        except KeyError:
-            if event_type == "event":
-                event_power_level = power_levels.content.get("events_default", 0)
-            elif event_type == "state":
-                event_power_level = power_levels.content.get("state_default", 50)
-            else:
-                return ErrorResponse(f"event_type {event_type} unknown")
-        except Exception:
-            return ErrorResponse("Couldn't get event power levels")
-
-        return user_power_level >= event_power_level
-
-    @logged_in_async
-    async def has_permission(
-        self, room_id: str, permission_type: str
-    ) -> bool | ErrorResponse:
-        who_am_i = await self.whoami()
-        if isinstance(who_am_i, ErrorResponse):
-            return who_am_i
-
-        # TODO: why does this function use whoami instead of self.user_id?
-        # Does that also mean that it shouldn't use MatrixRoom.creators?
-        if who_am_i.user_id in self.rooms[room_id].creators:
-            return True
-
-        power_levels = await self.room_get_state_event(room_id, "m.room.power_levels")
-
-        try:
-            user_power_level = power_levels.content["users"][who_am_i.user_id]
-        except KeyError:
-            user_power_level = power_levels.content.get("users_default", 0)
-        except Exception:
-            return ErrorResponse("Couldn't get user power levels")
-
-        try:
-            permission_power_level = power_levels.content[permission_type]
-        except KeyError:
-            return ErrorResponse(f"permission_type {permission_type} unknown")
-
-        return user_power_level >= permission_power_level

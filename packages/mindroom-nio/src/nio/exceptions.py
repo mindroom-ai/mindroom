@@ -25,10 +25,6 @@ class MembersSyncError(LocalProtocolError):
     pass
 
 
-class SendRetryError(LocalProtocolError):
-    pass
-
-
 class RemoteProtocolError(ProtocolError):
     pass
 
@@ -50,10 +46,6 @@ class InsufficientRecursionDepthError(RemoteProtocolError):
             f"Server reported recursion depth {reported!r}, "
             f"but at least {required} is required"
         )
-
-
-class LocalTransportError(ProtocolError):
-    pass
 
 
 class RemoteTransportError(ProtocolError):

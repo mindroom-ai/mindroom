@@ -1314,50 +1314,6 @@ class PowerLevels:
         required_level = self.get_message_event_required_level(event_type)
         return self.get_user_level(user_id) >= required_level
 
-    def can_user_invite(self, user_id: str) -> bool:
-        """Return whether a user has enough power to invite others."""
-        return self.get_user_level(user_id) >= self.defaults.invite
-
-    def can_user_kick(
-        self,
-        user_id: str,
-        target_user_id: str | None = None,
-    ) -> bool:
-        """Return whether a user has enough power to kick another.
-
-        If ``target_user_id`` is ``None``, returns whether ``user_id`` has
-        enough power to kick anyone with a lower power level than that user.
-        """
-        level = self.get_user_level(user_id)
-        can_kick_lower = level >= self.defaults.kick
-
-        if target_user_id is None:
-            return can_kick_lower
-
-        return can_kick_lower and level > self.get_user_level(target_user_id)
-
-    def can_user_ban(
-        self,
-        user_id: str,
-        target_user_id: str | None = None,
-    ) -> bool:
-        """Return whether a user has enough power to ban another.
-
-        If ``target_user_id`` is ``None``, returns whether ``user_id`` has
-        enough power to ban anyone with a lower power level than that user.
-        """
-        level = self.get_user_level(user_id)
-        can_ban_lower = level >= self.defaults.ban
-
-        if target_user_id is None:
-            return can_ban_lower
-
-        return can_ban_lower and level > self.get_user_level(target_user_id)
-
-    def can_user_redact(self, user_id: str):
-        """Return whether a user has enough power to redact other user's events."""
-        return self.get_user_level(user_id) >= self.defaults.redact
-
     def can_user_notify(self, user_id: str, notification_type: str):
         """Return whether user has enough power to send a type of notification."""
         required = self.get_notification_required_level(notification_type)

@@ -414,13 +414,3 @@ class CryptoMaintenance:
         )
         self.capture()
         return response, observations
-
-    def change_key_share(self, event: RoomKeyRequest, *, cancel: bool = False) -> bool:
-        self.store._require_transaction()
-        changed = (
-            self.olm.cancel_key_share(event)
-            if cancel
-            else self.olm.continue_key_share(event)
-        )
-        self.capture()
-        return changed

@@ -18,7 +18,6 @@ import json
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timedelta
-from json.decoder import JSONDecodeError
 from typing import Any
 
 import vodozemac
@@ -84,7 +83,6 @@ from . import (
     TrustState,
     logger,
 )
-from .key_export import decrypt_and_read, encrypt_and_save
 from .sas import Sas
 
 DecryptedOlmT = RoomKeyEvent | BadEvent | UnknownBadEvent | UnknownToDeviceEvent | None
@@ -328,16 +326,6 @@ class Olm:
 
         key_count = self.account.max_one_time_keys - self.uploaded_key_count
         return key_count > 0
-
-    def user_fully_verified(self, user_id: str) -> bool:
-        devices = self.device_store.active_user_devices(user_id)
-        for device in devices:
-            if not self.is_device_verified(device) and not self.is_device_blacklisted(
-                device
-            ):
-                return False
-
-        return True
 
     def share_keys(self) -> dict[str, Any]:
         def generate_one_time_keys(current_key_count: int) -> None:
@@ -611,48 +599,6 @@ class Olm:
         self.outgoing_to_device_messages.append(
             self._encrypt_forwarding_key(event.room_id, group_session, session, device)
         )
-
-    def get_active_key_requests(
-        self, user_id: str, device_id: str
-    ) -> list[RoomKeyRequest]:
-        """Get key requests from a device that are waiting for verification.
-
-        Args:
-            user_id (str): The id of the user for which we would like to find
-                the active key requests.
-            device_id (str): The id of the device for which we would like to
-                find the active key requests.
-        """
-        return [
-            event
-            for event in self.key_request_from_untrusted.values()
-            if event.sender == user_id and event.requesting_device_id == device_id
-        ]
-
-    def continue_key_share(self, event: RoomKeyRequest) -> bool:
-        """Continue a previously interrupted key share event.
-
-        Args:
-            event (RoomKeyRequest): The event which we would like to continue.
-        """
-        if event not in self.key_request_from_untrusted.values():
-            raise LocalProtocolError("No such pending key share request found")
-
-        event = self.key_request_from_untrusted[event.request_id]
-
-        if not self._collect_single_key_share(event):
-            return False
-
-        self.key_request_from_untrusted.pop(event.request_id)
-        return True
-
-    def cancel_key_share(self, event: RoomKeyRequest) -> bool:
-        """Cancel a previously interrupted key share event.
-
-        Args:
-            event (RoomKeyRequest): The event which we would like to cancel.
-        """
-        return bool(self.key_request_from_untrusted.pop(event.request_id, None))
 
     def _collect_single_key_share(self, event: RoomKeyRequest) -> bool:
         # The sender is ourself but on a different device. We share all
@@ -982,9 +928,6 @@ class Olm:
     def blacklist_device(self, device: OlmDevice) -> bool:
         return self.store.blacklist_device(device)
 
-    def unblacklist_device(self, device: OlmDevice) -> bool:
-        return self.store.unblacklist_device(device)
-
     def verify_device(self, device: OlmDevice) -> bool:
         return self.store.verify_device(device)
 
@@ -996,9 +939,6 @@ class Olm:
 
     def unverify_device(self, device: OlmDevice) -> bool:
         return self.store.unverify_device(device)
-
-    def ignore_device(self, device: OlmDevice) -> bool:
-        return self.store.ignore_device(device)
 
     def unignore_device(self, device: OlmDevice) -> bool:
         return self.store.unignore_device(device)
@@ -2007,46 +1947,6 @@ class Olm:
         self.account.mark_keys_as_published()
 
     @staticmethod
-    def export_keys_static(sessions, outfile, passphrase, count=10000):
-        session_list = []
-
-        for session in sessions:
-            payload = {
-                "algorithm": Olm._megolm_algorithm,
-                "sender_key": session.sender_key,
-                "sender_claimed_keys": {"ed25519": session.ed25519},
-                "forwarding_curve25519_key_chain": session.forwarding_chain,
-                "room_id": session.room_id,
-                "session_id": session.id,
-                "session_key": session.export_session(session.first_known_index),
-            }
-            session_list.append(payload)
-
-        data = json.dumps(session_list).encode()
-        encrypt_and_save(data, outfile, passphrase, count=count)
-
-    # This function is copyrighted under the Apache 2.0 license Zil0
-    def export_keys(self, outfile, passphrase, count=10000):
-        """Export all the Megolm decryption keys of this device.
-
-        The keys will be encrypted using the passphrase.
-        NOTE:
-            This does not save other information such as the private identity
-            keys of the device.
-        Args:
-            outfile (str): The file to write the keys to.
-            passphrase (str): The encryption passphrase.
-            count (int): Optional. Round count for the underlying key
-                derivation. It is not recommended to specify it unless
-                absolutely sure of the consequences.
-        """
-        inbound_group_store = self.store.load_inbound_group_sessions()
-
-        Olm.export_keys_static(inbound_group_store, outfile, passphrase, count)
-
-        logger.info(f"Successfully exported encryption keys to {outfile}")
-
-    @staticmethod
     def _import_group_session(
         session_key, sender_fp_key, sender_key, room_id, forwarding_chain
     ):
@@ -2061,83 +1961,6 @@ class Olm:
         except vodozemac.SessionKeyDecodeException as e:
             logger.warning(f"Error importing inbound group session: {e}")
             return None
-
-    @staticmethod
-    def import_keys_static(infile: str, passphrase: str) -> list[InboundGroupSession]:
-        sessions = []
-
-        try:
-            data = decrypt_and_read(infile, passphrase)
-        except ValueError as e:
-            raise EncryptionError(e)
-
-        try:
-            session_list_all = json.loads(data)
-        except JSONDecodeError as e:
-            raise EncryptionError(f"Error parsing key file: {str(e)}")
-
-        session_list = []
-        missing = False
-
-        for session in session_list_all:
-            if "sender_claimed_keys" in session:
-                session_list.append(session)
-            else:
-                missing = True
-
-        try:
-            validate_json(session_list, Schemas.megolm_key_import)
-        except (ValidationError, SchemaError) as e:
-            logger.warning(e)
-            raise EncryptionError(f"Error parsing key file: {str(e)}")
-
-        for session_dict in session_list:
-            if session_dict["algorithm"] != Olm._megolm_algorithm:
-                logger.warning("Ignoring session with unsupported algorithm.")
-                continue
-
-            session = Olm._import_group_session(
-                session_dict["session_key"],
-                session_dict["sender_claimed_keys"]["ed25519"],
-                session_dict["sender_key"],
-                session_dict["room_id"],
-                session_dict["forwarding_curve25519_key_chain"],
-            )
-
-            if not session:
-                missing = False
-                continue
-
-            sessions.append(session)
-
-        if missing:
-            total = len(session_list_all)
-            imported = len(session_list_all) - len(sessions)
-
-            logger.warning(f"Warning! Could only import {imported} out of {total} keys")
-
-        return sessions
-
-    # This function is copyrighted under the Apache 2.0 license Zil0
-    def import_keys(self, infile, passphrase):
-        """Import Megolm decryption keys.
-
-        The keys will be added to the current instance as well as written to
-        database.
-
-        Args:
-            infile (str): The file containing the keys.
-            passphrase (str): The decryption passphrase.
-        """
-        sessions = Olm.import_keys_static(infile, passphrase)
-
-        for session in sessions:
-            # This could be improved by writing everything to db at once at
-            # the end
-            if self.inbound_group_store.add(session):
-                self.save_inbound_group_session(session)
-
-        logger.info(f"Successfully imported encryption keys from {infile}")
 
     def clear_verifications(self):
         """Remove canceled or done key verifications from our cache.
@@ -2168,17 +1991,6 @@ class Olm:
         self.key_verifications = active_sas
 
         return events
-
-    def create_sas(self, olm_device):
-        sas = Sas(
-            self.user_id,
-            self.device_id,
-            self.account.identity_keys["ed25519"],
-            olm_device,
-        )
-        self.key_verifications[sas.transaction_id] = sas
-
-        return sas.start_verification()
 
     def get_active_sas(self, user_id: str, device_id: str) -> Sas | None:
         """Find a non-canceled SAS verification object for the provided user.
