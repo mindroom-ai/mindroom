@@ -51,6 +51,7 @@ from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
 from mindroom.history.types import (
+    HistoryAnchor,
     HistoryPolicy,
     PreparedHistoryState,
     ResolvedReplayPlan,
@@ -561,15 +562,15 @@ def test_a_scheduled_limit_leaves_no_anchor_for_the_next_reply(limit: int) -> No
         replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=500, add_history_to_context=True),
         replays_persisted_history=True,
         prepared_context_tokens=1_500,
-        non_prompt_tokens=1_000,
+        history_anchor=HistoryAnchor(1_000, "fake"),
         native_history=None,
     )
-    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(prepared)) == 1_000
+    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(prepared), "fake") == 1_000
 
     capped = _prepared_history_with_scheduled_limit(prepared, limit)
 
     # The run records no system prompt and tools, so the next reply sizes its history by estimate.
-    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(capped)) is None
+    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(capped), "fake") is None
 
 
 def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:

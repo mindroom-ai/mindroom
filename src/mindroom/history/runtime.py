@@ -49,6 +49,7 @@ from mindroom.history.types import (
     CompactionLifecycleStatus,
     CompactionMode,
     CompactionReplyOutcome,
+    HistoryAnchor,
     HistoryScope,
     HistoryScopeState,
     PreparedHistoryState,
@@ -351,8 +352,9 @@ def _reported_history_tokens(
         not resolved_inputs.history_settings.replays_whole_history
         # Another model counts with another tokenizer.
         or (latest_run.model, latest_run.model_provider) != (model.identity.id, model.identity.provider)
-        # Without what that request's system prompt and tools came to, its history cannot be told apart.
-        or (recorded_tokens := recorded_non_prompt_tokens(latest_run.metadata)) is None
+        # Without what that request's system prompt and tools came to, as this route counts them, its history cannot be
+        # told apart.
+        or (recorded_tokens := recorded_non_prompt_tokens(latest_run.metadata, model.token_counter.key)) is None
     ):
         return None
     messages = latest_run.messages
@@ -734,7 +736,11 @@ def finalize_history_preparation(
         compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
         prepared_context_tokens=prepared_context_tokens,
         # Authored replay limits keep older history out of every request.
-        non_prompt_tokens=prepared_scope_history.non_prompt_tokens if history_settings.replays_whole_history else None,
+        history_anchor=(
+            HistoryAnchor(prepared_scope_history.non_prompt_tokens, counter.key)
+            if history_settings.replays_whole_history
+            else None
+        ),
         native_history=native_history,
     )
 

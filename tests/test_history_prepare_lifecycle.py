@@ -42,6 +42,7 @@ from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionLifecycleStart,
     CompactionOutcome,
+    HistoryAnchor,
     HistoryPolicy,
     HistoryScope,
     PreparedHistoryState,
@@ -1880,10 +1881,12 @@ def _reported_run(
     images: list[Image] | None = None,
     reasoning_tokens: int | None = None,
     non_prompt_tokens: int | None = 400,
+    counter_key: str = "fake",
 ) -> RunRecord:
     """Return a completed run whose answer carries the request size its provider reported and the model's stamp.
 
-    The run records that its request was sized with ``non_prompt_tokens`` of system prompt and tools, when not None.
+    The run records that its request was sized with ``non_prompt_tokens`` of system prompt and tools, as the counter
+    keyed ``counter_key`` counts them, when not None.
     By default the answer's request starts the second after any summary a test writes. With ``reasoning_tokens``
     the answer also stores one encrypted reasoning item, as a Responses route records it, and reports that much
     reasoning.
@@ -1915,7 +1918,7 @@ def _reported_run(
         PreparedHistoryState(
             replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=600, add_history_to_context=True),
             prepared_context_tokens=1_000,
-            non_prompt_tokens=non_prompt_tokens,
+            history_anchor=None if non_prompt_tokens is None else HistoryAnchor(non_prompt_tokens, counter_key),
             native_history=None,
         ),
     )
@@ -1938,7 +1941,12 @@ async def _prepare_with_reported_usage(
     and tools, while each run records the 400 its request was sized with. The answering model counts with
     ``counter``, a quarter token per character when it is None.
     """
-    runs = [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", **latest)]
+    counter = counter or fake_token_counter()
+    runs = [
+        _reported_run("run-0", counter_key=counter.key),
+        _reported_run("run-1", counter_key=counter.key),
+        _reported_run("run-2", **{"counter_key": counter.key, **latest}),
+    ]
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -1983,7 +1991,7 @@ async def _prepare_with_reported_usage(
             model=ScriptedModel(
                 [],
                 identity=ModelIdentity(id="fake-model", provider="fake"),
-                token_counter=counter or fake_token_counter(),
+                token_counter=counter,
             ),
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=non_prompt_tokens,
@@ -2139,7 +2147,7 @@ async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_pat
     assert state.replay_plan.mode != "limited"
     assert state.replay_plan.estimated_tokens == reported
     # The run records the system prompt and tools it was sized with, which the next reply's anchor takes off.
-    assert state.non_prompt_tokens == 400
+    assert state.history_anchor == HistoryAnchor(400, "overcounts")
 
 
 @pytest.mark.asyncio
@@ -2170,7 +2178,7 @@ async def test_a_request_with_trimmed_history_leaves_no_anchor_for_the_next_repl
     assert state.replay_plan is not None
     assert (state.replay_plan.mode, state.replay_plan.num_history_runs) != ("configured", None)
     # The run records no system prompt and tools, so the next reply sizes its history by estimate.
-    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(state)) is None
+    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(state), "overcounts") is None
 
 
 @pytest.mark.asyncio
@@ -2229,6 +2237,8 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
         pytest.param({}, {}, id="no-reported-usage"),
         # Without the system prompt and tools that request was sized with, its history cannot be told apart.
         pytest.param({"input_tokens": 8_000, "non_prompt_tokens": None}, {}, id="no-recorded-system-prompt"),
+        # Another server under the same model name can tokenize differently.
+        pytest.param({"input_tokens": 8_000, "counter_key": "another-endpoint"}, {}, id="another-counting-route"),
         pytest.param({"input_tokens": 8_000, "model": "other-model"}, {}, id="another-model-answered"),
         pytest.param(
             {"input_tokens": 8_000, "images": [Image(url="https://example.com/chart.png")]},

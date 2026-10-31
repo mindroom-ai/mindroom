@@ -370,6 +370,18 @@ class NativeHistory:
         return NativeHistory(native_compaction=None, portable_replay=self.portable_replay)
 
 
+@dataclass(frozen=True)
+class HistoryAnchor:
+    """The system prompt and tools tokens a run's requests were sized with, and the key of the counter that counted them.
+
+    A later reply that counts with the same counter takes them off the request size the provider reported, to size the
+    history that request held.
+    """
+
+    non_prompt_tokens: int
+    counter_key: str
+
+
 @dataclass(frozen=True, kw_only=True)
 class PreparedHistoryState:
     """Prepared persisted-history state for one run.
@@ -385,8 +397,7 @@ class PreparedHistoryState:
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     prepared_context_tokens: int | None = None
-    # The system prompt and tools tokens the run's requests were sized with, when its settings replay the scope's
-    # whole history. A run whose final plan replays all of it records them, so a later reply can tell that history
-    # apart in the request size the provider reports.
-    non_prompt_tokens: int | None = None
+    # Set when the run's settings replay the scope's whole history; a run whose final plan replays all of it records
+    # it, so a later reply can tell that history apart in the request size the provider reports.
+    history_anchor: HistoryAnchor | None = None
     native_history: NativeHistory | None

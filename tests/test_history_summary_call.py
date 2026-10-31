@@ -18,6 +18,7 @@ from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+    HISTORY_ANCHOR_RUN_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     PRIOR_USAGE_RUN_METADATA_KEY,
 )
@@ -534,6 +535,7 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
         "durable_outcome": {"state": "delivered"},
         "model_params": {"temperature": 0.2},
         PRIOR_USAGE_RUN_METADATA_KEY: {"input_tokens": 100, "output_tokens": 5},
+        HISTORY_ANCHOR_RUN_METADATA_KEY: {"non_prompt_tokens": 400, "counter": "openai:http://10.0.0.5/v1:qwen"},
     }
     run.metadata = metadata.copy()
 
@@ -550,6 +552,8 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     assert "model_params" not in summary_input
     assert PRIOR_USAGE_RUN_METADATA_KEY not in summary_input
     assert AI_RUN_METADATA_KEY not in summary_input
+    assert HISTORY_ANCHOR_RUN_METADATA_KEY not in summary_input
+    assert "10.0.0.5" not in summary_input
     assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY not in summary_input
     assert "$request" in summary_input
     assert "2026-07-17T20:00:00Z" in summary_input

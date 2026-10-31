@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
-from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, HISTORY_ANCHOR_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.usage import RunMetrics
 from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
@@ -114,14 +114,6 @@ def _prepared_history_payload(prepared_history: PreparedHistoryState) -> dict[st
     payload: dict[str, Any] = {}
     if prepared_history.prepared_context_tokens is not None:
         payload["prepared_context"] = {"tokens": prepared_history.prepared_context_tokens}
-        replay_plan = prepared_history.replay_plan
-        # A request that replays part of the history, however the plan was cut, reports the size of that part alone.
-        if (
-            prepared_history.non_prompt_tokens is not None
-            and replay_plan is not None
-            and replay_plan.mode == "configured"
-        ):
-            payload["prepared_context"]["non_prompt_tokens"] = prepared_history.non_prompt_tokens
     decision = prepared_history.compaction_decision
     compaction: dict[str, Any] = {
         "decision": decision.mode,
@@ -146,15 +138,30 @@ def _prepared_history_payload(prepared_history: PreparedHistoryState) -> dict[st
 
 
 def build_prepared_history_metadata_content(prepared_history: PreparedHistoryState) -> dict[str, Any]:
-    """Build Matrix message metadata for prepared-context and compaction diagnostics."""
-    return {AI_RUN_METADATA_KEY: {"version": _AI_RUN_METADATA_VERSION, **_prepared_history_payload(prepared_history)}}
+    """Build a run's metadata: the prepared-context and compaction diagnostics its reply publishes, and its history anchor.
+
+    The anchor stays in the stored run and is never published.
+    """
+    content: dict[str, Any] = {
+        AI_RUN_METADATA_KEY: {"version": _AI_RUN_METADATA_VERSION, **_prepared_history_payload(prepared_history)},
+    }
+    anchor = prepared_history.history_anchor
+    replay_plan = prepared_history.replay_plan
+    # A request that replays part of the history, however the plan was cut, reports the size of that part alone.
+    if anchor is not None and replay_plan is not None and replay_plan.mode == "configured":
+        content[HISTORY_ANCHOR_RUN_METADATA_KEY] = {
+            "non_prompt_tokens": anchor.non_prompt_tokens,
+            "counter": anchor.counter_key,
+        }
+    return content
 
 
-def recorded_non_prompt_tokens(run_metadata: Mapping[str, Any] | None) -> int | None:
-    """Return the system prompt and tools tokens a run's requests were sized with, if the run recorded them."""
-    payload = (run_metadata or {}).get(AI_RUN_METADATA_KEY)
-    prepared_context = payload.get("prepared_context") if isinstance(payload, dict) else None
-    tokens = prepared_context.get("non_prompt_tokens") if isinstance(prepared_context, dict) else None
+def recorded_non_prompt_tokens(run_metadata: Mapping[str, Any] | None, counter_key: str) -> int | None:
+    """Return the system prompt and tools tokens a run's requests were sized with, if it recorded them by ``counter_key``."""
+    anchor = (run_metadata or {}).get(HISTORY_ANCHOR_RUN_METADATA_KEY)
+    if not isinstance(anchor, dict) or anchor.get("counter") != counter_key:
+        return None
+    tokens = anchor.get("non_prompt_tokens")
     return tokens if isinstance(tokens, int) else None
 
 

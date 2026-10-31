@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    HISTORY_ANCHOR_RUN_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     PRIOR_USAGE_RUN_METADATA_KEY,
 )
@@ -35,6 +36,7 @@ _TOOL_RESULT_ARG_CHARS = 200
 _SUMMARY_METADATA_OMIT_KEYS = frozenset(
     {
         AI_RUN_METADATA_KEY,
+        HISTORY_ANCHOR_RUN_METADATA_KEY,
         # The run's own messages already carry its prompts.
         MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
         COMPACTED_REQUESTS_METADATA_KEY,
