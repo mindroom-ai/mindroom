@@ -245,6 +245,115 @@ def test_client_chart_mounts_operator_notices_so_edits_reach_running_pods(tmp_pa
     assert "notices" not in {volume["name"] for volume in default_pod["volumes"]}
 
 
+def _client_main_nginx_conf(tmp_path: Path, values: str) -> str | None:
+    docs = _render_chart(
+        Path("cluster/k8s/client"),
+        release_name="mindroom-client",
+        values_files=_values_files(tmp_path, values),
+    )
+    pod = _resource(docs, "Deployment", "mindroom-client")["spec"]["template"]["spec"]
+    mounts = {mount["mountPath"]: mount for mount in pod["containers"][0]["volumeMounts"]}
+    if "/etc/nginx/nginx.conf" not in mounts:
+        return None
+    assert mounts["/etc/nginx/nginx.conf"] == {
+        "name": "nginx-config",
+        "mountPath": "/etc/nginx/nginx.conf",
+        "subPath": "nginx.conf",
+        "readOnly": True,
+    }
+    return next(doc["data"]["nginx.conf"] for doc in docs if "nginx.conf" in doc.get("data", {}))
+
+
+@pytest.mark.parametrize(
+    ("values", "user_directive"),
+    [
+        ("{}\n", False),
+        ("podSecurityContext:\n  runAsNonRoot: true\n", False),
+        ("securityContext:\n  runAsUser: 0\n  runAsNonRoot: false\n", True),
+        ("podSecurityContext: null\n", True),
+    ],
+    ids=["default", "run-as-non-root", "container-root", "image-user"],
+)
+def test_client_chart_sets_the_nginx_user_only_when_nginx_may_run_as_root(
+    tmp_path: Path,
+    values: str,
+    user_directive: bool,
+) -> None:
+    """An unprivileged master cannot switch workers to another user and warns about the directive at every start."""
+    main_conf = _client_main_nginx_conf(tmp_path, values)
+
+    assert main_conf is not None
+    assert ("user nginx;" in main_conf.splitlines()) is user_directive
+    assert "error_log /var/log/nginx/error.log warn;" in main_conf.splitlines()
+
+
+def test_client_chart_keeps_the_image_main_nginx_config_with_an_external_server_config(tmp_path: Path) -> None:
+    """An external ConfigMap need not carry the chart's main config, so the pod does not mount it from there."""
+    assert _client_main_nginx_conf(tmp_path, "nginx:\n  existingConfigMap: custom-nginx\n") is None
+
+
+def test_client_chart_nginx_logs_only_requests_when_it_starts_serves_and_stops(tmp_path: Path) -> None:
+    """Log collectors read every stderr line as an error, so routine warnings and notices there bury real errors."""
+    docker = shutil.which("docker")
+    if docker is None or subprocess.run([docker, "info"], check=False, capture_output=True).returncode:
+        pytest.skip("Docker is required to run the rendered nginx config")
+    main_conf = _client_main_nginx_conf(tmp_path, "{}\n")
+    assert main_conf is not None
+    pod = _client_pod(tmp_path, "{}\n")
+    uid, gid = pod["securityContext"]["runAsUser"], pod["securityContext"]["runAsGroup"]
+    files = {
+        "/etc/nginx/nginx.conf": main_conf,
+        "/etc/nginx/conf.d/default.conf": _client_nginx_conf("nginx.ipv6=false"),
+        "/usr/share/nginx/html/config.json": "{}",
+    }
+    mounts = []
+    for index, (path, content) in enumerate(files.items()):
+        source = tmp_path / f"mount-{index}"
+        source.write_text(content)
+        source.chmod(0o644)
+        mounts += ["--volume", f"{source}:{path}:ro"]
+    script = "\n".join(
+        [
+            "set -eu",
+            f"{shlex.join(pod['containers'][0]['command'])} &",
+            "for _ in $(seq 50); do curl -sf -o /dev/null http://127.0.0.1:8080/config.json && break; sleep 0.1; done",
+            # The image stops nginx with SIGQUIT, a graceful shutdown.
+            'kill -QUIT "$!"',
+            'wait "$!"',
+        ],
+    )
+
+    # Like the pod: its user, a read-only root, no capabilities, and emptyDirs that its fsGroup can write.
+    completed = subprocess.run(
+        [
+            docker,
+            "run",
+            "--rm",
+            "--user",
+            f"{uid}:{gid}",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--tmpfs",
+            f"/run:uid={uid},gid={gid}",
+            "--tmpfs",
+            f"/var/cache/nginx:uid={uid},gid={gid}",
+            *mounts,
+            _NGINX_IMAGE,
+            "sh",
+            "-c",
+            script,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+    assert '"GET /config.json HTTP/1.1" 200' in completed.stdout
+
+
 # Historical uppercase localparts, ports, and IPv6 server names are valid Matrix user IDs the client accepts.
 _BUG_REPORT_ADMINS = ["@admin:chat.example.com", "@Ops=Team/1+x:chat.example.com:8448", "@admin:[2001:db8::1]"]
 _MATRIX_RTC = """
