@@ -438,6 +438,7 @@ def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     assert "- `BRANCH`: `issue-9`" in preview
     assert "- `BASE`: `origin/main`" in preview
     assert "Applied template `mindroom-dev`" in result
+    assert "- `BRANCH`: `issue-9`" in result
     state = _read_todos(config)
     items = state["items"]
     assert len(items) > 1
@@ -1304,6 +1305,26 @@ def test_workspace_template_is_read_through_an_operator_linked_agents_directory(
 
     assert "`linked`" in listing
     assert "Linked task" in result
+    assert "Resolved params:" not in result
+
+
+def test_workspace_template_linked_outside_its_directory_is_refused(tmp_path: Path) -> None:
+    """A workspace template file that links outside the templates directory is refused, never read."""
+    config = _config(tmp_path)
+    tool = _todo(config)
+    victim = tmp_path / "victim.yaml.j2"
+    victim.write_text(_template_text("escape", "  - title: victim-only note\n"), encoding="utf-8")
+    template_dir = _workspace_template_dir(config)
+    template_dir.mkdir(parents=True)
+    (template_dir / "escape.yaml.j2").symlink_to(victim)
+
+    with (
+        tool_runtime_context(_tool_context(config)),
+        pytest.raises(ValueError, match="invalid template name: 'escape'"),
+    ):
+        tool.apply_template(name="escape", params={})
+
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
 
 
 def test_workspace_template_is_not_read_through_a_replaced_workspace(tmp_path: Path) -> None:
