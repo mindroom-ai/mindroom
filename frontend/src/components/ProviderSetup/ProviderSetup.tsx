@@ -125,11 +125,9 @@ export function providerSetupMessage(missing: MissingProviderKey[]): string {
 }
 
 function ProviderSetupDialog({
-  open,
   onOpenChange,
   missing,
 }: {
-  open: boolean;
   onOpenChange: (open: boolean) => void;
   missing: MissingProviderKey[];
 }) {
@@ -187,7 +185,7 @@ function ProviderSetupDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[560px]">
         <form onSubmit={(event) => void handleSubmit(event)}>
           <DialogHeader>
@@ -328,13 +326,7 @@ export function ProviderSetupBanner({ refreshKey }: { refreshKey: string }) {
           </Button>
         </div>
       )}
-      {open && (
-        <ProviderSetupDialog
-          open={open}
-          onOpenChange={setOpen}
-          missing={missing}
-        />
-      )}
+      {open && <ProviderSetupDialog onOpenChange={setOpen} missing={missing} />}
     </>
   );
 }

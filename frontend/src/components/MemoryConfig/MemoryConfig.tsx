@@ -101,50 +101,41 @@ function normalizeMemorySettings(
 ): MemorySettings {
   return {
     ...DEFAULT_MEMORY_SETTINGS,
-    ...(memory || {}),
+    ...memory,
     embedder: {
       ...DEFAULT_MEMORY_SETTINGS.embedder,
-      ...(memory?.embedder || {}),
+      ...memory?.embedder,
       config: {
         ...DEFAULT_MEMORY_SETTINGS.embedder.config,
-        ...(memory?.embedder?.config || {}),
+        ...memory?.embedder?.config,
       },
     },
     file: {
       ...DEFAULT_MEMORY_SETTINGS.file,
-      ...(memory?.file || {}),
+      ...memory?.file,
     },
     search: {
       ...DEFAULT_MEMORY_SETTINGS.search,
-      ...(memory?.search || {}),
+      ...memory?.search,
     },
     auto_flush: {
       ...DEFAULT_MEMORY_SETTINGS.auto_flush,
-      ...(memory?.auto_flush || {}),
+      ...memory?.auto_flush,
       batch: {
         ...DEFAULT_MEMORY_SETTINGS.auto_flush?.batch,
-        ...(memory?.auto_flush?.batch || {}),
+        ...memory?.auto_flush?.batch,
       },
       extractor: {
         ...DEFAULT_MEMORY_SETTINGS.auto_flush?.extractor,
-        ...(memory?.auto_flush?.extractor || {}),
+        ...memory?.auto_flush?.extractor,
         include_memory_context: {
           ...DEFAULT_MEMORY_SETTINGS.auto_flush?.extractor
             ?.include_memory_context,
-          ...(memory?.auto_flush?.extractor?.include_memory_context || {}),
+          ...memory?.auto_flush?.extractor?.include_memory_context,
         },
       },
     },
   };
-}
-
-function parseInteger(value: string, fallback: number): number {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isNaN(parsed) ? fallback : parsed;
-}
-
-function parseBoolean(value: string): boolean {
-  return value === "true";
 }
 
 function parseIncludePatterns(value: string): string[] {
@@ -167,19 +158,38 @@ function providerHelperText(provider: string): string {
   return "Choose your embedding provider";
 }
 
-function modelPlaceholder(provider: string): string {
-  const model = DEFAULT_MODELS[provider];
-  return model ? `e.g. ${model}` : "Model name";
-}
-
-function defaultEmbedderConfig(
-  provider: string,
-): MemorySettings["embedder"]["config"] {
-  // An empty host lets the runtime pick the server, such as OLLAMA_HOST for Ollama.
-  return {
-    model: DEFAULT_MODELS[provider] || "",
-    host: "",
-  };
+function NumberField({
+  id,
+  label,
+  helperText,
+  min,
+  value,
+  fallback,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  helperText: string;
+  min: number;
+  value: number | undefined;
+  fallback: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <FieldGroup label={label} helperText={helperText} htmlFor={id}>
+      <Input
+        id={id}
+        type="number"
+        min={min}
+        value={value ?? fallback}
+        onChange={(e) => {
+          const parsed = Number.parseInt(e.target.value, 10);
+          onChange(Number.isNaN(parsed) ? fallback : parsed);
+        }}
+        className="transition-colors hover:border-ring focus:border-ring"
+      />
+    </FieldGroup>
+  );
 }
 
 export function MemoryConfig() {
@@ -204,17 +214,14 @@ export function MemoryConfig() {
     );
   }, [includeText]);
 
-  const handleBackendChange = (backend: MemoryBackend) => {
-    updateMemoryConfig({ ...memory, backend });
-  };
-
   const handleProviderChange = (provider: string) => {
     updateMemoryConfig({
       ...memory,
       embedder: {
         ...memory.embedder,
         provider,
-        config: defaultEmbedderConfig(provider),
+        // An empty host lets the runtime pick the server, such as OLLAMA_HOST for Ollama.
+        config: { model: DEFAULT_MODELS[provider] || "", host: "" },
       },
     });
   };
@@ -235,53 +242,30 @@ export function MemoryConfig() {
   };
 
   const handleCredentialsServiceChange = (credentialsService: string) => {
-    const config = { ...memory.embedder.config };
+    const embedderConfig = { ...memory.embedder.config };
     const normalizedService = credentialsService.trim();
     if (normalizedService) {
-      config.credentials_service = normalizedService;
+      embedderConfig.credentials_service = normalizedService;
     } else {
-      delete config.credentials_service;
+      delete embedderConfig.credentials_service;
     }
     updateMemoryConfig({
       ...memory,
       embedder: {
         ...memory.embedder,
-        config,
+        config: embedderConfig,
       },
     });
   };
 
-  const updateFile = (
-    updates: Partial<NonNullable<MemorySettings["file"]>>,
+  const updateSection = <K extends "file" | "search" | "auto_flush">(
+    key: K,
+    updates: Partial<NonNullable<MemorySettings[K]>>,
   ) => {
     updateMemoryConfig({
       ...memory,
-      file: {
-        ...memory.file,
-        ...updates,
-      },
-    });
-  };
-
-  const updateSearch = (
-    updates: Partial<NonNullable<MemorySettings["search"]>>,
-  ) => {
-    updateMemoryConfig({
-      ...memory,
-      search: {
-        ...memory.search,
-        ...updates,
-      },
-    });
-  };
-
-  const updateAutoFlush = (
-    updates: Partial<NonNullable<MemorySettings["auto_flush"]>>,
-  ) => {
-    updateMemoryConfig({
-      ...memory,
-      auto_flush: {
-        ...memory.auto_flush,
+      [key]: {
+        ...memory[key],
         ...updates,
       },
     });
@@ -292,7 +276,7 @@ export function MemoryConfig() {
       NonNullable<NonNullable<MemorySettings["auto_flush"]>["batch"]>
     >,
   ) => {
-    updateAutoFlush({
+    updateSection("auto_flush", {
       batch: {
         ...memory.auto_flush?.batch,
         ...updates,
@@ -305,7 +289,7 @@ export function MemoryConfig() {
       NonNullable<NonNullable<MemorySettings["auto_flush"]>["extractor"]>
     >,
   ) => {
-    updateAutoFlush({
+    updateSection("auto_flush", {
       extractor: {
         ...memory.auto_flush?.extractor,
         ...updates,
@@ -337,7 +321,6 @@ export function MemoryConfig() {
       isDirty={isDirty}
       onSave={saveConfig}
       onDelete={() => {}}
-      showActions={true}
       disableSave={isLoading}
       disableDelete={true}
       className="h-full"
@@ -360,7 +343,10 @@ export function MemoryConfig() {
             <Select
               value={memory.backend || "mem0"}
               onValueChange={(value) =>
-                handleBackendChange(value as MemoryBackend)
+                updateMemoryConfig({
+                  ...memory,
+                  backend: value as MemoryBackend,
+                })
               }
             >
               <SelectTrigger
@@ -416,7 +402,11 @@ export function MemoryConfig() {
               type="text"
               value={memory.embedder.config.model}
               onChange={(e) => updateEmbedderConfig({ model: e.target.value })}
-              placeholder={modelPlaceholder(memory.embedder.provider)}
+              placeholder={
+                DEFAULT_MODELS[memory.embedder.provider]
+                  ? `e.g. ${DEFAULT_MODELS[memory.embedder.provider]}`
+                  : "Model name"
+              }
               className="transition-colors hover:border-ring focus:border-ring"
             />
           </FieldGroup>
@@ -481,46 +471,29 @@ export function MemoryConfig() {
 
           {memory.backend === "file" && (
             <>
-              <FieldGroup
+              <NumberField
+                id="entrypoint-max-lines"
                 label="Entrypoint Max Lines"
                 helperText="Maximum lines preloaded from the entrypoint file."
-                htmlFor="entrypoint-max-lines"
-              >
-                <Input
-                  id="entrypoint-max-lines"
-                  type="number"
-                  min={1}
-                  value={memory.file?.max_entrypoint_lines ?? 200}
-                  onChange={(e) =>
-                    updateFile({
-                      max_entrypoint_lines: parseInteger(e.target.value, 200),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={memory.file?.max_entrypoint_lines}
+                fallback={200}
+                onChange={(value) =>
+                  updateSection("file", { max_entrypoint_lines: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="entrypoint-max-tokens"
                 label="Entrypoint Max Tokens"
                 helperText="Maximum estimated tokens (characters / 4) of whole lines preloaded from the entrypoint file."
-                htmlFor="entrypoint-max-tokens"
-              >
-                <Input
-                  id="entrypoint-max-tokens"
-                  type="number"
-                  min={1}
-                  value={memory.file?.max_entrypoint_tokens ?? 50000}
-                  onChange={(e) =>
-                    updateFile({
-                      max_entrypoint_tokens: parseInteger(
-                        e.target.value,
-                        50000,
-                      ),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={memory.file?.max_entrypoint_tokens}
+                fallback={50000}
+                onChange={(value) =>
+                  updateSection("file", { max_entrypoint_tokens: value })
+                }
+              />
 
               <FieldGroup
                 label="Search Mode"
@@ -530,7 +503,7 @@ export function MemoryConfig() {
                 <Select
                   value={memory.search?.mode ?? "keyword"}
                   onValueChange={(value) =>
-                    updateSearch({ mode: value as MemorySearchMode })
+                    updateSection("search", { mode: value as MemorySearchMode })
                   }
                 >
                   <SelectTrigger
@@ -557,7 +530,7 @@ export function MemoryConfig() {
                   value={includeDraft}
                   onChange={(e) => {
                     setIncludeDraft(e.target.value);
-                    updateSearch({
+                    updateSection("search", {
                       include: parseIncludePatterns(e.target.value),
                     });
                   }}
@@ -574,7 +547,9 @@ export function MemoryConfig() {
                 <Select
                   value={String(memory.search?.include_entrypoint ?? false)}
                   onValueChange={(value) =>
-                    updateSearch({ include_entrypoint: parseBoolean(value) })
+                    updateSection("search", {
+                      include_entrypoint: value === "true",
+                    })
                   }
                 >
                   <SelectTrigger
@@ -598,7 +573,7 @@ export function MemoryConfig() {
                 <Select
                   value={String(memory.auto_flush?.enabled ?? false)}
                   onValueChange={(value) =>
-                    updateAutoFlush({ enabled: parseBoolean(value) })
+                    updateSection("auto_flush", { enabled: value === "true" })
                   }
                 >
                   <SelectTrigger
@@ -614,210 +589,131 @@ export function MemoryConfig() {
                 </Select>
               </FieldGroup>
 
-              <FieldGroup
+              <NumberField
+                id="flush-interval-seconds"
                 label="Flush Interval (seconds)"
                 helperText="Time between background flush passes."
-                htmlFor="flush-interval-seconds"
-              >
-                <Input
-                  id="flush-interval-seconds"
-                  type="number"
-                  min={5}
-                  value={memory.auto_flush?.flush_interval_seconds ?? 300}
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      flush_interval_seconds: parseInteger(e.target.value, 300),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={5}
+                value={memory.auto_flush?.flush_interval_seconds}
+                fallback={300}
+                onChange={(value) =>
+                  updateSection("auto_flush", { flush_interval_seconds: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="idle-seconds"
                 label="Idle Seconds"
                 helperText="How long a conversation must be quiet before its new turns are flushed."
-                htmlFor="idle-seconds"
-              >
-                <Input
-                  id="idle-seconds"
-                  type="number"
-                  min={0}
-                  value={memory.auto_flush?.idle_seconds ?? 120}
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      idle_seconds: parseInteger(e.target.value, 120),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={0}
+                value={memory.auto_flush?.idle_seconds}
+                fallback={120}
+                onChange={(value) =>
+                  updateSection("auto_flush", { idle_seconds: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="stale-ttl-seconds"
                 label="Stale TTL (seconds)"
                 helperText="Give up on turns whose flush has kept failing for this long."
-                htmlFor="stale-ttl-seconds"
-              >
-                <Input
-                  id="stale-ttl-seconds"
-                  type="number"
-                  min={60}
-                  value={memory.auto_flush?.stale_ttl_seconds ?? 86400}
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      stale_ttl_seconds: parseInteger(e.target.value, 86400),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={60}
+                value={memory.auto_flush?.stale_ttl_seconds}
+                fallback={86400}
+                onChange={(value) =>
+                  updateSection("auto_flush", { stale_ttl_seconds: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="retry-cooldown-seconds"
                 label="Retry Cooldown (seconds)"
                 helperText="Base cooldown before retrying a failed flush."
-                htmlFor="retry-cooldown-seconds"
-              >
-                <Input
-                  id="retry-cooldown-seconds"
-                  type="number"
-                  min={1}
-                  value={memory.auto_flush?.retry_cooldown_seconds ?? 30}
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      retry_cooldown_seconds: parseInteger(e.target.value, 30),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={memory.auto_flush?.retry_cooldown_seconds}
+                fallback={30}
+                onChange={(value) =>
+                  updateSection("auto_flush", { retry_cooldown_seconds: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-retry-cooldown-seconds"
                 label="Max Retry Cooldown (seconds)"
                 helperText="Upper bound for retry cooldown backoff."
-                htmlFor="max-retry-cooldown-seconds"
-              >
-                <Input
-                  id="max-retry-cooldown-seconds"
-                  type="number"
-                  min={1}
-                  value={memory.auto_flush?.max_retry_cooldown_seconds ?? 300}
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      max_retry_cooldown_seconds: parseInteger(
-                        e.target.value,
-                        300,
-                      ),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={memory.auto_flush?.max_retry_cooldown_seconds}
+                fallback={300}
+                onChange={(value) =>
+                  updateSection("auto_flush", {
+                    max_retry_cooldown_seconds: value,
+                  })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-sessions-per-cycle"
                 label="Batch: Max Sessions Per Cycle"
                 helperText="Conversations flushed in one pass, across all agents."
-                htmlFor="max-sessions-per-cycle"
-              >
-                <Input
-                  id="max-sessions-per-cycle"
-                  type="number"
-                  min={1}
-                  value={memory.auto_flush?.batch?.max_sessions_per_cycle ?? 10}
-                  onChange={(e) =>
-                    updateAutoFlushBatch({
-                      max_sessions_per_cycle: parseInteger(e.target.value, 10),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={memory.auto_flush?.batch?.max_sessions_per_cycle}
+                fallback={10}
+                onChange={(value) =>
+                  updateAutoFlushBatch({ max_sessions_per_cycle: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-sessions-per-agent"
                 label="Batch: Max Sessions Per Agent"
                 helperText="Conversations of one agent or private instance flushed in one pass."
-                htmlFor="max-sessions-per-agent"
-              >
-                <Input
-                  id="max-sessions-per-agent"
-                  type="number"
-                  min={1}
-                  value={
-                    memory.auto_flush?.batch
-                      ?.max_sessions_per_agent_per_cycle ?? 3
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushBatch({
-                      max_sessions_per_agent_per_cycle: parseInteger(
-                        e.target.value,
-                        3,
-                      ),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={
+                  memory.auto_flush?.batch?.max_sessions_per_agent_per_cycle
+                }
+                fallback={3}
+                onChange={(value) =>
+                  updateAutoFlushBatch({
+                    max_sessions_per_agent_per_cycle: value,
+                  })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-messages-per-flush"
                 label="Extractor: Max Messages Per Flush"
                 helperText="New messages read by one extraction; a longer backlog is read over later passes."
-                htmlFor="max-messages-per-flush"
-              >
-                <Input
-                  id="max-messages-per-flush"
-                  type="number"
-                  min={1}
-                  value={
-                    memory.auto_flush?.extractor?.max_messages_per_flush ?? 20
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushExtractor({
-                      max_messages_per_flush: parseInteger(e.target.value, 20),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={memory.auto_flush?.extractor?.max_messages_per_flush}
+                fallback={20}
+                onChange={(value) =>
+                  updateAutoFlushExtractor({ max_messages_per_flush: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-chars-per-flush"
                 label="Extractor: Max Chars Per Flush"
                 helperText="Character cap for chat excerpt passed to extraction."
-                htmlFor="max-chars-per-flush"
-              >
-                <Input
-                  id="max-chars-per-flush"
-                  type="number"
-                  min={1}
-                  value={
-                    memory.auto_flush?.extractor?.max_chars_per_flush ?? 12000
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushExtractor({
-                      max_chars_per_flush: parseInteger(e.target.value, 12000),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={memory.auto_flush?.extractor?.max_chars_per_flush}
+                fallback={12000}
+                onChange={(value) =>
+                  updateAutoFlushExtractor({ max_chars_per_flush: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-extraction-seconds"
                 label="Extractor: Max Duration (seconds)"
                 helperText="Timeout for one extraction attempt."
-                htmlFor="max-extraction-seconds"
-              >
-                <Input
-                  id="max-extraction-seconds"
-                  type="number"
-                  min={1}
-                  value={
-                    memory.auto_flush?.extractor?.max_extraction_seconds ?? 30
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushExtractor({
-                      max_extraction_seconds: parseInteger(e.target.value, 30),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={memory.auto_flush?.extractor?.max_extraction_seconds}
+                fallback={30}
+                onChange={(value) =>
+                  updateAutoFlushExtractor({ max_extraction_seconds: value })
+                }
+              />
 
               <FieldGroup
                 label="Extractor: NO_REPLY Token"
@@ -839,49 +735,35 @@ export function MemoryConfig() {
                 />
               </FieldGroup>
 
-              <FieldGroup
+              <NumberField
+                id="memory-snippets"
                 label="Context: Memory Snippets"
                 helperText="How many existing memory snippets to include for dedupe context."
-                htmlFor="memory-snippets"
-              >
-                <Input
-                  id="memory-snippets"
-                  type="number"
-                  min={0}
-                  value={
-                    memory.auto_flush?.extractor?.include_memory_context
-                      ?.memory_snippets ?? 5
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushExtractorContext({
-                      memory_snippets: parseInteger(e.target.value, 5),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={0}
+                value={
+                  memory.auto_flush?.extractor?.include_memory_context
+                    ?.memory_snippets
+                }
+                fallback={5}
+                onChange={(value) =>
+                  updateAutoFlushExtractorContext({ memory_snippets: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="snippet-max-chars"
                 label="Context: Snippet Max Chars"
                 helperText="Character cap per included memory snippet."
-                htmlFor="snippet-max-chars"
-              >
-                <Input
-                  id="snippet-max-chars"
-                  type="number"
-                  min={1}
-                  value={
-                    memory.auto_flush?.extractor?.include_memory_context
-                      ?.snippet_max_chars ?? 400
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushExtractorContext({
-                      snippet_max_chars: parseInteger(e.target.value, 400),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={
+                  memory.auto_flush?.extractor?.include_memory_context
+                    ?.snippet_max_chars
+                }
+                fallback={400}
+                onChange={(value) =>
+                  updateAutoFlushExtractorContext({ snippet_max_chars: value })
+                }
+              />
             </>
           )}
 

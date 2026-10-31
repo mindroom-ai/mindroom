@@ -80,24 +80,16 @@ describe("MemoryConfig", () => {
     expect(providerSelect).toHaveTextContent("OpenAI");
   });
 
-  it("lists sentence-transformers as an embedder provider option", async () => {
-    render(<MemoryConfig />);
-
-    const providerSelect = document.getElementById("provider");
-    expect(providerSelect).toBeInTheDocument();
-    fireEvent.click(providerSelect!);
-
-    expect(
-      await screen.findByText("Sentence Transformers"),
-    ).toBeInTheDocument();
-  });
-
   it("shows model as free-text input", () => {
     render(<MemoryConfig />);
 
     const modelInput = document.getElementById("model") as HTMLInputElement;
     expect(modelInput).toBeInTheDocument();
     expect(modelInput).toHaveValue("text-embedding-3-small");
+    expect(modelInput).toHaveAttribute(
+      "placeholder",
+      "e.g. text-embedding-3-small",
+    );
     expect(modelInput.tagName).toBe("INPUT");
   });
 
@@ -213,6 +205,9 @@ describe("MemoryConfig", () => {
     const hostInput = document.getElementById("host") as HTMLInputElement;
     expect(hostInput).toBeInTheDocument();
     expect(hostInput).toHaveValue("http://localhost:11434");
+    expect(
+      screen.getByText("Local embeddings using Ollama"),
+    ).toBeInTheDocument();
   });
 
   it("leaves an unset Ollama host empty, so a save keeps OLLAMA_HOST in charge", async () => {
@@ -439,6 +434,50 @@ describe("MemoryConfig", () => {
     });
   });
 
+  it("falls back to the default when a numeric field is cleared", () => {
+    mockStore({
+      memory: {
+        backend: "file",
+        embedder: mockConfig.memory!.embedder,
+        file: { max_entrypoint_lines: 120 },
+      },
+    });
+    render(<MemoryConfig />);
+
+    fireEvent.change(document.getElementById("entrypoint-max-lines")!, {
+      target: { value: "" },
+    });
+
+    expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        file: { max_entrypoint_lines: 200, max_entrypoint_tokens: 50000 },
+      }),
+    );
+  });
+
+  it("enables auto flush and entrypoint search from their selects", async () => {
+    mockStore({
+      memory: { backend: "file", embedder: mockConfig.memory!.embedder },
+    });
+    render(<MemoryConfig />);
+
+    fireEvent.click(document.getElementById("auto-flush-enabled")!);
+    fireEvent.click(await screen.findByRole("option", { name: "Enabled" }));
+    expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        auto_flush: expect.objectContaining({ enabled: true }),
+      }),
+    );
+
+    fireEvent.click(document.getElementById("memory-search-entrypoint")!);
+    fireEvent.click(await screen.findByRole("option", { name: "Enabled" }));
+    expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        search: expect.objectContaining({ include_entrypoint: true }),
+      }),
+    );
+  });
+
   it("updates search include patterns without touching other search settings", async () => {
     mockStore({
       memory: {
@@ -553,35 +592,6 @@ describe("MemoryConfig", () => {
         "OpenAI or any OpenAI-compatible API (set Base URL below)",
       ),
     ).toBeInTheDocument();
-  });
-
-  const withEmbedderProvider = (provider: string) =>
-    mockStore({
-      memory: { embedder: { provider, config: { model: "embedder" } } },
-    });
-
-  it("shows provider description for ollama", async () => {
-    withEmbedderProvider("ollama");
-    render(<MemoryConfig />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("Local embeddings using Ollama"),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("shows provider description for sentence-transformers", async () => {
-    withEmbedderProvider("sentence_transformers");
-    render(<MemoryConfig />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByText(
-          "Fully local embeddings using the sentence-transformers Python runtime",
-        ),
-      ).toBeInTheDocument();
-    });
   });
 
   it("shows base URL in config display when set", () => {

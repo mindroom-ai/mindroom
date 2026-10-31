@@ -1,10 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { integrationProviders } from "./index";
 
-vi.mock("@/lib/api", () => ({
-  withAgentExecutionScope: (url: string) => url,
-}));
-
 global.fetch = vi.fn();
 global.window.open = vi.fn();
 

@@ -9,7 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { toolNames } from "@/lib/toolEntry";
 import { useConfigStore } from "@/store/configStore";
 import {
-  resolveEffectiveDefaultTools,
+  resolveEffectiveAgentTools,
   type Agent,
   type Config,
   type Room,
@@ -63,14 +63,6 @@ function displayNames(
   return ids.map(
     (id) => items.find((item) => item.id === id)?.display_name ?? id,
   );
-}
-
-function resolveAgentTools(agent: Agent, config: Config | null): string[] {
-  const inheritedTools =
-    agent.include_default_tools === false
-      ? []
-      : resolveEffectiveDefaultTools(config?.defaults);
-  return [...new Set([...toolNames(agent.tools), ...inheritedTools])];
 }
 
 function resolveModelMetadata(
@@ -268,7 +260,7 @@ export function WorkspaceDirectory() {
     const agentItems = agents.map<DirectoryItem>((agent) => {
       const roomNames = displayNames(agent.rooms, rooms);
       const agentTeams = teams.filter((team) => team.agents.includes(agent.id));
-      const tools = resolveAgentTools(agent, config);
+      const tools = resolveEffectiveAgentTools(agent, config?.defaults);
       const model = resolveModelMetadata(agent.model, config);
       return {
         kind: "agent",
@@ -618,7 +610,10 @@ export function WorkspaceDirectory() {
                     agent={selectedAgent}
                     rooms={rooms}
                     teams={teams}
-                    tools={resolveAgentTools(selectedAgent, config)}
+                    tools={resolveEffectiveAgentTools(
+                      selectedAgent,
+                      config?.defaults,
+                    )}
                     modelLabel={modelLabel}
                   />
                 ) : null}

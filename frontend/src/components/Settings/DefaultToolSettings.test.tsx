@@ -24,8 +24,6 @@ describe("DefaultToolSettings", () => {
     vi.clearAllMocks();
     vi.mocked(useConfigStore).mockReturnValue({
       config: { defaults: { markdown: true, tools: ["gmail", "file"] } },
-      getAgentToolOverrides: vi.fn(),
-      updateAgentToolOverrides: vi.fn(),
       getDefaultToolOverrides: vi.fn(() => ({ label: "support" })),
       updateDefaultToolOverrides,
     } as never);

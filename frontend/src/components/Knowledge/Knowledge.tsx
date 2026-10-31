@@ -15,7 +15,7 @@ import {
 } from "@tanstack/react-table";
 import { apiErrorMessageFromPayload, API_ENDPOINTS } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { useConfigStore } from "@/store/configStore";
+import { useConfigStore, type SaveConfigResult } from "@/store/configStore";
 import { SchemaSection } from "@/components/SchemaForm";
 import type { KnowledgeBaseConfig, KnowledgeGitConfig } from "@/types/config";
 import { useToast } from "@/components/ui/use-toast";
@@ -221,6 +221,16 @@ function normalizeGitConfig(gitConfig: KnowledgeGitConfig): KnowledgeGitConfig {
   };
 }
 
+function gitBackedFileActionError(mode: KnowledgeAccessMode): string {
+  return `Git-backed knowledge bases sync from the repository. Update the repository and ${mode === "files" ? "sync" : "reindex"} instead.`;
+}
+
+function saveFailureMessage(result: SaveConfigResult): string {
+  return result.status === "error"
+    ? result.message
+    : "Save was superseded by newer draft edits";
+}
+
 function parsePatternsFromTextarea(value: string): string[] | undefined {
   const patterns = value
     .split("\n")
@@ -307,6 +317,14 @@ export function Knowledge() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const loadRequestIdRef = useRef(0);
 
+  const reportFailure = useCallback(
+    (title: string, message: string) => {
+      setError(message);
+      toast({ title, description: message, variant: "destructive" });
+    },
+    [toast],
+  );
+
   const knowledgeBases = useMemo(
     () => config?.knowledge_bases ?? {},
     [config?.knowledge_bases],
@@ -333,9 +351,10 @@ export function Knowledge() {
         : DEFAULT_BASE_SETTINGS,
     [selectedBaseConfig],
   );
-  const selectedBaseIsGitBacked = Boolean(selectedBaseConfig?.git);
-  const selectedBaseMode: KnowledgeAccessMode =
-    selectedBaseConfig?.mode ?? "semantic";
+  const settingsSourceType: KnowledgeSourceType = settings.git
+    ? "git"
+    : "local";
+  const settingsMode: KnowledgeAccessMode = settings.mode ?? "semantic";
   const baseNames = useMemo(
     () => Object.keys(knowledgeBases).sort(),
     [knowledgeBases],
@@ -425,10 +444,6 @@ export function Knowledge() {
     [selectedBase, settings, updateKnowledgeBase],
   );
 
-  const settingsSourceType: KnowledgeSourceType = settings.git
-    ? "git"
-    : "local";
-  const settingsMode: KnowledgeAccessMode = settings.mode ?? "semantic";
   const hasGitRepoUrlReplacement =
     settingsSourceType === "git" && gitRepoUrlReplacement.trim().length > 0;
   const canSaveSettings = isDirty || hasGitRepoUrlReplacement;
@@ -487,27 +502,13 @@ export function Knowledge() {
       return;
     }
 
-    const settingsMode = settings.mode ?? "semantic";
     if (settingsMode === "files" && !settings.path.trim()) {
       setError("Folder path is required for files-only knowledge bases");
       return;
     }
 
-    const normalizedChunking = normalizeChunking(
-      settings.chunk_size,
-      settings.chunk_overlap,
-    );
     const baseSettings: KnowledgeBaseConfig =
-      settingsMode === "semantic"
-        ? {
-            ...settings,
-            ...normalizedChunking,
-          }
-        : {
-            ...settings,
-            watch: false,
-            ...normalizedChunking,
-          };
+      settingsMode === "semantic" ? settings : { ...settings, watch: false };
     const nextSettings: KnowledgeBaseConfig = gitSettings
       ? {
           ...baseSettings,
@@ -522,16 +523,7 @@ export function Knowledge() {
     try {
       const result = await saveConfig();
       if (result.status !== "saved") {
-        const message =
-          result.status === "error"
-            ? result.message
-            : "Save was superseded by newer draft edits";
-        setError(message);
-        toast({
-          title: "Save failed",
-          description: message,
-          variant: "destructive",
-        });
+        reportFailure("Save failed", saveFailureMessage(result));
         return;
       }
       await loadData(selectedBase);
@@ -541,24 +533,22 @@ export function Knowledge() {
         description: "Configuration has been updated.",
       });
     } catch (err) {
-      const message =
+      reportFailure(
+        "Save failed",
         err instanceof Error
           ? err.message
-          : "Failed to save knowledge settings";
-      setError(message);
-      toast({
-        title: "Save failed",
-        description: message,
-        variant: "destructive",
-      });
+          : "Failed to save knowledge settings",
+      );
     } finally {
       setSavingSettings(false);
     }
   }, [
     loadData,
+    reportFailure,
     saveConfig,
     selectedBase,
     settings,
+    settingsMode,
     gitRepoUrlReplacement,
     toast,
     updateKnowledgeBase,
@@ -611,16 +601,7 @@ export function Knowledge() {
       updateKnowledgeBase(baseName, nextBaseConfig);
       const result = await saveConfig();
       if (result.status !== "saved") {
-        const message =
-          result.status === "error"
-            ? result.message
-            : "Save was superseded by newer draft edits";
-        setError(message);
-        toast({
-          title: "Create failed",
-          description: message,
-          variant: "destructive",
-        });
+        reportFailure("Create failed", saveFailureMessage(result));
         return;
       }
       setSelectedBase(baseName);
@@ -641,14 +622,10 @@ export function Knowledge() {
               : `Base '${baseName}' is ready for uploads.`,
       });
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Failed to create knowledge base";
-      setError(message);
-      toast({
-        title: "Create failed",
-        description: message,
-        variant: "destructive",
-      });
+      reportFailure(
+        "Create failed",
+        err instanceof Error ? err.message : "Failed to create knowledge base",
+      );
     } finally {
       setCreatingBase(false);
     }
@@ -662,6 +639,7 @@ export function Knowledge() {
     newBaseSourceType,
     newBaseGitSettings,
     newBaseDescription,
+    reportFailure,
     saveConfig,
     toast,
   ]);
@@ -685,16 +663,7 @@ export function Knowledge() {
       deleteKnowledgeBase(selectedBase);
       const result = await saveConfig();
       if (result.status !== "saved") {
-        const message =
-          result.status === "error"
-            ? result.message
-            : "Save was superseded by newer draft edits";
-        setError(message);
-        toast({
-          title: "Delete failed",
-          description: message,
-          variant: "destructive",
-        });
+        reportFailure("Delete failed", saveFailureMessage(result));
         return;
       }
       setSelectedBase(nextBase || "");
@@ -704,14 +673,10 @@ export function Knowledge() {
         description: `Deleted '${selectedBase}'.`,
       });
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Failed to delete knowledge base";
-      setError(message);
-      toast({
-        title: "Delete failed",
-        description: message,
-        variant: "destructive",
-      });
+      reportFailure(
+        "Delete failed",
+        err instanceof Error ? err.message : "Failed to delete knowledge base",
+      );
     } finally {
       setDeletingBase(false);
     }
@@ -719,6 +684,7 @@ export function Knowledge() {
     baseNames,
     deleteKnowledgeBase,
     loadData,
+    reportFailure,
     saveConfig,
     selectedBase,
     toast,
@@ -733,11 +699,8 @@ export function Knowledge() {
         setDragActive(false);
         return;
       }
-      if (selectedBaseIsGitBacked) {
-        const refreshVerb = selectedBaseMode === "files" ? "sync" : "reindex";
-        setError(
-          `Git-backed knowledge bases sync from the repository. Update the repository and ${refreshVerb} instead.`,
-        );
+      if (settingsSourceType === "git") {
+        setError(gitBackedFileActionError(settingsMode));
         return;
       }
 
@@ -765,14 +728,10 @@ export function Knowledge() {
           } to '${selectedBase}'.`,
         });
       } catch (err) {
-        const message =
-          err instanceof Error ? err.message : "Failed to upload files";
-        setError(message);
-        toast({
-          title: "Upload failed",
-          description: message,
-          variant: "destructive",
-        });
+        reportFailure(
+          "Upload failed",
+          err instanceof Error ? err.message : "Failed to upload files",
+        );
       } finally {
         setUploading(false);
       }
@@ -781,8 +740,9 @@ export function Knowledge() {
       isDirty,
       loadData,
       selectedBase,
-      selectedBaseIsGitBacked,
-      selectedBaseMode,
+      reportFailure,
+      settingsSourceType,
+      settingsMode,
       toast,
     ],
   );
@@ -792,11 +752,8 @@ export function Knowledge() {
       if (!selectedBase) {
         return;
       }
-      if (selectedBaseIsGitBacked) {
-        const refreshVerb = selectedBaseMode === "files" ? "sync" : "reindex";
-        setError(
-          `Git-backed knowledge bases sync from the repository. Update the repository and ${refreshVerb} instead.`,
-        );
+      if (settingsSourceType === "git") {
+        setError(gitBackedFileActionError(settingsMode));
         return;
       }
 
@@ -820,19 +777,15 @@ export function Knowledge() {
         );
         await loadData(selectedBase);
       } catch (err) {
-        const message =
-          err instanceof Error ? err.message : "Failed to delete file";
-        setError(message);
-        toast({
-          title: "Delete failed",
-          description: message,
-          variant: "destructive",
-        });
+        reportFailure(
+          "Delete failed",
+          err instanceof Error ? err.message : "Failed to delete file",
+        );
       } finally {
         setDeletingPath(null);
       }
     },
-    [loadData, selectedBase, selectedBaseIsGitBacked, selectedBaseMode, toast],
+    [loadData, reportFailure, selectedBase, settingsMode, settingsSourceType],
   );
 
   const handleReindex = useCallback(async () => {
@@ -840,6 +793,7 @@ export function Knowledge() {
       return;
     }
 
+    const actionName = settingsMode === "files" ? "Sync" : "Reindex";
     setReindexing(true);
     setError(null);
 
@@ -851,32 +805,26 @@ export function Knowledge() {
         },
       );
       await loadData(selectedBase);
-      const actionName = selectedBaseMode === "files" ? "Sync" : "Reindex";
       toast({
         title: `${actionName} complete`,
         description:
-          selectedBaseMode === "files"
+          settingsMode === "files"
             ? `Knowledge base '${selectedBase}' synced successfully.`
             : `Knowledge base '${selectedBase}' rebuilt successfully.`,
       });
     } catch (err) {
-      const message =
+      reportFailure(
+        `${actionName} failed`,
         err instanceof Error
           ? err.message
-          : selectedBaseMode === "files"
+          : settingsMode === "files"
             ? "Failed to sync knowledge files"
-            : "Failed to reindex knowledge files";
-      const actionName = selectedBaseMode === "files" ? "Sync" : "Reindex";
-      setError(message);
-      toast({
-        title: `${actionName} failed`,
-        description: message,
-        variant: "destructive",
-      });
+            : "Failed to reindex knowledge files",
+      );
     } finally {
       setReindexing(false);
     }
-  }, [loadData, selectedBase, selectedBaseMode, toast]);
+  }, [loadData, reportFailure, selectedBase, settingsMode, toast]);
 
   const columns: ColumnDef<KnowledgeFile>[] = useMemo(() => {
     const baseColumns: ColumnDef<KnowledgeFile>[] = [
@@ -909,7 +857,7 @@ export function Knowledge() {
       },
     ];
 
-    if (selectedBaseIsGitBacked) {
+    if (settingsSourceType === "git") {
       return baseColumns;
     }
 
@@ -934,7 +882,7 @@ export function Knowledge() {
         ),
       },
     ];
-  }, [deletingPath, handleDeleteFile, isDirty, selectedBaseIsGitBacked]);
+  }, [deletingPath, handleDeleteFile, isDirty, settingsSourceType]);
 
   const table = useReactTable({
     data: files,
@@ -1341,10 +1289,6 @@ export function Knowledge() {
                           path:
                             settings.path.trim() ||
                             defaultPathForBase(selectedBase),
-                          ...normalizeChunking(
-                            settings.chunk_size,
-                            settings.chunk_overlap,
-                          ),
                         })
                       }
                       disabled={savingSettings}
@@ -1903,7 +1847,7 @@ export function Knowledge() {
 
         {selectedBase && (
           <>
-            {selectedBaseIsGitBacked ? (
+            {settingsSourceType === "git" ? (
               <Card>
                 <CardContent className="py-6">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1911,7 +1855,7 @@ export function Knowledge() {
                       <p className="font-medium">Repository-managed files</p>
                       <p className="text-sm text-muted-foreground">
                         Update the configured repository, then{" "}
-                        {selectedBaseMode === "files" ? "sync" : "reindex"} to
+                        {settingsMode === "files" ? "sync" : "reindex"} to
                         refresh this base.
                       </p>
                     </div>
@@ -1927,10 +1871,10 @@ export function Knowledge() {
                         )}
                       />
                       {reindexing
-                        ? selectedBaseMode === "files"
+                        ? settingsMode === "files"
                           ? "Syncing..."
                           : "Reindexing..."
-                        : selectedBaseMode === "files"
+                        : settingsMode === "files"
                           ? "Sync"
                           : "Reindex"}
                     </Button>
@@ -1966,7 +1910,7 @@ export function Knowledge() {
                         Drop files here or upload manually
                       </p>
                       <p className="text-sm text-muted-foreground">
-                        {selectedBaseMode === "files"
+                        {settingsMode === "files"
                           ? "Agents can inspect these files from their workspace knowledge path."
                           : "Supported formats are auto-detected by agno readers."}
                       </p>
@@ -1987,7 +1931,7 @@ export function Knowledge() {
                         <Upload className="h-4 w-4 mr-2" />
                         {uploading ? "Uploading..." : "Upload"}
                       </Button>
-                      {selectedBaseMode === "semantic" ? (
+                      {settingsMode === "semantic" ? (
                         <Button
                           variant="outline"
                           onClick={handleReindex}
@@ -2044,7 +1988,7 @@ export function Knowledge() {
                             colSpan={columns.length}
                             className="px-4 py-8 text-center text-muted-foreground"
                           >
-                            {selectedBaseIsGitBacked
+                            {settingsSourceType === "git"
                               ? "No repository files available yet."
                               : "No files uploaded yet."}
                           </td>
