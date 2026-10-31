@@ -519,6 +519,7 @@ def test_create_event_in_another_calendar_sends_only_given_fields(
         ({"start": "2026-10-21T09:00:00Z"}, "without an offset"),
         ({"end": "2026-10-21T10:00:00+02:00"}, "without an offset"),
         ({"end": "2026-10-21T08:00:00"}, "end must be after start"),
+        ({"end": "2026-10-21T09:00:00"}, "end must be after start"),
         ({"start": "next week"}, "start must be an ISO 8601"),
         ({"time_zone": "Europe/Berlin'; DROP"}, "time_zone must be"),
         ({"time_zone": " UTC"}, "time_zone must be"),

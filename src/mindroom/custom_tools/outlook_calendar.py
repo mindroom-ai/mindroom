@@ -140,16 +140,16 @@ def _zoned(moment: datetime, zone: str) -> dict[str, str]:
 
 def _times(start: str | None, end: str | None, zone: str) -> dict[str, dict[str, str]]:
     """Return the start and end fields to send, given together and in order."""
-    if (start is None) != (end is None):
+    if start is None and end is None:
+        return {}
+    if start is None or end is None:
         msg = "Give start and end together."
         raise _invalid(msg)
-    begins = None if start is None else _local(start, "start")
-    ends = None if end is None else _local(end, "end")
-    if begins is not None and ends is not None and ends <= begins:
+    begins, ends = _local(start, "start"), _local(end, "end")
+    if ends <= begins:
         msg = "end must be after start."
         raise _invalid(msg)
-    fields = {"start": begins, "end": ends}
-    return {name: _zoned(moment, zone) for name, moment in fields.items() if moment is not None}
+    return {"start": _zoned(begins, zone), "end": _zoned(ends, zone)}
 
 
 def _addresses(value: list[str], field_name: str, maximum: int) -> list[str]:
@@ -195,7 +195,7 @@ def _mailbox(owner: str | None) -> str:
     return mailbox_path(owner, "calendar_owner")
 
 
-def _calendar_path(calendar: str | None, owner: str | None = None) -> str:
+def _calendar_path(calendar: str | None, owner: str | None) -> str:
     mailbox = _mailbox(owner)
     return f"{mailbox}/calendar" if calendar is None else f"{mailbox}/calendars/{path_segment(calendar, 'calendar')}"
 
