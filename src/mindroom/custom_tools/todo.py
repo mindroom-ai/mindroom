@@ -49,7 +49,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_VALID_PRIORITIES = frozenset(PRIORITY_ORDER)
 _PRIORITY_EMOJI: dict[str, str] = {
     "critical": "red",
     "high": "orange",
@@ -221,9 +220,11 @@ def _now_iso() -> str:
 
 
 def _short_id(existing_ids: set[str]) -> str:
+    """Return a new ID outside ``existing_ids`` and add it there."""
     while True:
         candidate = uuid.uuid4().hex[:8]
         if candidate not in existing_ids:
+            existing_ids.add(candidate)
             return candidate
 
 
@@ -235,6 +236,10 @@ def _ensure_thread_state(data: dict[str, Any], room_id: str, thread_id: str) -> 
         data["created_at"] = now
         data["updated_at"] = now
         data["items"] = []
+
+
+def _dependency_ids(depends_on: str) -> list[str]:
+    return [dep.strip() for dep in depends_on.split(",") if dep.strip()]
 
 
 def _would_create_cycle(items_by_id: dict[str, dict[str, Any]], item_id: str, new_dep_id: str) -> bool:
@@ -709,7 +714,7 @@ class TodoTools(Toolkit):
         for line in lines:
             priority = "medium"
             title = re.sub(r"^(\d+[\.)]\s*|[-*]\s+)", "", line).strip()
-            for candidate in _VALID_PRIORITIES:
+            for candidate in PRIORITY_ORDER:
                 prefix = f"[{candidate}] "
                 if title.lower().startswith(prefix):
                     priority = candidate
@@ -731,10 +736,8 @@ class TodoTools(Toolkit):
             created: list[dict[str, Any]] = []
             now = _now_iso()
             for title, priority in parsed:
-                new_id = _short_id(existing_ids)
-                existing_ids.add(new_id)
                 item = todo_item(
-                    new_id,
+                    _short_id(existing_ids),
                     title,
                     priority=priority,
                     depends_on=[],
@@ -768,10 +771,10 @@ class TodoTools(Toolkit):
             return "Title cannot be empty."
 
         priority = priority.lower()
-        if priority not in _VALID_PRIORITIES:
+        if priority not in PRIORITY_ORDER:
             return f"Invalid priority '{priority}'. Must be: low, medium, high, critical."
 
-        dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()] if depends_on else []
+        dep_ids = _dependency_ids(depends_on)
         resolved_agent = assigned_agent.strip() or _default_assignee(agent_name)
         assignee_error = _assignee_error(resolved_agent, _configured_agent_names())
         if assignee_error is not None:
@@ -785,11 +788,9 @@ class TodoTools(Toolkit):
                 if dep_id not in items_by_id:
                     return no_write(f"Dependency `{dep_id}` not found.")
 
-            existing_ids = {item["id"] for item in data["items"]}
-            new_id = _short_id(existing_ids)
             now = _now_iso()
             item = todo_item(
-                new_id,
+                _short_id(set(items_by_id)),
                 clean_title,
                 priority=priority,
                 depends_on=dep_ids,
@@ -852,9 +853,7 @@ class TodoTools(Toolkit):
                 result_lines.append(f"- `{item['id']}` {item['title']} waiting on {waiting_str}")
         if show_all and done:
             result_lines.append("\n**Done/Cancelled:**")
-            for item in done:
-                mark = "done" if item["status"] == "done" else "cancelled"
-                result_lines.append(f"- {mark} `{item['id']}` {item['title']}")
+            result_lines.extend(f"- {item['status']} `{item['id']}` {item['title']}" for item in done)
         return "\n".join(result_lines)
 
     def update_todo(  # noqa: C901, PLR0915
@@ -869,15 +868,16 @@ class TodoTools(Toolkit):
         """Update fields on an existing todo item."""
         path, room_id, thread_id, _agent_name = _current_scope()
 
-        if priority and priority.lower() not in _VALID_PRIORITIES:
+        if priority and priority.lower() not in PRIORITY_ORDER:
             return f"Invalid priority '{priority}'. Must be: low, medium, high, critical."
         if status and status.lower() not in VALID_STATUSES:
             return f"Invalid status '{status}'. Must be: open, done, cancelled."
-        if assigned_agent and assigned_agent.strip():
-            unknown_agent = _unknown_assigned_agent_message(assigned_agent.strip(), _configured_agent_names())
+        new_agent = assigned_agent.strip()
+        if new_agent:
+            unknown_agent = _unknown_assigned_agent_message(new_agent, _configured_agent_names())
             if unknown_agent is not None:
                 return unknown_agent
-        clean_title = title.strip() if title else ""
+        clean_title = title.strip()
         if title and not clean_title:
             return "Title cannot be empty."
         if not path.exists():
@@ -891,7 +891,6 @@ class TodoTools(Toolkit):
                 return no_write(f"Todo `{todo_id}` not found.")
 
             item = items_by_id[todo_id]
-            new_agent = assigned_agent.strip() if assigned_agent else ""
             # Changing an agent's work, or handing work to an agent, needs the requester's access to that agent.
             for target_agent in (item.get("assigned_agent", ""), new_agent):
                 unauthorized_agent = _unauthorized_assignee_message(target_agent)
@@ -900,7 +899,7 @@ class TodoTools(Toolkit):
             dep_ids: list[str] | None = None
             now = _now_iso()
             if depends_on is not None:
-                dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()]
+                dep_ids = _dependency_ids(depends_on)
                 for dep_id in dep_ids:
                     if dep_id not in items_by_id:
                         return no_write(f"Dependency `{dep_id}` not found.")
@@ -923,9 +922,10 @@ class TodoTools(Toolkit):
             if dep_ids is not None:
                 item["depends_on"] = dep_ids
                 changes.append(f"depends_on={dep_ids}")
+            # A whitespace-only assigned_agent clears the assignee; an empty one leaves it unchanged.
             if assigned_agent:
-                item["assigned_agent"] = assigned_agent.strip()
-                changes.append(f"assigned={assigned_agent.strip()}")
+                item["assigned_agent"] = new_agent
+                changes.append(f"assigned={new_agent}")
             if not changes:
                 return no_write("No fields to update.")
 
@@ -970,9 +970,11 @@ class TodoTools(Toolkit):
         path, room_id, thread_id, agent_name = _current_scope()
         default_assignee = _default_assignee(agent_name)
         configured_agents = _configured_agent_names()
-        for template_todo in rendered_template["todos"]:
-            resolved_agent = template_todo.get("assigned_agent") or default_assignee
-            assignee_error = _assignee_error(resolved_agent, configured_agents)
+        assignees = [
+            template_todo.get("assigned_agent") or default_assignee for template_todo in rendered_template["todos"]
+        ]
+        for assignee in assignees:
+            assignee_error = _assignee_error(assignee, configured_agents)
             if assignee_error is not None:
                 return assignee_error
         requester_id = _runtime_context().requester_id
@@ -980,11 +982,7 @@ class TodoTools(Toolkit):
         def apply_template(data: dict[str, Any]) -> list[dict[str, Any]]:
             _ensure_thread_state(data, room_id, thread_id)
             existing_ids = {item["id"] for item in data["items"]}
-            new_ids: list[str] = []
-            for _ in rendered_template["todos"]:
-                new_id = _short_id(existing_ids)
-                existing_ids.add(new_id)
-                new_ids.append(new_id)
+            new_ids = [_short_id(existing_ids) for _ in rendered_template["todos"]]
             now = _now_iso()
             created = [
                 todo_item(
@@ -992,11 +990,11 @@ class TodoTools(Toolkit):
                     template_todo["title"],
                     priority=template_todo.get("priority", "medium"),
                     depends_on=[new_ids[dep_index - 1] for dep_index in template_todo.get("depends_on", [])],
-                    assigned_agent=template_todo.get("assigned_agent") or default_assignee,
+                    assigned_agent=assignee,
                     requester_id=requester_id,
                     now=now,
                 )
-                for new_id, template_todo in zip(new_ids, rendered_template["todos"], strict=True)
+                for new_id, template_todo, assignee in zip(new_ids, rendered_template["todos"], assignees, strict=True)
             ]
             data["items"].extend(created)
             data["updated_at"] = now
