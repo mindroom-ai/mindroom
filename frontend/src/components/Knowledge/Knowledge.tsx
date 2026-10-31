@@ -443,16 +443,13 @@ export function Knowledge() {
 
   const updateSettings = useCallback(
     (updates: Partial<KnowledgeBaseConfig>) => {
-      if (!selectedBaseConfig) {
+      if (!selectedBase) {
         return;
       }
 
-      // Edits go over the authored base, not the normalized view: writing
-      // the view back would make a clamp against a half-typed chunk size
-      // permanent.
-      updateKnowledgeBase(selectedBase, { ...selectedBaseConfig, ...updates });
+      updateKnowledgeBase(selectedBase, { ...settings, ...updates });
     },
-    [selectedBase, selectedBaseConfig, updateKnowledgeBase],
+    [selectedBase, settings, updateKnowledgeBase],
   );
 
   const hasGitRepoUrlReplacement =

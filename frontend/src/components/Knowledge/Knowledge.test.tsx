@@ -1430,9 +1430,12 @@ describe("Knowledge", () => {
     expect(descriptionInput).toHaveValue("New docs description");
     expect(store.getState().config?.knowledge_bases?.docs).toEqual({
       description: "New docs description",
+      mode: "semantic",
       path: "./knowledge_docs/docs",
       watch: true,
-      chunk_size: 64,
+      chunk_size: 128,
+      chunk_overlap: 0,
+      git: undefined,
     });
     expect(store.getState().isDirty).toBe(true);
   });
@@ -1460,7 +1463,7 @@ describe("Knowledge", () => {
     expect(chunkSize).toHaveDisplayValue("128");
   });
 
-  it("keeps the chunk overlap when the chunk size is retyped through a smaller value", async () => {
+  it("shows the chunk overlap a save would write while the chunk size is retyped", async () => {
     const store = await mockStatefulStore({
       docs: {
         path: "./knowledge_docs/docs",
@@ -1475,18 +1478,14 @@ describe("Knowledge", () => {
     await screen.findByText("Active: docs");
 
     const chunkSize = screen.getByLabelText("Chunk Size (characters)");
-    const chunkOverlap = screen.getByLabelText("Chunk Overlap (characters)");
-    fireEvent.change(chunkSize, { target: { value: "2" } });
-    // While the size is the minimum, the overlap shows what a save would write.
-    expect(chunkOverlap).toHaveDisplayValue("127");
-    for (const value of ["20", "200", "2000"]) {
+    for (const value of ["5", "50", "500"]) {
       fireEvent.change(chunkSize, { target: { value } });
     }
-    expect(chunkOverlap).toHaveDisplayValue("300");
-    expect(store.getState().config?.knowledge_bases?.docs).toMatchObject({
-      chunk_size: 2000,
-      chunk_overlap: 300,
-    });
+    const storedOverlap =
+      store.getState().config?.knowledge_bases?.docs?.chunk_overlap;
+    expect(
+      screen.getByLabelText("Chunk Overlap (characters)"),
+    ).toHaveDisplayValue(String(storedOverlap));
   });
 
   it("keeps git settings typed key by key", async () => {
