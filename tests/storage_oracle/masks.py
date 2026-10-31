@@ -24,9 +24,9 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, override
 
-from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_queued_notices
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, MINDROOM_HISTORY_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_STATE_KEY
+from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
@@ -38,7 +38,9 @@ from mindroom.session_storage.legacy_scope_metadata import (
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.summary_rows import folded_tool_call_ids, history_event_ids, latest_row
+from tests.storage_oracle import notice_rewrites
 from tests.storage_oracle.backend import SESSION_ID
+from tests.storage_oracle.observe import probe_request, resume_requests
 from tests.storage_oracle.store_backend import (
     StoreBackend,
     edit_cut,
@@ -91,6 +93,12 @@ MASKS: dict[str, str] = {
     "its request, as its run does",
     "paused_calls_stored_once": "#3106 item 2: a run stores each paused call once, as its tool execution, and no "
     "requirements beside it; a converted delegation call keeps its requirement's id as its pause id",
+    "resumes_leave_out_the_paused_reply_s_notice": "#3108: a paused run's resume request leaves out the queued-message "
+    "notice the paused run holds, which the reply that paused was given",
+    "queued_notices_stored_once": "#3108: a reply stores each queued-message notice once, as its run held it; nothing "
+    "finalizes it after delivery or recovers it when a reply opens its scope",
+    "preserved_seen_ids_not_read": "#3463: seen ids earlier releases preserved in session metadata no longer count as "
+    "seen, so a redaction no longer rewrites the metadata to drop them",
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()
@@ -259,6 +267,13 @@ def drop_inert_session_totals(observed: dict[str, Any]) -> None:
         data.pop("session_metrics", None)
 
 
+def empty_missing_metadata(observed: dict[str, Any]) -> None:
+    """Show a session without metadata as one with empty metadata, which an old store's redaction rewrote it to."""
+    session = observed["session"]
+    if isinstance(session, dict) and session["metadata"] is None:
+        session["metadata"] = {}
+
+
 def readers_in_creation_order(observed: dict[str, Any], used: set[str]) -> None:
     """Show the turns readers list, which follow the log, in the creation order the old readers sorted them in."""
     turns, listed = observed["session_runs"], observed["list_runs"]
@@ -297,6 +312,12 @@ class MaskedBackend(StoreBackend):
         self.flag_restored = False
         # The update time an interrupted record's save moved the row to, and the one the old store left it at.
         self.news_at: tuple[int, int] | None = None
+        # When a redaction's cut made the old store rewrite a missing metadata value as an empty one, dropping the seen
+        # ids earlier releases preserved there, which no recorded sequence holds.
+        self.metadata_rewritten_at: int | None = None
+        # The probe request, resume requests, and loaded runs of the old store's messages, when its notice rewrites set
+        # them apart from the v2 store's at the latest observation.
+        self.held_requests: tuple[object, object, list[dict[str, Any]]] | None = None
         super().__init__(root, kind, determinism)
 
     # What the masks read of the v2 store.
@@ -543,29 +564,32 @@ class MaskedBackend(StoreBackend):
         self.link_only.discard(run_id)
         return ["written"]
 
-    def _old_rewrite(self, changed: Sequence[AnyRunRecord]) -> object:
-        """Record the old store's whole-run saves of the loaded copies a notice edit changed; return its outcome."""
+    def _old_notice_rewrite(self, changed: Sequence[AnyRunRecord]) -> object:
+        """Hold the messages of the runs the old store's notice rewrite changed, which the v2 store keeps; report it."""
         for run in changed:
             self.old_messages[run.run_id] = _old_kept(_dicts(run), run.status.value)
+            self.used.add("queued_notices_stored_once")
         return ["written"] * len(changed) if changed else "unchanged"
+
+    def _stored_messages(self) -> list[list[dict[str, Any]]]:
+        return [_dicts(run) for run in self.store.list_runs(SESSION_ID)]
 
     @override
     def finalize_notice(self, response_turn_id: str) -> object:
-        session = self.load()
+        # The v2 store keeps every notice as its run stored it; the old store rewrote the reply's notices.
+        session, stored = self.load(), self._stored_messages()
+        outcome = super().finalize_notice(response_turn_id)
+        assert self._stored_messages() == stored, "a notice finalization changed the v2 store"
         if session is None:
-            return super().finalize_notice(response_turn_id)
-        old_runs = self._old_view_runs(session.runs)
-        with self.determinism.ids_repeated():
-            old_changed = _finalize_queued_notice_in_runs(old_runs, response_turn_id=response_turn_id)
-        super().finalize_notice(response_turn_id)
-        return self._old_rewrite(old_changed)
+            return outcome
+        return self._old_notice_rewrite(notice_rewrites.finalize(self._old_view_runs(session.runs), response_turn_id))
 
     @override
     def scrub_notices(self, session: ConversationSession) -> object:
-        with self.determinism.ids_repeated():
-            old_changed = _recover_prior_queued_notices(self._old_view_runs(session.runs), active_response_turn_id=None)
+        stored = self._stored_messages()
         super().scrub_notices(session)
-        return self._old_rewrite(old_changed)
+        assert self._stored_messages() == stored, "a reply's opening of its scope changed the v2 store's notices"
+        return self._old_notice_rewrite(notice_rewrites.recover(self._old_view_runs(session.runs)))
 
     @override
     def persist_delegation(self, session: ConversationSession, record: AnyRunRecord, state: DelegationState) -> object:
@@ -753,6 +777,8 @@ class MaskedBackend(StoreBackend):
     def redaction_cleanup(self, redacted: set[str]) -> object:
         removed = self._cut(partial(redaction_cut, redacted=redacted))
         assert isinstance(removed, list)
+        if removed and self.metadata_rewritten_at is None and self.store.read_session_metadata(SESSION_ID) is None:
+            self.metadata_rewritten_at = self.determinism.now
         if any(f"$reply-{run_id}" in removed for run_id in self.link_only):
             self._diverge("link_reaches_any_stored_run", "a redaction of a reply only the v2 store linked cut history")
         return removed
@@ -876,6 +902,7 @@ class MaskedBackend(StoreBackend):
             view["ledger"] = {"error": f"OperationalError: no such table: {self.names.usage}"}
             self.used.add("tables_exist_at_open")
         readers_in_creation_order(view, self.used)
+        self._old_resume_requests(view, self._old_requests(view, observed))
         if isinstance(view["loaded_runs"], list):
             view["loaded_runs"] = self._old_loaded(view["loaded_runs"])
         if isinstance(view["list_runs"], list):
@@ -892,6 +919,7 @@ class MaskedBackend(StoreBackend):
         if untag_summary_requests(view["ledger"]):
             self.used.add("summary_requests_name_their_model")
         self._old_pending_view(view)
+        self._old_rewritten_metadata(view)
         self._old_history_metadata(view)
         self._old_session_totals(view)
         row = view["row"]
@@ -899,6 +927,65 @@ class MaskedBackend(StoreBackend):
             row["updated_at"] = self.news_at[1]
             self.used.add("a_finished_interrupted_record_is_news")
         return view
+
+    @override
+    def observe(self) -> dict[str, object]:
+        """Observe the v2 store, and build the requests the old store's runs built where its notice rewrites set them apart.
+
+        Those runs replay as the old store held them, without the history copies it kept, which no request replayed.
+        The old store's requests are built with the ids the observed ones were given, as one observation of it would.
+        """
+        self.held_requests = None
+        session = self.load()
+        if session is None:
+            return super().observe()
+        old = [
+            replace(run, messages=[message for message in run.messages if not message.from_history])
+            for run in self._old_view_runs(session.runs)
+        ]
+        if [_dicts(run) for run in old] == [_dicts(run) for run in session.runs if not self._hidden(run.to_dict())]:
+            return super().observe()
+        with self.determinism.ids_repeated():
+            observed = super().observe()
+        held = replace(session, runs=old)
+        self.held_requests = (
+            probe_request(held, self.scope),
+            resume_requests(held, self.scope),
+            [run.to_dict() for run in old],
+        )
+        return observed
+
+    def _old_requests(self, view: dict[str, Any], observed: dict[str, Any]) -> object:
+        """Show the requests the old store's runs built, when its notice rewrites set them apart; return the loaded runs.
+
+        The loaded runs are those whose paused messages the resume requests repeat.
+        """
+        if self.held_requests is None:
+            return observed["loaded_runs"]
+        view["request"], view["resume_requests"], loaded = deepcopy(self.held_requests)
+        self.used.add("queued_notices_stored_once")
+        return loaded
+
+    def _old_resume_requests(self, view: dict[str, Any], loaded: object) -> None:
+        """Show each paused run's resume request with the queued-message notices its paused run holds, as it was sent.
+
+        Each notice goes back before the paused message that follows it, so after a scope summary placed after the
+        paused prompt, as the request held it.
+        """
+        requests = view["resume_requests"]
+        if not (isinstance(requests, dict) and isinstance(loaded, list)):
+            return
+        for run in loaded:
+            if run["run_id"] not in requests:
+                continue
+            request = requests[run["run_id"]]["request"]
+            position = len(request)
+            for message in reversed([message for message in run["messages"] if message["role"] != "system"]):
+                if is_queued_notice_message(Message.from_dict(message)):
+                    request.insert(position, message)
+                    self.used.add("resumes_leave_out_the_paused_reply_s_notice")
+                    continue
+                position = next(index for index in range(position - 1, -1, -1) if request[index] == message)
 
     def _old_session_totals(self, view: dict[str, Any]) -> None:
         """Show the usage totals the Agno-layout store kept beside its ledger, the sum of the ledger's run rows."""
@@ -908,6 +995,18 @@ class MaskedBackend(StoreBackend):
         data = row["session_data"] if isinstance(row.get("session_data"), dict) else {}
         row["session_data"] = {**data, "session_metrics": totals}
         self.used.add("ledger_is_the_only_usage_owner")
+
+    def _old_rewritten_metadata(self, view: dict[str, Any]) -> None:
+        """Show the empty metadata a redaction left in the old store, and the update time its rewrite moved the row to."""
+        session, row = view["session"], view["row"]
+        if self.metadata_rewritten_at is None or not isinstance(session, dict):
+            return
+        if session["metadata"] is None:
+            session["metadata"] = {}
+            self.used.add("preserved_seen_ids_not_read")
+        if isinstance(row, dict) and row.get("updated_at", self.metadata_rewritten_at) < self.metadata_rewritten_at:
+            row["updated_at"] = self.metadata_rewritten_at
+            self.used.add("preserved_seen_ids_not_read")
 
     def _old_history_metadata(self, view: dict[str, Any]) -> None:
         """Show the owner's history state as the per-scope maps the Agno-layout store kept it in."""

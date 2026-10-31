@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import nio
 
 from mindroom.bot import AgentBot
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE, resolve_runtime_paths
 from mindroom.hooks import HookRegistry, HookRegistryState
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from mindroom.scheduling.tasks import ScheduledTaskRecord, ScheduledWorkflow
 
 SCHEDULE_WRITER_ID = "@mindroom_router:server"
-SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 _STATE_EVENT_PATH_PREFIX = "/_matrix/client/v3/rooms/"
 
 
@@ -117,6 +116,16 @@ def serve_room_schedule_state(
 
     client.room_get_state_event = AsyncMock(side_effect=get_state_event)
     serve_task_state_events(client, sender=sender)
+
+
+def serve_stored_task(client: Any, room_id: str, task_id: str, content: dict[str, Any] | None) -> None:  # noqa: ANN401
+    """Answer the scheduler's reads of one task with the bot-written ``content``, or report the task missing."""
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError(message="not found", status_code="M_NOT_FOUND")
+        if content is None
+        else nio.RoomGetStateEventResponse(content, SCHEDULED_TASK_EVENT_TYPE, task_id, room_id),
+    )
+    serve_task_state_events(client)
 
 
 def joined_member_state(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:

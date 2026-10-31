@@ -76,9 +76,8 @@ def resolve_agent_file(
         candidate = requested if requested.is_absolute() else base / requested
         try:
             resolved = candidate.resolve(strict=True)
-        # Python 3.12 raises RuntimeError for symlink loops; 3.13 raises OSError.
-        except (OSError, RuntimeError) as exc:
-            detail = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+        except OSError as exc:
+            detail = exc.strerror or exc
             msg = f"{field_name} '{raw_path}' does not exist or cannot be read: {detail}"
             raise ValueError(msg) from exc
         root = Path(resolved.anchor)
@@ -91,7 +90,7 @@ def resolve_agent_file(
         try:
             canonical_root = workspace_root.resolve()
             resolved = resolve_path_within_root(canonical_root, requested, symlinks="internal", strict=True)
-        except (ValueError, OSError, RuntimeError) as exc:
+        except (ValueError, OSError) as exc:
             msg = f"{field_name} '{raw_path}' must be an existing file inside the agent workspace (file_access is 'workspace'): {exc}"
             raise ValueError(msg) from exc
     if not resolved.is_file():

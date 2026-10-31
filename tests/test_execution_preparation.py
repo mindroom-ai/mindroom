@@ -35,12 +35,12 @@ from mindroom.execution_preparation import (
     _build_thread_history_messages,
     _fallback_static_token_budget,
     _messages_with_current_prompt,
-    _prepare_bound_team_execution_context,
     _prepare_execution_context_common,
     _prepared_history_with_scheduled_limit,
     _PreparedExecutionContext,
     _ThreadAttachmentContext,
     prepare_agent_execution_context,
+    prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
 from mindroom.history import runtime as history_runtime
@@ -345,7 +345,7 @@ async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_wi
     prepare_common = AsyncMock(return_value=MagicMock())
     monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
 
-    await _prepare_bound_team_execution_context(
+    await prepare_bound_team_run_context(
         make_turn_context("test_agent"),
         scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
         leader_system_messages=(Message(role="system", content="You lead the team."),),
@@ -356,7 +356,6 @@ async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_wi
         runtime_paths=runtime_paths,
         config=config,
         timezone="UTC",
-        team_name=None,
         history_settings=config.resolve_scope(None).history_settings,
         active_model_name="default",
         active_context_window=6_000,
@@ -862,7 +861,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
         lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
     )
 
-    await _prepare_bound_team_execution_context(
+    await prepare_bound_team_run_context(
         make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
         scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
         leader_system_messages=leader_system_messages,
@@ -873,9 +872,8 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
         runtime_paths=runtime_paths,
         config=config,
         timezone="UTC",
-        team_name=None,
         history_settings=config.resolve_scope(None).history_settings,
-        active_model_name=None,
+        active_model_name="default",
         active_context_window=None,
     )
 
@@ -904,7 +902,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     monkeypatch.setattr(execution_preparation, "finalize_history_preparation", finalize_history_preparation)
     team_id = "@mindroom_team:localhost"
 
-    prepared = await _prepare_bound_team_execution_context(
+    prepared = await prepare_bound_team_run_context(
         make_turn_context(
             "test_agent",
             room_id="!room:localhost",
@@ -925,9 +923,8 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
         runtime_paths=runtime_paths,
         config=config,
         timezone="UTC",
-        team_name=None,
         history_settings=config.resolve_scope(None).history_settings,
-        active_model_name=None,
+        active_model_name="default",
         active_context_window=None,
         response_sender_id=team_id,
         current_sender_id="@alice:localhost",
@@ -938,6 +935,51 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     # Persisted replay is budgeted around the turn's estimate; fallback replay records the estimate of its own turn.
     sized = static_prompt_tokens[0] if replays_persisted_history else prepared.prepared_history.prepared_context_tokens
     assert sized == estimator.estimate(render_prepared_messages_text(prepared.turn.in_request_order()))
+
+
+@pytest.mark.asyncio
+async def test_a_team_turn_renders_its_thread_under_the_turn_s_member_display_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leader reads each earlier sender under the display name the turn's context carries for them."""
+    config, runtime_paths = _bound_agent_config(tmp_path)
+    monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
+    )
+
+    prepared = await prepare_bound_team_run_context(
+        replace(
+            make_turn_context(
+                "test_agent",
+                room_id="!room:localhost",
+                thread_id="$thread",
+                reply_to_event_id="$current",
+            ),
+            member_display_names={"@alice:localhost": "Banana Man"},
+        ),
+        scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
+        leader_system_messages=(Message(role="system", content="You lead the team."),),
+        leader_tools=(),
+        model=ScriptedModel([]),
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="Earlier question", event_id="$older"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+        ],
+        runtime_paths=runtime_paths,
+        config=config,
+        timezone="UTC",
+        history_settings=config.resolve_scope(None).history_settings,
+        active_model_name="default",
+        active_context_window=None,
+    )
+
+    [earlier] = prepared.turn.context
+    assert 'display_name="Banana Man"' in str(earlier.content)
 
 
 @pytest.mark.asyncio

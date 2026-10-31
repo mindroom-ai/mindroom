@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def _clean_typing_states() -> AsyncGenerator[None, None]:
+async def _clean_typing_states() -> AsyncGenerator[None]:
     """Keep failed tests from leaking refresh tasks and client references."""
     assert not typing_module._ACTIVE_TYPING
     yield

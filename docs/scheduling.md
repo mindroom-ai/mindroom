@@ -66,6 +66,7 @@ Replace an existing task's timing and content.
 MindRoom re-parses the description to update timing and content.
 Omitted settings stay unchanged, including the history limit, silent mode, and model.
 A task cannot switch between one-time and recurring; cancel it and create a new one instead.
+A request that would change nothing about the task is refused, and the task stays as it was.
 
 ```
 !edit_schedule task42 keep the same schedule but restore full history
@@ -96,6 +97,7 @@ Cancel one task, or every task in the room.
 ```
 
 Use `!list_schedules` to find task IDs.
+Only a pending task can be cancelled; a one-time task that already ran, and a task that failed or was cancelled, stay as they are.
 
 **Aliases:** `!cancelschedule`, `!cancel-schedule`
 

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner, tool_catalog
 from mindroom.agent_cli.shell_access import minimal_shell_problems
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
@@ -60,7 +61,7 @@ def wrap_native_shell_window(toolkits: Sequence[AdaptedToolkit]) -> tuple[Adapte
     """
     for index, toolkit in enumerate(toolkits):
         for position, function in enumerate(toolkit.functions):
-            if function.name != "run_shell_command":
+            if function.name != SHELL_FUNCTION:
                 continue
             # An approved command resumes in a later run without this response's CLI, like a minimal subagent's.
             if function.registered_toolkit != "shell" or function.gate in CONFIRMATION_GATES:

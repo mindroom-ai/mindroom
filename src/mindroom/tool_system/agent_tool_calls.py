@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, replace
 from functools import wraps
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agent_loop.spec import UnstoredSession
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.llm.events import ReportedCall
@@ -387,8 +387,8 @@ def execute_agent_shell_call(
     Only the response owner supplies this leaf, which runs the binding's own shell
     function, so CLI calls from inside the command can use the catalog meanwhile.
     """
-    if binding.key.function not in SHELL_OPERATION_NAMES:
-        msg = "Shell leaf replacement requires a canonical shell operation"
+    if binding.key.function != SHELL_FUNCTION:
+        msg = "Shell leaf replacement requires the canonical shell function"
         raise ValueError(msg)
     return _execute_agent_tool_call(
         binding,

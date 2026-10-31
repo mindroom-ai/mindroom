@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.delegation.execution import answered_delegation_calls, has_delegation_state
+from mindroom.delegation.execution import answered_delegation_calls
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunStatus, TeamRunRecord, ToolExecution
@@ -349,7 +349,6 @@ def test_a_delegation_answered_only_on_its_requirement_stays_answered(tmp_path: 
     run = store.get_run(row["run_id"])
     assert run is not None
     assert answered_delegation_calls(run) == {(None, "call-delegate"): "Helper says 42"}
-    assert has_delegation_state(run)
     # Only the delegation call keeps its requirement's id; the confirmation call beside it needs none.
     assert [tool.pause_id for tool in run.tools or ()] == [None, "parent-requirement"]
     stored_state = (run.metadata or {})[DELEGATION_STATE_KEY]

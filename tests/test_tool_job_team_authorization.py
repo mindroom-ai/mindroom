@@ -283,7 +283,7 @@ async def test_a_child_with_an_authored_persona_is_judged_by_its_grant(
     try:
         job = await start_delegation_job(runtime, child, owner=owner, operation=operation)
         assert delegation_child(job).persona == child.persona
-        await runtime.cancel_revoked(denied=lambda saved: coordinator._grant(saved) == "denied")
+        await runtime.cancel_revoked()
         assert [listed.job_id for listed in await runtime.list_jobs(owner=owner, depth=0)] == [job.job_id]
     finally:
         await runtime.shutdown()
@@ -522,7 +522,6 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
                 replay_plan=None,
                 prompt_id=None,
             ),
-            entity_name="pair",
         )
         await start_job(runtime, "ended", tool_name="report", depth=0, adapter={}, owner=identity, operation=operation)
         await wait_for_status(runtime, "ended", "completed")

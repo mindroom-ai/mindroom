@@ -229,7 +229,6 @@ async def test_a_child_resume_whose_session_is_gone_stops_before_rebuilding_the_
             config=config,
             runtime_paths=paths,
             decisions={call_id: True},
-            denial_reasons={call_id: None},
             approval_id="card-0",
         )
 
@@ -299,7 +298,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
         assert card_id.startswith(f"{state.children[0].delegation_id}:")
         assert card_id.endswith(":same-call")
         assert card_id.count(":") == (2 if nested else 1)
-        assert [tool.tool_call_id for tool in paused.tools] == [state.pending_tools[0]["tool_call_id"]]
+        assert [tool.tool_call_id for tool in paused.tools] == [card_id]
         assert paused.toolkit_owners[("code", "write_report")] == "report"
 
         if outcome in {"cancel", "cancel_removed", "cancel_completed"}:
@@ -395,7 +394,6 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
                 config=config,
                 runtime_paths=paths,
                 decisions={call_id: outcome == "approve"},
-                denial_reasons={call_id: None},
                 approval_id=f"card-{index}",
             )
             # A resumed child's session loads in its database's lane, behind the child's other storage work.
@@ -461,21 +459,8 @@ async def test_a_child_resumed_after_its_approval_reports_its_activity_as_progre
             run_id="parent-run",
         )
         assert isinstance(paused, PausedAttempt)
-        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
-        call_id = str(state.pending_tools[0]["tool_call_id"])
         with tool_progress_reporter(reports.append):
-            result = await resume(
-                approval_executor(config, paths),
-                paused,
-                _saved_approval_calls(state),
-                agent_name="leader",
-                identity=identity,
-                config=config,
-                runtime_paths=paths,
-                decisions={call_id: True},
-                denial_reasons={call_id: None},
-                approval_id="card-0",
-            )
+            result = await _approve_the_child_s_pending_call(config, paths, paused, "card-0")
 
     assert isinstance(result, CompletedApprovalRun)
     assert report.written == ["written"]
@@ -532,20 +517,7 @@ async def test_a_child_resumed_after_its_approval_hands_its_parent_everything_it
             run_id="parent-run",
         )
         assert isinstance(paused, PausedAttempt)
-        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
-        call_id = str(state.pending_tools[0]["tool_call_id"])
-        result = await resume(
-            approval_executor(config, paths),
-            paused,
-            _saved_approval_calls(state),
-            agent_name="leader",
-            identity=identity,
-            config=config,
-            runtime_paths=paths,
-            decisions={call_id: True},
-            denial_reasons={call_id: None},
-            approval_id="card-0",
-        )
+        result = await _approve_the_child_s_pending_call(config, paths, paused, "card-0")
 
     assert isinstance(result, CompletedApprovalRun)
     assert report.written == ["written"]
@@ -738,19 +710,7 @@ async def test_a_call_gated_two_delegations_down_keeps_the_toolkit_of_the_agent_
         )
         assert isinstance(paused, PausedAttempt)
         assert paused.toolkit_owners == {("writer", "write_report"): "report"}
-        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
-        call_id = str(state.pending_tools[0]["tool_call_id"])
-        result = await resume(
-            approval_executor(config, paths),
-            paused,
-            _saved_approval_calls(state),
-            agent_name="leader",
-            identity=identity,
-            config=config,
-            runtime_paths=paths,
-            decisions={call_id: True},
-            denial_reasons={call_id: None},
-        )
+        result = await _approve_the_child_s_pending_call(config, paths, paused, "approval")
 
     assert isinstance(result, CompletedApprovalRun)
     assert result.response_text.endswith("parent result")
@@ -805,7 +765,6 @@ async def test_a_completed_sibling_keeps_its_result_when_the_policy_changes_befo
                 config=config,
                 runtime_paths=paths,
                 decisions={call_id: True},
-                denial_reasons={call_id: None},
                 approval_id=f"card-{index}",
             )
 
@@ -1069,21 +1028,13 @@ async def test_failed_nested_resume_settles_descendants_and_visible_tools(
             run_id="parent-run",
         )
         assert isinstance(paused, PausedAttempt)
-        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
-        call_id = str(state.pending_tools[0]["tool_call_id"])
         monkeypatch.setattr(execution, "_continue_child", failed_resume)
-        result = await resume(
-            approval_executor(config, paths),
-            paused,
-            _saved_approval_calls(state),
-            agent_name="leader",
-            identity=identity,
-            config=config,
-            runtime_paths=paths,
-            decisions={call_id: True},
-        )
+        result = await _approve_the_child_s_pending_call(config, paths, paused, "approval")
 
     assert isinstance(result, CompletedApprovalRun)
+    # The child call the approval was about closes in the parent's reply instead of staying pending.
+    assert "`write_report` [2]\n" in result.response_text
+    assert "⏳" not in result.response_text
     assert report.written == []
     resumed = _parent_record(config, paths, identity, "parent-run")
     result_message = next(message.content for message in resumed.messages if message.tool_call_id == "delegate-0")
@@ -1592,7 +1543,9 @@ def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:
         )
 
     assert isinstance(granted, Config)
-    assert isinstance(other_agent, str)
+    assert other_agent == (
+        "Cannot author a subagent for 'child': system_prompt, tools, skills, knowledge, and profile apply only to yourself."
+    )
     assert isinstance(delegate_rule, str)
     assert isinstance(revoked, str)
 
@@ -1629,7 +1582,6 @@ def test_adapted_delegate_functions_carry_the_delegation_gate(tmp_path: Path) ->
     config = _config(paths, child_tools=())
     toolkit = DelegateTools(
         "leader",
-        ["code"],
         paths,
         config,
         agent_workspace_root_path(paths.storage_root, "leader"),
@@ -1806,20 +1758,7 @@ async def test_a_child_record_reports_the_usage_of_its_resumed_run_and_the_attem
             run_id="parent-run",
         )
         assert isinstance(paused, PausedAttempt)
-        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
-        call_id = str(state.pending_tools[0]["tool_call_id"])
-        result = await resume(
-            approval_executor(config, paths),
-            paused,
-            _saved_approval_calls(state),
-            agent_name="leader",
-            identity=identity,
-            config=config,
-            runtime_paths=paths,
-            decisions={call_id: True},
-            denial_reasons={call_id: None},
-            approval_id="card-0",
-        )
+        result = await _approve_the_child_s_pending_call(config, paths, paused, "card-0")
 
     assert isinstance(result, CompletedApprovalRun)
     assert report.written == ["written"]
@@ -1852,7 +1791,6 @@ async def _approve_the_child_s_pending_call(
         config=config,
         runtime_paths=paths,
         decisions={call_id: True},
-        denial_reasons={call_id: None},
         approval_id=approval_id,
     )
 

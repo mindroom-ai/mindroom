@@ -115,7 +115,8 @@ class DelegationChild:
     model_name: str
     depth: int
     execution_identity: dict[str, object]
-    subagent_id: str | None = None
+    # The conversation handle follow-ups name; a follow-up keeps the id of the child it continues.
+    subagent_id: str
     previous_delegation_id: str | None = None
     parent_requirement_id: str = ""
     storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)

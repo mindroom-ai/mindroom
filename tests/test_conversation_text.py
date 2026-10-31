@@ -7,7 +7,7 @@ import pytest
 from mindroom.agent_loop.tools import media_follow_up
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.conversation_text import thread_context_note, utterances
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
+from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.llm.media import Image
@@ -138,7 +138,7 @@ def test_runtime_prompts_and_stopped_summaries_are_nobodys_words(
             Message(
                 role="user",
                 content="[SYSTEM NOTICE] A newer message arrived; pause here.",
-                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER},
+                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
             ),
             id="queued-message-notice",
         ),

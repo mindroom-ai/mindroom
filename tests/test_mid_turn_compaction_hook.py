@@ -74,7 +74,6 @@ async def test_a_text_fallback_on_a_native_route_stops_asking_the_provider_to_co
     hook = mid_turn_compaction_hook(
         config=config,
         runtime_paths=runtime_paths,
-        entity_name="test_agent",
         scope=TEST_AGENT_SCOPE,
         model_name="default",
         model=model,
@@ -138,7 +137,6 @@ async def test_a_later_loop_of_the_run_sizes_and_falls_back_by_its_own_request_s
     hook = mid_turn_compaction_hook(
         config=config,
         runtime_paths=runtime_paths,
-        entity_name="test_agent",
         scope=TEST_AGENT_SCOPE,
         model_name="default",
         model=model,
@@ -193,7 +191,6 @@ def _run_local_hook(config: Config, runtime_paths: RuntimePaths, model: ModelPro
     return mid_turn_compaction_hook(
         config=config,
         runtime_paths=runtime_paths,
-        entity_name="test_agent",
         scope=TEST_AGENT_SCOPE,
         model_name="default",
         model=model,

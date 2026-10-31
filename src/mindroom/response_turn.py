@@ -40,7 +40,7 @@ from mindroom.constants import (
 )
 from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
+from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput, persist_interrupted_replay_snapshot
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
@@ -432,13 +432,16 @@ class TurnPartialSnapshot:
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     interrupted_tools: tuple[ToolTraceEntry, ...] = ()
     attempt_run_id: str | None = None
+    # The input around the prompt as the attempt's run stored it, which a mid-turn fold may have rewritten; None until
+    # the run stored a record.
+    turn_input: TurnInput | None = None
 
 
 class _LiveAttempt(Protocol):
     """The attempt a turn is running, as an interruption records it."""
 
     def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return the attempt's partial output and run id."""
+        """Return the attempt's partial output, its run id, and the input its run stored, once it stored one."""
         ...
 
 
@@ -446,12 +449,13 @@ class _LiveAttempt(Protocol):
 class TurnRunState:
     """Driver-owned mutable state shared with the adapter attempt bodies.
 
-    Attempt bodies must set ``run_metadata`` once prepare finishes; interruption
-    recording falls back to rebuilt metadata while it is unset. They set
-    ``attempt`` once their attempt starts, which tells the driver the attempt ran
-    in the turn's scope; the driver drops it when the attempt is spent, so an
-    interruption before the next attempt starts records none of the spent
-    attempt's partial output, whose finished calls ``prior_completed_tools``
+    Attempt bodies must set ``run_metadata`` and ``turn_input`` once prepare
+    finishes; until then interruption recording falls back to rebuilt metadata
+    for ``run_metadata`` and to no input for ``turn_input``. They set
+    ``attempt`` once their attempt starts, which tells the driver
+    the attempt ran in the turn's scope; the driver drops it when the attempt is
+    spent, so an interruption before the next attempt starts records none of the
+    spent attempt's partial output, whose finished calls ``prior_completed_tools``
     already carries.
     """
 
@@ -460,6 +464,10 @@ class TurnRunState:
     # None until the driver loads the turn's scope, which it does before the turn's first attempt.
     scope_context: ScopeSessionContext | None = None
     run_metadata: dict[str, Any] | None = None
+    # The input around the prompt the prepared attempt sends, whose context events ``run_metadata`` marks seen. An
+    # interrupted record keeps it until the attempt's run stores its own (``TurnPartialSnapshot.turn_input``), as the
+    # run of an attempt that completes does.
+    turn_input: TurnInput = NO_TURN_INPUT
     # The calls the turn's spent attempts finished, and their usage, before a retry or a continuation started another.
     prior_completed_tools: tuple[ToolTraceEntry, ...] = ()
     prior_usage: tuple[RunMetrics, ...] = ()
@@ -732,10 +740,6 @@ class TurnAdapter[ChunkT]:
     user_message: str
     # The reply to an error no attempt handled, its credentials redacted.
     unexpected_error_text: Callable[[Exception], str]
-    # The entity the turn's queued notices name: a configured team's own name, which the label of its members the turn
-    # context carries is not.
-    entity_name: str
-    on_scope_loaded: Callable[[ScopeSessionContext | None], None] | None = None
 
 
 def _raise_continuation_budget_exhausted() -> NoReturn:
@@ -795,6 +799,7 @@ async def _record_interrupted(
         completed_tools=(*run.prior_completed_tools, *snapshot.completed_tools),
         interrupted_tools=snapshot.interrupted_tools,
         original_status=status,
+        turn_input=snapshot.turn_input if snapshot.turn_input is not None else run.turn_input,
     )
     if not sinks.persist_interrupted:
         return
@@ -869,8 +874,14 @@ def _settle_empty_run(
 
 
 def _drop_spent_attempt(run: TurnRunState, resolution: CompletedAttempt) -> None:
-    """Drop the attempt a retry or a continuation follows, keeping its finished calls and its usage for the turn."""
+    """Drop the attempt a retry or a continuation follows, keeping its finished calls and its usage for the turn.
+
+    A continuation's spent run is stored as a turn with the input it read, so the turn no longer holds it for an
+    interrupted record; an empty run is no turn, so its retry still does.
+    """
     run.prior_completed_tools = (*run.prior_completed_tools, *resolution.completed_tools)
+    if not resolution.is_empty:
+        run.turn_input = NO_TURN_INPUT
     if resolution.usage is not None:
         run.prior_usage = (*run.prior_usage, resolution.usage)
     run.attempt = None
@@ -913,8 +924,6 @@ async def _load_scope_session(
     await _remove_history_of_redacted_events(ctx, scope_context)
     run.scope_context = scope_context
     set_consumption_storage(scope_context.storage_factory)
-    if adapter.on_scope_loaded is not None:
-        adapter.on_scope_loaded(scope_context)
     return scope_context
 
 
@@ -947,15 +956,6 @@ def replays_as_turn(ctx: ResponseTurnContext, record: AnyRunRecord, *, is_empty:
     if ctx.participation is not None and not ctx.participation.approved:
         return record.status is RunStatus.cancelled
     return ctx.allow_no_report_response or not is_empty
-
-
-def _register_started_attempt(adapter: TurnAdapter[Any], run: TurnRunState) -> None:
-    """Hand the turn's scope to queued-notice finalization once an attempt started, which set ``run.attempt``.
-
-    An attempt that failed before it started ran nothing in the scope, so it hands over none.
-    """
-    if run.attempt is not None:
-        ai_runtime.register_scope_notice_storage(scope_context=run.scope_context, entity_name=adapter.entity_name)
 
 
 def _publish_run_metadata(sinks: TurnSinks, build: Callable[[], dict[str, Any]] | None) -> None:
@@ -1072,7 +1072,7 @@ async def stream_response_turn[ChunkT](
     *,
     continuation: TurnContinuationRunState,
     resume: TurnResume | None = None,
-) -> AsyncGenerator[ChunkT | FailedReply, None]:
+) -> AsyncGenerator[ChunkT | FailedReply]:
     """Own the whole response while binding context only during pulls and close; a failed turn ends with its reply."""
     lifetime = CliTurnLifetime()
     stream = context_bound_async_stream(
@@ -1102,7 +1102,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     continuation: TurnContinuationRunState,
     cli_lifetime: CliTurnLifetime,
     resume: TurnResume,
-) -> AsyncGenerator[ChunkT | FailedReply, None]:
+) -> AsyncGenerator[ChunkT | FailedReply]:
     """Run one response turn, yielding the attempt chunks as they arrive.
 
     The driver is the only writer of the turn's record: it settles the record before it yields the text that ends the
@@ -1131,17 +1131,13 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         context_factory=lambda: helper_usage_context(scope_context),
                         stream_factory=partial(adapter.run_attempt, run, continuation),
                     )
-                    try:
-                        async with closing_async_stream(attempt_stream):
-                            async for item in attempt_stream:
-                                if isinstance(item, AttemptResolved):
-                                    # Drain the producer to finish persistence and cleanup.
-                                    resolution = item.resolution
-                                    continue
-                                yield item
-                    finally:
-                        # Before the settle below drops the spent attempt.
-                        _register_started_attempt(adapter, run)
+                    async with closing_async_stream(attempt_stream):
+                        async for item in attempt_stream:
+                            if isinstance(item, AttemptResolved):
+                                # Drain the producer to finish persistence and cleanup.
+                                resolution = item.resolution
+                                continue
+                            yield item
                 await finalize_consumption()
                 if resolution is None:
                     _raise_missing_stream_resolution(ctx.entity_label)

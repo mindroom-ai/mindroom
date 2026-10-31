@@ -12,7 +12,7 @@ agent's scope, read or write summary rows directly:
   between the runs by ``seq``; replay is the scope's latest summary row and the
   runs it does not cover, and ``session.summary`` is derived from that row on read
 - the database owner's history state under ``MINDROOM_HISTORY_METADATA_KEY``: whether its next run
-  compacts first, and the consumed Matrix event ids team turns of earlier releases preserved there
+  compacts first
 
 Nothing else the summary rows already know is stored: the event ids compacted
 history represents are derived from them when seen ids are read. A metadata change
@@ -52,9 +52,8 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
 
 
-# The fields of the owner's history state, each left out of the stored value at its default.
+# The only field of the owner's history state, left out of the stored value at its default.
 _FORCE_COMPACTION = "force_compact_before_next_run"
-_SEEN_EVENT_IDS = "seen_event_ids"
 
 
 async def record_summary_usage(
@@ -106,12 +105,23 @@ def _history_state(metadata: dict[str, Any] | None) -> dict[str, Any]:
     return raw_value if isinstance(raw_value, dict) else {}
 
 
-def _with_history_state(metadata: dict[str, Any] | None, field: str, value: object) -> dict[str, Any]:
-    """Return session ``metadata`` with one field of the owner's history state changed; ``metadata`` is left alone.
+# LEGACY_COMPAT: Seen ids earlier releases copied into the owner's history state.
+# Legacy format: ``seen_event_ids`` in a session row's ``MINDROOM_HISTORY_METADATA_KEY`` value, which layout version 7
+# fills from the older per-scope entry (``session_storage/legacy_scope_metadata.py``): the destructive compactor merged
+# compacted runs' ids into it, and team turns merged the ids each one consumed, which its stored run also holds.
+# Last legacy release: v2026.10.760; replacement: v2026.10.761, where each team turn's stored run is the only record of
+# the events it consumed.
+# Handling: Nothing reads the ids; seen ids come only from the replayable runs and the summary rows. The force flag's
+# writer keeps the field beside the flag, so a row holds it as inert data.
+# Coverage: tests/test_history_scope_state.py::test_seen_event_ids_match_model_history_visibility,
+# tests/test_history_scope_state.py::test_an_edit_cut_returns_the_messages_only_the_removed_run_read, and
+# tests/test_history_scope_state.py::test_the_force_flag_is_set_and_cleared_beside_the_seen_ids.
+def _with_force_flag(metadata: dict[str, Any] | None, *, forced: bool) -> dict[str, Any]:
+    """Return session ``metadata`` with the owner's force flag set to ``forced``; ``metadata`` is left alone.
 
-    A field at its default (false or empty) is left out, and an empty state removes the key.
+    A false flag is left out, and an empty state removes the key.
     """
-    state = {**_history_state(metadata), field: value}
+    state = {**_history_state(metadata), _FORCE_COMPACTION: forced}
     state = {name: stored for name, stored in state.items() if stored}
     session_metadata = dict(metadata or {})
     if state:
@@ -123,7 +133,7 @@ def _with_history_state(metadata: dict[str, Any] | None, field: str, value: obje
 
 def with_force_compaction(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Return session ``metadata`` asking its owner to compact before its next run; ``metadata`` itself is left alone."""
-    return _with_history_state(metadata, _FORCE_COMPACTION, value=True)
+    return _with_force_flag(metadata, forced=True)
 
 
 def has_queued_force_compaction(storage: ConversationStore, session_id: str) -> bool:
@@ -138,12 +148,10 @@ def has_queued_force_compaction(storage: ConversationStore, session_id: str) -> 
 def read_scope_seen_event_ids(storage: ConversationStore, session: ConversationSession) -> set[str]:
     """Return the Matrix event ids the replayed history of the scope owning ``session`` already represents.
 
-    Loaded runs carry their own ids, the summary rows supply those of compacted
-    history, and session metadata adds the ids earlier releases preserved there.
+    Loaded runs carry their own ids, and the summary rows supply those of compacted history.
     """
     scope = owner_scope(session)
-    seen = _preserved_seen_event_ids(session.metadata)
-    seen |= summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="seen")
+    seen = summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="seen")
     for run in session.runs:
         if replays_in_scope(run, scope):
             seen.update(seen_event_ids(run.metadata))
@@ -191,9 +199,8 @@ def _remove_redacted_event_from_history(
     """Remove the part of the history of the scope owning ``session`` that derives from a redacted Matrix event.
 
     The first element that answered, read, or wrote the event goes with everything
-    after it, and the runs a removed summary covered replay again. Afterwards the
-    seen ids earlier releases preserved in metadata are dropped, so messages only they
-    covered return as unseen thread context. ``session`` is synced to the stored result.
+    after it, and the runs a removed summary covered replay again. ``session`` is synced
+    to the stored result.
     Returns whether the scope's history changed.
     """
     session_id, scope = session.session_id, owner_scope(session)
@@ -212,7 +219,6 @@ def _remove_redacted_event_from_history(
         return False
     elif legacy_event_ids is not None:
         summary_rows.retire(storage, session=session, scope_key=scope.key)
-    storage.update_metadata(session, partial(_with_history_state, field=_SEEN_EVENT_IDS, value=[]))
     return True
 
 
@@ -286,7 +292,7 @@ def set_force_compaction(
     def change(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
         if _scope_state(metadata).force_compact_before_next_run == forced:
             return metadata
-        return _with_history_state(metadata, _FORCE_COMPACTION, value=forced)
+        return _with_force_flag(metadata, forced=forced)
 
     storage.update_metadata(session, change)
 
@@ -418,22 +424,3 @@ def append_fold(
 def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id: str) -> set[str]:
     """Return the tool calls the run's mid-turn folds summarized, from the rows they flagged."""
     return summary_rows.folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)
-
-
-# LEGACY_COMPAT: Consumed Matrix event ids team turns preserved in session metadata.
-# Legacy format: ``seen_event_ids`` in a session row's ``MINDROOM_HISTORY_METADATA_KEY`` value, into which team turns
-# merged the events each non-empty reply consumed, a copy of its stored run's ``matrix_seen_event_ids``; layout version 7
-# fills it from the older per-scope entry (``session_storage/legacy_scope_metadata.py``).
-# Last legacy release: v2026.10.759; replacement: the next release, where a team turn's stored run is the only record of
-# the events it consumed, as an agent turn's is.
-# Handling: The ids count as seen, beside the replayable runs' and the summary rows', until a redaction cut of the scope
-# drops them all (``_remove_redacted_event_from_history``); an edit's cut leaves them. Nothing writes them any more.
-# Coverage: tests/test_history_scope_state.py::test_seen_event_ids_match_model_history_visibility,
-# tests/test_compaction_redaction.py::test_redacting_a_loaded_only_event_keeps_the_summary,
-# tests/test_compaction_redaction.py::test_legacy_seen_ids_without_summary_keep_unrelated_runs, and
-# tests/test_compaction_redaction.py::test_rollback_forgets_seen_ids_of_the_removed_runs.
-def _preserved_seen_event_ids(metadata: dict[str, Any] | None) -> set[str]:
-    raw_seen_ids = _history_state(metadata).get(_SEEN_EVENT_IDS)
-    if not isinstance(raw_seen_ids, list):
-        return set()
-    return {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}

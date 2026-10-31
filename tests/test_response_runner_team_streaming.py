@@ -184,7 +184,6 @@ def _driven_team_stream(
             make_text_chunk=lambda text: text,
             user_message=ctx.prompt,
             unexpected_error_text=str,
-            entity_name=scope_id,
         )
         return stream_response_turn(
             ctx,

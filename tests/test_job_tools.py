@@ -273,7 +273,7 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
     await runtime.acknowledge_wait("durable", waited.claim)
     await runtime.shutdown()
     allowed = True
-    runtime = await tool_job_runtime(tmp_path, authorize=lambda _: allowed)
+    runtime = await tool_job_runtime(tmp_path, grant=lambda _: "allowed" if allowed else "denied")
     await runtime.recover()
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -476,7 +476,7 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
         return BackgroundOutcome("completed", result, result_payload=encode_result_payload(ToolResultPayload(result)))
 
     try:
-        adapter = {"child": {"result": None}} if kind == "delegation" else {}
+        adapter = {"child": {"subagent_id": "child", "result": None}} if kind == "delegation" else {}
         await start_job(
             runtime,
             "large",

@@ -170,12 +170,11 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
     old_agent, old_member, old_team, old_router = _materialize(runtime)
     assert old_agent.spec.model.identity.id == "default-model"
     before = resolve_entity_preparation_inputs(
-        entity_name="general",
         history_settings=old_agent.history_settings,
         config=old,
         runtime_paths=runtime.runtime_paths,
         static_prompt_tokens=0,
-        active_model_name=None,
+        active_model_name=entity_model_name(old, "general"),
         active_context_window=None,
     ).execution_plan
     assert before.replay_window_tokens == 4000
@@ -201,12 +200,11 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
         assert _temperature(model) == (0.1 if context_only else 0.7)
     assert team.spec.leader.model.identity.id == ("other-model" if context_only else "updated-team-model")
     after = resolve_entity_preparation_inputs(
-        entity_name="general",
         history_settings=agent.history_settings,
         config=runtime.config,
         runtime_paths=runtime.runtime_paths,
         static_prompt_tokens=0,
-        active_model_name=None,
+        active_model_name=entity_model_name(runtime.config, "general"),
         active_context_window=None,
     ).execution_plan
     assert after.replay_window_tokens == 64000

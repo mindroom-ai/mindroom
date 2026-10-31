@@ -26,6 +26,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
+from mindroom.history.interrupted_replay import TurnInput
 from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import build_request, replayed_history
@@ -155,7 +156,6 @@ async def prepare_materialized_team_execution(
     runtime_model: TurnModel,
     response_sender_id: str | None,
     current_sender_id: str | None,
-    configured_team_name: str | None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     current_event_id: str | None = None,
@@ -189,7 +189,6 @@ async def prepare_materialized_team_execution(
         runtime_paths=runtime_paths,
         config=config,
         timezone=built.timezone,
-        entity_name=configured_team_name,
         history_settings=built.history_settings,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
@@ -245,7 +244,6 @@ def _leader_run(
     config: Config,
     runtime_paths: RuntimePaths,
     storage: RunStorage,
-    configured_team_name: str | None,
     compaction_lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
 ) -> LeaderRun:
@@ -266,7 +264,6 @@ def _leader_run(
                 lifecycle=compaction_lifecycle,
                 turn_recorder=turn_recorder,
             ),
-            entity_name=configured_team_name,
         ),
         request_template=with_native_history(ModelRequest(messages=()), history.native_history),
         model_name=prepared.runtime_model_name,
@@ -280,7 +277,6 @@ def run_prepared_team(
     config: Config,
     runtime_paths: RuntimePaths,
     scope_context: ScopeSessionContext,
-    team_name: str,
     user_id: str | None,
 ) -> AsyncIterator[TeamRunEvent]:
     """Run one prepared turn of a configured team outside Matrix, with the leader hooks and storage a Matrix turn has.
@@ -294,7 +290,6 @@ def run_prepared_team(
         config=config,
         runtime_paths=runtime_paths,
         storage=storage,
-        configured_team_name=team_name,
         compaction_lifecycle=None,
         turn_recorder=None,
     )
@@ -358,7 +353,7 @@ class _TeamTurn:
 
     @property
     def entity_name(self) -> str:
-        """The name the team's stored notices and logs carry: the configured team, or the materialized label."""
+        """The name the team's run records and request logs carry: the configured team, or the materialized label."""
         return self.configured_team_name or self.ctx.entity_label
 
     @property
@@ -451,11 +446,11 @@ class _TeamTurn:
             current_event_id=continuation_state.active_current_event_id,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
             compaction_lifecycle=self.ctx.compaction_lifecycle,
-            configured_team_name=self.configured_team_name,
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             pipeline_timing=self.ctx.pipeline_timing,
         )
         run.run_metadata = prepared.run_metadata
+        run.turn_input = TurnInput(context=prepared.turn.context)
         presentation = TeamStreamPresentation.new(
             members.requested_agent_names,
             members.display_names,
@@ -489,7 +484,6 @@ class _TeamTurn:
             config=config,
             runtime_paths=self.runtime_paths,
             storage=storage,
-            configured_team_name=self.configured_team_name,
             compaction_lifecycle=self.ctx.compaction_lifecycle,
             turn_recorder=run.record,
         )
@@ -529,7 +523,7 @@ class _TeamTurn:
         self,
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
-    ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved, None]:
+    ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
         attempt, events = await self.start_attempt(run, continuation_state)
         shown: str | None = None
@@ -775,7 +769,6 @@ async def team_response_stream(
         make_text_chunk=lambda text: text,
         user_message=ctx.prompt,
         unexpected_error_text=turn.error_text,
-        entity_name=turn.entity_name,
     )
     response_stream = stream_response_turn(
         turn.ctx,

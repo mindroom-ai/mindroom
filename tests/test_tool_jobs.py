@@ -67,8 +67,7 @@ async def test_a_wait_whose_access_is_still_resolving_is_released_not_refused(
     grant = {"access": "allowed"}
     runtime = await tool_job_runtime(
         tmp_path,
-        authorize=lambda _job: grant["access"] == "allowed",
-        denied=lambda _job: grant["access"] == "denied",
+        grant=lambda _job: grant["access"],
     )
     owner = job_owner()
     finish = asyncio.Event()
@@ -108,8 +107,7 @@ async def test_a_wait_that_starts_while_access_resolves_gives_back_its_claim(tmp
     grant = {"access": "allowed"}
     runtime = await tool_job_runtime(
         tmp_path,
-        authorize=lambda _job: grant["access"] == "allowed",
-        denied=lambda _job: False,
+        grant=lambda _job: grant["access"],
     )
     owner = job_owner()
 
@@ -2179,7 +2177,7 @@ async def test_one_failed_cancellation_request_does_not_block_the_others(
 ) -> None:
     """Revocation still reaches later jobs when one job's save fails, and reports which job failed."""
     revoked = False
-    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: not revoked)
+    runtime = await tool_job_runtime(tmp_path, grant=lambda _job: "denied" if revoked else "allowed")
     failing = False
 
     def failing_writer(job: dict[str, object], _payload: object) -> None:
@@ -2206,7 +2204,7 @@ async def test_one_failed_cancellation_request_does_not_block_the_others(
         failing = revoked = True
         with capture_logs() as logs:
             # Revocation only logs; its next pass retries the failed job.
-            await runtime.cancel_revoked(denied=lambda _job: revoked)
+            await runtime.cancel_revoked()
         failing = revoked = False
         assert [entry["job_id"] for entry in logs if entry["log_level"] == "error"] == ["first"]
         settled = await runtime.wait("second", owner=job_owner(), depth=0)
@@ -2250,4 +2248,39 @@ async def test_failed_detached_drain_reports_its_job(tmp_path: Path) -> None:
     finally:
         release.set()
         blocked = False
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_job_whose_access_still_resolves_is_neither_started_nor_shown(tmp_path: Path) -> None:
+    """A resolving grant refuses a new job and keeps an existing one out of lookup, listing, and the ended jobs."""
+    grant = {"access": "pending"}
+    runtime = await tool_job_runtime(tmp_path, grant=lambda _job: grant["access"])
+    owner = job_owner()
+    key = ConversationKey(
+        recipient="parent",
+        room_id="!room:test",
+        thread_id="$root",
+        requester_id="@alice:test",
+        silent=False,
+    )
+
+    async def completed() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    try:
+        with pytest.raises(JobAccessError):
+            await runtime.start("refused", tool_name="tool", depth=0, adapter={}, owner=owner, operation=completed)
+        grant["access"] = "allowed"
+        await start_job(runtime, "job-1", tool_name="tool", depth=0, adapter={}, owner=owner, operation=completed)
+        await wait_for_status(runtime, "job-1", "completed")
+        assert [job.job_id for job in await runtime.ended_jobs(key)] == ["job-1"]
+
+        grant["access"] = "pending"
+
+        with pytest.raises(JobAccessError):
+            await lookup(runtime, "job-1", owner=owner, depth=0)
+        assert await runtime.list_jobs(owner=owner, depth=0) == []
+        assert await runtime.ended_jobs(key) == ()
+    finally:
         await runtime.shutdown()

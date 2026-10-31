@@ -2213,7 +2213,6 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
         "/api/homeassistant/connect/oauth?agent_name=general",
         json={
             "instance_url": "127.0.0.1:8123",
-            "client_id": "client-id",
             "allow_private_url": True,
         },
     )
@@ -2225,7 +2224,69 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "http://127.0.0.1:8123/auth/authorize"
     assert params["state"][0]
     assert params["state"][0] != "general"
-    assert "agent_name=general" not in params["redirect_uri"][0]
+    assert params["client_id"] == ["http://localhost"]
+    assert params["redirect_uri"] == ["http://localhost/api/homeassistant/callback"]
+
+
+def _connect_homeassistant_oauth_behind_proxy(
+    tmp_path: Path,
+    env: dict[str, str],
+    *,
+    host: str = "mindroom.example.com",
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Start Home Assistant OAuth through a TLS-terminating proxy, which forwards plain HTTP with the browser's Host."""
+    main.initialize_api_app(main.app, _runtime_paths(tmp_path, process_env=env))
+    bind_test_embedded_runtime(main.app)
+    return TestClient(main.app, base_url=f"http://{host}").post(
+        "/api/homeassistant/connect/oauth",
+        headers=headers or {"Authorization": "Bearer test-key"},
+        json={"instance_url": "127.0.0.1:8123", "allow_private_url": True},
+    )
+
+
+def test_homeassistant_connect_oauth_identifies_mindroom_by_its_public_origin(tmp_path: Path) -> None:
+    """Behind a proxy that terminates TLS, the Client ID and redirect URI share the public origin, not the request's."""
+    response = _connect_homeassistant_oauth_behind_proxy(
+        tmp_path,
+        {"MINDROOM_API_KEY": "test-key", "MINDROOM_PUBLIC_URL": "https://mindroom.example.com/"},
+    )
+
+    assert response.status_code == 200, response.text
+    params = parse_qs(urlparse(response.json()["auth_url"]).query)
+    assert params["client_id"] == ["https://mindroom.example.com"]
+    assert params["redirect_uri"] == ["https://mindroom.example.com/api/homeassistant/callback"]
+
+
+def test_homeassistant_connect_oauth_refuses_an_invalid_public_url(tmp_path: Path) -> None:
+    """A `MINDROOM_PUBLIC_URL` without an origin gives Home Assistant no Client ID to accept."""
+    response = _connect_homeassistant_oauth_behind_proxy(
+        tmp_path,
+        {"MINDROOM_API_KEY": "test-key", "MINDROOM_PUBLIC_URL": "mindroom.example.com"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "MINDROOM_PUBLIC_URL is not a valid URL"
+
+
+def test_homeassistant_connect_oauth_from_the_dashboard_host_returns_there(tmp_path: Path) -> None:
+    """A dashboard on its own host gets the callback there, because the public host may send the path to another app."""
+    env = {
+        **trusted_upstream_env(),
+        "MINDROOM_PUBLIC_URL": "https://chat.example.org",
+        "MINDROOM_DASHBOARD_URL": "https://admin.example.org",
+    }
+    response = _connect_homeassistant_oauth_behind_proxy(
+        tmp_path,
+        env,
+        host="admin.example.org",
+        headers={**trusted_upstream_headers(), "Origin": "https://admin.example.org"},
+    )
+
+    assert response.status_code == 200, response.text
+    params = parse_qs(urlparse(response.json()["auth_url"]).query)
+    assert params["client_id"] == ["https://admin.example.org"]
+    assert params["redirect_uri"] == ["https://admin.example.org/api/homeassistant/callback"]
 
 
 def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
@@ -2257,7 +2318,6 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
             "/api/homeassistant/connect/oauth?agent_name=general",
             json={
                 "instance_url": "127.0.0.1:8123",
-                "client_id": "client-id",
                 "allow_private_url": True,
             },
         )
@@ -2270,18 +2330,20 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
         )
 
     assert callback_response.status_code in {302, 307}
+    # Relative, so the browser stays on the origin Home Assistant returned it to.
+    assert callback_response.headers["location"] == "/?homeassistant=connected"
     async_client.__aenter__.return_value.post.assert_called_once_with(
         "http://127.0.0.1:8123/auth/token",
         data={
             "grant_type": "authorization_code",
             "code": "test-code",
-            "client_id": "client-id",
+            "client_id": "http://localhost",
         },
         timeout=10.0,
     )
     assert get_runtime_credentials_manager(runtime_paths).shared_manager().load_credentials("homeassistant") == {
         "instance_url": "http://127.0.0.1:8123",
-        "client_id": "client-id",
+        "client_id": "http://localhost",
         "access_token": "ha-access",
         "refresh_token": "ha-refresh",
         "expires_in": 3600,
@@ -2505,10 +2567,7 @@ def test_homeassistant_connect_rejects_draft_execution_scope_override(
     ):
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general&execution_scope=shared",
-            json={
-                "instance_url": "http://93.184.216.34:8123",
-                "client_id": "client-id",
-            },
+            json={"instance_url": "http://93.184.216.34:8123"},
         )
     assert connect_response.status_code == 409
     assert "Save the configuration before managing credentials" in connect_response.json()["detail"]

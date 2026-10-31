@@ -20,6 +20,7 @@ import pytest
 
 from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_FUNCTIONS, DELEGATION_STATE_KEY
+from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.summary_message import is_scope_summary
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -89,6 +90,10 @@ MASKS: dict[str, str] = {
     "(``mindroom.session_storage.legacy_run_requirements``)",
     "silence_flag_not_stored": "#3106: a paused delegation's ``external_execution_silent`` is read as absent "
     "(``ToolExecution.from_dict``)",
+    "resumes_leave_out_the_paused_reply_s_notice": "#3108: a paused run's resume request leaves out the queued-message "
+    "notice the paused run holds, which the reply that paused was given",
+    "preserved_seen_ids_not_read": "#3463: seen ids an older release preserved in session metadata no longer count as "
+    "seen (``mindroom.history.storage.read_scope_seen_event_ids``)",
 }
 # The masks each golden and legacy input uses; every other input compares unmasked.
 _PINS: dict[str, set[str]] = {
@@ -131,6 +136,7 @@ _PINS: dict[str, set[str]] = {
     },
     "legacy/captured__legacy_compaction_state__opening_storage_leaves_uncompacted_scopes_and_their_seen_ids_alone": {
         "history_state_is_the_owners_one_value",
+        "preserved_seen_ids_not_read",
         "row_ids_fill_the_record",
     },
     "legacy/captured__legacy_compaction_state__opening_storage_numbers_rows_an_old_writer_stored_without_an_index": {
@@ -147,6 +153,7 @@ _PINS: dict[str, set[str]] = {
     "goldens/team_panel": {"history_state_is_the_owners_one_value"},
     "legacy/captured__legacy_compaction_state__opening_storage_keeps_seen_ids_of_a_scope_without_a_summary": {
         "history_state_is_the_owners_one_value",
+        "preserved_seen_ids_not_read",
     },
 }
 # The masks each recorded end state uses; every other end state compares unmasked.
@@ -162,8 +169,11 @@ _END_STATE_PINS: dict[str, frozenset[str]] = {
     "generated/13": frozenset(
         {"history_state_is_the_owners_one_value", "fold_stores_cancelled_row", "history_copies_not_stored"},
     ),
-    "generated/20": frozenset({"embedded_members_become_member_rows"}),
-    "generated/39": frozenset({"history_copies_not_stored", "readers_follow_the_log"}),
+    "generated/20": frozenset({"embedded_members_become_member_rows", "resumes_leave_out_the_paused_reply_s_notice"}),
+    "generated/37": frozenset({"resumes_leave_out_the_paused_reply_s_notice"}),
+    "generated/39": frozenset(
+        {"history_copies_not_stored", "readers_follow_the_log", "resumes_leave_out_the_paused_reply_s_notice"},
+    ),
     "generated/8": frozenset({"history_state_is_the_owners_one_value", "force_request_moves_into_metadata"}),
     "generated/19": frozenset({"history_state_is_the_owners_one_value", "force_request_moves_into_metadata"}),
     "generated/0": frozenset({"history_state_is_the_owners_one_value"}),
@@ -356,6 +366,26 @@ def _unminted(observed: dict[str, Any]) -> None:
     for message in (message for request in requests if isinstance(request, list) for message in request):
         if is_scope_summary(Message.from_dict(message)):
             message["id"] = "minted"
+
+
+def _resumes_leave_out_paused_notices(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
+    """Show each recorded resume request without the queued-message notices of the paused run it resumes.
+
+    Those are the notices the request holds that are not history copies; the notices of earlier runs still replay.
+    """
+
+    def paused_notice(message: dict[str, Any]) -> bool:
+        return not message.get("from_history") and is_queued_notice_message(Message.from_dict(message))
+
+    for side in (recorded, observed):
+        resumes = side["resume_requests"] if isinstance(side["resume_requests"], dict) else {}
+        for resume in resumes.values():
+            kept = [message for message in resume["request"] if not paused_notice(message)]
+            if side is observed:
+                assert kept == resume["request"]
+            elif kept != resume["request"]:
+                resume["request"] = kept
+                used.add("resumes_leave_out_the_paused_reply_s_notice")
 
 
 def _rows_fill_records(recorded: dict[str, Any], observed: dict[str, Any], session_id: str, used: set[str]) -> None:
@@ -583,6 +613,20 @@ def _history_state_in_one_value(recorded: dict[str, Any], owner_key: str, used: 
     used.add("history_state_is_the_owners_one_value")
 
 
+def _preserved_seen_ids_not_read(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
+    """Show the recorded seen ids without the preserved ones the owner's history state holds and no history does."""
+    metadata = recorded["session"]["metadata"] if isinstance(recorded["session"], dict) else None
+    state = metadata.get(MINDROOM_HISTORY_METADATA_KEY, {}) if isinstance(metadata, dict) else {}
+    seen = recorded["seen_event_ids"]
+    if not isinstance(seen, list):
+        return
+    dropped = set(state.get("seen_event_ids", [])) - set(observed["seen_event_ids"])
+    if dropped:
+        assert dropped <= set(seen)
+        recorded["seen_event_ids"] = sorted(set(seen) - dropped)
+        used.add("preserved_seen_ids_not_read")
+
+
 def _session_columns_encoded_once(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
     """Show session data Agno 2 encoded twice, which a read of the row decodes to text, as the object stored once."""
     row, old = observed["row"], recorded["row"]
@@ -604,12 +648,14 @@ def _mask_session(
 ) -> set[str]:
     """Show one session's recorded and observed observables as one store would; return the runs the fold mask hid."""
     _rows_fill_records(recorded, observed, session_id, used)
+    _resumes_leave_out_paused_notices(recorded, observed, used)
     _paused_notices_read_as_no_content(recorded, observed, used)
     _waiting_calls_name_their_member_runs(recorded, observed, used)
     _silence_flag_not_stored(recorded, used)
     _session_columns_encoded_once(recorded, observed, used)
     _force_requests_in_metadata(recorded, observed, used)
     _history_state_in_one_value(recorded, owner_key, used)
+    _preserved_seen_ids_not_read(recorded, observed, used)
     readers_in_creation_order(observed, used)
     _drop_history_copies(recorded, observed, used)
     _hide_folded(recorded, facts, used)

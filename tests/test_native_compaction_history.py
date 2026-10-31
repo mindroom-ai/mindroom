@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, ModelConfig
+from mindroom.config.resolution import entity_model_name
 from mindroom.history.native import configure_native_history, restore_native_history, with_native_history
 from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import scope_history_messages
@@ -73,12 +74,11 @@ def _no_provider_environment() -> Iterator[None]:
 def _inputs(config: Config) -> HistoryPreparationInputs:
     """Resolve the configured test agent's history inputs for a 100-token static prompt."""
     return resolve_entity_preparation_inputs(
-        entity_name="test_agent",
         history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
         runtime_paths=runtime_paths_for(config),
         static_prompt_tokens=100,
-        active_model_name=None,
+        active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
     )
 
@@ -627,7 +627,6 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
 
     prepared = await prepare_bound_scope_history(
         model=leader,
-        team_name="team",
         history_settings=config.resolve_scope("team").history_settings,
         config=config,
         runtime_paths=paths,

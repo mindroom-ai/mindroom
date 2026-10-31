@@ -85,7 +85,7 @@ def _stream_turn(
     sinks: TurnSinks,
     run_attempt: Callable[
         [TurnRunState, TurnContinuationRunState],
-        AsyncGenerator[str | AttemptResolved, None],
+        AsyncGenerator[str | AttemptResolved],
     ],
 ) -> AsyncIterator[str]:
     """Drive the turn as ``ai.stream_agent_response`` does, from the plain request prompt."""
@@ -97,7 +97,6 @@ def _stream_turn(
             make_text_chunk=lambda text: text,
             user_message=ctx.prompt,
             unexpected_error_text=str,
-            entity_name=ctx.entity_label,
         ),
         sinks,
         continuation=TurnContinuationRunState.initial(
@@ -129,7 +128,7 @@ async def test_non_streaming_continuation_delivers_final_exactly_once_after_last
     async def run_attempt(
         _run: TurnRunState,
         continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         attempts.append(continuation.active_prompt)
         events.append(f"attempt:{len(attempts)}")
         # No final delivery may happen before the last attempt settles.
@@ -212,7 +211,7 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
     async def run_attempt(
         _run: TurnRunState,
         continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         attempts.append(continuation.active_prompt)
         events.append(f"attempt:{len(attempts)}")
         # No stream finalization may happen between attempts.

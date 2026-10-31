@@ -217,7 +217,7 @@ class WorkerBrowserMCP:
             try:
                 path = resolve_path_within_root(self._workspace, value, symlinks="internal", strict=True)
                 allowed = path.is_file()
-            except (OSError, RuntimeError, ValueError) as exc:
+            except (OSError, ValueError) as exc:
                 raise ValueError(msg) from exc
             if not allowed:
                 raise ValueError(msg)
@@ -243,13 +243,12 @@ class WorkerBrowserMCP:
         msg = "Native browser output must stay within the worker workspace and have the expected file type."
         try:
             canonical = resolve_path_within_root(self._workspace, path, symlinks="internal")
-            # stat still reports symlink loops and invalid parents on Python
-            # versions where non-strict resolve suppresses those errors.
+            # Non-strict resolve suppresses symlink loops and invalid parents; stat still reports them.
             try:
                 mode = canonical.stat().st_mode
             except FileNotFoundError:
                 mode = None
-        except (OSError, RuntimeError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             raise ValueError(msg) from exc
         if mode is not None and not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
             raise ValueError(msg)

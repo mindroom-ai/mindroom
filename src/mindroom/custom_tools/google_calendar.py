@@ -86,7 +86,7 @@ class GoogleCalendarTools(
         # Remove when: Agno accepts sufficient granular scopes during construction;
         # retain MindRoom's scope selection, credential ownership, and tool permissions.
         # Coverage: tests/test_google_calendar_oauth_tool.py::test_google_calendar_default_config_enables_write_methods;
-        # tests/test_google_calendar_oauth_tool.py::test_google_calendar_provider_uses_narrow_scopes_for_every_tool_operation.
+        # tests/test_google_oauth_providers.py::test_each_google_provider_declares_its_service_on_the_shared_google_contract.
         super().__init__(**kwargs)
         self.creds = creds
 

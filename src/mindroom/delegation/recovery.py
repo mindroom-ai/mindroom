@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 _RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
 
 
-async def resolve_subagent(
+async def load_settled_subagent(
     subagent_id: str,
     *,
     owner: ToolExecutionIdentity,
@@ -45,7 +45,7 @@ async def resolve_subagent(
     runtime_paths: RuntimePaths,
     depth: int,
 ) -> DelegationChild:
-    """Resolve a scoped handle and reconcile an abandoned attempt under its recovery lock."""
+    """Load a scoped handle, first settling an abandoned attempt under its recovery lock, so this writes state."""
     load = partial(load_subagent, subagent_id, owner=owner, config=config, runtime_paths=runtime_paths, depth=depth)
     child = await load()
     if child.status == "running":

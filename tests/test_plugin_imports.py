@@ -99,8 +99,8 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             "authority": dict(tool.authority),
         }
 
-        def authorized(job):
-            return locally_allowed(
+        def grant(job):
+            allowed = locally_allowed(
                 config,
                 job.owner,
                 tools=tools,
@@ -110,6 +110,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
                 depth=job.depth,
                 authority=job.adapter["authority"],
             )
+            return "allowed" if allowed else "denied"
 
         async def no_cleanup(job):
             return None
@@ -121,10 +122,9 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
         if action == "create":
             runtime = ToolJobRuntime(
                 store,
-                authorize=lambda job: True,
+                grant=lambda job: "allowed",
                 authorize_execution=lambda *args: None,
                 cancel=no_cleanup,
-                denied=lambda job: False,
             )
             await runtime.recover()
 
@@ -159,10 +159,9 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
         elif action == "recover":
             runtime = ToolJobRuntime(
                 store,
-                authorize=authorized,
+                grant=grant,
                 authorize_execution=lambda *args: None,
                 cancel=no_cleanup,
-                denied=lambda job: not authorized(job),
             )
             await runtime.recover()
             statuses = {

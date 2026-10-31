@@ -31,7 +31,7 @@ _VERSIONS = {LEGACY_COMPACTION_METADATA_KEY: 2, LEGACY_MATRIX_HISTORY_METADATA_K
 # into the new value, merged with one the conversion's force-request fold already wrote; other scopes' entries, which no
 # release read, and values in a version no reader accepted are dropped with both keys. A row without either key keeps
 # its metadata bytes.
-# Coverage: tests/session_storage/test_legacy_scope_metadata.py::test_every_recorded_session_reads_as_the_release_that_wrote_it_read_it,
+# Coverage: tests/session_storage/test_legacy_scope_metadata.py::test_every_recorded_session_keeps_its_owner_state_in_one_value,
 # tests/session_storage/test_legacy_scope_metadata.py::test_other_scopes_and_unread_versions_are_dropped_and_a_newer_flag_is_kept,
 # tests/session_storage/test_legacy_scope_metadata.py::test_a_converted_database_converts_once.
 def flatten_history_metadata(connection: sqlite3.Connection, names: TableNames) -> None:

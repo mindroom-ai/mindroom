@@ -8,7 +8,7 @@ import importlib.util
 import sys
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from types import MethodType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
@@ -32,6 +33,7 @@ from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.event_journal import IngestionRecordAdmission, IngestionRecordDisposition
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.llm.usage import TokenCounts
 from mindroom.matrix.room_membership import ensure_room_membership_synced
@@ -315,13 +317,25 @@ def _set_helper_access(
     )
 
 
-async def _grant_room_memberships(config: Config, client: AsyncMock, tmp_path: Path) -> AgentReplyMembershipIndex:
-    """Authorize the helper's callers through Alice's membership in a separate grant room."""
+async def _grant_room_memberships(
+    config: Config,
+    client: AsyncMock,
+    tmp_path: Path,
+    *,
+    unqueryable_room: bool = False,
+) -> AgentReplyMembershipIndex:
+    """Authorize the helper's callers through Alice's membership in a separate grant room.
+
+    With ``unqueryable_room``, the helper's access also names a second grant room the router has not joined, so every
+    refresh leaves that room unready.
+    """
     config.agents["helper"].rooms = [ROOM_ID, "grant"]
-    _set_helper_access(config, members_of_rooms=["grant"])
+    _set_helper_access(config, members_of_rooms=["grant", "other"] if unqueryable_room else ["grant"])
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", GRANT_ROOM_ID, "#grant:example.org", "Grant")
+    if unqueryable_room:
+        state.add_room("other", "!other:example.org", "#other:example.org", "Other")
     save_matrix_state(state, runtime_paths)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[GRANT_ROOM_ID])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -689,44 +703,13 @@ async def test_manager_joins_requester_private_agent_in_owned_rooms(
 
 
 @pytest.mark.asyncio
-async def test_manager_stops_call_when_agent_is_kicked_from_ephemeral_room(tmp_path: Path) -> None:
-    """Own membership removal tears down media without waiting for another call event."""
-    client = _client()
-    client.room_get_state.return_value = _state_response(_remote_member_event())
-    bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path)
-    room = _room()
-    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
-
-    await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
-
-    assert bridge.closed is True
-    assert _call_state(manager).session is None
-    assert _call_state(manager).logical_call is None
-    assert ROOM_ID in manager._departed_rooms
-    assert ROOM_ID not in manager._rooms
-    assert ROOM_ID not in manager._locks
-
-
-@pytest.mark.asyncio
 async def test_manager_ignores_own_departure_from_unmanaged_room(tmp_path: Path) -> None:
     """Ordinary room churn cannot create call-manager departure or lock state."""
     client = _client()
     manager = _manager(client, FakeBridge(), tmp_path)
-    room = _room(room_id="!text:example.org")
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "event_id": "$leave",
-            "sender": "@alice:example.org",
-            "origin_server_ts": int(time.time() * 1000),
-            "type": "m.room.member",
-            "state_key": BOT_USER,
-            "content": {"membership": "leave"},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
+    client.rooms = {"!text:example.org": _room(room_id="!text:example.org")}
 
-    await _deliver(manager, manager.on_room_membership_event(room, event))
+    await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={"!text:example.org"})
 
     assert manager._departed_rooms == set()
     assert dict(manager._locks) == {}
@@ -746,22 +729,9 @@ async def test_manager_does_not_retain_departed_ad_hoc_room(tmp_path: Path) -> N
         config,
         invited_rooms_by_agent={"helper": invited_rooms},
     )
-    room = _room()
-    manager._rooms[ROOM_ID] = _RoomCall(room)
+    manager._rooms[ROOM_ID] = _RoomCall(_room())
     invited_rooms.clear()
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "event_id": "$leave",
-            "sender": "@alice:example.org",
-            "origin_server_ts": int(time.time() * 1000),
-            "type": "m.room.member",
-            "state_key": BOT_USER,
-            "content": {"membership": "leave"},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
-
-    await _deliver(manager, manager.on_room_membership_event(room, event))
+    await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
 
     assert manager._rooms == {}
     assert manager._departed_rooms == set()
@@ -769,28 +739,36 @@ async def test_manager_does_not_retain_departed_ad_hoc_room(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_manager_ignores_frame_keys_after_departing_configured_room(tmp_path: Path) -> None:
-    """Late to-device keys cannot repopulate state after the bot leaves."""
+async def test_manager_ignores_its_own_member_events(tmp_path: Path) -> None:
+    """The bot's own membership comes only from durably admitted sync sections, so its member events change nothing."""
     client = _client()
-    client.rooms = {ROOM_ID: _room(encrypted=True)}
-    manager = _manager(client, FakeBridge(), tmp_path)
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "event_id": "$leave",
-            "sender": "@alice:example.org",
-            "origin_server_ts": int(time.time() * 1000),
-            "type": "m.room.member",
-            "state_key": BOT_USER,
-            "content": {"membership": "leave"},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
-    await _deliver(manager, manager.on_room_membership_event(client.rooms[ROOM_ID], event))
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    room = _room()
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+    assert bridge.connected_grant is not None
+    client.room_get_state.reset_mock()
 
-    await manager.on_to_device_event(_frame_key_event())
+    for membership in ("leave", "ban", "join"):
+        event = nio.RoomMemberEvent.from_dict(
+            {
+                "event_id": f"${membership}",
+                "sender": "@admin:example.org",
+                "origin_server_ts": int(time.time() * 1000),
+                "type": "m.room.member",
+                "state_key": BOT_USER,
+                "content": {"membership": membership},
+            },
+        )
+        assert isinstance(event, nio.RoomMemberEvent)
+        await _deliver(manager, manager.on_room_membership_event(room, event))
 
-    assert not _call_state(manager).pending_keys
+    assert bridge.closed is False
+    assert _call_state(manager).session is not None
+    assert manager._departed_rooms == set()
     client.room_get_state.assert_not_awaited()
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -845,6 +823,7 @@ async def test_leaving_a_call_room_ends_its_call_and_forgets_its_state(tmp_path:
     assert state.retry_task.cancelled()
     assert state.expiry_handle.cancelled()
     assert manager._rooms == {}
+    assert ROOM_ID not in manager._locks
     assert ROOM_ID in manager._departed_rooms
     client.room_get_state.reset_mock()
     await manager.on_to_device_event(_frame_key_event())
@@ -1777,17 +1756,22 @@ async def test_positive_call_reconciliation_waits_for_admission_and_rechecks_pol
 
 
 class _BlockingConnectBridge(FakeBridge):
-    """Hold the SFU connect step until the test releases it."""
+    """Hold the SFU connect step until the test releases it, and count closes."""
 
     def __init__(self) -> None:
         super().__init__()
         self.connect_started = asyncio.Event()
         self.release_connect = asyncio.Event()
+        self.closes = 0
 
     async def connect(self, grant: SfuGrant) -> None:
         self.connect_started.set()
         await self.release_connect.wait()
         await super().connect(grant)
+
+    async def aclose(self) -> None:
+        self.closes += 1
+        await super().aclose()
 
 
 @pytest.mark.asyncio
@@ -1998,6 +1982,96 @@ async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -
     assert bridge.closed
     assert _call_state(manager).session is None
     assert _call_state(manager).logical_call is None
+
+
+@dataclass
+class _ManagerBot:
+    """A fleet member whose call work runs on a real call manager, as `AgentBot` runs it."""
+
+    manager: CallManager
+    tasks: list[asyncio.Task[None]] = field(default_factory=list)
+
+    def schedule_pending_invite_reconciliation(self) -> None:
+        return None
+
+    async def revoke_reply_authorized_calls(self) -> None:
+        await self.manager.revoke_reply_authorization()
+
+    def schedule_reply_authorized_call_reconciliation(self) -> None:
+        self.tasks.append(asyncio.create_task(self.manager.reconcile_reply_authorization()))
+
+    def schedule_reply_authorized_call_revocation(self) -> None:
+        self.tasks.append(asyncio.create_task(self.manager.revoke_reply_authorization()))
+
+    async def settle(self) -> None:
+        while self.tasks:
+            await self.tasks.pop(0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_invalidation_after_a_partial_refresh_ends_the_calls_that_refresh_allowed(tmp_path: Path) -> None:
+    """A refresh that readies one grant room restores authority, so the next loss of authority must end its calls."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    memberships = await _grant_room_memberships(config, client, tmp_path, unqueryable_room=True)
+    manager = _manager(client, bridge, tmp_path, config, agent_reply_memberships=memberships)
+    bot = _ManagerBot(manager)
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: [bot])
+    membership_sync.invalidate(config, reason="sync_loop_started")
+    await bot.settle()
+
+    await memberships.refresh(config, test_runtime_paths(tmp_path), client)
+    await membership_sync.apply_authoritative_refresh(config)
+    assert memberships.needs_refresh(config)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.connected_grant is not None
+
+    membership_sync.invalidate(config, reason="uncertain_sync_response")
+    await bot.settle()
+
+    assert bridge.closed
+    assert _call_state(manager).session is None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("starting", [False, True])
+async def test_a_batch_of_loss_records_ends_a_denied_call_once(tmp_path: Path, *, starting: bool) -> None:
+    """Every loss record in one batch revokes; the denied call, joined or still starting, is torn down once."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = _BlockingConnectBridge()
+    config = _config()
+    memberships = await _grant_room_memberships(config, client, tmp_path)
+    manager = _manager(client, bridge, tmp_path, config, agent_reply_memberships=memberships)
+    bot = _ManagerBot(manager)
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: [bot])
+    call = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
+    if not starting:
+        bridge.release_connect.set()
+        await call
+        assert _call_state(manager).session is not None
+
+    for _ in range(3):
+        membership_sync.pre_admit_ingestion(
+            config,
+            test_runtime_paths(tmp_path),
+            IngestionRecordAdmission(disposition=IngestionRecordDisposition.HISTORY_LOSS, room_id=ROOM_ID),
+            None,
+        )
+    assert len(bot.tasks) == 3
+    await bot.settle()
+    bridge.release_connect.set()
+    await call
+
+    assert bridge.closes == 1
+    assert _call_state(manager).session is None
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio

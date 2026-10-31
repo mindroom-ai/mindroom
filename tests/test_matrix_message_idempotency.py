@@ -289,6 +289,23 @@ async def test_invalid_keyed_sends_never_send(
     assert not transport.events
 
 
+async def test_blank_attachments_keep_a_keyed_send_text_only(
+    context: ToolRuntimeContext,
+    transport: MatrixTransport,
+) -> None:
+    """Blank attachment entries are dropped, so a repeated keyed text send still sends once."""
+    with tool_runtime_context(context):
+        first, second = [
+            json.loads(
+                await MatrixMessageTools().matrix_message(message="text", attachments=[" "], idempotency_key="key"),
+            )
+            for _ in range(2)
+        ]
+    assert first["status"] == "ok"
+    assert second == first
+    assert len(transport.events) == len(transport.attempts) == 1
+
+
 async def test_unkeyed_repeats_still_send_each_time(context: ToolRuntimeContext, transport: MatrixTransport) -> None:
     """Ordinary sends retain their existing non-idempotent behavior."""
     with tool_runtime_context(context):

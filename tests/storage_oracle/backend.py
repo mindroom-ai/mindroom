@@ -57,7 +57,7 @@ _MEMBERS = ("alpha", "beta")
 SUMMARY_MODEL = ModelIdentity(id="oracle-summary-model", provider="oracle")
 SUMMARY_USAGE = MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10))
 # The response turn id a run's live queued-message notice names.
-_NOTICE_TURN_KEY = "mindroom_queued_message_notice_response_turn_id"
+NOTICE_TURN_KEY = "mindroom_queued_message_notice_response_turn_id"
 # Events the legacy openings' summaries and archived runs hold, as ``Driver.seed_legacy`` documents them.
 LEGACY_EVENTS: dict[int, tuple[str, ...]] = {
     0: ("$legacy-1", "$legacy-2"),
@@ -228,11 +228,11 @@ class Driver(ABC):
 
     @abstractmethod
     def finalize_notice(self, response_turn_id: str) -> object:
-        """Finalize one response's queued-message notice."""
+        """Finalize one response's queued-message notice, as releases before #3108 did once a reply was delivered."""
 
     @abstractmethod
     def scrub_notices(self, session: ConversationSession) -> object:
-        """Recover crash-left notices of earlier responses in a reply's loaded session."""
+        """Recover crash-left notices of earlier responses in a reply's loaded session, as releases before #3108 did."""
 
     @abstractmethod
     def persist_delegation(self, session: ConversationSession, record: AnyRunRecord, state: DelegationState) -> object:
@@ -437,7 +437,7 @@ class Driver(ABC):
                 "n",
                 "user",
                 f"newer message for {run_id}",
-                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, _NOTICE_TURN_KEY: response_turn_id},
+                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, NOTICE_TURN_KEY: response_turn_id},
             ),
         )
         self.notice_turns.append(response_turn_id)

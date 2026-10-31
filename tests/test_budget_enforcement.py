@@ -265,7 +265,6 @@ async def test_direct_delegation_reads_the_orchestrators_budget_monitor(tmp_path
     runtime_paths = _runtime_paths(tmp_path)
     tools = DelegateTools(
         "leader",
-        ["child"],
         runtime_paths,
         config,
         agent_workspace_root_path(runtime_paths.storage_root, "leader"),

@@ -3,62 +3,37 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, cast
 from urllib.parse import quote
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
-from mindroom.http_error_detail import error_detail_from_response
-from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
+from mindroom.http_error_detail import error_detail_from_response, validation_error_detail
+from mindroom.script_runs.wire import (
+    SCRIPT_PROTOCOL_VERSION,
+    SandboxScriptCancelResponse,
+    SandboxScriptControlRequest,
+    SandboxScriptRunRequest,
+    SandboxScriptRunResponse,
+    SandboxScriptStatusRequest,
+    SandboxScriptStatusResponse,
+    ScriptReceipt,
+    ScriptWorkerError,
+    WorkerScriptCancel,
+    WorkerScriptStatus,
+)
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
 _TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
-_DEFAULT_TIMEOUT_SECONDS = 15.0
+_REQUEST_TIMEOUT_SECONDS = 15.0
 
-__all__ = [
-    "ScriptWorkerClient",
-    "ScriptWorkerError",
-    "WorkerScriptCancel",
-    "WorkerScriptStatus",
-]
-
-
-class ScriptWorkerError(RuntimeError):
-    """A rejected script request or unavailable worker transport."""
-
-    def __init__(self, message: str, *, failure_kind: Literal["tool", "worker"]) -> None:
-        super().__init__(message)
-        self.failure_kind = failure_kind
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerScriptStatus:
-    """Normalized state from one supervisor handle."""
-
-    state: Literal["running", "exited", "unknown"]
-    output: str = ""
-    exit_code: int | None = None
-
-    @classmethod
-    def unknown_handle(cls) -> WorkerScriptStatus:
-        """Return the lifecycle fact used when a supervisor lost its handle."""
-        return cls(state="unknown")
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerScriptCancel:
-    """Normalized cancellation signal outcome."""
-
-    cancel_requested: bool
-    already_finished: bool
-    unknown_handle: bool
+__all__ = ["ScriptWorkerClient"]
 
 
 @dataclass(slots=True)
 class ScriptWorkerClient:
     """Send script process-control requests to an already-selected worker."""
 
-    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS
     transport: httpx.AsyncBaseTransport | None = None
 
     async def launch(
@@ -77,10 +52,9 @@ class ScriptWorkerClient:
 
         ``config_snapshot`` holds the live config fields runners resolve; workers mount no config and resolve agents only from it.
         """
-        data = await self._post(
-            worker,
-            url=worker_api_endpoint(worker, "script-run"),
-            json={
+        request = _parsed(
+            SandboxScriptRunRequest,
+            {
                 "protocol_version": SCRIPT_PROTOCOL_VERSION,
                 "run_id": run_id,
                 "worker_key": worker.worker_key,
@@ -88,11 +62,11 @@ class ScriptWorkerClient:
                 "source_digest": source_digest,
                 "gateway_url": gateway_url,
                 "max_runtime_seconds": max_runtime_seconds,
-                "private_agent_names": list(private_agent_names) if private_agent_names is not None else None,
+                "private_agent_names": private_agent_names,
                 "config_snapshot": config_snapshot,
             },
         )
-        self._raise_structured_failure(data)
+        await self._post(worker, worker_api_endpoint(worker, "script-run"), request, SandboxScriptRunResponse)
 
     async def status(
         self,
@@ -101,23 +75,13 @@ class ScriptWorkerClient:
         run_id: str,
     ) -> WorkerScriptStatus:
         """Poll one worker-owned supervisor handle."""
-        data = await self._post(
+        receipt = await self._post(
             worker,
-            url=f"{worker_api_endpoint(worker, 'script-status')}/{quote(run_id, safe='')}/status",
-            json={"worker_key": worker.worker_key},
+            f"{worker_api_endpoint(worker, 'scripts')}/{quote(run_id, safe='')}/status",
+            _parsed(SandboxScriptStatusRequest, {"worker_key": worker.worker_key}),
+            SandboxScriptStatusResponse,
         )
-        self._raise_structured_failure(data)
-        state = data.get("state")
-        output = data.get("output", "")
-        exit_code = data.get("exit_code")
-        if not isinstance(state, str) or state not in {"running", "exited", "unknown"} or not isinstance(output, str):
-            message = "Worker returned an invalid script status receipt."
-            raise ScriptWorkerError(message, failure_kind="worker")
-        if exit_code is not None and type(exit_code) is not int:
-            message = "Worker returned an invalid script exit code."
-            raise ScriptWorkerError(message, failure_kind="worker")
-        normalized_state = cast("Literal['running', 'exited', 'unknown']", state)
-        return WorkerScriptStatus(state=normalized_state, output=output, exit_code=exit_code)
+        return WorkerScriptStatus(state=receipt.state, output=receipt.output, exit_code=receipt.exit_code)
 
     async def cancel(
         self,
@@ -127,71 +91,59 @@ class ScriptWorkerClient:
         force: bool = False,
     ) -> WorkerScriptCancel:
         """Request graceful or forced termination of one worker-owned handle."""
-        data = await self._post(
+        receipt = await self._post(
             worker,
-            url=f"{worker_api_endpoint(worker, 'script-cancel')}/{quote(run_id, safe='')}/cancel",
-            json={
-                "worker_key": worker.worker_key,
-                "force": force,
-            },
+            f"{worker_api_endpoint(worker, 'scripts')}/{quote(run_id, safe='')}/cancel",
+            _parsed(SandboxScriptControlRequest, {"worker_key": worker.worker_key, "force": force}),
+            SandboxScriptCancelResponse,
         )
-        self._raise_structured_failure(data)
-        cancel_requested = data.get("cancel_requested")
-        already_finished = data.get("already_finished", False)
-        unknown_handle = data.get("unknown_handle", False)
-        if (
-            not isinstance(cancel_requested, bool)
-            or not isinstance(already_finished, bool)
-            or not isinstance(unknown_handle, bool)
-        ):
-            message = "Worker returned an invalid script cancellation receipt."
-            raise ScriptWorkerError(message, failure_kind="worker")
         return WorkerScriptCancel(
-            cancel_requested=cancel_requested,
-            already_finished=already_finished,
-            unknown_handle=unknown_handle,
+            cancel_requested=receipt.cancel_requested,
+            already_finished=receipt.already_finished,
+            unknown_handle=receipt.unknown_handle,
         )
 
-    async def _post(
+    async def _post[ReceiptT: ScriptReceipt](
         self,
         worker: WorkerHandle,
-        *,
         url: str,
-        json: dict[str, object],
-    ) -> dict[str, object]:
+        request: BaseModel,
+        receipt_model: type[ReceiptT],
+    ) -> ReceiptT:
         token = worker.auth_token
         if token is None:
             message = "Worker authentication token is unavailable."
-            raise ScriptWorkerError(message, failure_kind="worker")
+            raise ScriptWorkerError(message)
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
+            async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS, transport=self.transport) as client:
                 # The body carries the worker key, which names the requester, because access logs record URLs.
-                response = await client.post(url, headers={_TOKEN_HEADER: token}, json=json)
+                response = await client.post(url, headers={_TOKEN_HEADER: token}, json=request.model_dump(mode="json"))
         except httpx.HTTPError as exc:
             message = f"Worker script request failed: {exc}"
-            raise ScriptWorkerError(message, failure_kind="worker") from exc
+            raise ScriptWorkerError(message) from exc
         if response.status_code >= 400:
             detail = error_detail_from_response(
                 response,
                 fallback=f"Worker script request failed with status {response.status_code}.",
             )
-            request_failure = response.status_code in {400, 413, 422}
-            raise ScriptWorkerError(detail, failure_kind="tool" if request_failure else "worker")
+            raise ScriptWorkerError(detail)
         try:
             decoded = response.json()
         except ValueError as exc:
             message = "Worker returned a non-JSON script response."
-            raise ScriptWorkerError(message, failure_kind="worker") from exc
-        if not isinstance(decoded, dict):
-            message = "Worker returned a non-object script response."
-            raise ScriptWorkerError(message, failure_kind="worker")
-        return {str(key): value for key, value in decoded.items()}
+            raise ScriptWorkerError(message) from exc
+        receipt = _parsed(receipt_model, decoded)
+        if not receipt.ok:
+            raise ScriptWorkerError(receipt.error or "Worker script operation failed.")
+        return receipt
 
-    @staticmethod
-    def _raise_structured_failure(data: dict[str, object]) -> None:
-        if data.get("ok") is True:
-            return
-        failure_kind = data.get("failure_kind")
-        kind: Literal["tool", "worker"] = "tool" if failure_kind == "tool" else "worker"
-        error = data.get("error")
-        raise ScriptWorkerError(str(error or "Worker script operation failed."), failure_kind=kind)
+
+def _parsed[ModelT: BaseModel](model: type[ModelT], data: object) -> ModelT:
+    """Validate one script message, naming each rejected field without repeating its value."""
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        detail = validation_error_detail(exc.errors(include_url=False, include_input=False), fallback=model.__name__)
+        message = f"Invalid script worker message: {detail}"
+        # The validation error itself holds the rejected values, which can include the config snapshot.
+        raise ScriptWorkerError(message) from None

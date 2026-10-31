@@ -21,8 +21,8 @@ from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.llm.errors import ProviderError
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
-from tests.delegation_helpers import _call, _delegate_runtime_context, _runtime_paths
-from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
 
@@ -260,7 +260,7 @@ async def test_preapproved_participant_tool_runs(tmp_path: Path, monkeypatch: py
         tmp_path,
         monkeypatch,
         config,
-        turns=[calls(_call("add", "add-1", a=1, b=2)), answer("3")],
+        turns=[calls(tool_call("add", "add-1", a=1, b=2)), answer("3")],
     )
 
     run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator"]}]))
@@ -288,7 +288,6 @@ async def test_participant_cannot_be_continued_outside_its_workflow(
     subagent_id = json.loads(record.read_text())["child"]["subagent_id"]
     toolkit = DelegateTools(
         "leader",
-        ["leader"],
         workflow.paths,
         config,
         agent_workspace_root_path(workflow.paths.storage_root, "leader"),
@@ -408,7 +407,7 @@ async def test_participant_runs_the_profile_validated_at_run_start(
         monkeypatch,
         config,
         turns=[
-            calls(_call("save_file", "save-1", contents=rewritten, file_name="subagents/second.md")),
+            calls(tool_call("save_file", "save-1", contents=rewritten, file_name="subagents/second.md")),
             answer("Rewrote it."),
             answer("Second answer."),
         ],

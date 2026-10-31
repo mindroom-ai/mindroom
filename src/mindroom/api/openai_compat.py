@@ -837,7 +837,7 @@ async def _stream_completion(
     """Handle streaming chat completion via SSE."""
     agent_name, session_id = turn.entity_label, turn.session_id
     stream = cast(
-        "AsyncGenerator[AIStreamChunk, None]",
+        "AsyncGenerator[AIStreamChunk]",
         context_bound_async_stream(
             context_factory=lambda: detached_tool_scope(turn.execution_identity),
             stream_factory=lambda: stream_agent_response(turn, runtime_paths, config),
@@ -986,7 +986,6 @@ async def _prepare_openai_team_execution(
         ),
         response_sender_id=None,
         current_sender_id=None,
-        configured_team_name=team_name,
     )
 
 
@@ -1065,7 +1064,7 @@ def _team_completion_events(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
-) -> AsyncGenerator[TeamRunEvent, None]:
+) -> AsyncGenerator[TeamRunEvent]:
     """Return one team completion's run events, each pulled as the requester, under its request log and helper usage.
 
     Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
@@ -1079,7 +1078,7 @@ def _team_completion_events(
         prepared=prepared,
     )
     return cast(
-        "AsyncGenerator[TeamRunEvent, None]",
+        "AsyncGenerator[TeamRunEvent]",
         context_bound_async_stream(
             context_factory=lambda: detached_tool_scope(execution_identity),
             stream_factory=lambda: context_bound_async_stream(
@@ -1091,7 +1090,6 @@ def _team_completion_events(
                         config=config,
                         runtime_paths=runtime_paths,
                         scope_context=scope_context,
-                        team_name=team_name,
                         user_id=requester_id,
                     ),
                     request_context=request_log_context,
@@ -1177,7 +1175,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
-    stream: AsyncGenerator[TeamRunEvent, None] | None = None
+    stream: AsyncGenerator[TeamRunEvent] | None = None
 
     async def _cleanup() -> None:
         if stream is not None:
@@ -1222,7 +1220,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     state = CompletionStreamState.begin(model_id)
     stream_completed = False
 
-    async def _event_generator() -> AsyncGenerator[str, None]:
+    async def _event_generator() -> AsyncGenerator[str]:
         """Yield the SSE chunks of the team stream, starting with ``first_event``, which was already pulled.
 
         A run that fails mid-stream closes its started tool calls as interrupted and ends with a failure chunk,

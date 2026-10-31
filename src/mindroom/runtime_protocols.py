@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     )
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
+    from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.skill_learning.runner import SkillReviewRunner
@@ -83,6 +84,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     @property
     def scheduled_tasks(self) -> ScheduledTaskRuntime: ...  # noqa: D102
+
+    @property
+    def script_runtime(self) -> ScriptRuntimeLifecycle: ...  # noqa: D102
 
     @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
@@ -145,24 +149,8 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Handle a managed bot completing its first sync."""
         ...
 
-    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
-        """Revoke room-backed reply grants until the router refreshes them."""
-        ...
-
     def refresh_agent_reply_memberships(self) -> Awaitable[None]:
         """Rebuild room-backed reply grants from the router client."""
-        ...
-
-    async def reconcile_reply_authorized_calls(self) -> None:
-        """Revoke denied calls, then reconcile newly authorized joined rooms."""
-        ...
-
-    async def reconcile_pending_invites(self) -> None:
-        """Recheck cached room invites against each entity's invitation policy."""
-        ...
-
-    async def revoke_reply_authorized_calls(self) -> None:
-        """End active calls without running positive room reconciliation."""
         ...
 
     def send_approval_notice(
