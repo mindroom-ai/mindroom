@@ -1430,12 +1430,9 @@ describe("Knowledge", () => {
     expect(descriptionInput).toHaveValue("New docs description");
     expect(store.getState().config?.knowledge_bases?.docs).toEqual({
       description: "New docs description",
-      mode: "semantic",
       path: "./knowledge_docs/docs",
       watch: true,
-      chunk_size: 128,
-      chunk_overlap: 0,
-      git: undefined,
+      chunk_size: 64,
     });
     expect(store.getState().isDirty).toBe(true);
   });
@@ -1463,7 +1460,7 @@ describe("Knowledge", () => {
     expect(chunkSize).toHaveDisplayValue("128");
   });
 
-  it("shows the chunk overlap a save would write while the chunk size is retyped", async () => {
+  it("keeps the chunk overlap when the chunk size is retyped through a smaller value", async () => {
     const store = await mockStatefulStore({
       docs: {
         path: "./knowledge_docs/docs",
@@ -1478,14 +1475,61 @@ describe("Knowledge", () => {
     await screen.findByText("Active: docs");
 
     const chunkSize = screen.getByLabelText("Chunk Size (characters)");
-    for (const value of ["5", "50", "500"]) {
+    const chunkOverlap = screen.getByLabelText("Chunk Overlap (characters)");
+    fireEvent.change(chunkSize, { target: { value: "2" } });
+    // While the size is the minimum, the overlap shows what a save would write.
+    expect(chunkOverlap).toHaveDisplayValue("127");
+    for (const value of ["20", "200", "2000"]) {
       fireEvent.change(chunkSize, { target: { value } });
     }
-    const storedOverlap =
-      store.getState().config?.knowledge_bases?.docs?.chunk_overlap;
+    expect(chunkOverlap).toHaveDisplayValue("300");
+    expect(store.getState().config?.knowledge_bases?.docs).toMatchObject({
+      chunk_size: 2000,
+      chunk_overlap: 300,
+    });
+  });
+
+  it("keeps git settings typed key by key", async () => {
+    const store = await mockStatefulStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        git: { repo_url: "https://github.com/org/repo", branch: "main" },
+      },
+    });
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    const branch = screen.getByLabelText("Branch");
+    fireEvent.change(branch, { target: { value: "" } });
+    expect(store.getState().config?.knowledge_bases?.docs?.git?.branch).toBe(
+      "main",
+    );
+    for (const value of ["", "d", "dev"]) {
+      fireEvent.change(branch, { target: { value } });
+      expect(branch).toHaveDisplayValue(value);
+    }
+    const pollInterval = screen.getByLabelText("Poll Interval (seconds)");
+    const syncTimeout = screen.getByLabelText("Sync Timeout (seconds)");
+    for (const input of [pollInterval, syncTimeout]) {
+      for (const value of ["", "3", "30"]) {
+        fireEvent.change(input, { target: { value } });
+        expect(input).toHaveDisplayValue(value);
+      }
+    }
+    fireEvent.change(pollInterval, { target: { value: "3" } });
     expect(
-      screen.getByLabelText("Chunk Overlap (characters)"),
-    ).toHaveDisplayValue(String(storedOverlap));
+      store.getState().config?.knowledge_bases?.docs?.git
+        ?.poll_interval_seconds,
+    ).toBe(5);
+    fireEvent.change(pollInterval, { target: { value: "30" } });
+    expect(store.getState().config?.knowledge_bases?.docs?.git).toMatchObject({
+      branch: "dev",
+      poll_interval_seconds: 30,
+      sync_timeout_seconds: 30,
+    });
   });
 
   it("saves updated git settings from base settings", async () => {

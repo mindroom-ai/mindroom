@@ -166,6 +166,13 @@ function sourceTypeForBase(config?: KnowledgeBaseConfig): KnowledgeSourceType {
   return config?.git ? "git" : "local";
 }
 
+const branchOrMain = (text: string) => text || "main";
+
+function secondsAtLeastFive(text: string): number {
+  const seconds = Number.parseInt(text, 10);
+  return Number.isNaN(seconds) || seconds < 5 ? 5 : seconds;
+}
+
 function defaultGitSettings(
   gitConfig?: KnowledgeGitConfig,
 ): KnowledgeGitConfig {
@@ -436,13 +443,16 @@ export function Knowledge() {
 
   const updateSettings = useCallback(
     (updates: Partial<KnowledgeBaseConfig>) => {
-      if (!selectedBase) {
+      if (!selectedBaseConfig) {
         return;
       }
 
-      updateKnowledgeBase(selectedBase, { ...settings, ...updates });
+      // Edits go over the authored base, not the normalized view: writing
+      // the view back would make a clamp against a half-typed chunk size
+      // permanent.
+      updateKnowledgeBase(selectedBase, { ...selectedBaseConfig, ...updates });
     },
-    [selectedBase, settings, updateKnowledgeBase],
+    [selectedBase, selectedBaseConfig, updateKnowledgeBase],
   );
 
   const hasGitRepoUrlReplacement =
@@ -1191,13 +1201,13 @@ export function Knowledge() {
                     >
                       Branch
                     </label>
-                    <Input
+                    <ParsedInput
                       id="new-base-git-branch"
                       value={newBaseGitSettings.branch ?? "main"}
-                      onChange={(event) =>
-                        updateNewBaseGitSettings({
-                          branch: event.target.value || "main",
-                        })
+                      format={(branch) => branch}
+                      parse={branchOrMain}
+                      onChange={(branch) =>
+                        updateNewBaseGitSettings({ branch })
                       }
                       placeholder="main"
                     />
@@ -1495,14 +1505,12 @@ export function Knowledge() {
                       >
                         Branch
                       </label>
-                      <Input
+                      <ParsedInput
                         id="knowledge-git-branch"
                         value={settings.git.branch ?? "main"}
-                        onChange={(event) =>
-                          updateGitSettings({
-                            branch: event.target.value || "main",
-                          })
-                        }
+                        format={(branch) => branch}
+                        parse={branchOrMain}
+                        onChange={(branch) => updateGitSettings({ branch })}
                         placeholder="main"
                       />
                     </div>
@@ -1514,23 +1522,16 @@ export function Knowledge() {
                       >
                         Poll Interval (seconds)
                       </label>
-                      <Input
+                      <ParsedInput
                         id="knowledge-git-poll-interval-seconds"
                         type="number"
                         min={5}
                         value={settings.git.poll_interval_seconds ?? 300}
-                        onChange={(event) => {
-                          const nextValue = Number.parseInt(
-                            event.target.value,
-                            10,
-                          );
-                          updateGitSettings({
-                            poll_interval_seconds:
-                              Number.isNaN(nextValue) || nextValue < 5
-                                ? 5
-                                : nextValue,
-                          });
-                        }}
+                        format={String}
+                        parse={secondsAtLeastFive}
+                        onChange={(poll_interval_seconds) =>
+                          updateGitSettings({ poll_interval_seconds })
+                        }
                       />
                       <p className="text-xs text-muted-foreground">
                         Minimum snapshot age before checking for Git updates on
@@ -1568,23 +1569,16 @@ export function Knowledge() {
                       >
                         Sync Timeout (seconds)
                       </label>
-                      <Input
+                      <ParsedInput
                         id="knowledge-git-sync-timeout-seconds"
                         type="number"
                         min={5}
                         value={settings.git.sync_timeout_seconds ?? 3600}
-                        onChange={(event) => {
-                          const nextValue = Number.parseInt(
-                            event.target.value,
-                            10,
-                          );
-                          updateGitSettings({
-                            sync_timeout_seconds:
-                              Number.isNaN(nextValue) || nextValue < 5
-                                ? 5
-                                : nextValue,
-                          });
-                        }}
+                        format={String}
+                        parse={secondsAtLeastFive}
+                        onChange={(sync_timeout_seconds) =>
+                          updateGitSettings({ sync_timeout_seconds })
+                        }
                       />
                       <p className="text-xs text-muted-foreground">
                         Abort a hung Git command after this many seconds.

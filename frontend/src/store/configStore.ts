@@ -48,7 +48,8 @@ export type SaveConfigResult =
 type ConfigDiagnosticPath = Array<string | number>;
 
 // The save payload rebuilds these roots from the draft agent and team
-// collections; every other dirty root is copied from the draft config.
+// collections; every other dirty root is copied from the draft config, with
+// room names trimmed.
 const COLLECTION_ROOTS = new Set(["agents", "teams"]);
 
 // Schema-driven editors address roots by name, including roots the typed
