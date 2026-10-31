@@ -44,6 +44,7 @@ The deployment lookup raises on failure for every caller: a sync leaves the row 
 
 A provision that claims the instance while a sync waits on Kubernetes changes its status, and the sync must not undo that claim.
 The guard compares status only, so a sync that read `provisioning` while a provision held the instance can still record what Kubernetes shows (see the known limitation).
+Provisioning's own readiness writes follow the same rule: they record `running` only while the row still holds the provision's `provisioning` claim, so a stop an admin records during the wait stands.
 
 ### Stripe prices are matched by amount
 

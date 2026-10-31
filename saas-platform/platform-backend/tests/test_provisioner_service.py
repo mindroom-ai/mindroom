@@ -5,7 +5,7 @@ import base64
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -357,3 +357,70 @@ class TestInstanceStatusSync:
                 {"instance_id": 3, "old_status": "running", "new_status": "error", "reason": "deployment_not_found"},
             ],
         }
+
+
+_ACCOUNT_ID = "00000000-0000-0000-0000-000000000001"
+_SUBSCRIPTION_ID = "11111111-1111-1111-1111-111111111111"
+
+
+class TestReadinessStatusWrites:
+    """Provisioning records running once the deployment is ready, but only over its own provisioning claim."""
+
+    @pytest.mark.parametrize(
+        ("written_meanwhile", "ready", "expected"),
+        [("provisioning", True, "running"), ("provisioning", False, "provisioning"), ("stopped", True, "stopped")],
+    )
+    def test_provision_records_running_only_over_its_own_claim(
+        self, written_meanwhile: str, ready: bool, expected: str
+    ):
+        """An admin's stop during the readiness wait stands, and the deployed tier is recorded either way."""
+        row = {
+            "instance_id": 7,
+            "subscription_id": _SUBSCRIPTION_ID,
+            "account_id": _ACCOUNT_ID,
+            "status": "running",
+            "tier": "hobby",
+            "openrouter_key_hash": None,
+            "lifecycle_stopped_at": None,
+        }
+        db = FakeSupabase({"instances": [row]})
+
+        async def ready_after_a_write(*_args: Any, **_kwargs: Any) -> bool:  # noqa: ANN401
+            db.row("instances", instance_id=7)["status"] = written_meanwhile
+            return ready
+
+        service = "backend.services.provisioner_service"
+        with (
+            patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+            patch(f"{service}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+            patch(f"{service}._apply_instance_secret", AsyncMock(return_value="hash")),
+            patch(f"{service}.wait_for_deployment_ready", ready_after_a_write),
+            patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        ):
+            asyncio.run(
+                provisioner_service.provision_instance(
+                    db,
+                    data={
+                        "subscription_id": _SUBSCRIPTION_ID,
+                        "account_id": _ACCOUNT_ID,
+                        "tier": "byok",
+                        "instance_id": 7,
+                    },
+                    background_tasks=None,
+                )
+            )
+
+        assert (row["status"], row["tier"]) == (expected, "byok")
+
+    @pytest.mark.parametrize(("stored", "expected"), [("provisioning", "running"), ("stopped", "stopped")])
+    def test_background_readiness_records_running_only_over_the_claim(self, stored: str, expected: str):
+        """The longer background wait does not undo a stop recorded while it waited."""
+        db = FakeSupabase({"instances": [{"instance_id": 7, "status": stored, "lifecycle_stopped_at": None}]})
+
+        with (
+            patch("backend.services.provisioner_service.ensure_supabase", return_value=db),
+            patch("backend.services.provisioner_service.wait_for_deployment_ready", AsyncMock(return_value=True)),
+        ):
+            asyncio.run(provisioner_service._background_mark_running_when_ready("7"))
+
+        assert db.row("instances", instance_id=7)["status"] == expected

@@ -141,7 +141,8 @@ async def _background_mark_running_when_ready(instance_id: str, namespace: str =
         ready = await wait_for_deployment_ready(instance_id, namespace=namespace, timeout_seconds=600)
         if ready and not _held_by_lifecycle(ensure_supabase(), instance_id):
             try:
-                update_instance(ensure_supabase(), instance_id, {"status": "running"})
+                # A status another writer recorded meanwhile, such as an admin's stop, stands.
+                update_instance(ensure_supabase(), instance_id, {"status": "running"}, expected_status="provisioning")
             except Exception:
                 logger.warning("Background update: failed to mark instance %s as running", instance_id)
     except Exception:
@@ -1027,7 +1028,10 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         return held_response
     try:
         # The tier is recorded only once deployed; the subscription lifecycle redeploys an instance whose tier differs.
-        update_instance(sb, customer_id, {"status": "running" if ready else "provisioning", "tier": tier})
+        update_instance(sb, customer_id, {"tier": tier})
+        if ready:
+            # A status another writer recorded meanwhile, such as an admin's stop, stands.
+            update_instance(sb, customer_id, {"status": "running"}, expected_status="provisioning")
     except Exception:
         logger.warning("Failed to update instance status after readiness poll")
 
