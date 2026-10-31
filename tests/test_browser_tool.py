@@ -3260,6 +3260,8 @@ async def test_status_reading_a_frozen_tab_does_not_hold_up_other_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Other calls on the browser go on while status waits for a tab's title."""
+    # The title answers only when the test lets it, so its bound must outlast the test's own waits.
+    monkeypatch.setattr("mindroom.custom_tools.browser._TAB_TITLE_TIMEOUT_SECONDS", 2 * SETTLE_TIMEOUT_SECONDS)
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
     adapters = _browser_per_start(monkeypatch)
     browser = BrowserTools(paths)
