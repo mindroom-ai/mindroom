@@ -241,7 +241,7 @@ def test_sync_copies_the_whole_bundle_onto_a_new_target(
     tmp_path: Path,
     existing: str,
 ) -> None:
-    """A first start creates the target, including missing parents, as an exact copy that keeps source mtimes."""
+    """A first start creates the target, including missing parents, as an exact copy."""
     source = _make_source(tmp_path / "bundle")
     target = tmp_path / "storage" / "content-bundles" / "sync"
     if existing == "empty":
@@ -250,10 +250,6 @@ def test_sync_copies_the_whole_bundle_onto_a_new_target(
     _run(bundle_inits["sync"], tool_dir, source, target)
 
     assert _snapshot(target) == _snapshot(source)
-    # BusyBox cp -a keeps whole seconds only.
-    assert {name: ids[1] // 10**9 for name, ids in _file_ids(target).items()} == {
-        name: ids[1] // 10**9 for name, ids in _file_ids(source).items()
-    }
 
 
 def test_sync_removes_and_repairs_entries_written_into_the_target(
@@ -383,6 +379,55 @@ def test_sync_fills_directories_that_end_up_read_only_without_root(
         source.chmod(0o555)
         _run(bundle_inits["sync"], tool_dir, source, target)
         assert _snapshot(target) == _snapshot(source)
+
+
+_BUSYBOX_IMAGE = "mirror.gcr.io/library/busybox:1.36"
+# Runs as root in the bundle image: builds a root-owned bundle, then starts the init twice as nobody, as a pod whose
+# securityContext sets a non-root user does, and compares the trees.
+_NON_ROOT_INIT = """
+set -eu
+cat > /init.sh
+mkdir -p /bundle/plugins/tools /bundle/scripts /bundle/read-only /storage
+echo 'VERSION = 1' > /bundle/plugins/tools/plugin.py
+printf '#!/bin/sh\\necho seeded\\n' > /bundle/scripts/seed.sh
+chmod 0755 /bundle/scripts/seed.sh
+echo shared > /bundle/shared.md
+chmod 0664 /bundle/shared.md
+echo kept > /bundle/read-only/kept.md
+chmod 0555 /bundle/read-only
+ln -s plugins/tools /bundle/current
+chown nobody:nobody /storage
+start() { su -s /bin/sh -c 'sh -ec "$(cat /init.sh)" content-bundle-sync /bundle /storage/sync' nobody; }
+start
+echo 'VERSION = 2' > /bundle/plugins/tools/plugin.py
+chmod 0775 /bundle/scripts/seed.sh
+start
+listing() { cd "$1" && find . -exec stat -c '%a %F %n' {} + | sort; }
+[ "$(listing /bundle)" = "$(listing /storage/sync)" ] || { echo trees differ >&2; exit 1; }
+[ "$(stat -c %U /storage/sync/shared.md)" = nobody ]
+cat /storage/sync/plugins/tools/plugin.py
+"""
+
+
+def test_a_non_root_init_copies_a_root_owned_bundle_without_ownership_errors(
+    bundle_inits: dict[str, dict[str, Any]],
+) -> None:
+    """BusyBox cp -a run as non-root reports every file whose root owner it cannot copy, which buries real errors."""
+    docker = shutil.which("docker")
+    if docker is None or subprocess.run([docker, "info"], check=False, capture_output=True).returncode:
+        pytest.skip("Docker is required to run the init in a BusyBox bundle image")
+
+    completed = subprocess.run(
+        [docker, "run", "--rm", "-i", _BUSYBOX_IMAGE, "sh", "-c", _NON_ROOT_INIT],
+        input=bundle_inits["sync"]["args"][0],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+    assert completed.stdout == "VERSION = 2\n"
 
 
 def test_root_without_permission_override_updates_read_only_directories(
