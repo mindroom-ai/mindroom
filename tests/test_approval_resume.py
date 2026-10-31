@@ -164,7 +164,6 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
         paused_state,
         children=[replace(child, status="completed", result="42")],
         hooks={call_id: replace(hook, after_called=True) for call_id, hook in paused_state.hooks.items()},
-        pending_tools=[],
         pending_tool_sources={},
         pending_requirements=[],
         pending_child_id=None,

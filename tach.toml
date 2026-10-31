@@ -8248,7 +8248,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.delegation.state"
-depends_on = ["mindroom.history.types", "mindroom.tool_system.worker_routing"]
+depends_on = ["mindroom.history.types", "mindroom.llm", "mindroom.tool_system.worker_routing"]
 
 [[modules]]
 path = "mindroom.delegation.hooks"

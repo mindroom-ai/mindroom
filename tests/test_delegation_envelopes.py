@@ -317,14 +317,14 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
         assert {source.toolkit_name for source in state.pending_tool_sources.values()} == {"calculator"}
         approval_calls = tuple(
             ApprovalCall(
-                tool_call_id=str(tool["tool_call_id"]),
-                tool_name=str(tool["tool_name"]),
+                tool_call_id=tool.tool_call_id,
+                tool_name=tool.tool_name,
                 invoking_agent="child",
                 toolkit_name="calculator",
                 expires_at_ns=2**62,
-                arguments_digest=approval_arguments_digest(tool["tool_args"]),
+                arguments_digest=approval_arguments_digest(tool.tool_args),
             )
-            for tool in state.pending_tools
+            for tool in (requirement.tool_execution for requirement in state.pending_calls())
         )
         result = await resume(
             approval_executor(config, paths),
@@ -428,14 +428,14 @@ async def test_a_resumed_child_that_answered_after_a_refused_model_switch_is_not
     state = DelegationState.from_metadata(stored_run("leader", "parent-run", **options).metadata)
     approval_calls = tuple(
         ApprovalCall(
-            tool_call_id=str(tool["tool_call_id"]),
-            tool_name=str(tool["tool_name"]),
+            tool_call_id=tool.tool_call_id,
+            tool_name=tool.tool_name,
             invoking_agent="child",
             toolkit_name="calculator",
             expires_at_ns=2**62,
-            arguments_digest=approval_arguments_digest(tool["tool_args"]),
+            arguments_digest=approval_arguments_digest(tool.tool_args),
         )
-        for tool in state.pending_tools
+        for tool in (requirement.tool_execution for requirement in state.pending_calls())
     )
 
     result = await resume(

@@ -276,7 +276,6 @@ def test_a_paused_child_s_toolkit_owners_are_the_toolkits_its_sources_recorded(
         persona=None,
     )
     state = DelegationState(
-        pending_tools=[tool.to_dict()],
         pending_tool_sources={"child-card": DelegationPendingTool(child, "child-call", toolkit_name=recorded)},
         pending_requirements=[RunRequirement(tool).to_dict()],
         pending_child_id="delegation",

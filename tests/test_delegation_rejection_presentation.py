@@ -120,7 +120,10 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
             response = await _drive_delegations(response, **options)
             assert response.status is RunStatus.paused
             state = DelegationState.from_metadata(response.metadata)
-            approval_calls = answered_calls((str(tool["tool_call_id"]) for tool in state.pending_tools), approved=False)
+            approval_calls = answered_calls(
+                (call.tool_execution.tool_call_id for call in state.pending_calls()),
+                approved=False,
+            )
 
         async def stored_run() -> AsyncIterator[RunEvent]:
             yield RunFinished(response)
@@ -238,7 +241,10 @@ async def test_a_refused_subagent_call_answers_with_its_refusal_instead_of_its_o
         if rejection == "policy":
             response = await _drive_delegations(response, **options)
             state = DelegationState.from_metadata(response.metadata)
-            approval_calls = answered_calls((str(tool["tool_call_id"]) for tool in state.pending_tools), approved=False)
+            approval_calls = answered_calls(
+                (call.tool_execution.tool_call_id for call in state.pending_calls()),
+                approved=False,
+            )
 
         async def stored_run() -> AsyncIterator[RunEvent]:
             yield RunFinished(response)

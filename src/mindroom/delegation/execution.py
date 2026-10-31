@@ -547,7 +547,6 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
     for tool in paused.tools:
         projected = deepcopy(tool)
         projected.tool_call_id = child_card_id(child.delegation_id, tool.tool_call_id)
-        state.pending_tools.append(projected.to_dict())
         state.pending_tool_sources[projected.tool_call_id] = deepcopy(
             child_state.pending_tool_sources.get(tool.tool_call_id)
             or DelegationPendingTool(
@@ -560,17 +559,16 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
 
 
 async def _complete_approved_child_tools(
-    pending_tools: list[dict[str, object]],
-    tool_sources: Mapping[str, DelegationPendingTool],
+    generation: DelegationState,
     on_event: ResumeEvents,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> None:
     """Publish each resumed tool's result, read from its exact approved attempt, in the parent's live trace."""
-    for pending_tool in pending_tools:
-        call_id = ToolExecution.from_dict(pending_tool).tool_call_id
-        source = tool_sources[call_id]
+    for requirement in generation.pending_calls():
+        call_id = requirement.tool_execution.tool_call_id
+        source = generation.pending_tool_sources[call_id]
         response = await read_child_run(source.child, config, runtime_paths)
         for tool in (response.tools or ()) if response is not None else ():
             if tool.tool_call_id == source.tool_call_id and not tool.is_paused:
@@ -579,14 +577,14 @@ async def _complete_approved_child_tools(
 
 
 def _settle_pending_child_tools(
-    pending_tools: list[dict[str, object]],
+    generation: DelegationState,
     on_event: ResumeEvents,
     *,
     reason: str,
 ) -> None:
     """Close the current approval generation's visible tools after an interruption."""
-    for pending_tool in pending_tools:
-        on_event(ToolCompleted(replace(ToolExecution.from_dict(pending_tool).call, result=reason, is_error=True)))
+    for requirement in generation.pending_calls():
+        on_event(ToolCompleted(replace(requirement.tool_execution.call, result=reason, is_error=True)))
 
 
 def _prepare_delegation_output(
@@ -1129,7 +1127,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     reason=authorization,
                 )
             if waited_child is not None and on_event is not None:
-                _settle_pending_child_tools(previous_state.pending_tools, on_event, reason=authorization)
+                _settle_pending_child_tools(previous_state, on_event, reason=authorization)
         result = resolve_result(authorization, failed=True)
         if requirement.id in state.hooks:
             await after_delegation(
@@ -1153,7 +1151,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         projected.requires_confirmation = True
         projected.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
         projected.tool_call_id = requirement_key
-        state.pending_tools = [projected.to_dict()]
         state.pending_requirements = [RunRequirement(projected).to_dict()]
         state.pending_agent_name = caller
         await persist(state)
@@ -1281,8 +1278,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 )
                 if child_calls is not None and on_event is not None:
                     await _complete_approved_child_tools(
-                        previous_state.pending_tools,
-                        previous_state.pending_tool_sources,
+                        previous_state,
                         on_event,
                         config=config,
                         runtime_paths=runtime_paths,
@@ -1325,7 +1321,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     status="failed",
                 )
                 if child_calls is not None and on_event is not None:
-                    _settle_pending_child_tools(previous_state.pending_tools, on_event, reason=reason)
+                    _settle_pending_child_tools(previous_state, on_event, reason=reason)
             await persist(state)
 
         # Completed and failed children both close the parent call and its after hook.
@@ -1367,10 +1363,7 @@ def prepare_delegation_state(
     own = ResumeDecisions()
     if approval_calls is not None:
         # Validate every presented identity before touching any child or gate.
-        apply_exact_approval_decisions(
-            [RunRequirement.from_dict(item) for item in state.pending_requirements],
-            approval_calls,
-        )
+        apply_exact_approval_decisions(state.pending_calls(), approval_calls)
         if state.pending_child_id is None:
             ordinary = [item for item in response.requirements or () if item.needs_confirmation]
             ordinary_ids = {item.tool_execution.tool_call_id for item in ordinary}
@@ -1465,7 +1458,6 @@ async def _drive_delegations[R: AnyRunRecord](
         # Ask for ordinary calls last, so the approval that covers them belongs to the continuation that runs them.
         if ordinary:
             state.pending_requirements = [requirement.to_dict() for requirement in ordinary]
-            state.pending_tools = [requirement.tool_execution.to_dict() for requirement in ordinary]
             await persist(state)
             return response
         await persist(state)

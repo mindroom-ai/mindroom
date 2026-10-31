@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 
 from mindroom.history.types import HistoryScope
+from mindroom.llm.runs import RunRequirement
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -15,7 +16,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.llm.runs import RunRequirement
     from mindroom.llm.usage import RunMetrics
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -176,8 +176,8 @@ class DelegationState:
     children: list[DelegationChild] = field(default_factory=list)
     gates: dict[str, bool] = field(default_factory=dict)
     hooks: dict[str, DelegationHookState] = field(default_factory=dict)
-    pending_tools: list[dict[str, Any]] = field(default_factory=list)
     pending_tool_sources: dict[str, DelegationPendingTool] = field(default_factory=dict)
+    # The calls the presented approval generation asks about, as stored requirements.
     pending_requirements: list[dict[str, Any]] = field(default_factory=list)
     pending_agent_name: str | None = None
     pending_child_id: str | None = None
@@ -190,6 +190,13 @@ class DelegationState:
     @classmethod
     def from_metadata(cls, metadata: dict[str, Any] | None) -> DelegationState:
         """Read the driver-owned snapshot attached to a run's metadata."""
+        # LEGACY_COMPAT: Delegation state that stored each pending call twice.
+        # Legacy format: `mindroom_delegation` metadata with a `pending_tools` list beside `pending_requirements`,
+        # holding the tool execution of each pending requirement again, in the same order.
+        # Last legacy release: v2026.10.744 wrote both lists; the next release writes only `pending_requirements`.
+        # Handling: `pending_tools` is ignored, since the requirements hold the same calls, and the next write of
+        # the state drops it.
+        # Coverage: tests/test_response_turn.py::test_a_stored_delegation_pause_with_a_separate_tool_list_presents_its_requirements
         stored = (metadata or {}).get(DELEGATION_STATE_KEY)
         if stored is None:
             return cls()
@@ -201,7 +208,6 @@ class DelegationState:
             children=[DelegationChild.from_dict(child) for child in snapshot.get("children", [])],
             gates=dict(snapshot.get("gates", {})),
             hooks={key: DelegationHookState(**value) for key, value in snapshot.get("hooks", {}).items()},
-            pending_tools=list(snapshot.get("pending_tools", [])),
             pending_tool_sources={
                 call_id: DelegationPendingTool(
                     child=DelegationChild.from_dict(source["child"]),
@@ -216,9 +222,12 @@ class DelegationState:
             storage_bindings=dict(snapshot.get("storage_bindings", {})),
         )
 
+    def pending_calls(self) -> list[RunRequirement]:
+        """Return fresh copies of the requirements the presented approval generation asks about."""
+        return [RunRequirement.from_dict(item) for item in self.pending_requirements]
+
     def clear_pending(self) -> None:
         """Clear only the presented approval generation, retaining sibling results."""
-        self.pending_tools = []
         self.pending_tool_sources = {}
         self.pending_requirements = []
         self.pending_agent_name = None

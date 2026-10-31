@@ -635,7 +635,7 @@ def pending_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
     """
     delegation = DelegationState.from_metadata(record.metadata)
     if delegation.pending_requirements:
-        return [RunRequirement.from_dict(item) for item in delegation.pending_requirements]
+        return delegation.pending_calls()
     return deepcopy(record.requirements or [])
 
 
@@ -651,20 +651,21 @@ def paused_attempt_from_response(
         msg = f"Paused run {record.run_id!r} names no session"
         raise RuntimeError(msg)
     delegation = DelegationState.from_metadata(record.metadata)
-    if delegation.pending_tools:
-        pending_tools = [ToolExecution.from_dict(tool) for tool in delegation.pending_tools]
+    if delegation.pending_requirements:
+        requirements = delegation.pending_calls()
         if delegation.pending_child_id is not None:
             # A source that recorded no toolkit leaves its call unowned, as a missing key does.
             toolkit_owners = {
-                (source.child.child_agent_name, tool.tool_name): source.toolkit_name
-                for tool in pending_tools
-                if (source := delegation.pending_tool_sources.get(tool.tool_call_id)) is not None
+                (source.child.child_agent_name, requirement.tool_execution.tool_name): source.toolkit_name
+                for requirement in requirements
+                if (source := delegation.pending_tool_sources.get(requirement.tool_execution.tool_call_id)) is not None
                 and source.toolkit_name is not None
             }
+        # The pause's tools are its requirements' own calls.
         paused = _paused_attempt_from_pause(
             toolkit_owners=toolkit_owners,
-            tools=pending_tools,
-            requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
+            tools=(),
+            requirements=requirements,
             session_id=record.session_id,
             run_id=record.run_id,
         )
