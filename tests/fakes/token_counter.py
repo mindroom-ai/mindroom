@@ -22,9 +22,10 @@ def fake_token_counter(
     key: str = "fake",
     count: Callable[[str], Awaitable[int]] | None = None,
     replay: PortableReplayEstimator | None = None,
+    framed: bool = False,
 ) -> TokenCounter:
     """Return a counter estimating ``quarter_tokens``; ``count`` stands in for a provider's counting endpoint."""
-    return TokenCounter(key=key, estimate=quarter_tokens, count=count, replay=replay)
+    return TokenCounter(key=key, estimate=quarter_tokens, count=count, replay=replay, framed=framed)
 
 
 __all__ = ["fake_token_counter", "quarter_tokens"]

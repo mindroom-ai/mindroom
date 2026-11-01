@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
 
     from mindroom.llm.provider import TokenCounter
 
@@ -31,7 +31,6 @@ __all__ = [
     "fit_text",
     "measure",
     "opaque_tokens",
-    "text_tokens",
     "utf8_byte_bound",
 ]
 
@@ -62,6 +61,8 @@ class _Counts:
     """The process's exact counts, cooldowns, and provider counts in flight; the lock guards only updates."""
 
     exact: dict[_TextKey, int] = field(default_factory=dict)
+    # What a framed endpoint counts for a message beyond its text, by counter key.
+    framing: dict[str, int] = field(default_factory=dict)
     cooling_until: dict[str, float] = field(default_factory=dict)
     # Counter keys whose latest provider count failed, so a streak of failures warns once.
     failing: set[str] = field(default_factory=set)
@@ -142,14 +143,25 @@ def _cooling(counter: TokenCounter) -> bool:
 async def count_exact(counter: TokenCounter, text: str) -> TokenCount:
     """Count ``text`` through ``counter``'s provider unless a local count is exact; a failure counts locally.
 
-    Encoding runs in a worker thread, so a long text never stalls the event loop.
+    A framed endpoint's framing is counted once per counter key. Encoding runs in a worker thread, so a long text never
+    stalls the event loop.
     """
     local = await asyncio.to_thread(count, counter, text)
-    if local.kind == "exact" or counter.count is None or not text.strip() or _cooling(counter):
+    provider_count = counter.count
+    if local.kind == "exact" or provider_count is None or not text.strip() or _cooling(counter):
         return local
     try:
         async with asyncio.timeout(_TIMEOUT_SECONDS):
-            tokens = await counter.count(text)
+            framing = _state.framing.get(counter.key) if counter.framed else 0
+            if framing is None:
+                # A one-character message holds one token, which leaves the framing; each framed route's tokenizer
+                # encodes "a" as one token.
+                tokens, framed_one = await asyncio.gather(provider_count(text), provider_count("a"))
+                with _state.lock:
+                    framing = _state.framing[counter.key] = framed_one - 1
+            else:
+                tokens = await provider_count(text)
+            tokens = max(0, tokens - framing)
     # Any network or provider failure leaves the local count standing.
     except Exception as error:
         with _state.lock:
@@ -196,16 +208,6 @@ async def measure(counter: TokenCounter, *texts: str) -> None:
         tasks.append(task)
     if tasks:
         await asyncio.wait(tasks)
-
-
-async def text_tokens(count_message: Callable[[str], Awaitable[int]], text: str) -> int:
-    """Count ``text`` through an endpoint that counts it as a whole message, without that message's framing.
-
-    The endpoint also counts a one-character message, whose one token leaves only the framing; each route that
-    counts this way has a tokenizer that encodes ``"a"`` as one token.
-    """
-    tokens, framed_one = await asyncio.gather(count_message(text), count_message("a"))
-    return max(0, tokens - (framed_one - 1))
 
 
 def fit_text(

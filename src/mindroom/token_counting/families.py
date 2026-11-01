@@ -167,6 +167,7 @@ def counter_for_model(
     *,
     local_encoder: bool = False,
     count: Callable[[str], Awaitable[int]] | None = None,
+    framed: bool = False,
     replay: PortableReplayEstimator | None = None,
     endpoint: str | None = None,
 ) -> TokenCounter:
@@ -174,8 +175,8 @@ def counter_for_model(
 
     ``local_encoder`` says the route serves OpenAI's own models, so the tokenizer tiktoken maps the model id to is the
     model's own; any other route may serve another model under an OpenAI name, so the name only picks its estimate.
-    ``endpoint`` names where ``count`` reaches for a route whose identity names no endpoint, so a failing endpoint
-    pauses only its own counts.
+    ``framed`` says ``count`` counts a whole message holding the text. ``endpoint`` names where ``count`` reaches for a
+    route whose identity names no endpoint, so a failing endpoint pauses only its own counts.
     """
     name = identity.id.lower().rsplit("/", 1)[-1]
     if local_encoder and (encoding := _own_encoding(name)) is not None:
@@ -189,6 +190,7 @@ def counter_for_model(
         key=f"{identity.provider}:{endpoint or identity.endpoint or ''}:{identity.id}",
         estimate=partial(_scaled_o200k_tokens, _margin(name)),
         count=count,
+        framed=framed,
         replay=replay,
     )
 

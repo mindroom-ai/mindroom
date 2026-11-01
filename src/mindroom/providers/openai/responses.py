@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import InvalidRequest
@@ -30,7 +29,6 @@ from mindroom.providers.openai.responses_wire import (
     responses_stop_reason,
     usage_report,
 )
-from mindroom.token_counting.counts import text_tokens
 from mindroom.token_counting.families import counter_for_model
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -83,7 +81,8 @@ class ResponsesAdapter:
         return counter_for_model(
             self.identity,
             local_encoder=openai_endpoint or self.wire.route == "codex",
-            count=partial(text_tokens, self._count_input_tokens) if openai_endpoint else None,
+            count=self._count_input_tokens if openai_endpoint else None,
+            framed=True,
             replay=self,
         )
 

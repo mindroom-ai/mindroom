@@ -47,7 +47,6 @@ from mindroom.providers.gemini.wire import (
 from mindroom.providers.google_adc import with_runtime_application_credentials
 from mindroom.providers.identity import model_identity
 from mindroom.providers.tool_policy import disables_tools
-from mindroom.token_counting.counts import text_tokens
 from mindroom.token_counting.families import counter_for_model
 
 if TYPE_CHECKING:
@@ -94,18 +93,14 @@ class GeminiProvider:
             if params["vertexai"]
             else f"gemini-api:{params['http_options'].get('base_url', '')}"
         )
-        return counter_for_model(self.identity, count=self._count_text_tokens, endpoint=endpoint)
+        return counter_for_model(self.identity, count=self._count_content_tokens, framed=True, endpoint=endpoint)
 
-    async def _count_text_tokens(self, text: str) -> int:
-        """Count ``text`` without the framing of the content the endpoint counts it in, on one client."""
+    async def _count_content_tokens(self, text: str) -> int:
+        """Count a content holding ``text``, framing included."""
         # Building the client may discover Google credentials, which blocks.
         client = await asyncio.to_thread(self._sdk_client)
-
-        async def content_tokens(content: str) -> int:
-            counted = await client.aio.models.count_tokens(model=self.identity.id, contents=content)
-            return counted.total_tokens or 0
-
-        return await text_tokens(content_tokens, text)
+        counted = await client.aio.models.count_tokens(model=self.identity.id, contents=text)
+        return counted.total_tokens or 0
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.

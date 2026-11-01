@@ -14,7 +14,7 @@ from structlog.testing import capture_logs
 
 from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.token_counting import counts, families
-from mindroom.token_counting.counts import TokenCount, count, count_exact, estimated, fit_text, measure, text_tokens
+from mindroom.token_counting.counts import TokenCount, count, count_exact, estimated, fit_text, measure
 from mindroom.token_counting.families import counter_for_model, load_o200k
 from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 
@@ -178,11 +178,26 @@ def test_blank_text_never_reaches_the_endpoint() -> None:
     assert endpoint.texts == []
 
 
-def test_text_tokens_removes_the_message_framing() -> None:
+def test_a_framed_endpoint_counts_its_framing_once_per_key() -> None:
+    """An endpoint that counts whole messages counts a one-token message once per key, and that framing comes off."""
+    texts: list[str] = []
+
     async def framed(text: str) -> int:
+        texts.append(text)
         return len(text) + 9
 
-    assert asyncio.run(text_tokens(framed, "abcd")) == 4
+    counter = fake_token_counter(count=framed, framed=True)
+
+    async def scenario() -> None:
+        assert await count_exact(counter, "abcd") == TokenCount(4, "exact")
+        assert await count_exact(counter, "efghij") == TokenCount(6, "exact")
+        assert await count_exact(fake_token_counter(key="other", count=framed, framed=True), "abcd") == TokenCount(
+            4,
+            "exact",
+        )
+
+    asyncio.run(scenario())
+    assert texts == ["abcd", "a", "efghij", "abcd", "a"]
 
 
 def test_failed_count_falls_back_logs_kind_and_cools_down_only_its_key() -> None:

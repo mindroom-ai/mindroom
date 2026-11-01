@@ -99,7 +99,6 @@ from mindroom.providers.identity import model_identity
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import AWS_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
-from mindroom.token_counting.counts import text_tokens
 from mindroom.token_counting.families import counter_for_model
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
@@ -242,24 +241,21 @@ class ClaudeProvider:
         """Claude counts through the Messages API's free token counting endpoint, which every route serves."""
         return counter_for_model(
             self.identity,
-            count=self._count_text_tokens,
+            count=self._count_message_tokens,
+            framed=True,
             # Only Bedrock has no endpoint identity; its region names where counts go.
             endpoint=f"bedrock:{_bedrock_region(self.settings)}" if self.route == "bedrock_claude" else None,
         )
 
-    async def _count_text_tokens(self, text: str) -> int:
-        """Count ``text`` without the framing of the user message the endpoint counts it in, on one client."""
+    async def _count_message_tokens(self, text: str) -> int:
+        """Count a user message holding ``text``, framing included."""
         # Building the client may discover Google credentials, which blocks.
         client = await asyncio.to_thread(self._client)
-
-        async def message_tokens(content: str) -> int:
-            counted = await client.messages.count_tokens(
-                model=self.identity.id,
-                messages=[{"role": "user", "content": content}],
-            )
-            return counted.input_tokens
-
-        return await text_tokens(message_tokens, text)
+        counted = await client.messages.count_tokens(
+            model=self.identity.id,
+            messages=[{"role": "user", "content": text}],
+        )
+        return counted.input_tokens
 
     def native_compaction_settings(
         self,

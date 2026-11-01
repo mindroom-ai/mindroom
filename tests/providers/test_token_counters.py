@@ -63,10 +63,11 @@ async def test_claude_counts_through_count_tokens_without_framing(tmp_path: Path
         provider = provider_for(ROUTE_CONFIGS[route], tmp_path, http_client)
         counter = provider.token_counter
         assert counter.count is not None
+        assert counter.framed
         assert not counter.exact_locally
-        assert await counter.count("hello world") == len("hello world")
+        assert await counter.count("hello world") == len("hello world") + 8
     assert all(url.split("?")[0].endswith(path) for url, _body, _headers in wire.requests)
-    assert sorted(body["messages"][0]["content"] for _url, body, _headers in wire.requests) == ["a", "hello world"]
+    assert [body["messages"][0]["content"] for _url, body, _headers in wire.requests] == ["hello world"]
     assert all(body["messages"][0]["role"] == "user" for _url, body, _headers in wire.requests)
 
 
@@ -79,6 +80,7 @@ async def test_gemini_counts_through_count_tokens(tmp_path: Path) -> None:
     provider = build_adapter({"provider": "google", "id": "gemini-3.8-flash", "api_key": "test-key"}, tmp_path, wire)
     counter = provider.token_counter
     assert counter.count is not None
+    assert counter.framed
     assert await counter.count("hello world") == len("hello world")
     assert wire.requests[0][0].endswith("/models/gemini-3.8-flash:countTokens")
 
@@ -96,7 +98,8 @@ async def test_responses_counts_through_input_tokens_on_openai_only(tmp_path: Pa
     counter = provider.token_counter
     assert counter.count is not None
     assert counter.replay is provider
-    assert await counter.count("hello world") == len("hello world")
+    assert counter.framed
+    assert await counter.count("hello world") == len("hello world") + 7
     url, body, _headers = wire.requests[0]
     assert url == "https://api.openai.com/v1/responses/input_tokens"
     assert body["model"] == "gpt-6-astra"
@@ -183,10 +186,10 @@ async def test_counting_builds_the_sdk_client_off_the_event_loop(
     async with httpx2.AsyncClient() as http_client:
         claude = provider_for(ROUTE_CONFIGS["vertexai_claude"], tmp_path, http_client)
         monkeypatch.setattr(type(claude), "_client", client)
-        await claude._count_text_tokens("hello")
+        await claude._count_message_tokens("hello")
     gemini = build_adapter({"provider": "google", "id": "gemini-3.8-flash", "api_key": "k"}, tmp_path, _Wire(dict))
     monkeypatch.setattr(type(gemini), "_sdk_client", client)
-    await gemini._count_text_tokens("hello")
+    await gemini._count_content_tokens("hello")
 
     assert len(built_on) == 2
     assert loop_thread not in built_on

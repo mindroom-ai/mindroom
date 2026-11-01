@@ -66,15 +66,16 @@ class TokenCounter:
     ``key`` identifies the counts: two counters with one key count the same text alike, so exact counts
     and a failing endpoint's pause are kept per key. ``estimate`` counts locally and never over the network; it
     returns None while its encoder is still loading. ``exact_locally`` says the estimate is the model's own tokenizer.
-    ``count`` counts text exactly through the provider, without the framing of the message it sends the text in;
-    None when the route has no counting endpoint. ``replay`` is how the route sizes explicitly replayed history,
-    or None to size it canonically.
+    ``count`` counts text exactly through the provider; None when the route has no counting endpoint. ``framed``
+    says ``count`` counts the text as a whole message, framing included, which counting takes off.
+    ``replay`` is how the route sizes explicitly replayed history, or None to size it canonically.
     """
 
     key: str
     estimate: Callable[[str], int | None]
     exact_locally: bool = False
     count: Callable[[str], Awaitable[int]] | None = None
+    framed: bool = False
     replay: PortableReplayEstimator | None = None
 
 
