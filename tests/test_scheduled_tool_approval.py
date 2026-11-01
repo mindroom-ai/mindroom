@@ -1586,7 +1586,7 @@ async def _fire_once(
     """Run one due one-time task to its end, its send ending as ``outcome`` and the named approval methods faked."""
     client = make_matrix_client_mock()
     client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state = AsyncMock()
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
     workflow = ScheduledWorkflow(
         created_by="@user:server",
         schedule_type="once",

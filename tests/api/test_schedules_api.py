@@ -495,7 +495,7 @@ def test_edit_or_cancel_whose_task_cannot_be_read_is_a_server_error(
     response = _send_with(test_client, client, method, **kwargs)
 
     assert response.status_code == 500
-    assert response.json()["detail"] == f"Failed to get scheduled task 'abc12345' from room 'test_room': {read_error}"
+    assert response.json()["detail"] == f"Failed to get scheduled task `abc12345` from room `test_room`: {read_error}"
     client.room_put_state.assert_not_awaited()
 
 
