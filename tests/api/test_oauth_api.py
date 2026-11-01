@@ -6298,7 +6298,7 @@ def test_slack_status_and_connect_without_client(
         (False, None, "The MindRoom Slack app is not configured"),
         (True, Response(200, json={"ok": False, "error": "invalid_auth"}), "The MindRoom Slack app is not configured"),
         (True, Response(503), "Slack could not be reached; try again"),
-        (True, Response(429, headers={"Retry-After": "30"}), "Slack could not be reached; try again"),
+        (True, Response(429), "Slack could not be reached; try again"),
         (True, None, "Slack could not be reached; try again"),
     ],
     ids=["no-app", "token-rejected", "slack-server-error", "slack-rate-limited", "slack-unreachable"],

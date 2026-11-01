@@ -347,7 +347,7 @@ def delivery_failed(exc: Exception, *, event_id: str | None, channel_id: str | N
     A Slack error that fails every attempt alike skips the target, so Slack is not asked to send the event again;
     any other failure is retried.
     """
-    if _fails_every_attempt(exc):
+    if isinstance(exc, SlackApiError) and not exc.transient:
         logger.error(
             "Slack refused a call, so the event is not delivered",
             event_id=event_id,
@@ -362,10 +362,6 @@ def delivery_failed(exc: Exception, *, event_id: str | None, channel_id: str | N
         reason=failure_reason(exc),
     )
     return "retry"
-
-
-def _fails_every_attempt(exc: Exception) -> bool:
-    return isinstance(exc, SlackApiError) and not exc.transient
 
 
 def failure_reason(exc: Exception) -> str:
