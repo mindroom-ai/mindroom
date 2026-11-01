@@ -403,8 +403,8 @@ class TestThreadUtils:
         self.config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                    "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
+                    "general": AgentConfig(display_name="General", rooms=["!test:example.org"]),
                 },
                 teams={},
                 room_models={},
@@ -520,8 +520,8 @@ class TestThreadUtils:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                    "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
+                    "general": AgentConfig(display_name="General", rooms=["!test:example.org"]),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 bot_accounts=["@telegram:localhost"],
@@ -546,7 +546,7 @@ class TestThreadUtils:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 bot_accounts=["@telegram:localhost"],
@@ -571,7 +571,7 @@ class TestThreadUtils:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 bot_accounts=["@telegram:localhost"],
@@ -600,8 +600,8 @@ class TestBridgeMentionFallback:
         self.config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                    "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
+                    "general": AgentConfig(display_name="General", rooms=["!test:example.org"]),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),

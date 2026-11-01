@@ -66,6 +66,11 @@ def managed_room_alias_localpart(room_key: str, runtime_paths: RuntimePaths) -> 
     return f"{room_key}_{namespace}"
 
 
+def managed_room_alias(room_key: str, server_name: str, runtime_paths: RuntimePaths) -> str:
+    """Build the full alias MindRoom gives the managed room for a room key, as its record stores it."""
+    return f"#{managed_room_alias_localpart(room_key, runtime_paths)}:{server_name}"
+
+
 def managed_space_alias_localpart(runtime_paths: RuntimePaths) -> str:
     """Build the reserved alias localpart for the root MindRoom Space."""
     return managed_room_alias_localpart("_mindroom_root_space", runtime_paths)
