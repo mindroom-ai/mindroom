@@ -443,7 +443,7 @@ async def test_a_flood_of_progress_reports_costs_a_few_events_and_keeps_the_late
 
     loop = asyncio.get_running_loop()
     with (
-        patch("mindroom.agent_loop.tools.redact_sensitive_text", wraps=redact_sensitive_text) as redact,
+        patch("mindroom.tool_system.progress.redact_sensitive_text", wraps=redact_sensitive_text) as redact,
         patch.object(loop, "call_soon_threadsafe", wraps=loop.call_soon_threadsafe) as hop,
     ):
         items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]

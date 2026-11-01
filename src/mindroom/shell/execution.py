@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
-from mindroom.redaction import redact_sensitive_text
+from mindroom.redaction import private_key_start
 from mindroom.shell.output_capture import (
     CapturedShellStream,
     ShellOutputCapture,
@@ -146,12 +146,12 @@ class ProcessRecord:
 def _progress_lines(buffer: _OutputBuffer) -> str:
     """Return the last lines a running command shows, each in the state it was redrawn to last.
 
-    Redaction sees everything printed so far, so a credential that spans more lines than the tail, such as a private
-    key, stays masked.
+    A private key that runs into those lines is kept whole, so whoever shows them can still mask it.
     """
-    shown = redact_sensitive_text(buffer.last_lines(buffer.max_lines))
-    lines = [line.rstrip("\r").rsplit("\r", 1)[-1] for line in shown.split("\n")] if shown else []
-    return "\n".join(lines[-_PROGRESS_TAIL_LINES:])
+    lines = [line.rstrip("\r").rsplit("\r", 1)[-1] for line in buffer.last_lines(buffer.max_lines).split("\n")]
+    text = "\n".join(lines)
+    tail = len(text) - len("\n".join(lines[-_PROGRESS_TAIL_LINES:]))
+    return text[private_key_start(text, tail) :]
 
 
 class _OutputProgress:

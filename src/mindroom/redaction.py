@@ -26,6 +26,7 @@ __all__ = [
     "REDACTION_FAILED",
     "URL_PATTERN",
     "nests_beyond_redaction_depth",
+    "private_key_start",
     "redact_config_text",
     "redact_log_event",
     "redact_private_keys",
@@ -652,6 +653,17 @@ def _redact_phrase_token(match: re.Match[str]) -> str:
 def redact_private_keys(value: str) -> str:
     """Replace each PEM private key, which spans several lines, with the redaction placeholder."""
     return _PRIVATE_KEY_PATTERN.sub(REDACTED, value)
+
+
+def private_key_start(value: str, position: int) -> int:
+    """Return where a PEM private key that runs into ``position`` starts, or ``position`` when none does.
+
+    Redacting ``value`` from ``position`` would leave such a key's body without the BEGIN line that identifies it.
+    """
+    for match in _PRIVATE_KEY_PATTERN.finditer(value, 0, position):
+        if match.end() >= position:
+            return match.start()
+    return position
 
 
 def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = False) -> str:

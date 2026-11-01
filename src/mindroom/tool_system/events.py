@@ -216,7 +216,7 @@ class CollectedStreamPresentation:
     # Whether a text chunk replaces the collected text, as in a team's stream of whole documents, instead of continuing it.
     replaces_text: bool = False
     # The latest output of each running call, by call ID, which a live reply shows and nothing stores.
-    tool_progress: dict[str, str] = field(default_factory=dict)
+    tool_progress: dict[str, str] = field(default_factory=dict, init=False)
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
     separate_next_text: bool = field(default=False, init=False, repr=False)
 

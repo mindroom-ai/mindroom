@@ -13,7 +13,6 @@ from mindroom.llm.events import ToolProgress
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import ToolExecution
 from mindroom.logging_config import get_logger
-from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.invocation import (
     MISSING_TOOL_ERROR_TEXT,
@@ -21,7 +20,7 @@ from mindroom.tool_system.invocation import (
     execute_tool_call,
     parse_tool_arguments,
 )
-from mindroom.tool_system.progress import cap_progress, tool_progress_reporter
+from mindroom.tool_system.progress import shown_progress, tool_progress_reporter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
@@ -290,9 +289,8 @@ async def _run_call(
             text, latest, flush_scheduled = latest, None, False
         last_flush = loop.time()
         if text is not None:
-            # Output can print credentials; mask them as the call's result preview does, before the cut can drop the
-            # label that identifies a long one.
-            emit(ToolProgress(execution.tool_call_id, cap_progress(redact_sensitive_text(text))))
+            # Output can print credentials; mask them as the call's result preview does.
+            emit(ToolProgress(execution.tool_call_id, shown_progress(text)))
 
     def schedule_flush() -> None:
         loop.call_later(max(0.0, last_flush + _PROGRESS_FLUSH_SECONDS - loop.time()), flush)

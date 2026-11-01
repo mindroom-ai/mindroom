@@ -14,12 +14,11 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
-from mindroom.redaction import redact_sensitive_text
-from mindroom.shell.execution import _MAX_OUTPUT_BYTES, _OutputBuffer, _OutputProgress
+from mindroom.shell.execution import _MAX_OUTPUT_BYTES, _OutputBuffer, _OutputProgress, _progress_lines
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.progress import tool_progress_reporter
+from mindroom.tool_system.progress import shown_progress, tool_progress_reporter
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tools.shell import (
@@ -818,8 +817,8 @@ async def test_a_progress_meter_reports_only_its_latest_state(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_a_key_the_output_tail_cuts_in_two_stays_masked(tmp_path: Path) -> None:
-    """A private key longer than the reported tail is masked: redaction sees everything printed so far, not the tail."""
+async def test_a_key_the_output_tail_cuts_in_two_is_reported_whole(tmp_path: Path) -> None:
+    """A private key longer than the reported tail is reported from its first line, so the shown output masks it."""
     entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
     reports: list[str] = []
     key_lines = " ".join(f"'MIIE{index:02d}{'A' * 56}'" for index in range(25))
@@ -831,12 +830,12 @@ async def test_a_key_the_output_tail_cuts_in_two_stays_masked(tmp_path: Path) ->
     with patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1), tool_progress_reporter(reports.append):
         await entrypoint(["bash", "-c", command])
 
-    assert reports
-    assert all("A" * 56 not in report for report in reports)
+    assert reports[0].startswith("-----BEGIN PRIVATE KEY-----")
     assert reports[0].endswith("waiting")
+    assert "A" * 56 not in shown_progress(reports[0])
 
 
-def test_a_quiet_commands_unchanged_output_is_not_redacted_again() -> None:
+def test_a_quiet_commands_unchanged_output_is_not_read_again() -> None:
     """A command that prints nothing new, such as a dev server waiting for requests, costs its progress checks nothing."""
     reports: list[str] = []
     stdout, stderr = _OutputBuffer(), _OutputBuffer()
@@ -844,14 +843,14 @@ def test_a_quiet_commands_unchanged_output_is_not_redacted_again() -> None:
 
     with (
         patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0),
-        patch("mindroom.shell.execution.redact_sensitive_text", wraps=redact_sensitive_text) as redact,
+        patch("mindroom.shell.execution._progress_lines", wraps=_progress_lines) as read,
     ):
         progress = _OutputProgress(reports.append, stdout, stderr)
         for _ in range(5):
             progress.poll()
 
     assert reports == ["listening on :8000"]
-    assert redact.call_count == 2
+    assert read.call_count == 2
 
 
 @pytest.mark.asyncio
