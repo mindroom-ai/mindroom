@@ -65,7 +65,6 @@ describe("useUnsavedDraft", () => {
     expect(removed.map(([, listener]) => listener)).toEqual(
       expect.arrayContaining(added.map(([, listener]) => listener)),
     );
-    first.unmount();
   });
 
   it("asks before an editor's own action only when its draft is unsaved", () => {

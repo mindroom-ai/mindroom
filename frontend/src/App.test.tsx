@@ -320,10 +320,7 @@ describe("App tab switching", () => {
     expect(unloadAsks()).toBe(false);
     unmount();
 
-    vi.mocked(useConfigStore).mockReturnValue({
-      ...vi.mocked(useConfigStore)(),
-      isDirty: true,
-    });
+    useConfigStore().isDirty = true;
     render(<App />);
     expect(unloadAsks()).toBe(true);
   });

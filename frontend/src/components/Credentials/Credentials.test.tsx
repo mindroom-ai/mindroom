@@ -508,10 +508,7 @@ describe("Credentials", () => {
     // Selecting the canonical service loads its credentials in an effect,
     // which can still be pending once the save's own updates are on screen.
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
-        "/api/credentials/anthropic",
-        expect.anything(),
-      );
+      expect(readsOf("/api/credentials/anthropic")).toBeGreaterThan(0);
     });
   });
 
