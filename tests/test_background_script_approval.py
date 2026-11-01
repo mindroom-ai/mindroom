@@ -45,8 +45,9 @@ if TYPE_CHECKING:
     from mindroom.approval.manager import ApprovalManager
 
 # An approval card send and a background approval waiter each finish as soon as
-# their journal writes commit; this bound only keeps a lost wake from hanging the
-# test until the call's 30-second deadline.
+# their journal writes commit; this bound only keeps a lost send or wake from
+# hanging the test, and it stays below the call's 30-second deadline, which would
+# end a decision wait on its own.
 _SETTLED_DECISION_WAIT_SECONDS = 5.0
 
 

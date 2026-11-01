@@ -1173,7 +1173,11 @@ def test_google_drive_large_file_error_names_exposed_download_function(tmp_path:
 
 @pytest.mark.parametrize(
     ("mime_type", "downloadable"),
-    [("application/vnd.google-apps.drawing", True), ("application/vnd.google-apps.folder", False)],
+    [
+        ("application/vnd.google-apps.drawing", True),
+        ("application/vnd.google-apps.folder", False),
+        ("application/vnd.google-apps.vid", False),
+    ],
 )
 def test_google_drive_read_refusal_advises_download_only_for_downloadable_workspace_types(
     tmp_path: Path,
