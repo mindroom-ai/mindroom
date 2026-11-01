@@ -1082,18 +1082,18 @@ class ApprovalContinuationRunner:
 
     def _approval_post_response_deps(self, continuation: ApprovalContinuation) -> PostResponseEffectsDeps:
         """Build normal post-response dependencies for a continued run."""
-        # A continuation keeps its turn's source events, so a run paused for approval is verified when it ends.
-        notify = self.locked.response_finished_notifier(
-            continuation.sources.logical_source_event_ids,
-            continuation.requester_id,
-        )
         return self.deps.post_response_effects.build_deps(
             room_id=continuation.room_id,
             membership_turn_id=continuation.source_event_ids[0],
             queue_memory_persistence=self._approval_memory_persistence(continuation),
+            # A continuation keeps its turn's source events, so a run paused for approval is verified when it ends.
             # The resumed reply reports the whole turn's cost, but the usage stored before the pause may already be in a
-            # scan, possibly of an earlier month, so budgets take the cost as unknown and recount.
-            notify_response_finished=lambda _cost_usd: notify(None),
+            # scan, possibly of an earlier month, so its cost is not dated and budgets recount instead.
+            notify_response_finished=self.locked.response_finished_notifier(
+                continuation.sources.logical_source_event_ids,
+                continuation.requester_id,
+                None,
+            ),
             persist_response_event_id=self._approval_response_event_persistence(continuation),
         )
 

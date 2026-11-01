@@ -51,6 +51,7 @@ from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+    from datetime import datetime
 
     import nio
     import structlog
@@ -163,6 +164,7 @@ class LockedTurns:
             notify_response_finished=self.response_finished_notifier(
                 request.sources.logical_source_event_ids,
                 request.user_id,
+                request.requested_at,
             ),
             persist_response_event_id=persist_response_event_id,
         )
@@ -171,10 +173,12 @@ class LockedTurns:
         self,
         source_event_ids: Sequence[str],
         requester_id: str | None,
+        started_at: datetime | None,
     ) -> Callable[[float | None], None]:
         """Return the callback that lets automations verify their runs and budgets add the reply's cost.
 
         ``requester_id`` is the requester the turn ran for, which its stored run names and whose spend the cost adds to.
+        ``started_at`` is when the turn was requested, None when its cost cannot be dated.
         """
         orchestrator = self.deps.runtime.orchestrator
 
@@ -182,7 +186,7 @@ class LockedTurns:
             try:
                 orchestrator.automations.response_finished(source_event_ids)
             finally:
-                orchestrator.budgets.response_finished(requester_id, cost_usd)
+                orchestrator.budgets.response_finished(requester_id, cost_usd, started_at)
 
         return notify
 

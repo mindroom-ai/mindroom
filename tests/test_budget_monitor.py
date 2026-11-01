@@ -299,12 +299,12 @@ async def test_scan_failure_keeps_previous_snapshot_and_reply_costs(
 ) -> None:
     monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0})
     scans.error = RuntimeError("database locked")
-    monitor.response_finished(ALICE, 1.0)
+    monitor.response_finished(ALICE, 1.0, OCTOBER)
 
     await monitor.sync(_config())
     await _until(lambda: scans.calls == 2)
     await _quiet()
-    monitor.response_finished(ALICE, 0.5)
+    monitor.response_finished(ALICE, 0.5, OCTOBER)
 
     assert monitor._spend_usd(ALICE) == 13.5
     await monitor.stop()
@@ -479,7 +479,7 @@ async def test_reconciliation_interval_schedules_scans_and_finished_replies_do_n
     await _until(lambda: scans.calls == 1)
 
     for _ in range(5):
-        replies_only.response_finished(ALICE, 1.0)
+        replies_only.response_finished(ALICE, 1.0, OCTOBER)
     await _quiet()
 
     assert scans.calls == 1
@@ -502,7 +502,7 @@ async def test_a_new_month_drops_last_months_spend_and_scans_again(
     monitor, _current = _monitor(tmp_path, _config(), clock, tick_seconds=0.01)
     await monitor.sync(_config())
     await _until(lambda: monitor.status().snapshot is not None)
-    monitor.response_finished(ALICE, 2.0)
+    monitor.response_finished(ALICE, 2.0, OCTOBER)
     assert _decide(monitor, ALICE, "astra") == "luna"
     scans.release.clear()
     scans.spend = {ALICE: 0.5}
@@ -532,6 +532,26 @@ async def test_status_lists_only_people(tmp_path: Path, monkeypatch: pytest.Monk
     )
 
     assert [user.user_id for user in monitor.status().users] == [BOB]
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_started_last_month_adds_nothing_and_requests_a_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scan dates usage by request, so the part of a reply spent before the month began belongs to the month before."""
+    clock = _Clock()
+    clock.now = datetime(2026, 11, 1, 0, 30, tzinfo=UTC)
+    scans = _Scans(monkeypatch, {ALICE: 1.0})
+    monitor, _current = _monitor(tmp_path, _config(), clock)
+    await monitor.sync(_config())
+    await _until(lambda: monitor.status().snapshot is not None)
+
+    monitor.response_finished(ALICE, 6.0, datetime(2026, 10, 31, 23, 50, tzinfo=UTC))
+
+    assert monitor._spend_usd(ALICE) == 1.0
+    await _until(lambda: scans.calls == 2)
     await monitor.stop()
 
 
@@ -603,7 +623,7 @@ async def test_a_finished_replys_cost_can_apply_the_fallback_without_a_scan(
     monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 9.0})
     assert _decide(monitor, ALICE, "astra") == "astra"
 
-    monitor.response_finished(ALICE, 1.5)
+    monitor.response_finished(ALICE, 1.5, OCTOBER)
     await _quiet()
 
     assert monitor._spend_usd(ALICE) == 10.5
@@ -618,13 +638,13 @@ async def test_a_rescan_replaces_the_costs_recorded_before_it_started_and_keeps_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 5.0})
-    monitor.response_finished(ALICE, 2.0)
+    monitor.response_finished(ALICE, 2.0, OCTOBER)
     scans.release.clear()
     scans.spend = {ALICE: 6.5}
 
     await monitor.sync(_config())
     await _until(lambda: scans.calls == 2)
-    monitor.response_finished(ALICE, 1.0)
+    monitor.response_finished(ALICE, 1.0, OCTOBER)
 
     # Until the scan completes, the last scan and both replies count.
     assert monitor._spend_usd(ALICE) == 8.0
@@ -642,11 +662,11 @@ async def test_a_reply_counts_for_the_person_a_scan_charges(tmp_path: Path, monk
     router = fixture_entity_matrix_id(ROUTER_AGENT_NAME, config.get_domain(paths), paths).full_id
     assert budget_user_id(router, config, paths) is None
 
-    monitor.response_finished(ALICE_BRIDGE, 2.0)
+    monitor.response_finished(ALICE_BRIDGE, 2.0, OCTOBER)
     for requester_id in (BRIDGE_BOT, router, None):
-        monitor.response_finished(requester_id, 4.0)
+        monitor.response_finished(requester_id, 4.0, OCTOBER)
         # Nobody is charged for such a reply, so not knowing its cost needs no scan.
-        monitor.response_finished(requester_id, None)
+        monitor.response_finished(requester_id, None, OCTOBER)
     await _quiet()
 
     assert scans.calls == 1
@@ -664,8 +684,8 @@ async def test_a_completed_unpriced_reply_neither_adds_nor_scans(
 ) -> None:
     monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 3.0})
 
-    monitor.response_finished(ALICE, 0.0)
-    monitor.response_finished(BOB, 0.0)
+    monitor.response_finished(ALICE, 0.0, OCTOBER)
+    monitor.response_finished(BOB, 0.0, OCTOBER)
     await _quiet()
 
     assert scans.calls == 1
@@ -683,7 +703,7 @@ async def test_a_stopped_reply_adds_nothing_and_requests_a_scan(
     scans.release.clear()
     scans.spend = {ALICE: 7.0}
 
-    monitor.response_finished(ALICE, None)
+    monitor.response_finished(ALICE, None, OCTOBER)
 
     assert monitor._spend_usd(ALICE) == 5.0
     await _until(lambda: scans.calls == 2)
@@ -700,7 +720,7 @@ async def test_replies_before_the_first_scan_count_nothing_until_it_completes(
     """The first scan covers replies that finished before it started, so they are not added on top of it."""
     scans = _Scans(monkeypatch, {ALICE: 3.0})
     monitor, _current = _monitor(tmp_path, _config())
-    monitor.response_finished(ALICE, 20.0)
+    monitor.response_finished(ALICE, 20.0, OCTOBER)
 
     assert monitor._spend_usd(ALICE) == 0.0
     assert _decide(monitor, ALICE, "astra") == "astra"
@@ -717,8 +737,8 @@ async def test_status_shows_the_latest_scan_plus_finished_replies(
 ) -> None:
     monitor, _scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0, BOB: 3.0})
 
-    monitor.response_finished(BOB, 8.0)
-    monitor.response_finished(CAROL, 1.5)
+    monitor.response_finished(BOB, 8.0, OCTOBER)
+    monitor.response_finished(CAROL, 1.5, OCTOBER)
     status = monitor.status()
 
     assert [(user.user_id, user.spend_usd, user.over_budget) for user in status.users] == [
@@ -769,7 +789,7 @@ async def test_a_rescan_keeps_the_total_a_finished_reply_added(tmp_path: Path) -
         ),
     )
     cost = run_cost_usd(metrics, model_provider=model.provider, model_id=model.id, prices=model_prices(config))
-    monitor.response_finished(ALICE_BRIDGE, cost)
+    monitor.response_finished(ALICE_BRIDGE, cost, OCTOBER)
     assert monitor._spend_usd(ALICE) == pytest.approx(8.0)
     first_scan = monitor.status().snapshot
 

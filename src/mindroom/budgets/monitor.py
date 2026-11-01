@@ -203,7 +203,7 @@ class BudgetMonitor:
         self._loop.start()
         self._request_scan()
 
-    def response_finished(self, requester_id: str | None, cost_usd: float | None) -> None:
+    def response_finished(self, requester_id: str | None, cost_usd: float | None, started_at: datetime | None) -> None:
         """Add a finished reply's cost to its requester's spend until a scan covers the reply, or request a scan.
 
         ``requester_id`` is the requester the reply ran for, which its stored run names, so the cost counts for the
@@ -211,7 +211,9 @@ class BudgetMonitor:
         instance per requester, so that requester is also the owner a scan charges for a run that names none, and a
         team reply's cost covers its members' runs, which name the same requester.
         ``cost_usd`` is the exact cost of the reply's stored usage, zero when it used no priced model, or None when it
-        is unknown; then a scan counts the usage instead.
+        is unknown; then a scan counts the usage instead. ``started_at`` is when the reply's turn was requested, None
+        when its cost cannot be dated; a scan dates usage by request, so a reply that started in an earlier month has
+        an unknown cost for this one.
         """
         if requester_id is None:
             return
@@ -221,6 +223,8 @@ class BudgetMonitor:
         user_id = budget_user_id(requester_id, config, self.runtime_paths)
         if user_id is None:
             return
+        if started_at is None or month_bounds(started_at)[0] != month_bounds(self.clock())[0]:
+            cost_usd = None
         if cost_usd is None:
             self._request_scan()
         elif cost_usd:

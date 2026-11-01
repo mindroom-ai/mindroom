@@ -2608,6 +2608,70 @@ async def test_a_stream_whose_headers_never_reached_the_client_closes_while_its_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failed_send", ["http.response.start", "http.response.body"])
+async def test_an_agent_stream_the_client_left_tells_budgets_its_cost_is_unknown(
+    test_config: Config,
+    failed_send: str,
+) -> None:
+    """A stream left before its turn ended, even before its body started, reports no cost, so budgets recount it."""
+
+    async def unfinished_turn(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        yield TextDelta("Checking.")
+        await asyncio.Event().wait()
+
+    runtime_paths = _runtime_paths()
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name="general",
+        session_id="session-123",
+        runtime_paths=runtime_paths,
+        requester_id="@alice:localhost",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+    )
+    turn = openai_compat._openai_turn_context(
+        "general",
+        session_id="session-123",
+        execution_identity=execution_identity,
+    )
+    cost = openai_compat._CompletionCost()
+    monitor = MagicMock(spec=BudgetMonitor)
+    completion_lock = asyncio.Lock()
+    await completion_lock.acquire()
+    with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=unfinished_turn):
+        response = openai_compat._attach_openai_completion_lock_release(
+            await openai_compat._stream_completion(turn, test_config, runtime_paths, cost),
+            completion_lock,
+            monitor,
+            "@alice:localhost",
+            cost,
+        )
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.request"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == failed_send:
+            error_message = "client closed"
+            raise OSError(error_message)
+
+    with suppress(ClientDisconnect, OSError):
+        await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+
+    monitor.response_finished.assert_called_once_with("@alice:localhost", None, cost.started_at)
+    assert not completion_lock.locked()
+
+
+def test_a_team_completion_without_a_run_record_has_an_unknown_cost(test_config: Config) -> None:
+    """A team run that failed before handing over its record leaves stored usage no completion can price."""
+    record = TeamRunRecord(run_id="team-run", team_id="test-team", status=RunStatus.completed)
+
+    assert openai_compat._team_cost_usd(None, test_config) is None
+    assert openai_compat._team_cost_usd(record, test_config) == 0.0
+
+
+@pytest.mark.asyncio
 async def test_openai_stream_response_skips_background_on_asgi20_disconnect_before_done() -> None:
     """ASGI 2.0 disconnect can return normally but still must skip background work."""
     events: list[str] = []

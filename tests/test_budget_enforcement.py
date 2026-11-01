@@ -6,8 +6,9 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -139,11 +140,12 @@ async def test_a_completed_reply_adds_its_cost_for_its_requester(
         typing_indicator=_noop_typing,
         should_use_streaming=AsyncMock(return_value=streaming),
     ):
-        await coordinator.generate_response(_plain_request(_target()))
+        request = _plain_request(_target())
+        await coordinator.generate_response(request)
         assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS, owner=coordinator.deps.runtime)
 
-    # 1,000 input tokens at $5 and 100 output tokens at $30 per million.
-    response_finished.assert_called_once_with("@user:localhost", pytest.approx(0.008))
+    # 1,000 input tokens at $5 and 100 output tokens at $30 per million, dated by when the turn was requested.
+    response_finished.assert_called_once_with("@user:localhost", pytest.approx(0.008), request.requested_at)
 
 
 def _budgets_with_spend(
@@ -189,7 +191,11 @@ async def test_a_finished_reply_adds_its_known_cost_or_requests_a_scan(
         ResponseOutcome(),
         PostResponseEffectsDeps(
             logger=MagicMock(),
-            notify_response_finished=coordinator.locked.response_finished_notifier(("$event",), _ALICE),
+            notify_response_finished=coordinator.locked.response_finished_notifier(
+                ("$event",),
+                _ALICE,
+                datetime.now(UTC),
+            ),
         ),
     )
 
@@ -224,7 +230,7 @@ def test_budgets_hear_of_a_finished_reply_when_automations_fail(
     monkeypatch.setattr(coordinator.deps.runtime.orchestrator, "_automations", automations)
 
     with pytest.raises(RuntimeError, match="automation store unavailable"):
-        coordinator.locked.response_finished_notifier(("$event",), _ALICE)(0.5)
+        coordinator.locked.response_finished_notifier(("$event",), _ALICE, datetime.now(UTC))(0.5)
 
     assert monitor._spend_usd(_ALICE) == 23.5
 
@@ -574,7 +580,8 @@ def test_openai_compat_completion_adds_its_cost_for_its_requester(
 
     assert reply.status_code == 200
     # Alice is over her zero cap, so the reply runs on luna: 1,000 input tokens at $0.20 and 100 at $1.25 per million.
-    response_finished.assert_called_once_with("@alice:localhost", pytest.approx(0.000325))
+    response_finished.assert_called_once_with("@alice:localhost", pytest.approx(0.000325), ANY)
+    assert response_finished.call_args.args[2] <= datetime.now(UTC)
 
 
 async def _run_workflow_as(workflow: _SubagentWorkflow, active_model_name: str) -> dict[str, object]:

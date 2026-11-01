@@ -14,7 +14,8 @@ import asyncio
 import hashlib
 import time
 import weakref
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
 
@@ -160,6 +161,7 @@ class _CompletionCost:
     """The USD cost of one completion's turn: zero when it used no priced model, None until known."""
 
     usd: float | None = None
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 async def _finish_openai_completion(
@@ -170,7 +172,7 @@ async def _finish_openai_completion(
 ) -> None:
     """Release the session lock and add the finished completion's cost to its requester's spend."""
     _release_openai_completion_lock(completion_lock)
-    budget_monitor.response_finished(requester_id, cost.usd)
+    budget_monitor.response_finished(requester_id, cost.usd, cost.started_at)
 
 
 def _attach_openai_completion_lock_release(

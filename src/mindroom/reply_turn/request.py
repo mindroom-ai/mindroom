@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import ATTACHMENT_IDS_KEY
@@ -101,6 +102,8 @@ class ResponseRequest:
     # replaces only then, so a Stop that refuses the claim leaves that history whole.
     on_reply_claimed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
+    # When the turn was requested, before its run started; budgets date the reply's cost by it.
+    requested_at: datetime = field(default_factory=lambda: datetime.now(UTC), compare=False)
 
     def __post_init__(self) -> None:
         """Require the envelope to name the source driving this response."""
