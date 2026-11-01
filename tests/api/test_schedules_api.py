@@ -60,11 +60,11 @@ def _task(
     )
 
 
-def _record_test_room(room_id: str = "!test_room:localhost") -> None:
-    """Record the configured ``test_room`` as created, so listing reads its tasks under ``room_id``."""
+def _record_test_room() -> None:
+    """Record the configured ``test_room`` as created, so listing reads its tasks under ``!test_room:localhost``."""
     update_matrix_state(
         main._app_runtime_paths(main.app),
-        lambda state: state.add_room("test_room", room_id, "#test_room:localhost", "Test Room"),
+        lambda state: state.add_room("test_room", "!test_room:localhost", "#test_room:localhost", "Test Room"),
     )
 
 
@@ -178,36 +178,34 @@ def test_list_schedules_reads_a_room_configured_by_alias_under_its_room_id(
     temp_config_file: Path,
 ) -> None:
     """A configured alias is read once under the room ID it resolves to, and one that does not resolve says why."""
-    _configure_agent_rooms(temp_config_file, ["#lobby:example.org", "test_room", "#gone:example.org"])
+    _configure_agent_rooms(temp_config_file, ["#test_room:localhost", "test_room", "gone", "#gone:localhost"])
     # The room key and the alias name the same room, which must be read once.
-    _record_test_room("!lobby:localhost")
-
-    async def room_resolve_alias(room_alias: str) -> object:
-        if room_alias == "#lobby:example.org":
-            return nio.RoomResolveAliasResponse(room_alias=room_alias, room_id="!lobby:localhost", servers=[])
-        return nio.RoomResolveAliasError.from_dict(
-            {"errcode": "M_NOT_FOUND", "error": f"Room alias {room_alias} not found"},
-        )
+    _record_test_room()
 
     client = make_matrix_client_mock()
-    client.room_resolve_alias = AsyncMock(side_effect=room_resolve_alias)
+    client.room_resolve_alias = AsyncMock(
+        return_value=nio.RoomResolveAliasError.from_dict(
+            {"errcode": "M_NOT_FOUND", "error": "Room alias #gone:localhost not found"},
+        ),
+    )
     client.room_get_state = AsyncMock(
         return_value=nio.RoomGetStateResponse.from_dict(
-            [scheduled_task_state_event("abc12345", _stored(), room_id="!lobby:localhost")],
-            room_id="!lobby:localhost",
+            [scheduled_task_state_event("abc12345", _stored(), room_id="!test_room:localhost")],
+            room_id="!test_room:localhost",
         ),
     )
     response = _send_with(test_client, client, "GET", path="/api/schedules")
 
     assert response.status_code == 200
     data = response.json()
-    client.room_get_state.assert_awaited_once_with("!lobby:localhost")
-    assert [(task["task_id"], task["room_id"]) for task in data["tasks"]] == [("abc12345", "!lobby:localhost")]
+    client.room_resolve_alias.assert_awaited_once_with("#gone:localhost")
+    client.room_get_state.assert_awaited_once_with("!test_room:localhost")
+    assert [(task["task_id"], task["room_id"]) for task in data["tasks"]] == [("abc12345", "!test_room:localhost")]
     assert data["unreadable_rooms"] == [
         {
-            "room_id": "#gone:example.org",
-            "room_alias": "#gone:example.org",
-            "error": "Unable to resolve room alias: RoomResolveAliasError: M_NOT_FOUND Room alias #gone:example.org not found",
+            "room_id": "#gone:localhost",
+            "room_alias": "#gone:localhost",
+            "error": "Unable to resolve room alias: RoomResolveAliasError: M_NOT_FOUND Room alias #gone:localhost not found",
         },
     ]
 
@@ -218,13 +216,13 @@ def test_list_schedules_reports_an_alias_whose_lookup_broke_off_beside_the_reada
 ) -> None:
     """An alias lookup that breaks off is reported with the reason, and the other rooms' tasks are still listed."""
     # The broken-off lookup comes first, so the next reference must not inherit its outcome.
-    _configure_agent_rooms(temp_config_file, ["#flaky:example.org", "#readable:example.org"])
+    _configure_agent_rooms(temp_config_file, ["flaky", "#flaky:localhost", "readable", "#readable:localhost"])
 
     client = make_matrix_client_mock()
     client.room_resolve_alias = AsyncMock(
         side_effect=[
             aiohttp.ClientPayloadError("Response payload is not completed"),
-            nio.RoomResolveAliasResponse(room_alias="#readable:example.org", room_id="!readable:localhost", servers=[]),
+            nio.RoomResolveAliasResponse(room_alias="#readable:localhost", room_id="!readable:localhost", servers=[]),
         ],
     )
     client.room_get_state = AsyncMock(
@@ -240,8 +238,8 @@ def test_list_schedules_reports_an_alias_whose_lookup_broke_off_beside_the_reada
     assert [(task["task_id"], task["room_id"]) for task in data["tasks"]] == [("abc12345", "!readable:localhost")]
     assert data["unreadable_rooms"] == [
         {
-            "room_id": "#flaky:example.org",
-            "room_alias": "#flaky:example.org",
+            "room_id": "#flaky:localhost",
+            "room_alias": "#flaky:localhost",
             "error": "Unable to resolve room alias: ClientPayloadError: Response payload is not completed",
         },
     ]

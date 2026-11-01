@@ -61,11 +61,19 @@ def _load_slack_app(runtime_paths: RuntimePaths) -> SlackAppCredentials:
 
 
 async def _slack_runtime_endpoints(provider: OAuthProvider, runtime_paths: RuntimePaths) -> OAuthRuntimeEndpoints:
-    """Return Slack's fixed endpoints once `auth.test` accepts the app's bot token.
+    """Return Slack's fixed endpoints, once `auth.test` accepts the app's bot token whenever an OAuth client is saved.
 
     The lookup caches the bot's workspace, which the token parser compares every connecting account against.
     Running it here puts it before both the authorization URL and the code exchange.
+    Without a client nothing can connect, so status reports the missing client instead of checking the app.
     """
+    endpoints = OAuthRuntimeEndpoints(
+        authorization_url=provider.authorization_url,
+        token_url=provider.token_url,
+        token_endpoint_auth_method=provider.token_endpoint_auth_method,
+    )
+    if await asyncio.to_thread(provider.client_config_resolution, runtime_paths) is None:
+        return endpoints
     app = await asyncio.to_thread(_load_slack_app, runtime_paths)
     try:
         async with slack_http_client() as client:
@@ -74,11 +82,7 @@ async def _slack_runtime_endpoints(provider: OAuthProvider, runtime_paths: Runti
         raise OAuthProviderError(SLACK_APP_NOT_CONFIGURED) from exc
     except httpx.HTTPError as exc:
         raise OAuthProviderError(SLACK_UNREACHABLE) from exc
-    return OAuthRuntimeEndpoints(
-        authorization_url=provider.authorization_url,
-        token_url=provider.token_url,
-        token_endpoint_auth_method=provider.token_endpoint_auth_method,
-    )
+    return endpoints
 
 
 def _object(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:

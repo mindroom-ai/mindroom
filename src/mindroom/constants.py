@@ -172,23 +172,31 @@ class RuntimePaths:
             return self.env_file_values[name]
         return default
 
-    def first_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
-        """Return the first usable value of ``names`` and the variable that supplied it.
+    def _plain_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
+        """Return the first usable value of ``names`` in the process env, then the `.env`, and the variable that set it.
 
-        Tries each name in the process env, then each in the `.env`, then the stripped contents of the file each
-        name's `<NAME>_FILE` names, so an earlier value never resolves a file path. A blank or unedited
-        starter-template placeholder value of a name counts as unset in all three, so an exported one does not hide
-        a `.env` value.
+        A blank or unedited starter-template placeholder value counts as unset, so an exported one does not hide a
+        `.env` value.
         """
         for layer in (self.process_env, self.env_file_values):
             for name in names:
                 value = layer.get(name, "")
                 if not runtime_env_policy.is_unset_env_value(name, value):
                     return value, name
+        return None
+
+    def first_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
+        """Return the first usable value of ``names`` and the variable that supplied it.
+
+        Tries ``_plain_env_value``, then the stripped contents of the file each name's `<NAME>_FILE` names, so an
+        earlier value never resolves a file path; a file's blank or placeholder contents count as unset too.
+        """
+        if (plain := self._plain_env_value(names)) is not None:
+            return plain
         for name in names:
             path = runtime_env_path(self, f"{name}_FILE")
             try:
-                value = "" if path is None else path.read_text(encoding="utf-8-sig").strip()
+                value = "" if path is None else read_secret_file(path)
             except (OSError, UnicodeDecodeError):
                 value = ""
             if not runtime_env_policy.is_unset_env_value(name, value):
@@ -715,10 +723,10 @@ def trusted_tool_runtime_env_values(
     for name in tuple(merged_env):
         if name != "GOOGLE_APPLICATION_CREDENTIALS" and not name.endswith("_FILE"):
             continue
-        source_path = _runtime_env_source_path(runtime_paths, name)
+        source_path = runtime_env_path(runtime_paths, name)
         if source_path is None:
             continue
-        merged_env[name] = str(source_path.resolve())
+        merged_env[name] = str(source_path)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
@@ -765,17 +773,6 @@ def shell_execution_runtime_env_values(
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def _runtime_env_source_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
-    """Return one runtime env var as a lexical filesystem path without resolving symlinks."""
-    raw_value = runtime_paths.env_value(name)
-    if raw_value is None or not raw_value.strip():
-        return None
-    path = Path(raw_value).expanduser()
-    if not path.is_absolute():
-        path = runtime_paths.config_dir / path
-    return path
-
-
 def _sandbox_shell_execution_runtime_env_values(
     *,
     extra_env_passthrough: str | None = None,
@@ -819,15 +816,27 @@ def build_execution_tool_env(
     return dict(_execution_tool_runtime_env_values(runtime_paths))
 
 
+def read_secret_file(path: Path) -> str:
+    """Return a secret file's text without a UTF-8 byte order mark or surrounding whitespace, as the `.env` reads."""
+    return path.read_text(encoding="utf-8-sig").strip()
+
+
 def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
-    """Resolve one runtime env var as a filesystem path.
+    """Resolve one runtime env var, read as ``RuntimePaths._plain_env_value`` reads it, as a filesystem path.
 
     Relative paths are interpreted relative to the runtime config directory.
     """
-    source_path = _runtime_env_source_path(runtime_paths, name)
-    if source_path is None:
+    if (plain := runtime_paths._plain_env_value((name,))) is None:
         return None
-    return source_path.resolve()
+    return _resolve_runtime_relative_path(plain[0], base_dir=runtime_paths.config_dir)
+
+
+def secret_path_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return the variables naming the primary's secret files: every `<NAME>_FILE`, and a set credentials path."""
+    names = {name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")}
+    if runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS") is not None:
+        names.add("GOOGLE_APPLICATION_CREDENTIALS")
+    return frozenset(names)
 
 
 def runtime_env_flag(
