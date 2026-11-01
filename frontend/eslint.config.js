@@ -24,9 +24,6 @@ const gitIgnored = readFileSync(
 export default [
   { basePath: "..", ignores: gitIgnored },
   {
-    ignores: ["coverage/**"],
-  },
-  {
     files: ["**/*.{ts,tsx}"],
     languageOptions: {
       parser: tsParser,
