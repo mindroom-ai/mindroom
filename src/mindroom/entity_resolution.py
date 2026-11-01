@@ -171,6 +171,7 @@ def _room_reference_identifiers(
     """Return room ID, alias, and managed key identifiers for one live room.
 
     An alias names a managed room key only when it is exactly the alias MindRoom gives that room.
+    ``_room_refs_match`` maps configured refs through MindRoom's record, so a recorded room matches by its room ID.
     """
     domain = runtime_matrix_domain(runtime_paths)
     room_refs = (room_id, *room_aliases)
@@ -178,10 +179,6 @@ def _room_reference_identifiers(
     for room_ref in room_refs:
         if managed_key := managed_room_key_for_alias(room_ref, domain, runtime_paths):
             identifiers.add(managed_key)
-    for room_key, room in matrix_state.matrix_state_for_runtime(runtime_paths).rooms.items():
-        persisted_identifiers = {room_key, room.room_id, room.alias}
-        if identifiers.intersection(persisted_identifiers):
-            identifiers.update(persisted_identifiers)
     return identifiers
 
 
