@@ -76,7 +76,7 @@ def _refuse_unloadable(config: Config, runtime_paths: RuntimePaths, roster: Pers
         authored = config.authored_model_dump()
         config.validate_with_runtime(authored, runtime_paths, tolerate_plugin_load_errors=True, roster=roster)
     except ValueError as exc:  # Pydantic and runtime validation errors are both ValueErrors.
-        msg = f"The agent would not load with this change, so nothing was stored: {exc}"
+        msg = f"The agent would not load with this change, so nothing was stored: {config_validation_summary(exc)}"
         raise _GeneratedAgentError(msg) from exc
 
 

@@ -255,7 +255,9 @@ def iter_config_validation_messages(
 
 
 def config_validation_summary(exc: Exception) -> str:
-    """Return the messages of ``iter_config_validation_messages`` on one line, each as ``<location>: <message>``."""
+    """Return a config validation error's issues on one line as ``<location>: <message>``, or another error's text."""
+    if not isinstance(exc, (ValidationError, ConfigRuntimeValidationError)):
+        return str(exc)
     return "; ".join(f"{location}: {message}" for location, message in iter_config_validation_messages(exc))
 
 
