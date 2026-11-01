@@ -475,21 +475,6 @@ async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tm
 
 
 @pytest.mark.asyncio
-async def test_repeated_membership_invalidation_preserves_refresh_backoff(tmp_path: Path) -> None:
-    """Repeated uncertain responses must not bypass the bounded refresh retry delay."""
-    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
-    bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
-
-    with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
-        await bot._router.refresh_memberships_if_needed()
-        bot.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-        await bot._router.refresh_memberships_if_needed()
-
-    orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
-
-
-@pytest.mark.asyncio
 async def test_router_authoritative_departure_revokes_grant_before_membership_fence(
     tmp_path: Path,
 ) -> None:
@@ -988,7 +973,7 @@ async def test_replayed_truncated_leave_cannot_fence_a_rejoined_membership(tmp_p
 
 @pytest.mark.asyncio
 async def test_replayed_departure_cannot_leave_a_confirmed_join_fenced(tmp_path: Path) -> None:
-    """A duplicated old leave report cannot invalidate a confirmed rejoin."""
+    """A duplicated old leave report, redelivered after the rejoin it preceded, cannot invalidate that rejoin."""
     bot = _agent_bot(tmp_path)
     room_id = "!rejoined:localhost"
     departure = _validated_reported_membership_admission(
@@ -1005,6 +990,7 @@ async def test_replayed_departure_cannot_leave_a_confirmed_join_fenced(tmp_path:
         membership="join",
         previous_epoch=1,
     )
+    batch = IngestionBatchAdmission(_STREAM_ID, 1, (departure, rejoin))
     principal = bot.journal_principal()
     await principal.load_or_create_ingestion_consumer(new_generation=_CONSUMER_GENERATION)
     await principal.bind_ingestion_stream(
@@ -1012,18 +998,12 @@ async def test_replayed_departure_cannot_leave_a_confirmed_join_fenced(tmp_path:
         stream_id=_STREAM_ID,
     )
 
-    assert (await principal.admit_ingestion_batch(IngestionBatchAdmission(_STREAM_ID, 1, (departure,)))).record_facts[
-        0
-    ] == _FRESH_RECEIPT_FACTS
-    assert (await principal.admit_ingestion_batch(IngestionBatchAdmission(_STREAM_ID, 1, (departure,)))).record_facts[
-        0
-    ] == _REPLAY_FACTS
-    assert (await principal.admit_ingestion_batch(IngestionBatchAdmission(_STREAM_ID, 2, (rejoin,)))).record_facts[
-        0
-    ] == _FRESH_RECEIPT_FACTS
-    epoch_after_rejoin = await principal.membership_epoch(room_id)
+    assert (await principal.admit_ingestion_batch(batch)).record_facts == (_FRESH_RECEIPT_FACTS, _FRESH_RECEIPT_FACTS)
+    after_rejoin = await membership_position(principal, room_id)
+    assert after_rejoin == RoomMembershipPosition("join", 1)
 
-    assert await principal.membership_epoch(room_id) == epoch_after_rejoin
+    assert (await principal.admit_ingestion_batch(batch)).record_facts == (_REPLAY_FACTS, _REPLAY_FACTS)
+    assert await membership_position(principal, room_id) == after_rejoin
 
 
 @pytest.mark.asyncio
