@@ -64,7 +64,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
 
-from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config, iter_config_validation_messages
+from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config, config_validation_summary
 
 
 def doctor(config_path: Path | None = None, storage_path: Path | None = None) -> None:
@@ -191,9 +191,8 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
     try:
         config = load_config_quiet(runtime_paths=runtime_paths)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        issues = "; ".join(f"{location}: {message}" for location, message in iter_config_validation_messages(exc))
         # A message can quote a config key, which may contain brackets Rich reads as markup.
-        console.print(f"[red]✗[/red] Config invalid: {escape(issues)}")
+        console.print(f"[red]✗[/red] Config invalid: {escape(config_validation_summary(exc))}")
         return None, 0, 1, 0
     if reference_issues := automation_reference_issues(config, runtime_paths):
         # The config loads, so the remaining checks still run against it.

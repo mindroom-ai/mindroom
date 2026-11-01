@@ -252,6 +252,11 @@ def iter_config_validation_messages(
     ]
 
 
+def config_validation_summary(exc: Exception) -> str:
+    """Return the messages of ``iter_config_validation_messages`` on one line, each as ``<location>: <message>``."""
+    return "; ".join(f"{location}: {message}" for location, message in iter_config_validation_messages(exc))
+
+
 def format_invalid_config_message(
     exc: ConfigLoadUserError,
     *,
@@ -1024,7 +1029,9 @@ class Config(BaseModel):
                     tolerate_plugin_load_errors=tolerate_plugin_load_errors,
                 )
             except (ValidationError, ConfigRuntimeValidationError) as exc:
-                msg = f"personal_agents would generate an invalid agent for a new user: {exc}"
+                msg = (
+                    f"personal_agents would generate an invalid agent for a new user: {config_validation_summary(exc)}"
+                )
                 raise ConfigRuntimeValidationError(msg) from exc
         settings = config.personal_rooms
         instance = expansion.instances.get(settings.agent) if settings is not None else None

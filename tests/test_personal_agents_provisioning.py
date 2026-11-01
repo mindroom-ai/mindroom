@@ -217,8 +217,23 @@ async def test_custom_matrix_username_gets_namespace(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("user_id", ["@ali*ce:evil.org", "@a b:evil.org", "@a[b]c:evil.org"])
-async def test_unsupported_owner_id_gets_no_account_or_roster_entry(tmp_path: Path, user_id: str) -> None:
+@pytest.mark.parametrize(
+    ("user_id", "reason"),
+    [
+        (
+            "@ali*ce:evil.org",
+            "cannot own a personal agent: credential_managers: "
+            "credential_managers must contain concrete Matrix user IDs: @ali*ce:evil.org",
+        ),
+        (
+            "@a b:evil.org",
+            "cannot own a personal agent: credential_managers: "
+            "credential_managers must contain concrete Matrix user IDs: @a b:evil.org",
+        ),
+        ("@a[b]c:evil.org", "cannot own an agent: brackets in a Matrix ID are not supported"),
+    ],
+)
+async def test_unsupported_owner_id_gets_no_account_or_roster_entry(tmp_path: Path, user_id: str, reason: str) -> None:
     """An ID that would break the generated agent's access fails only that user's onboarding, before registration."""
     paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(deepcopy(BASE), paths)
@@ -226,9 +241,11 @@ async def test_unsupported_owner_id_gets_no_account_or_roster_entry(tmp_path: Pa
 
     with (
         patch("mindroom.personal_agents.create_agent_user", new=create_user),
-        pytest.raises(ValueError, match=r"cannot own (a personal|an) agent"),
+        pytest.raises(ValueError, match=r"cannot own (a personal|an) agent") as raised,
     ):
         await _provision(config, paths, user_id)
+
+    assert str(raised.value) == f"{user_id} {reason}"
 
     create_user.assert_not_awaited()
     assert read_personal_agent_roster(paths) == []

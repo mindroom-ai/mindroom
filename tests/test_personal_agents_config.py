@@ -269,8 +269,12 @@ def test_broken_template_fails_without_any_user(tmp_path: Path) -> None:
     data = deepcopy(BASE)
     # Config does not check agent model names, so use a knowledge base reference it does check.
     data["personal_agents"]["mind"]["agent"]["knowledge_bases"] = ["missing"]
-    with pytest.raises(ConfigRuntimeValidationError, match="personal_agents would generate an invalid agent"):
+    with pytest.raises(ConfigRuntimeValidationError, match="personal_agents would generate an invalid agent") as raised:
         _runtime_config(tmp_path, data)
+    assert str(raised.value) == (
+        "personal_agents would generate an invalid agent for a new user: "
+        "config: Agents reference unknown knowledge bases: mind_personal_agent_probe_0 -> missing"
+    )
 
 
 def test_broken_override_for_user_not_onboarded_fails(tmp_path: Path) -> None:

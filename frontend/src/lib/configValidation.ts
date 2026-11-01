@@ -39,20 +39,10 @@ export function getConfigValidationIssues(
 export function getGlobalConfigDiagnostics(
   diagnostics: ConfigDiagnostic[],
 ): GlobalConfigDiagnostic[] {
-  const globals = diagnostics.filter(
+  return diagnostics.filter(
     (diagnostic): diagnostic is GlobalConfigDiagnostic =>
       diagnostic.kind === "global",
   );
-  const seen = new Set<string>();
-
-  return globals.filter((diagnostic) => {
-    const key = `${diagnostic.blocking}:${diagnostic.message}`;
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
 }
 
 export function findConfigValidationIssue(
