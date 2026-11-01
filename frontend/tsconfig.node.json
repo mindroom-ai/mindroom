@@ -6,10 +6,5 @@
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true
   },
-  "include": [
-    "vite.config.ts",
-    "vite.connections.config.ts",
-    "svgz.config.ts",
-    "vitest.config.ts"
-  ]
+  "include": ["*.config.ts"]
 }
