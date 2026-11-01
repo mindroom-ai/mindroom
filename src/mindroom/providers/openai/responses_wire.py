@@ -124,7 +124,8 @@ def _latest_response(messages: Sequence[Message]) -> tuple[int, dict[str, Any]] 
 def conversation_digest(messages: Sequence[Message]) -> str:
     """Return the digest of the conversation ``messages`` hold, which each stored response records for its request.
 
-    It covers what a request sends of each message, the system text and the turn context included,
+    It covers what a request sends of each message, the system text and the turn context (``add_to_agent_memory=False``)
+    included,
     and leaves out what only storage reads: ids, replay flags, usage, a reply's provider data and reasoning, and inline
     media bytes, which a media item's id and source stand for.
     """

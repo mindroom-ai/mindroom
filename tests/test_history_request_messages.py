@@ -693,7 +693,7 @@ def test_a_paused_row_whose_answers_name_no_model_ends_its_input_at_the_first_ca
     assert [message.id for message in stored_turn_input(stored).context] == [context.id]
 
 
-def test_a_stopped_run_s_turn_input_ends_at_its_model_s_first_answer() -> None:
+def test_a_row_without_turn_context_ends_its_input_at_its_model_s_first_answer() -> None:
     """A row without turn context ends its input at its model's first answer, even one without a call."""
     context = Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>')
     answer = Message(role="assistant", content="Partial", provider_data=model_provenance("m", "Synthetic"))

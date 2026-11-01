@@ -304,7 +304,7 @@ The key `matrix_message_target` is reserved; MindRoom replaces hook items that u
 
 ## Enrichment in minimal mode
 
-In [minimal mode](tools/agent-cli.md), system enrichment and non-persisted message enrichment are available to the agent through the CLI's enrichment context document instead of the prompt.
+In [minimal mode](tools/agent-cli.md), system enrichment and `persist=False` message enrichment are available to the agent through the CLI's enrichment context document instead of the prompt.
 Return an `EnrichmentItem` with `minimal_required=True` when the item must stay in the prompt without a tool call; `ctx.add_metadata()` and `ctx.add_instruction()` cannot set this flag.
 Persisted message enrichment and standard mode are unaffected.
 

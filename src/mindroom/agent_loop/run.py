@@ -420,7 +420,8 @@ def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, stat
     memory results and the approval receipt, stores in place: a resume then sends the paused request unchanged, and
     the next turn's request can extend this run's last one whole, which append-only prompt caches such as Codex's
     need. A run that stopped after a call, or whose team member run did (``run_tool_executions``), drops it instead:
-    a model switch continues the turn in another attempt, which replays this run and sends the turn context again.
+    such a stop is normally a model switch, whose continuation attempt replays this run and sends the turn context
+    again.
     """
     stopped = status is not RunStatus.paused and any(tool.stop_after_call for tool in run_tool_executions(record))
     record.messages = [

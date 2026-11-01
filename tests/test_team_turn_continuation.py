@@ -258,7 +258,7 @@ async def test_a_members_switch_continues_the_team_with_the_turn_context_sent_on
     monkeypatch: pytest.MonkeyPatch,
     probe: type[ProbeToolkit],  # noqa: ARG001
 ) -> None:
-    """The leader's run, which a member's switch stopped, stores no turn context, so the continuation sends it once."""
+    """The leader's run, whose member run a switch stopped, stores no turn context; the continuation sends it once."""
     team = _team(
         tmp_path,
         monkeypatch,

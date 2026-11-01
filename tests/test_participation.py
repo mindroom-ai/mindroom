@@ -120,7 +120,7 @@ async def test_approval_reuses_exact_normal_prefix_and_only_checks_once() -> Non
     assert second.content == "Continued"
     assert gate.approved
     assert gate.decided.is_set()
-    # The decision prompt is transient: the stored run holds the reply's messages only.
+    # The decision prompt goes only to the decision request: the stored run holds the reply's messages only.
     assert [m.role for m in first.messages] == ["system", "user", "assistant"]
 
 

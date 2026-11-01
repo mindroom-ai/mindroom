@@ -3141,7 +3141,7 @@ With the default `reserve_tokens`, a summary model with a context window of roug
 
 A long reply, for example a tool loop that keeps reading files, can outgrow the context window before it finishes.
 Before each model request, MindRoom checks whether the request would exceed the replay window minus `reserve_tokens`; if it would, it compacts first and the reply continues.
-After that compaction the model sees its system prompt, the user's current message, any per-turn context, and a summary that records the progress made so far; earlier conversation and the reply's own earlier tool calls and results are replaced by that summary.
+After that compaction the model sees its system prompt, the user's current message, the current turn's context, and a summary that records the progress made so far; earlier conversation and the reply's own earlier tool calls and results are replaced by that summary.
 The tool calls still appear in the reply.
 If the summary and the current message together exceed the model's `context_window` minus `reserve_tokens`, the reply fails with `Saved conversation summary exceeds the available history budget` (see [Compacted history and redaction](#compacted-history-and-redaction)).
 If the summary model fails, the reply continues without compacting and may then fail with a provider error.
@@ -17748,7 +17748,7 @@ The key `matrix_message_target` is reserved; MindRoom replaces hook items that u
 
 ## Enrichment in minimal mode
 
-In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), system enrichment and non-persisted message enrichment are available to the agent through the CLI's enrichment context document instead of the prompt.
+In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), system enrichment and `persist=False` message enrichment are available to the agent through the CLI's enrichment context document instead of the prompt.
 Return an `EnrichmentItem` with `minimal_required=True` when the item must stay in the prompt without a tool call; `ctx.add_metadata()` and `ctx.add_instruction()` cannot set this flag.
 Persisted message enrichment and standard mode are unaffected.
 

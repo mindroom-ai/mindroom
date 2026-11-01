@@ -860,7 +860,7 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
     )
     second_request, third_request = requests[1], requests[2]
 
-    assert stable_serialize(second_request[:-1]) == stable_serialize(third_request[: len(second_request) - 1])
+    assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
     assert third_request[-1] == {
         "role": "user",
         "content": render_transient_context(("turn context three",)),
