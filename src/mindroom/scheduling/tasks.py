@@ -1005,8 +1005,8 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
         Formatted string like "2024-01-15 15:30 EST (2 hours from now)"
 
     """
-    # A timedelta of aware instants, because humanize compares datetimes as naive host-local times,
-    # which repeat during a daylight-saving fall-back hour.
+    # A timedelta of aware instants, because humanize subtracts datetimes as naive host-local wall times,
+    # which differ from real elapsed time whenever the host's UTC offset changes between the two instants.
     relative_str = humanize.naturaltime(datetime.now(UTC) - dt)
     return f"{_format_local_time(dt, timezone_str)} ({relative_str})"
 
