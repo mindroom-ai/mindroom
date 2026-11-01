@@ -1608,6 +1608,42 @@ async def test_file_backend_entrypoint_grows_to_the_cap_once_the_provider_counte
 
 
 @pytest.mark.asyncio
+async def test_file_backend_entrypoint_keeps_the_file_rate_after_an_append(storage_path: Path, config: Config) -> None:
+    """An append's text is counted after the reply that needs it, so the file's last provider rate stands in until then.
+
+    The margin estimate would shrink the preload, and the conversation would keep the smaller copy.
+    """
+    config.memory.file.max_entrypoint_lines = 500
+    config.memory.file.max_entrypoint_tokens = 100
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    lines = [f"fact {index:02} " + "z" * 32 for index in range(40)]
+    memory = workspace / "MEMORY.md"
+    memory.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    async def half(text: str) -> int:
+        return len(text) // 8
+
+    counter = fake_token_counter(count=half)
+    await count_exact(counter, "\n".join(lines))
+
+    async def kept_lines() -> list[str]:
+        parts = await public_build_memory_prompt_parts(
+            "x",
+            "general",
+            config,
+            runtime_paths_for(config),
+            counter=counter,
+        )
+        return [line for line in lines if line in parts.session_preamble]
+
+    before = await kept_lines()
+    memory.write_text("\n".join([*lines, "fact 40 " + "z" * 32]) + "\n", encoding="utf-8")
+
+    assert await kept_lines() == before
+
+
+@pytest.mark.asyncio
 async def test_file_backend_entrypoint_cut_ignores_calibration_from_other_text(
     storage_path: Path,
     config: Config,

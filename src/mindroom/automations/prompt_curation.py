@@ -126,7 +126,12 @@ def _plan_curation(
     memory_text = curated_payloads.get(_ENTRYPOINT, b"").decode("utf-8")
     memory_lines = len(memory_text.splitlines())
     # Lines the preload withholds never reach the prompt, at any token count; judged as a reply's preload judges them.
-    if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(memory_text, config, counter):
+    if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(
+        memory_text,
+        config,
+        counter,
+        root / _ENTRYPOINT,
+    ):
         return None
     return _CurationPlan(
         agent_name=agent_name,

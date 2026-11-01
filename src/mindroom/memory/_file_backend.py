@@ -64,6 +64,8 @@ _MAX_MEMORY_SCAN_BYTES = 16 << 20
 _MAX_MEMORY_SCAN_ENTRIES = 4096
 _MAX_MEMORY_DIR_DEPTH = 8
 _READ_CHUNK_BYTES = 1 << 16
+# The latest provider rate of each MEMORY.md, by counter key and path.
+_file_rates: dict[tuple[str, Path], float] = {}
 
 
 @dataclass(frozen=True)
@@ -679,14 +681,19 @@ def _entrypoint_text(lines: list[str]) -> str:
     return "\n".join(lines).strip()
 
 
-def _file_rate(counter: TokenCounter, text: str) -> float:
-    """Return how many provider tokens the file holds per estimated token, once its provider counted the whole file.
+def _file_rate(counter: TokenCounter, text: str, source: Path) -> float:
+    """Return how many provider tokens the file at ``source`` holds per estimated token, by its latest provider count.
 
-    The rate stays while the file does, so the cut of an unchanged file never moves; before the count, it is one.
+    An append changes the text, whose count arrives in the background after the reply that needs it, so the rate of
+    the last counted text stands in until then; neither an unchanged file nor an append moves the cut by the family
+    margin or by calibration. Before the provider counted the file, it is one.
     """
+    key = (counter.key, source)
     exact = cached_count(counter, text)
     estimate = counter.estimate(text) if exact is not None else None
-    return exact / estimate if exact is not None and estimate else 1.0
+    if exact is not None and estimate:
+        _file_rates[key] = exact / estimate
+    return _file_rates.get(key, 1.0)
 
 
 def _preload_tokens(counter: TokenCounter, text: str, rate: float) -> int:
@@ -713,8 +720,9 @@ def _entrypoint_lines_within_caps(
     max_lines: int,
     max_tokens: int,
     counter: TokenCounter,
+    source: Path,
 ) -> list[str]:
-    """Keep whole lines within both caps, as the model the preload goes to counts them.
+    """Keep whole lines within both caps, as the model the preload goes to counts them; ``source`` is the file's path.
 
     Lines are selected by their own estimates, scaled by the whole file's provider count once cached; once the provider
     has counted the preload they make and that count is over the cap, the line estimates scale by how far they fell
@@ -730,7 +738,7 @@ def _entrypoint_lines_within_caps(
         _line_cost(counter, line) if index < max_lines or index >= len(lines) - max_lines else 0.0
         for index, line in enumerate(lines)
     ]
-    rate = scale = _file_rate(counter, _entrypoint_text(lines))
+    rate = scale = _file_rate(counter, _entrypoint_text(lines), source)
     while True:
         selected = _selected_lines(costs, first_entry, max_lines, max_tokens / scale)
         kept = [lines[index] for index in selected]
@@ -741,8 +749,8 @@ def _entrypoint_lines_within_caps(
         scale = measured / estimated
 
 
-def entrypoint_withholds_lines(text: str, config: Config, counter: TokenCounter) -> bool:
-    """Return whether the MEMORY.md preload, counted with ``counter``, would leave out any line of ``text``."""
+def entrypoint_withholds_lines(text: str, config: Config, counter: TokenCounter, source: Path) -> bool:
+    """Return whether the preload of the MEMORY.md at ``source``, counted with ``counter``, would leave out any line."""
     lines = text.splitlines()
     file_config = config.memory.file
     kept = _entrypoint_lines_within_caps(
@@ -750,6 +758,7 @@ def entrypoint_withholds_lines(text: str, config: Config, counter: TokenCounter)
         file_config.max_entrypoint_lines,
         file_config.max_entrypoint_tokens,
         counter,
+        source,
     )
     return len(kept) < len(lines)
 
@@ -778,7 +787,7 @@ def _load_scope_entrypoint_context(
             max_bytes=_MAX_MEMORY_FILE_BYTES,
         )
     file_text = _entrypoint_text(lines)
-    lines = _entrypoint_lines_within_caps(lines, max_lines, max_tokens, counter)
+    lines = _entrypoint_lines_within_caps(lines, max_lines, max_tokens, counter, entrypoint_path)
     return MemoryEntrypointContext(
         text=_entrypoint_text(lines),
         file_text=file_text,

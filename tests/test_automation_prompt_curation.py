@@ -186,7 +186,7 @@ def test_memory_the_preload_shows_whole_asks_for_no_cut(tmp_path: Path) -> None:
     # The file as a reply's preload counts it in the background, without its final newline.
     asyncio.run(count_exact(counter, MEMORY.strip()))
     # Its 1,286 estimated tokens are 643 to the provider, so a reply preloads every line.
-    assert not entrypoint_withholds_lines(MEMORY, config, counter)
+    assert not entrypoint_withholds_lines(MEMORY, config, counter, root / "MEMORY.md")
 
     assert _plan_curation(config, root, "mind", automation, counter) is None
 
