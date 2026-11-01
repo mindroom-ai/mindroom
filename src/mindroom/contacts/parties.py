@@ -60,11 +60,16 @@ def party_matrix_ids(party: ContactParty, runtime_paths: RuntimePaths) -> frozen
     return frozenset({current_entity_id(party.id, runtime_paths).full_id, party.owner})
 
 
-def personal_room_of(config: Config, runtime_paths: RuntimePaths, user_id: str) -> tuple[str, str] | None:
-    """Return the personal agent and room of a user's personal room, once it exists."""
+def personal_room_agent(config: Config, user_id: str) -> str | None:
+    """Return the personal agent that serves a user's personal room, once the user has one."""
     if config.personal_rooms is None:
         return None
-    agent_name = config.personal_agent_name(config.personal_rooms.agent, user_id)
+    return config.personal_agent_name(config.personal_rooms.agent, user_id)
+
+
+def personal_room_of(config: Config, runtime_paths: RuntimePaths, user_id: str) -> tuple[str, str] | None:
+    """Return the personal agent and room of a user's personal room, once it exists."""
+    agent_name = personal_room_agent(config, user_id)
     if agent_name is None:
         return None
     record = read_personal_room(personal_room_record_path(runtime_paths, agent_name, user_id))

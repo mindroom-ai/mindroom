@@ -17,7 +17,14 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.resolution import authored_tool_entries
 from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
-from mindroom.contacts.parties import agent_party, party_matrix_ids, person_party, personal_room_of, resolve_target
+from mindroom.contacts.parties import (
+    agent_party,
+    party_matrix_ids,
+    person_party,
+    personal_room_agent,
+    personal_room_of,
+    resolve_target,
+)
 from mindroom.contacts.policy import effective_rules
 from mindroom.contacts.store import (
     ContactBook,
@@ -31,7 +38,6 @@ from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import create_room, invite_to_room, leave_room
-from mindroom.matrix.invited_rooms_store import forget_invited_room, invited_rooms_path, remember_invited_room
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -231,6 +237,11 @@ async def request_contact(
         requester = own
         side = ContactSide(rules=_clean_rules(rules), tools=validate_side_tools(config, agent_name, tools))
     _check_pair(requester, target_party)
+    # The agent of the owner's personal room asks them and accepts for them, which takes the contacts tools.
+    poster = personal_room_agent(config, target_party.owner)
+    if poster is not None and agent_party(config, poster) is None:
+        msg = f"{target_party.owner}'s personal agent {poster} does not take contact requests"
+        raise ValueError(msg)
 
     def create(book: ContactBook) -> ContactRecord:
         for existing in book.contacts:
@@ -320,7 +331,7 @@ async def _seat_parties(
     room_id: str,
     agents: dict[str, tuple[AgentBot, nio.AsyncClient]],
 ) -> None:
-    """Invite everyone who speaks for either party, then make each agent party join the room and keep it."""
+    """Invite everyone who speaks for either party, then make each agent party join the room."""
     paths = context.runtime_paths
     creator = _room_creator(record)
     _, client = agents[creator]
@@ -334,19 +345,16 @@ async def _seat_parties(
         if not await bot.change_local_membership(room_id, "join"):
             msg = f"{name} could not join the contact room; accept again to retry"
             raise ValueError(msg)
-        await run_blocking_until_complete(remember_invited_room, invited_rooms_path(paths, name), room_id)
 
 
 async def _leave_contact_room(context: ToolRuntimeContext, record: ContactRecord, room_id: str) -> None:
-    """Make the agents of a contact leave its room and stop keeping it across restarts."""
+    """Make the agents of a contact leave its room; they keep only the rooms of active contacts across restarts."""
     for party in (record.requester, record.target):
         if party.kind != "agent":
             continue
         client = None if context.orchestrator is None else context.orchestrator.running_entity_client(party.id)
         if client is not None:
             await leave_room(client, room_id)
-        path = invited_rooms_path(context.runtime_paths, party.id)
-        await run_blocking_until_complete(forget_invited_room, path, room_id)
 
 
 async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecord, poster: str) -> None:
@@ -354,7 +362,8 @@ async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecor
 
     A person who asked has no agent to continue, so the accepting agent tells their thread, when it is in that room.
     """
-    target = _display(context.current_config, record.target)
+    # A display name is the other owner's to choose, so a message the requesting agent acts on names the ID.
+    target = record.target.id
     requester = record.requester
     if requester.kind == "agent":
         await _post_to_origin(
@@ -393,7 +402,8 @@ async def accept_contact(
     """Accept a pending request for its target owner: open the contact room, seat both parties, and tell the requester.
 
     Only the agent of the target owner's personal room, which asked them there, accepts. The target side keeps any
-    rules or tools left out. A room that cannot be fully set up is left again and the request stays pending.
+    rules or tools left out. Both agent parties keep the room while the contact is active. A room that cannot be fully
+    set up is left again and the request stays pending.
     """
     config, paths = context.current_config, context.runtime_paths
     own = _own_party(context, agent_name)

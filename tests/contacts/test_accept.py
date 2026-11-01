@@ -4,17 +4,23 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
 from mindroom.contacts import flow
+from mindroom.contacts.store import contact_room_ids
 from mindroom.custom_tools.contacts import ContactsTools
 from mindroom.entity_resolution import current_entity_id
-from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
+from mindroom.logging_config import get_logger
+from mindroom.matrix.sync_continuity import SyncContinuityStore
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.conftest import TEST_PASSWORD, make_matrix_client_mock
 from tests.contacts.test_tools import (
     CAROL,
     CONTACT_ROOM,
@@ -31,7 +37,7 @@ from tests.contacts.test_tools import (
 from tests.test_generated_agents import CO_OWNER, OWNER
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -43,6 +49,7 @@ ROOM_STATE = [
     {"type": "m.room.history_visibility", "state_key": "", "content": {"history_visibility": "shared"}},
 ]
 NOT_PENDING = r"^Only a pending contact can be accepted$"
+REMOVED_ROOM = "!removed:localhost"
 
 
 @dataclass
@@ -102,9 +109,38 @@ def _joined(runtime: _Runtime) -> set[str]:
     return joined
 
 
+def _room_lifecycle(config: Config, paths: RuntimePaths, agent_name: str) -> BotRoomLifecycle:
+    """Return one agent's room lifecycle on fakes, with no configured, retained, or invited rooms."""
+    user_id = _account(paths, agent_name)
+    return BotRoomLifecycle(
+        BotRoomLifecycleDeps(
+            agent_name=agent_name,
+            agent_user=AgentMatrixUser(
+                agent_name=agent_name,
+                user_id=user_id,
+                display_name=agent_name,
+                password=TEST_PASSWORD,
+            ),
+            runtime=SimpleNamespace(client=make_matrix_client_mock(user_id=user_id), config=config),
+            runtime_paths=paths,
+            continuity_store=SyncContinuityStore(paths.storage_root, agent_name),
+            get_logger=lambda: get_logger("tests.contacts"),
+            get_configured_rooms=list,
+            get_retained_room_ids=set,
+            get_cleanup_exclusions=AsyncMock(return_value=set()),
+            send_response=AsyncMock(return_value=None),
+            change_membership=AsyncMock(return_value=True),
+            admit_response=MagicMock(),
+            on_configured_room_joined=AsyncMock(),
+            on_room_joined=AsyncMock(),
+            get_conversation_reader=MagicMock(),
+        ),
+    )
+
+
 def _kept(paths: RuntimePaths) -> set[str]:
     """Return the agents that keep the contact room across restarts."""
-    return {name for name in TOOLS if CONTACT_ROOM in load_invited_rooms(invited_rooms_path(paths, name))}
+    return {name for name in TOOLS if CONTACT_ROOM in contact_room_ids(paths, name)}
 
 
 @pytest.mark.asyncio
@@ -213,7 +249,7 @@ async def test_accept_saves_rules_and_tools_after_validation(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_accept_kicks_off_requesting_agent_as_its_owner(tmp_path: Path) -> None:
-    """The requesting agent mentions itself in the thread it asked from, for its owner, so it continues its task."""
+    """The requesting agent mentions itself in its thread, for its owner, naming the target by ID, not a chosen name."""
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     record = await _pending(config, paths, runtime)
@@ -223,7 +259,7 @@ async def test_accept_kicks_off_requesting_agent_as_its_owner(tmp_path: Path) ->
 
     runtime.sent("mind_alice").assert_awaited_once_with(
         ORIGIN_ROOM,
-        f"@mind_alice Bob's Mind accepted your contact request. Continue the task in the contact room {CONTACT_ROOM}: "
+        f"@mind_alice mind_bob accepted your contact request. Continue the task in the contact room {CONTACT_ROOM}: "
         "Plan the dinner",
         ORIGIN_THREAD,
         "native:contacts",
@@ -269,7 +305,7 @@ async def test_a_person_requester_hears_from_the_accepting_agent_only_in_a_room_
         runtime.sent(name).assert_not_awaited()
     runtime.sent("mind_carol").assert_awaited_once_with(
         ORIGIN_ROOM,
-        f"Carol's Mind accepted your contact request. The contact room is {CONTACT_ROOM}.",
+        f"mind_carol accepted your contact request. The contact room is {CONTACT_ROOM}.",
         ORIGIN_THREAD,
         "native:contacts",
         {SKIP_MENTIONS_KEY: True},
@@ -330,6 +366,49 @@ async def test_a_room_that_cannot_be_set_up_is_left_and_the_request_stays_pendin
     assert _kept(paths) == set()
     assert [stored.status for stored in _stored(paths)] == ["pending"]
     runtime.sent("mind_alice").assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_room_cleanup_keeps_an_active_contact_room_for_its_agents_and_leaves_a_removed_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent party keeps its active contact's room across restarts, even accepting no invites, until removal."""
+    config, paths = _setup(tmp_path, accept_invites=False)
+    runtime = _runtime()
+    active = await _pending(config, paths, runtime)
+    removed = await _pending(config, paths, runtime, target=CAROL)
+    with _matrix():
+        await _accept(config, paths, runtime, active.id)
+    with _matrix(REMOVED_ROOM):
+        await _accept(config, paths, runtime, removed.id, agent_name="mind_carol", requester_id=CAROL)
+    await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", removed.id)
+
+    left: list[str] = []
+
+    async def record_left(
+        _client: object,
+        room_ids: list[str],
+        *,
+        leave_room_action: Callable[[str], Awaitable[bool]],
+    ) -> list[str]:
+        del leave_room_action
+        left.extend(room_ids)
+        return room_ids
+
+    joined = [CONTACT_ROOM, REMOVED_ROOM, "!stale:localhost"]
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=joined))
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", record_left)
+    left_by_agent = {}
+    for name in ("mind_alice", "mind_bob", "mind_carol"):
+        await _room_lifecycle(config, paths, name).leave_unconfigured_rooms()
+        left_by_agent[name], left[:] = sorted(left), []
+
+    assert left_by_agent == {
+        "mind_alice": [REMOVED_ROOM, "!stale:localhost"],
+        "mind_bob": [REMOVED_ROOM, "!stale:localhost"],
+        "mind_carol": [CONTACT_ROOM, REMOVED_ROOM, "!stale:localhost"],
+    }
 
 
 @pytest.mark.asyncio

@@ -15,14 +15,9 @@ from mindroom.agents import create_agent
 from mindroom.config.resolution import agent_policy, agent_tool_facts
 from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.contacts import flow
-from mindroom.contacts.store import ContactParty, ContactRecord, read_contacts, update_contacts
+from mindroom.contacts.store import ContactParty, ContactRecord, contact_room_ids, read_contacts, update_contacts
 from mindroom.custom_tools.contacts import ContactsTools
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
-from mindroom.matrix.invited_rooms_store import (
-    invited_rooms_path,
-    load_invited_rooms,
-    remember_invited_room,
-)
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -81,11 +76,12 @@ def _runtime() -> _Runtime:
     return runtime
 
 
-def _data(*, tools: list[str] | None = None, contacts: bool = True) -> dict[str, Any]:
+def _data(*, tools: list[str] | None = None, contacts: bool = True, accept_invites: bool = True) -> dict[str, Any]:
     data = _with_template()
     agent = data["personal_agents"]["mind"]["agent"]
     agent["tools"] = tools or ["calculator", "scheduler", "self_config", "matrix_message"]
     agent["include_default_tools"] = False
+    agent["accept_invites"] = accept_invites
     if contacts:
         agent["contacts"] = {"rules": ["Never share keys."]}
     data["personal_rooms"] = {"agent": "mind", "onboarding_rooms": ["lobby"]}
@@ -279,6 +275,23 @@ async def test_a_target_agent_outside_its_owners_personal_room_is_asked_through_
     assert record.target == ContactParty(kind="agent", id="work_bob", owner=CO_OWNER)
     assert send.await_args.args[:2] == (runtime.clients["mind_bob"], BOB_ROOM)
     assert "your agent Bob's Work (work_bob)" in send.await_args.args[2]["body"]
+
+
+@pytest.mark.asyncio
+async def test_a_request_the_target_owner_could_never_accept_is_refused(tmp_path: Path) -> None:
+    """The agent of the owner's personal room accepts for them, so without contacts it takes no requests."""
+    data = _data()
+    data["personal_agents"]["home"] = {"agent": {"display_name": "{user_display_name}'s Home", "model": "default"}}
+    data["personal_rooms"]["agent"] = "home"
+    entries = [_personal(), _personal(CO_OWNER), _personal(CO_OWNER, template="home", agent_name="home_bob")]
+    config = _load(tmp_path, data, entries=entries)
+    paths = test_runtime_paths(tmp_path)
+    persist_entity_accounts(config, paths)
+
+    with _delivered() as send, pytest.raises(ValueError, match=rf"^{CO_OWNER}'s personal agent home_bob does not take"):
+        await _request(config, paths, _runtime())
+    send.assert_not_awaited()
+    assert _stored(paths) == []
 
 
 @pytest.mark.asyncio
@@ -522,9 +535,7 @@ async def test_remove_by_either_owner_leaves_room(tmp_path: Path) -> None:
     runtime = _runtime()
     record = await _pending(config, paths, runtime)
     _activate(paths, record.id)
-    for name in ("mind_alice", "mind_bob"):
-        remember_invited_room(invited_rooms_path(paths, name), CONTACT_ROOM)
-        remember_invited_room(invited_rooms_path(paths, name), "!other:localhost")
+    assert contact_room_ids(paths, "mind_alice") == contact_room_ids(paths, "mind_bob") == {CONTACT_ROOM}
 
     removed = await flow.remove_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
 
@@ -532,7 +543,7 @@ async def test_remove_by_either_owner_leaves_room(tmp_path: Path) -> None:
     assert _stored(paths) == [removed]
     for name in ("mind_alice", "mind_bob"):
         runtime.clients[name].room_leave.assert_awaited_once_with(CONTACT_ROOM)
-        assert load_invited_rooms(invited_rooms_path(paths, name)) == {"!other:localhost"}
+        assert contact_room_ids(paths, name) == frozenset()
     runtime.clients["mind_carol"].room_leave.assert_not_awaited()
     with pytest.raises(ValueError, match=r"^The contact is already removed"):
         await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", record.id)
