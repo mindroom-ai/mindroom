@@ -4417,6 +4417,7 @@ visibility = ["mindroom.cli.desktop"]
 path = "mindroom.desktop.bridge_session"
 depends_on = [
     "mindroom.desktop.bridge",
+    "mindroom.desktop.command_journal",
     "mindroom.desktop.filesystem",
     "mindroom.desktop.login_environment",
     "mindroom.desktop.native_config",

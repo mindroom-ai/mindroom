@@ -17,6 +17,8 @@ from mindroom.desktop.protocol import DesktopCommand, DesktopResponse
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.matrix.device_identity import PinnedMatrixDevice
+
 _MAX_ENTRIES = 1024
 _MAX_SESSIONS = 128
 
@@ -29,8 +31,19 @@ class DesktopCommandJournalFullError(DesktopCommandJournalError):
     """Execution or delivery must progress before more work is admitted."""
 
 
-def check_controller_binding(path: Path, controller_key: str) -> None:
-    """Reject configuration incompatible with an existing journal without changing it."""
+def desktop_journal_path(storage_root: Path) -> Path:
+    """Return the bridge's command journal under one storage root."""
+    return storage_root / "desktop_bridge" / "commands.sqlite3"
+
+
+def controller_journal_key(controller: PinnedMatrixDevice) -> str:
+    """Return the controller identity a journal stays bound to."""
+    return json.dumps([controller.user_id, controller.device_id, controller.ed25519])
+
+
+def check_controller_binding(storage_root: Path, controller: PinnedMatrixDevice) -> None:
+    """Reject a controller the bridge's existing journal is not bound to, without changing the journal."""
+    path = desktop_journal_path(storage_root)
     try:
         mode = path.lstat().st_mode
     except FileNotFoundError:
@@ -45,7 +58,7 @@ def check_controller_binding(path: Path, controller_key: str) -> None:
     except sqlite3.DatabaseError as exc:
         msg = "Desktop journal controller binding could not be read."
         raise DesktopCommandJournalError(msg) from exc
-    if existing is None or existing[0] != controller_key:
+    if existing is None or existing[0] != controller_journal_key(controller):
         msg = "Desktop journal belongs to a different controller."
         raise DesktopCommandJournalError(msg)
 
@@ -374,4 +387,6 @@ __all__ = [
     "DesktopCommandJournalError",
     "DesktopCommandJournalFullError",
     "check_controller_binding",
+    "controller_journal_key",
+    "desktop_journal_path",
 ]

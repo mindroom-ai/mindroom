@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import importlib.util
 import sys
 import threading
@@ -437,6 +438,16 @@ def _admission(gate: ResponseAdmissionGate, wait: Callable[[], Awaitable[bool]])
     return {"response_admission_gate": gate, "admission_fence": lambda: admitted_response_decision(gate, wait)}
 
 
+def _bridge_per_session(bridges: list[FakeBridge]) -> Callable[[str, bool], FakeBridge]:
+    """Return a bridge factory that gives every call session a new bridge and records it in ``bridges``."""
+
+    def new_bridge(_identity: str, _e2ee: bool) -> FakeBridge:
+        bridges.append(FakeBridge())
+        return bridges[-1]
+
+    return new_bridge
+
+
 def _manager(
     client: AsyncMock,
     bridge: FakeBridge,
@@ -832,6 +843,9 @@ async def test_leaving_a_call_room_ends_its_call_and_forgets_its_state(tmp_path:
     assert state.retry_task.cancelled()
     assert state.expiry_handle.cancelled()
     assert manager._rooms == {}
+    # The mock re-raises one stored OSError, so its traceback and the mock's frame form a cycle that keeps the finished
+    # reconcile's frame, and its lock, alive until a collection runs.
+    gc.collect()
     assert ROOM_ID not in manager._locks
     assert ROOM_ID in manager._departed_rooms
     client.room_get_state.reset_mock()
@@ -850,12 +864,7 @@ async def test_call_room_joins_a_new_call_after_the_bot_rejoins(tmp_path: Path) 
     room = _room(encrypted=True)
     client.rooms = {ROOM_ID: room}
     bridges: list[FakeBridge] = []
-
-    def new_bridge(_identity: str, _e2ee: bool) -> FakeBridge:
-        bridges.append(FakeBridge())
-        return bridges[-1]
-
-    manager = _manager(client, FakeBridge(), tmp_path, bridge_factory=new_bridge)
+    manager = _manager(client, FakeBridge(), tmp_path, bridge_factory=_bridge_per_session(bridges))
     first_call = (await _join_call_with_queued_key_and_retry(client, manager, room)).logical_call
 
     await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
@@ -2019,29 +2028,82 @@ class _ManagerBot:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_invalidation_after_a_partial_refresh_ends_the_calls_that_refresh_allowed(tmp_path: Path) -> None:
-    """A refresh that readies one grant room restores authority, so the next loss of authority must end its calls."""
+async def test_a_call_a_ready_grant_room_allows_restarts_after_each_loss_of_authority(tmp_path: Path) -> None:
+    """Each loss of authority ends the call, and the next refresh starts it again without waiting out a backoff.
+
+    A second grant room the router has not joined keeps a refresh owed and makes every refresh back off.
+    """
     client = _client()
+    client.rooms = {ROOM_ID: _room()}
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    bridge = FakeBridge()
+    bridges: list[FakeBridge] = []
     config = _config()
     memberships = await _grant_room_memberships(config, client, tmp_path, unqueryable_room=True)
-    manager = _manager(client, bridge, tmp_path, config, agent_reply_memberships=memberships)
+    manager = _manager(
+        client,
+        FakeBridge(),
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+        bridge_factory=_bridge_per_session(bridges),
+    )
     bot = _ManagerBot(manager)
     membership_sync = AgentReplyMembershipSync(memberships, lambda: [bot])
+
+    async def refresh() -> None:
+        await memberships.refresh(config, test_runtime_paths(tmp_path), client)
+        await membership_sync.apply_grant_change()
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    for restarts in (1, 2):
+        membership_sync.invalidate(config, reason="sync_loop_started")
+        await bot.settle()
+        assert all(bridge.closed for bridge in bridges)
+        assert _call_state(manager).session is None
+
+        await membership_sync.refresh_if_needed(config, refresh)
+        await bot.settle()
+
+        assert memberships.needs_refresh(config)
+        assert len(bridges) == restarts + 1
+        assert bridges[-1].connected_grant is not None
+        assert not bridges[-1].closed
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_a_refresh_a_new_loss_of_authority_overtook_starts_no_call(tmp_path: Path) -> None:
+    """A refresh's call reconciliation still runs after a gap reopened, and finds the caller's grant unready."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridges: list[FakeBridge] = []
+    config = _config()
+    memberships = await _grant_room_memberships(config, client, tmp_path)
+    manager = _manager(
+        client,
+        FakeBridge(),
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+        bridge_factory=_bridge_per_session(bridges),
+    )
+    bot = _ManagerBot(manager)
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: [bot])
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     membership_sync.invalidate(config, reason="sync_loop_started")
     await bot.settle()
 
     await memberships.refresh(config, test_runtime_paths(tmp_path), client)
-    await membership_sync.apply_authoritative_refresh(config)
-    assert memberships.needs_refresh(config)
-    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
-    assert bridge.connected_grant is not None
-
     membership_sync.invalidate(config, reason="uncertain_sync_response")
+    state_reads = client.room_get_state.await_count
+    await membership_sync.apply_grant_change()
     await bot.settle()
 
-    assert bridge.closed
+    assert client.room_get_state.await_count > state_reads
+    assert len(bridges) == 1
+    assert bridges[0].closed
     assert _call_state(manager).session is None
     await manager.shutdown()
 
@@ -2159,13 +2221,8 @@ async def test_reply_revocation_drops_keys_queued_for_the_revoked_call(tmp_path:
     client.rooms = {ROOM_ID: room}
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridges: list[FakeBridge] = []
-
-    def new_bridge(_identity: str, _e2ee: bool) -> FakeBridge:
-        bridges.append(FakeBridge())
-        return bridges[-1]
-
     config = _config()
-    manager = _manager(client, FakeBridge(), tmp_path, config, bridge_factory=new_bridge)
+    manager = _manager(client, FakeBridge(), tmp_path, config, bridge_factory=_bridge_per_session(bridges))
     await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
     await _deliver(manager, manager.on_to_device_event(_frame_key_event(device_id="ALICESECOND")))
     assert _call_state(manager).pending_keys

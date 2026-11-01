@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -15,7 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, MAX_TOKEN_BYTES, RUN_ID_ENV, TOKEN_PATH_ENV
+from mindroom.script_runs.launch_contract import (
+    GATEWAY_URL_ENV,
+    MAX_TOKEN_BYTES,
+    RUN_ID_ENV,
+    TOKEN_PATH_ENV,
+    digest_arguments,
+)
 
 __all__ = ["MindRoomToolCallError", "MindRoomTools"]
 
@@ -94,7 +99,7 @@ class MindRoomTools:
         """Execute one logical governed call and poll only its stable call ID."""
         call_id = uuid.uuid4().hex
         wire_arguments = _json_wire_arguments(arguments, call_id=call_id)
-        arguments_digest = _digest_arguments(wire_arguments)
+        arguments_digest = digest_arguments(wire_arguments)
         receipt: _Receipt | None = None
         while receipt is None:
             try:
@@ -228,17 +233,6 @@ def _read_token(path: Path) -> str:
     if not token:
         raise RuntimeError(_CAPABILITY_INVALID_MESSAGE)
     return token
-
-
-def _digest_arguments(arguments: dict[str, object]) -> str:
-    encoded = json.dumps(
-        arguments,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _json_wire_arguments(arguments: dict[str, object], *, call_id: str) -> dict[str, object]:
