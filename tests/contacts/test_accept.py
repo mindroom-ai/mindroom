@@ -179,7 +179,6 @@ async def test_accept_creates_room_invites_and_joins(tmp_path: Path) -> None:
     assert matrix.invite.await_count == len(invitees)
     assert _joined(runtime) == _kept(paths) == {"mind_alice", "mind_bob"}
     assert (accepted.status, accepted.room_id) == ("active", CONTACT_ROOM)
-    assert accepted.decided_at is not None
     assert _stored(paths) == [accepted]
 
 

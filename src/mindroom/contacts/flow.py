@@ -113,10 +113,8 @@ def _by_id(book: ContactBook, contact_id: str) -> ContactRecord:
     return next(record for record in book.contacts if record.id == contact_id)
 
 
-def _set_notice(contact_id: str, room_id: str, event_id: str, book: ContactBook) -> None:
-    record = _by_id(book, contact_id)
-    record.notice_room_id = room_id
-    record.notice_event_id = event_id
+def _set_notice(contact_id: str, event_id: str, book: ContactBook) -> None:
+    _by_id(book, contact_id).notice_event_id = event_id
 
 
 def _request_poster(config: Config, runtime_paths: RuntimePaths, owner: str) -> tuple[str, str]:
@@ -131,7 +129,7 @@ def _request_poster(config: Config, runtime_paths: RuntimePaths, owner: str) -> 
 
 
 async def _post_request_notice(context: ToolRuntimeContext, record: ContactRecord) -> None:
-    """Post the request as a new thread in the target owner's personal room and store where it landed."""
+    """Post the request as a new thread in the target owner's personal room and store its event ID."""
     config, paths = context.current_config, context.runtime_paths
     poster, room_id = _request_poster(config, paths, record.target.owner)
     client = None if context.orchestrator is None else context.orchestrator.running_entity_client(poster)
@@ -149,7 +147,7 @@ async def _post_request_notice(context: ToolRuntimeContext, record: ContactRecor
     await run_blocking_until_complete(
         update_contacts,
         paths,
-        partial(_set_notice, record.id, room_id, delivered.event_id),
+        partial(_set_notice, record.id, delivered.event_id),
     )
 
 
@@ -416,7 +414,6 @@ async def accept_contact(
             raise ValueError(_NOT_PENDING)
         current.status = "active"
         current.room_id = room_id
-        current.decided_at = time.time()
         _change_side(current.target_side, rules, checked)
         return current.model_copy(deep=True)
 
@@ -443,7 +440,6 @@ async def decline_contact(context: ToolRuntimeContext, agent_name: str, contact_
             msg = "Only a pending contact can be declined"
             raise ValueError(msg)
         record.status = "declined"
-        record.decided_at = time.time()
         return record.model_copy(deep=True)
 
     record = await run_blocking_until_complete(update_contacts, context.runtime_paths, decline)

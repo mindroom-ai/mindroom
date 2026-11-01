@@ -56,11 +56,9 @@ class ContactRecord(BaseModel):
     target_side: ContactSide
     origin_room_id: str
     origin_thread_id: str | None
-    notice_room_id: str | None = None
     notice_event_id: str | None = None
     room_id: str | None = None
     created_at: float
-    decided_at: float | None = None
 
     def party(self, side: SideName) -> ContactParty:
         """Return the party on one side."""

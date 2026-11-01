@@ -230,7 +230,7 @@ async def test_request_records_pending_and_posts_notice_with_txn_id(tmp_path: Pa
     assert (record.requester_side.rules, record.requester_side.tools) == ("Be brief", ["calculator"])
     assert (record.target_side.rules, record.target_side.tools) == (None, None)
     assert (record.origin_room_id, record.origin_thread_id) == (ORIGIN_ROOM, ORIGIN_THREAD)
-    assert (record.notice_room_id, record.notice_event_id) == (BOB_ROOM, "$notice")
+    assert record.notice_event_id == "$notice"
     assert _stored(paths) == [record]
 
     send.assert_awaited_once()
@@ -440,7 +440,6 @@ async def test_decline_by_target_owner_only_and_notifies_origin(tmp_path: Path) 
     declined = await flow.decline_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
 
     assert declined.status == "declined"
-    assert declined.decided_at is not None
     assert _stored(paths) == [declined]
     runtime.sent("mind_alice").assert_awaited_once()
     args = runtime.sent("mind_alice").await_args
