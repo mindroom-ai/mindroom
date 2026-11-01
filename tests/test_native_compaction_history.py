@@ -70,14 +70,14 @@ def _no_provider_environment() -> Iterator[None]:
         yield
 
 
-def _inputs(config: Config) -> HistoryPreparationInputs:
-    """Resolve the configured test agent's history inputs for a 100-token static prompt."""
+def _inputs(config: Config, entity: str = "test_agent") -> HistoryPreparationInputs:
+    """Resolve the configured ``entity``'s history inputs for a 100-token static prompt."""
     return resolve_entity_preparation_inputs(
-        history_settings=config.resolve_scope("test_agent").history_settings,
+        history_settings=config.resolve_scope(entity).history_settings,
         config=config,
         runtime_paths=runtime_paths_for(config),
         static_prompt_tokens=100,
-        active_model_name=entity_model_name(config, "test_agent"),
+        active_model_name=entity_model_name(config, entity),
         active_context_window=None,
     )
 
@@ -626,14 +626,7 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
 
     prepared = await prepare_scope_history(
         model=leader,
-        resolved_inputs=resolve_entity_preparation_inputs(
-            history_settings=config.resolve_scope("team").history_settings,
-            config=config,
-            runtime_paths=paths,
-            static_prompt_tokens=100,
-            active_model_name="default",
-            active_context_window=200000,
-        ),
+        resolved_inputs=_inputs(config, "team"),
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,

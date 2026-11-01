@@ -849,44 +849,6 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
 
 
 @pytest.mark.asyncio
-async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_share(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Team history sized from the previous request takes off only the static estimate's system prompt and tools."""
-    config, runtime_paths = _bound_agent_config(tmp_path)
-    leader_system_messages = (Message(role="system", content="You lead the team."),)
-    leader_tools = PreparedTools(functions=_build(config, runtime_paths).spec.functions).specs()
-    prepare_scope_history = AsyncMock(return_value=MagicMock())
-    monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare_scope_history)
-    monkeypatch.setattr(
-        execution_preparation,
-        "finalize_history_preparation",
-        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
-    )
-
-    await prepare_bound_team_run_context(
-        make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
-        scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
-        leader_system_messages=leader_system_messages,
-        leader_tools=leader_tools,
-        model=ScriptedModel([]),
-        prompt="Current request",
-        thread_history=None,
-        runtime_paths=runtime_paths,
-        config=config,
-        timezone="UTC",
-        history_settings=config.resolve_scope(None).history_settings,
-        active_model_name="default",
-        active_context_window=None,
-    )
-
-    kwargs = prepare_scope_history.await_args.kwargs
-    estimator = build_static_token_estimator(leader_system_messages, leader_tools, frozenset())
-    assert kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("replays_persisted_history", [True, False])
 async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     tmp_path: Path,

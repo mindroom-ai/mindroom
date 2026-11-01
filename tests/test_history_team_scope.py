@@ -24,7 +24,6 @@ from mindroom.history.session_context import (
     resolve_bound_team_scope,
 )
 from mindroom.history.types import (
-    HistoryScope,
     PreparedHistoryState,
 )
 from mindroom.llm.messages import Message, system_text
@@ -125,14 +124,14 @@ def _build_pair(
     )
 
 
-def _expected_static_tokens(built: BuiltTeam, prompt: str) -> int:
-    """Return the estimate a request of ``prompt`` costs before its history: the prompt, the leader's prompt, its tools."""
+def _leader_non_prompt_tokens(built: BuiltTeam) -> int:
+    """Return the estimate a leader request costs besides its prompt text and history: the leader's prompt, its tools."""
     payloads = [
         {key: value for key, value in asdict(tool).items() if value is not None}
         for tool in leader_tool_specs(built.spec)
     ]
     system_content = system_text(built.spec.leader.system_messages)
-    return estimate_text_tokens(prompt) + estimate_text_tokens(system_content) + len(stable_serialize(payloads)) // 4
+    return estimate_text_tokens(system_content) + len(stable_serialize(payloads)) // 4
 
 
 @pytest.mark.asyncio
@@ -142,21 +141,13 @@ async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
     monkeypatch: pytest.MonkeyPatch,
     scheduled: bool,
 ) -> None:
-    """The opened scope is prepared once on the leader's model and the turn's window, sized by the leader's prompt.
+    """The scope is prepared once on the leader's model and the turn's window, sized by the leader's prompt and tools.
 
     A scheduled turn's history budget rules out native compaction.
     """
     config, runtime_paths = _pair_config(tmp_path)
     built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
-    scope_context = load_bound_scope_session(
-        member_names=["zeta", "alpha"],
-        team_name=None,
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    )
-    assert scope_context is not None
+    scope_context = unstored_team_scope_context(config, ["zeta", "alpha"], team_name=None)
     prepare = AsyncMock(return_value=MagicMock())
     monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare)
     monkeypatch.setattr(
@@ -189,15 +180,16 @@ async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
     assert prepare.await_count == 1
     kwargs = prepare.await_args.kwargs
     assert kwargs["scope_context"] is scope_context
-    assert scope_context.scope == HistoryScope("team", "team_alpha+zeta")
     assert kwargs["model"] is built.spec.leader.model
     assert (kwargs["compaction_lifecycle"], kwargs["pipeline_timing"]) == (lifecycle, timing)
     assert kwargs["allow_native_compaction"] is not scheduled
     resolved_inputs = kwargs["resolved_inputs"]
     assert resolved_inputs.history_settings is built.history_settings
     assert (resolved_inputs.active_model_name, resolved_inputs.active_context_window) == ("default", 1_500)
+    non_prompt_tokens = _leader_non_prompt_tokens(built)
+    assert kwargs["non_prompt_tokens"] == non_prompt_tokens
     sent_prompt = render_prepared_messages_text(prepared.turn.in_request_order())
-    assert resolved_inputs.execution_plan.static_prompt_tokens == _expected_static_tokens(built, sent_prompt)
+    assert resolved_inputs.execution_plan.static_prompt_tokens == estimate_text_tokens(sent_prompt) + non_prompt_tokens
 
 
 @pytest.mark.asyncio
