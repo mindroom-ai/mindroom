@@ -1102,6 +1102,34 @@ def test_service_install_keeps_the_shell_dashboard_key(
 
 
 @pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+def test_service_install_refuses_dashboard_settings_the_service_cannot_start_with(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entry_point: str,
+) -> None:
+    """An upgrade that left a retired setting in `.env` fails the install with `mindroom run`'s error, not at service start."""
+    (tmp_path / ".env").write_text("MINDROOM_BASE_URL=https://mindroom.example.org\n", encoding="utf-8")
+    runtime_paths = _shell_runtime(tmp_path)
+    manager = _login_service_manager()
+
+    if entry_point == "run --service":
+        with pytest.raises(typer.Exit) as exit_info:
+            start_login_service(runtime_paths, manager)
+        exit_code, output = exit_info.value.exit_code, capsys.readouterr().err
+    else:
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        exit_code, output = result.exit_code, result.output
+
+    assert exit_code == 1
+    assert "Error: MINDROOM_BASE_URL was removed; set MINDROOM_PUBLIC_URL" in normalize_console_output(output)
+    manager.install_service.assert_not_called()
+    manager.install_runtime.assert_not_called()
+
+
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
 @pytest.mark.parametrize(
     ("env_content", "warned"),
     [
