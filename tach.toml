@@ -1988,6 +1988,7 @@ depends_on = [
     "mindroom.api.egress_status",
     "mindroom.api.oauth",
     "mindroom.config.egress_broker",
+    "mindroom.config.main",
     "mindroom.egress_broker",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.plugins",

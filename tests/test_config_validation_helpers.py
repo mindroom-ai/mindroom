@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -13,10 +14,14 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import LiveCallProfile, RealtimeCallProfile
 from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig
 from mindroom.config.knowledge import KnowledgeRerankerConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, config_validation_issues
 from mindroom.config.models import DefaultsConfig, EmbedderConfig, ToolConfigEntry
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.config.voice import SpeechServiceConfig, VoiceSTTConfig
+from tests.conftest import test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_duplicate_items_preserves_first_duplicate_encounter_order() -> None:
@@ -261,3 +266,36 @@ def test_a_team_entry_with_an_unknown_mode_or_key_fails_naming_it(authored: dict
     with pytest.raises(ValueError, match=message) as raised:
         TeamConfig.model_validate({"display_name": "Team", "role": "Work", "agents": ["code"], **authored})
     assert next(iter(authored)) in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "second_room",
+    ["voice", "#voice:localhost"],
+    ids=["same-spelling-model-validator", "alias-spelling-runtime-validation"],
+)
+def test_one_rule_reports_one_location_and_message_from_either_validator(tmp_path: Path, second_room: str) -> None:
+    """A call room shared by spelling or by alias fails with the same issue, named at `config`, without Pydantic's prefix."""
+    data = {
+        "agents": {
+            "one": {"display_name": "One", "rooms": ["voice"]},
+            "two": {"display_name": "Two", "rooms": [second_room]},
+        },
+        "calls": {
+            "enabled": True,
+            "profiles": {
+                "voice": {
+                    "backend": "realtime",
+                    "model": "gpt-realtime",
+                    "credentials_service": "openai",
+                    "voice": "marin",
+                },
+            },
+            "agents": {"one": "voice", "two": "voice"},
+        },
+    }
+    with pytest.raises(ValueError, match="configures multiple agents") as raised:
+        Config.validate_with_runtime(data, test_runtime_paths(tmp_path))
+
+    assert config_validation_issues(raised.value) == [
+        (("config",), "calls.agents configures multiple agents for room(s): voice (one, two)"),
+    ]

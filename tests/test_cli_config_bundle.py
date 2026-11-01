@@ -10,13 +10,14 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 import typer
+import yaml
 from typer.testing import CliRunner
 
 from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.config_bundle import initialize_runtime_bundle
 from mindroom.cli.main import app
 from mindroom.config.bundle import install_config_bundle
-from mindroom.config.main import load_config
+from mindroom.config.main import Config, load_config
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -473,3 +474,57 @@ def test_apply_bundle_never_rolls_back_an_unproven_failure(
     assert receipt["rollback"] is None
     assert ("restoring the previous tree failed" in receipt["detail"]) == (case == "previous_changed")
     assert _fingerprint_of(target) == candidate
+
+
+_PROVIDER_TYPO = "models:\n  default:\n    provider: opneai\n    id: m\n"
+_PROVIDER_ISSUE = "models → default → provider: Unknown provider 'opneai': use one of "
+
+
+@pytest.mark.parametrize("surface", ["initialize", "install", "install-json", "apply", "rollback"])
+def test_a_config_that_fails_validation_is_reported_as_its_issues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    surface: str,
+) -> None:
+    """Each bundle command names a validation failure as `<location>: <message>`, not as Pydantic's report."""
+    if surface in {"initialize", "install", "install-json"}:
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "config.yaml").write_text(_PROVIDER_TYPO)
+        target = tmp_path / "active"
+        if surface == "initialize":
+            with pytest.raises(typer.Exit):
+                initialize_runtime_bundle(source, target / "config.yaml", None)
+            assert capsys.readouterr().err.startswith(f"Bundle initialization failed: {_PROVIDER_ISSUE}")
+            return
+        json_flag = ["--json"] if surface == "install-json" else []
+        result = runner.invoke(app, ["config", "install-bundle", str(source), "--target", str(target), *json_flag])
+        if surface == "install-json":
+            assert json.loads(result.stdout)["detail"].startswith(_PROVIDER_ISSUE)
+        else:
+            assert result.stderr.startswith(f"Bundle installation failed: {_PROVIDER_ISSUE}")
+        return
+    source, target, _first = _active_tree(tmp_path)
+    previous_fingerprint = _fingerprint_of(target)
+    if surface == "apply":
+        (source / "config.yaml").write_text(_PROVIDER_TYPO)
+    else:
+        (source / "config.yaml").write_text("agents: {}\n# candidate\n")
+
+    def respond(call: int) -> dict[str, object]:
+        if call == 1:
+            return {"status": "applied", "fingerprint": previous_fingerprint}
+        # The candidate is installed; the tree the rollback would restore no longer validates.
+        monkeypatch.setattr(
+            "mindroom.config.bundle.load_config",
+            lambda _runtime: Config.model_validate(yaml.safe_load(_PROVIDER_TYPO)),
+        )
+        return {"status": "failed", "fingerprint": _fingerprint_of(source)}
+
+    _serve_runtime(monkeypatch, respond)
+    _code, receipt = _apply(source, target, "--rollback-on-failure")
+    prefix = (
+        "" if surface == "apply" else "The runtime rejected the candidate, and restoring the previous tree failed: "
+    )
+    assert receipt["detail"].startswith(f"{prefix}{_PROVIDER_ISSUE}"), receipt
