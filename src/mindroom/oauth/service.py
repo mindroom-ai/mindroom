@@ -28,7 +28,7 @@ from mindroom.oauth.providers import (
     oauth_connect_url_requires_host_browser,
 )
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
-from mindroom.origins import local_api_origin
+from mindroom.origins import configured_public_url, local_api_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -179,9 +179,8 @@ def consume_oauth_connect_token(
 
 def oauth_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvider | None = None) -> str:
     """Return the public MindRoom origin used for user-facing OAuth links."""
-    configured = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or runtime_paths.env_value("MINDROOM_BASE_URL")
-    if configured:
-        return configured.rstrip("/")
+    if configured := configured_public_url(runtime_paths):
+        return configured
 
     if provider is not None:
         client_config = provider.client_config(runtime_paths)

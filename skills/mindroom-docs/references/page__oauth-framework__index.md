@@ -90,7 +90,7 @@ The API routes are:
 Add `agent_name` to target a connection for one agent's credential scope.
 The dashboard connects to the agent's saved scope, so save a `worker_scope` change before connecting.
 
-The provider callback URL is `<MINDROOM_PUBLIC_URL or MINDROOM_BASE_URL>/api/oauth/<provider>/callback`, or `http://localhost:<MINDROOM_PORT>/api/oauth/<provider>/callback` (port `8765` by default) when neither is set.
+The provider callback URL is `<MINDROOM_PUBLIC_URL>/api/oauth/<provider>/callback`, or `http://localhost:<MINDROOM_PORT>/api/oauth/<provider>/callback` (port `8765` by default) when it is unset.
 Register that URL on the provider's OAuth app, or store an explicit `redirect_uri` in the provider-specific client config service.
 
 Conversation connect links for a scoped connection are valid for 10 minutes, work once, and are tied to the requester, provider, and agent scope that produced them.
@@ -142,8 +142,8 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Spotify | [Spotify](https://docs.mindroom.chat/tools/media-and-content/#connect-spotify) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
-A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
-Otherwise the client works only when MindRoom is opened on `localhost`, and other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access.`
+A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
+Otherwise the client works only when MindRoom is opened on `localhost`, and other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL and configure a custom OAuth client for remote access.`
 
 ### Provider And Credential Service Rules
 

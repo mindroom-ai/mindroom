@@ -160,6 +160,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 Connect Home Assistant in the dashboard's **Tools** tab, using either method:
 
 - **OAuth**: enter the Home Assistant URL; Home Assistant needs no application registration, and after sign-in it returns you to `MINDROOM_DASHBOARD_URL` when you connect from that host, else to `MINDROOM_PUBLIC_URL`, or to the address MindRoom received the request on when that is unset, so set `MINDROOM_PUBLIC_URL` when a proxy in front of MindRoom terminates HTTPS.
+  Home Assistant refuses that address with `Invalid client id` when it is an IP address other than a loopback, private, or link-local one, such as a public or Tailscale `100.x` address, so set `MINDROOM_PUBLIC_URL`, or `MINDROOM_DASHBOARD_URL` when you connect from that host, to a URL with a DNS name, such as `https://mindroom.example.org`, or use the access-token method.
 - **Access token**: in your Home Assistant profile, create a long-lived access token under **Long-Lived Access Tokens**, then enter the Home Assistant URL and the token.
 
 Expired OAuth access tokens renew automatically.
@@ -171,6 +172,7 @@ A Home Assistant URL on a private, local, or loopback network, such as `http://h
 | `Invalid authentication token. Please reconnect Home Assistant.` | The token was revoked or OAuth renewal failed; reconnect. |
 | `Private Home Assistant URLs require explicit opt-in. ...` | Enable **Allow private or local URL** and reconnect. |
 | `Connection timeout - check if Home Assistant is accessible` | Make sure the MindRoom server can reach the Home Assistant URL. |
+| `Invalid client id` on Home Assistant's sign-in page | Give MindRoom's address a DNS name, as the **OAuth** method above describes, or connect with an access token. |
 
 ## Related Docs
 

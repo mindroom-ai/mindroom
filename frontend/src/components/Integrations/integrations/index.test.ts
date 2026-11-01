@@ -270,6 +270,8 @@ describe("Generic OAuth integration provider", () => {
         has_service_account_config: false,
         client_config_service: "google_oauth_client",
         client_config_redirect_uri_supported: true,
+        default_redirect_uri:
+          "https://mindroom.example.org/api/oauth/google_drive/callback",
       }),
     });
 
@@ -282,6 +284,8 @@ describe("Generic OAuth integration provider", () => {
       oauth_custom_client_configured: true,
       oauth_client_config_service: "google_oauth_client",
       oauth_client_redirect_uri_supported: true,
+      oauth_default_redirect_uri:
+        "https://mindroom.example.org/api/oauth/google_drive/callback",
     });
   });
 
