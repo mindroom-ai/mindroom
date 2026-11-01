@@ -1110,9 +1110,8 @@ class MatrixApiTools(Toolkit):
             )
             if state_policy_error is not None:
                 return state_policy_error
-
-        if not dry_run and (limit_error := self._check_rate_limit(context, room_id, action="redact")) is not None:
-            error_message = limit_error
+            if not dry_run:
+                error_message = self._check_rate_limit(context, room_id, action="redact")
 
         if error_message is not None:
             return self._error_payload(

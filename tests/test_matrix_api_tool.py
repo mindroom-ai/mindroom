@@ -777,29 +777,34 @@ async def test_matrix_api_redact_happy_path(reason: str, expected_reason: str | 
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_errors_when_thread_classification_fails() -> None:
-    """Redact should fail closed when thread classification cannot be resolved."""
+    """Redact should fail closed when thread classification cannot be resolved, without spending write budget."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.client.room_get_event.side_effect = RuntimeError("lookup boom")
+    ctx.client.room_send.return_value = nio.RoomSendResponse(event_id="$send:localhost", room_id=ctx.room_id)
 
-    with tool_runtime_context(ctx):
-        payload = json.loads(
-            await tool.matrix_api(
-                action="redact",
-                event_id="$target:localhost",
-                reason="cleanup",
-            ),
-        )
+    with (
+        patch("mindroom.custom_tools.matrix_api.logger.warning"),
+        tool_runtime_context(ctx),
+    ):
+        payloads = [
+            json.loads(await tool.matrix_api(action="redact", event_id="$target:localhost", reason="cleanup"))
+            for _ in range(5)
+        ]
+        sent = json.loads(await tool.matrix_api(action="send_event", event_type="com.example.after", content={}))
 
-    assert payload == {
-        "action": "redact",
-        "message": "Failed to resolve redaction target thread mapping.",
-        "room_id": ctx.room_id,
-        "status": "error",
-        "target_event_id": "$target:localhost",
-        "tool": "matrix_api",
-    }
+    assert payloads == 5 * [
+        {
+            "action": "redact",
+            "message": "Failed to resolve redaction target thread mapping.",
+            "room_id": ctx.room_id,
+            "status": "error",
+            "target_event_id": "$target:localhost",
+            "tool": "matrix_api",
+        },
+    ]
     ctx.client.room_redact.assert_not_awaited()
+    assert sent["status"] == "ok"
 
 
 @pytest.mark.asyncio
