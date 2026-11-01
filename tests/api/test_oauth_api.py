@@ -6293,22 +6293,27 @@ def test_slack_status_and_connect_without_client(
 
 
 @pytest.mark.parametrize(
-    ("slack_app_saved", "slack_reachable", "detail"),
+    ("slack_app_saved", "slack_answer", "detail"),
     [
-        (False, True, "The MindRoom Slack app is not configured"),
-        (True, True, "The MindRoom Slack app is not configured"),
-        (True, False, "Slack could not be reached; try again"),
+        (False, None, "The MindRoom Slack app is not configured"),
+        (True, Response(200, json={"ok": False, "error": "invalid_auth"}), "The MindRoom Slack app is not configured"),
+        (True, Response(503), "Slack could not be reached; try again"),
+        (True, Response(429, headers={"Retry-After": "30"}), "Slack could not be reached; try again"),
+        (True, None, "Slack could not be reached; try again"),
     ],
-    ids=["no-app", "token-rejected", "slack-unreachable"],
+    ids=["no-app", "token-rejected", "slack-server-error", "slack-rate-limited", "slack-unreachable"],
 )
 def test_slack_connect_names_what_blocks_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     slack_app_saved: bool,
-    slack_reachable: bool,
+    slack_answer: Response | None,
     detail: str,
 ) -> None:
-    """With a Slack OAuth client saved, Connect names a missing or rejected Slack app, or an unreachable Slack."""
+    """With a Slack OAuth client saved, Connect names a missing or rejected Slack app, or a Slack that failed itself.
+
+    `slack_answer` is what Slack answers `auth.test`; None refuses the connection.
+    """
     runtime_paths = _runtime_paths(tmp_path, {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"})
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials("slack_oauth_client", {"client_id": "slack-client-id", "client_secret": "slack-secret"})
@@ -6318,8 +6323,8 @@ def test_slack_connect_names_what_blocks_it(
 
     def answer_slack(request: Request) -> Response:
         slack_requests.append(str(request.url))
-        if slack_reachable:
-            return Response(200, json={"ok": False, "error": "invalid_auth"})
+        if slack_answer is not None:
+            return slack_answer
         message = "no route to slack.com"
         raise ConnectError(message, request=request)
 

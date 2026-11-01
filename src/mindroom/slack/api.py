@@ -25,6 +25,13 @@ _PERMALINK_PATH_RE = re.compile(rf"/archives/({_CONVERSATION_ID})/p([0-9]{{10}})
 _INVALID_TARGET = "Use a Slack conversation ID, <conversation>:<ts>, a message link, or a user ID"
 _NOT_A_CONVERSATION = "Use a Slack conversation ID, <conversation>:<ts>, or a message link"
 SLACK_UNREACHABLE = "Slack could not be reached; try again"
+# Slack's own failures, which a later call may not meet: its HTTP 5xx answers, a request it received cut off
+# (`request_timeout`: POST data missing or truncated in transit), its rate limit and an answer that is not JSON.
+# Any other Slack error, such as a revoked token or a missing scope, fails every attempt alike.
+_TRANSIENT_ERRORS = frozenset(
+    {"ratelimited", "internal_error", "fatal_error", "service_unavailable", "request_timeout", "invalid_body"},
+)
+_SERVER_ERROR = re.compile(r"http_5[0-9]{2}")
 
 
 class SlackApiError(Exception):
@@ -35,6 +42,11 @@ class SlackApiError(Exception):
         self.error = error
         self.retry_after = retry_after
         self.needed_scope = needed_scope
+
+    @property
+    def transient(self) -> bool:
+        """Whether this is Slack's own failure, which a later call may not meet."""
+        return self.error in _TRANSIENT_ERRORS or _SERVER_ERROR.fullmatch(self.error) is not None
 
 
 @dataclass(frozen=True)

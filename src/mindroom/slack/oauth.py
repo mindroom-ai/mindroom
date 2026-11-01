@@ -80,7 +80,7 @@ async def _slack_runtime_endpoints(provider: OAuthProvider, runtime_paths: Runti
         async with slack_http_client() as client:
             await slack_bot_identity(client, app)
     except SlackApiError as exc:
-        raise OAuthUserFacingError(SLACK_APP_NOT_CONFIGURED) from exc
+        raise OAuthUserFacingError(SLACK_UNREACHABLE if exc.transient else SLACK_APP_NOT_CONFIGURED) from exc
     except httpx.HTTPError as exc:
         raise OAuthUserFacingError(SLACK_UNREACHABLE) from exc
     return endpoints
