@@ -2,7 +2,12 @@ import { type ComponentProps, useState } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { Dialog, DialogContent, DialogTitle } from "./dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "./dialog";
 
 /**
  * A dialog opened from a plain button, as cards open their settings, with no
@@ -23,6 +28,7 @@ function CardWithDialog({
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogContent onCloseAutoFocus={onCloseAutoFocus}>
             <DialogTitle>Settings</DialogTitle>
+            <DialogDescription>Tool settings.</DialogDescription>
             <button onClick={() => setOpen(false)}>Cancel</button>
           </DialogContent>
         </Dialog>
