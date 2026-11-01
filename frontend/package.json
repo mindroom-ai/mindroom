@@ -10,7 +10,7 @@
     "prebuild": "node scripts/generate-icon-imports.cjs",
     "build": "tsc && vite build && vite build --config vite.connections.config.ts",
     "preview": "vite preview",
-    "lint": "eslint \"src/**/*.{ts,tsx}\" vite.config.ts vite.connections.config.ts vitest.config.ts --report-unused-disable-directives --max-warnings 0",
+    "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
     "type-check": "tsc --noEmit",
     "screenshot": "node scripts/screenshot.cjs",
     "test": "vitest",
@@ -77,8 +77,6 @@
     "vitest": "^4.1.6"
   },
   "overrides": {
-    "brace-expansion": "1.1.13",
-    "minimatch": "3.1.4",
     "picomatch": "4.0.4",
     "yaml": "2.9.0"
   }

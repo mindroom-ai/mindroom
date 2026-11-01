@@ -28,22 +28,31 @@ interface ToolConfigPanelProps {
   target: ToolOverrideTarget;
   toolName: string;
   toolDisplayName?: string;
-  /** Dedicated per-agent override fields (curated, e.g. shell). */
+  /** The tool's agent-only fields, which only an agent's entry may set. */
   overrideFields?: ToolFieldSchema[] | null;
-  /** The tool's config_fields: the fallback schema, and the secrets the panel points to the Tools page. */
+  /** The tool's config_fields, and the secrets the panel points to the Tools page. */
   configFields?: ToolFieldSchema[] | null;
 }
 
 /**
- * The fields a tool entry may set: the dedicated overrideFields, else the
- * configFields, without those the backend refuses in a tool entry.
+ * The fields a tool entry may set, as the backend merges them: the
+ * configFields, then the agent-only fields, without those the backend refuses
+ * in a tool entry. A same-name agent-only field replaces its config twin in
+ * place, because a Map keeps a key's first position when it is set again.
  */
 function resolveFields(
   overrideFields?: ToolFieldSchema[] | null,
   configFields?: ToolFieldSchema[] | null,
 ): ToolFieldSchema[] {
-  const fields = overrideFields?.length ? overrideFields : (configFields ?? []);
-  return fields.filter((field) => field.authored_override !== false);
+  const fields = new Map(
+    [...(configFields ?? []), ...(overrideFields ?? [])].map((field) => [
+      field.name,
+      field,
+    ]),
+  );
+  return [...fields.values()].filter(
+    (field) => field.authored_override !== false,
+  );
 }
 
 function coerceEditValue(

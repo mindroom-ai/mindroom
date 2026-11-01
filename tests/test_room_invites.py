@@ -1786,7 +1786,7 @@ async def test_router_welcome_send_is_idempotent_for_concurrent_empty_room_check
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    bot.client = AsyncMock()
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.room_messages = AsyncMock(
         return_value=nio.RoomMessagesResponse(
             room_id="!empty:localhost",
@@ -1854,7 +1854,7 @@ async def test_router_welcome_send_retries_after_delivery_failure(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    bot.client = AsyncMock()
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.room_messages = AsyncMock(
         return_value=nio.RoomMessagesResponse(
             room_id="!empty:localhost",

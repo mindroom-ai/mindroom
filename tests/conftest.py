@@ -2258,14 +2258,19 @@ def event_serving_client(
     return client
 
 
-def make_thread_reply_lookup(reply_event_id: str, thread_root_id: str) -> RelationLookup:
-    """Return a relation lookup whose homeserver answers every event lookup with one reply inside a thread."""
+def thread_reply_client(reply_event_id: str, thread_root_id: str) -> MagicMock:
+    """Return a homeserver that answers every event lookup with one reply inside a thread."""
     content = {
         "msgtype": "m.text",
         "body": "reply",
         "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
     }
-    return make_relation_lookup(client=event_serving_client(reply_event_id, content=content))
+    return event_serving_client(reply_event_id, content=content)
+
+
+def make_thread_reply_lookup(reply_event_id: str, thread_root_id: str) -> RelationLookup:
+    """Return a relation lookup whose homeserver answers every event lookup with one reply inside a thread."""
+    return make_relation_lookup(client=thread_reply_client(reply_event_id, thread_root_id))
 
 
 def _serving_client() -> SimpleNamespace:
