@@ -632,7 +632,7 @@ class Config(BaseModel):
         ]
         if conflicts:
             msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
-            raise ValueError(msg)
+            raise ConfigRuntimeValidationError(msg)
 
     @model_validator(mode="after")
     def validate_membership_access_room_references(self) -> Config:
