@@ -6128,7 +6128,8 @@ def _forward_proxy_to_seeded_runner(
             headers={"x-mindroom-sandbox-token": _TEST_AUTH_TOKEN},
         )
         # A call slowed past the runner's progress or keepalive interval streams those lines before its result line.
-        return json.loads(response.text.splitlines()[-1])
+        # Split on newlines alone, as the primary's client does, since JSON text may hold other Unicode line separators.
+        return json.loads(response.text.rstrip("\n").rpartition("\n")[2])
 
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
