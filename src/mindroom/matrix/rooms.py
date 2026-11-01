@@ -40,6 +40,7 @@ from mindroom.matrix_identifiers import (
     managed_room_alias,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
+    server_emoji_alias_localpart,
     split_concrete_matrix_user_ids,
 )
 from mindroom.topic_generator import configured_room_topic, ensure_room_has_topic, generate_room_topic_ai
@@ -54,6 +55,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
 _DENIED_ROOM_STATE_ERROR_CODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
+# MindRoom Chat hides rooms of this type and uses their MSC2545 emoji packs everywhere.
+_SERVER_EMOJI_ROOM_TYPE = "io.mindroom.emoji"
+_EMOJI_PACK_EVENT_TYPE = "im.ponies.room_emotes"
+_POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
+_MODERATOR_POWER_LEVEL = 50
 
 
 class _AliasResolution(Enum):
@@ -615,6 +621,108 @@ async def ensure_root_space(
     )
 
     return root_space_id
+
+
+async def _ensure_server_emoji_room_exists(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    alias_localpart: str,
+    full_alias: str,
+) -> str | None:
+    """Return the server emoji room, joining the router's room for the alias or creating it."""
+    known_room_id = matrix_state.matrix_state_for_runtime(runtime_paths).server_emoji_room_id
+    joined_room_ids = await get_joined_rooms(client) or []
+    if known_room_id and known_room_id in joined_room_ids:
+        return known_room_id
+
+    resolution = await _resolve_managed_alias(client, full_alias, known_room_id)
+    if resolution is _AliasResolution.RETRY_LATER:
+        return None
+    if resolution is _AliasResolution.CREATE_WITHOUT_ALIAS:
+        # The operator publishes the alias, so MindRoom Chat would never find a room created without it.
+        logger.error("server_emoji_room_alias_taken", room_alias=full_alias, hint="No emoji room was created.")
+        return None
+    if isinstance(resolution, str):
+        room_id = resolution
+        joined = room_id in client.rooms or room_id in joined_room_ids
+        if not joined and await join_room(client, room_id) is not RoomJoinOutcome.JOINED:
+            logger.warning("server_emoji_room_join_failed", room_alias=full_alias, room_id=room_id)
+            return None
+    else:
+        name = config.server_emoji.name
+        # The same shape as scripts/utilities/create_server_emoji_room.py: a hidden, local-only room any local
+        # user may join, outside the room directory, holding one empty pack.
+        response = await client.room_create(
+            visibility=nio.RoomVisibility.private,
+            alias=alias_localpart,
+            name=name,
+            room_type=_SERVER_EMOJI_ROOM_TYPE,
+            federate=False,
+            preset=nio.RoomPreset.public_chat,
+            initial_state=[
+                {
+                    "type": _EMOJI_PACK_EVENT_TYPE,
+                    "state_key": "",
+                    "content": {"pack": {"display_name": name, "usage": ["emoticon"]}, "images": {}},
+                },
+            ],
+        )
+        if not isinstance(response, nio.RoomCreateResponse):
+            logger.error("server_emoji_room_creation_failed", room_alias=full_alias, error=str(response))
+            return None
+        room_id = str(response.room_id)
+    if known_room_id != room_id:
+        update_matrix_state(runtime_paths, lambda state: state.set_server_emoji_room_id(room_id))
+    return room_id
+
+
+def _server_emoji_power_levels(levels: dict[str, Any], *, moderators_only: bool) -> dict[str, Any]:
+    """Return power levels that let members, or only moderators, change the packs, and keep members from posting."""
+    current_events = levels.get("events")
+    events = dict(current_events) if isinstance(current_events, dict) else {}
+    events[_EMOJI_PACK_EVENT_TYPE] = _MODERATOR_POWER_LEVEL if moderators_only else 0
+    # Members join this hidden room by themselves and cannot mute it, so a message there would notify the whole server.
+    # Explicit levels for message types would undercut events_default, so raise those too.
+    for message_type in ("m.room.message", "m.room.encrypted"):
+        if message_type in events:
+            events[message_type] = max(events[message_type], _MODERATOR_POWER_LEVEL)
+    events_default = max(levels.get("events_default", 0), _MODERATOR_POWER_LEVEL)
+    return {**levels, "events": events, "events_default": events_default}
+
+
+async def ensure_server_emoji_room(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Create and maintain the optional server custom emoji room, returning its room ID once it is ready."""
+    if not config.server_emoji.enabled:
+        return None
+
+    server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
+    alias_localpart = server_emoji_alias_localpart(runtime_paths)
+    full_alias = f"#{alias_localpart}:{server_name}"
+    room_id = await _ensure_server_emoji_room_exists(client, config, runtime_paths, alias_localpart, full_alias)
+    snapshot = await read_room_state(client, room_id) if room_id is not None else None
+    levels = snapshot.events.get((_POWER_LEVELS_EVENT_TYPE, "")) if snapshot is not None else None
+    if room_id is None or snapshot is None or levels is None:
+        return None
+
+    # Every other level stays as the homeserver or a room admin set it.
+    desired_levels = _server_emoji_power_levels(levels, moderators_only=config.server_emoji.moderators_only)
+    if desired_levels != levels:
+        response = await client.room_put_state(room_id, _POWER_LEVELS_EVENT_TYPE, desired_levels)
+        if not isinstance(response, nio.RoomPutStateResponse):
+            logger.warning("server_emoji_room_power_levels_failed", room_id=room_id, error=str(response))
+            return None
+    admin_user_ids, _ = split_concrete_matrix_user_ids(config.room_defaults.admins)
+    if not await ensure_room_admin_power_levels(client, room_id, admin_user_ids, snapshot=snapshot):
+        logger.warning("server_emoji_room_power_levels_failed", room_id=room_id)
+        return None
+
+    logger.info("server_emoji_room_ready", room_alias=full_alias, room_id=room_id)
+    return room_id
 
 
 async def ensure_user_in_rooms(
