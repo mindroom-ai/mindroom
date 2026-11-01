@@ -1092,7 +1092,7 @@ async def test_finished_script_kills_same_group_descendants(
 @pytest.mark.asyncio
 async def test_orphaned_supervisor_exits_and_removes_its_runtime_dir(tmp_path: Path) -> None:
     """A supervisor whose parent dies must exit and remove its runtime dir."""
-    # The supervisor's own short prefix keeps the socket path under the 107-byte limit on any xdist worker.
+    # The supervisor's own short prefix keeps the socket path within the 107-byte limit on two-digit xdist workers.
     runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-"))
     socket_path = runtime_dir / "supervisor.sock"
     # Outside the runtime dir, which the orphaned supervisor removes, perhaps before this test reads the file.

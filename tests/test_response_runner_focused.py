@@ -926,6 +926,7 @@ async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_ow
     proof_cancelled = asyncio.Event()
     release_proof = asyncio.Event()
     proof_finished = asyncio.Event()
+    drain_done_when_proof_cancelled: list[bool] = []
 
     async def interrupted_response() -> None:
         response_started.set()
@@ -938,6 +939,7 @@ async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_ow
                 try:
                     await release_proof.wait()
                 except asyncio.CancelledError:
+                    drain_done_when_proof_cancelled.append(drain.done())
                     proof_cancelled.set()
             return True
         finally:
@@ -961,11 +963,12 @@ async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_ow
     try:
         # The proof waits for a release sent only after the drain returned, so a drain waiting for it is not done.
         await asyncio.wait({drain}, timeout=SETTLE_TIMEOUT_SECONDS)
-        assert drain.done(), "the drain waited for its recovery proof"
+        assert drain.done(), "the drain is still waiting for its recovery proof"
         with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
             drain.result()
-        assert proof_started.is_set()
         await asyncio.wait_for(proof_cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        # Only a drain that waited, however briefly, lets the cancellation reach the proof before it returns.
+        assert drain_done_when_proof_cancelled[:1] == [True], "the drain waited for its recovery proof"
         assert inbox.pending_inbox_response_count == 1
     finally:
         release_proof.set()

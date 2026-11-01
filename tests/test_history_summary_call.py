@@ -124,6 +124,9 @@ class _ProviderCall:
         self.finished = asyncio.Event()
         self.release = asyncio.Event()
         self.task: asyncio.Task[object] | None = None
+        # The task awaiting the summary call, and whether it had already returned when the cancellation reached here.
+        self.caller: asyncio.Task[str] | None = None
+        self.caller_done_when_cancelled: bool | None = None
 
     async def swallowing_cancel(self) -> None:
         self.started.set()
@@ -152,6 +155,7 @@ class _ProviderCall:
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
+            self.caller_done_when_cancelled = self.caller is not None and self.caller.done()
             self.cancelled.set()
             await self.release.wait()
             raise
@@ -183,16 +187,17 @@ async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_
             on_usage=None,
         ),
     )
+    call.caller = summary_task
 
     try:
         # The cleanup waits for a release sent only after the call returned, so a call waiting for it is not done.
         await asyncio.wait({summary_task}, timeout=SETTLE_TIMEOUT_SECONDS)
-        assert summary_task.done(), "the call waited for its cancelled request"
+        assert summary_task.done(), "the call is still waiting for its cancelled request"
         with pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"):
             summary_task.result()
-        assert call.started.is_set()
-        assert not call.finished.is_set()
         await asyncio.wait_for(call.cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        # Only a call that waited, however briefly, lets the cancellation reach the request before it returns.
+        assert call.caller_done_when_cancelled, "the call waited for its cancelled request"
     finally:
         call.release.set()
     await asyncio.wait_for(call.finished.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
@@ -267,16 +272,18 @@ async def test_compaction_summary_outer_cancellation_returns_without_waiting_for
             on_usage=None,
         ),
     )
+    call.caller = summary_task
 
     try:
         await asyncio.wait_for(call.started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         summary_task.cancel()
         # The cleanup waits for a release sent only after the call returned, so a call waiting for it is not done.
         await asyncio.wait({summary_task}, timeout=SETTLE_TIMEOUT_SECONDS)
-        assert summary_task.done(), "the cancelled call waited for its cancelled request"
+        assert summary_task.done(), "the cancelled call is still waiting for its cancelled request"
         assert summary_task.cancelled()
-        assert not call.finished.is_set()
         await asyncio.wait_for(call.cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        # Only a call that waited, however briefly, lets the cancellation reach the request before it returns.
+        assert call.caller_done_when_cancelled, "the cancelled call waited for its cancelled request"
     finally:
         call.release.set()
     await asyncio.wait_for(call.finished.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
