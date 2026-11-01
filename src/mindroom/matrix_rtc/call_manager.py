@@ -33,6 +33,7 @@ from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
+from mindroom.matrix.personal_room_store import retained_personal_rooms
 from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge, prewarm_call_audio_process
 from mindroom.matrix_rtc.call_backends import fetch_sfu_grant, resolve_livekit_service, resolve_voice_backend
@@ -814,6 +815,10 @@ class CallManager:
                 self._runtime_paths,
                 room_aliases=room_aliases,
                 invited_rooms_by_agent=self._get_invited_rooms_by_agent(),
+                personal_rooms_by_agent={
+                    agent_name: retained_personal_rooms(self._runtime_paths, agent_name)
+                    for agent_name in self._config.calls.agents
+                },
             )
         except ValueError as error:
             log = logger.warning if self._has_live_remote_call_signal(room, call_event) else logger.debug

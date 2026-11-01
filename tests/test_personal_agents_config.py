@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from pydantic import ValidationError
 
+from mindroom.approval.tool_owners import _catalog_authority
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.personal_agents import (
@@ -440,3 +441,27 @@ def test_calls_template_whose_user_override_lists_rooms_is_rejected(tmp_path: Pa
         match=r"calls\.agents names personal_agents\.mind, whose agent lists rooms",
     ):
         _runtime_config(tmp_path, data)
+
+
+def test_unknown_template_call_profile_fails_before_onboarding(tmp_path: Path) -> None:
+    """A template's unknown profile fails the load that names it, not the reload that onboards its first user."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS) | {"agents": {"mind": "voiec"}}}
+    with pytest.raises(ConfigRuntimeValidationError, match=r"calls\.agents references unknown profile\(s\): voiec"):
+        _runtime_config(tmp_path, data)
+
+
+def test_explicit_call_profile_equal_to_the_template_is_saved(tmp_path: Path) -> None:
+    """An authored entry for a generated agent survives saving even when it names the template's profile."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    data["calls"]["agents"]["mind_bob"] = "voice"
+    config = _runtime_config(tmp_path, data, roster=(_entry(), _entry("@bob:example.org")))
+    assert config.authored_model_dump()["calls"]["agents"] == {"mind": "voice", "mind_bob": "voice"}
+
+
+def test_onboarding_under_a_calls_template_keeps_other_agents_cli_catalogs(tmp_path: Path) -> None:
+    """Another user's onboarding adds only that user's call entry, which never reaches this agent's toolkits."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    before = _runtime_config(tmp_path / "before", deepcopy(data), roster=(_entry(),))
+    after = _runtime_config(tmp_path / "after", deepcopy(data), roster=(_entry(), _entry("@bob:example.org")))
+    assert after.calls.agents != before.calls.agents
+    assert _catalog_authority(after, "mind_alice_smith") == _catalog_authority(before, "mind_alice_smith")

@@ -330,6 +330,7 @@ class Config(BaseModel):
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
     _personal_agent_instances: dict[str, PersonalAgentInstance] = PrivateAttr(default_factory=dict)
     _personal_agent_call_templates: dict[str, str] = PrivateAttr(default_factory=dict)
+    _personal_agent_call_agents: dict[str, str] = PrivateAttr(default_factory=dict)
     _generated_agent_dumps: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
     _generated_agents: dict[str, GeneratedAgentInfo] = PrivateAttr(default_factory=dict)
     _personal_agents_added_agents_section: bool = PrivateAttr(default=False)
@@ -1034,6 +1035,7 @@ class Config(BaseModel):
             raise ConfigRuntimeValidationError(msg)
         config._personal_agent_instances = expansion.instances
         config._personal_agent_call_templates = expansion.call_templates
+        config._personal_agent_call_agents = expansion.call_agents
         # Pass two builds every generated agent from pass one, so a creator's own edits never change what it grants.
         generated_data, generated = expand_generated_agents(config, cast("dict[str, Any]", expansion.data), roster)
         if generated_data is not None:
@@ -1050,6 +1052,7 @@ class Config(BaseModel):
                 logger.warning("generated_agents_invalid", error=str(exc))
             config._personal_agent_instances = expansion.instances
             config._personal_agent_call_templates = expansion.call_templates
+            config._personal_agent_call_agents = expansion.call_agents
         config._generated_agents = {name: info for name, info in generated.items() if name in config.agents}
         # authored_model_dump drops generated agents while they match these dumps.
         config._generated_agent_dumps = {
@@ -1110,8 +1113,7 @@ class Config(BaseModel):
             calls["agents"] = {
                 agent_name: profile
                 for agent_name, profile in calls.get("agents", {}).items()
-                if (instance := self._personal_agent_instances.get(agent_name)) is None
-                or self._personal_agent_call_templates.get(instance.template) != profile
+                if self._personal_agent_call_agents.get(agent_name) != profile
             } | self._personal_agent_call_templates
         return payload
 

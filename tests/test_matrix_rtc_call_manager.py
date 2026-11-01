@@ -37,6 +37,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.event_journal import IngestionRecordAdmission, IngestionRecordDisposition
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.llm.usage import TokenCounts
+from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_backends import (
@@ -5876,3 +5877,35 @@ async def test_join_retries_when_the_audio_process_cannot_start(tmp_path: Path) 
 
     assert _call_state(manager).retry_task is not None
     await manager.shutdown()
+
+
+def test_manager_joins_calls_in_its_own_personal_room(tmp_path: Path) -> None:
+    """An agent creates its owner's personal room itself, so that room is its call room without configured rooms."""
+    config = Config(
+        models={},
+        agents={"helper": AgentConfig(display_name="Helper")},
+        calls=CallsConfig(
+            enabled=True,
+            profiles={
+                "voice": RealtimeCallProfile(
+                    backend="realtime",
+                    model="gpt-realtime",
+                    credentials_service="openai",
+                    voice="marin",
+                ),
+            },
+            agents={"helper": "voice"},
+        ),
+    )
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
+    assert not manager._is_configured_call_room(_room())
+    write_personal_room(
+        personal_room_record_path(test_runtime_paths(tmp_path), "helper", "@alice:example.org"),
+        PersonalRoomRecord(
+            user_id="@alice:example.org",
+            alias="#personal_alice:example.org",
+            source_room_id="!lobby:example.org",
+            room_id=ROOM_ID,
+        ),
+    )
+    assert manager._is_configured_call_room(_room())
