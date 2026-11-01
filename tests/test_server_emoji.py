@@ -322,8 +322,11 @@ async def test_router_room_that_is_not_an_emoji_room_is_left_alone(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_deleted_alias_of_the_joined_emoji_room_is_published_again(tmp_path: Path) -> None:
-    """MindRoom Chat finds the room by its alias, so the router restores a deleted alias."""
-    client = _router_client(_emoji_room_state(dict(_SERVER_LEVELS)), joined=True, alias=_missing_alias())
+    """MindRoom Chat finds the room by its canonical alias, so the router restores both after a deletion."""
+    state = _emoji_room_state(dict(_SERVER_LEVELS))
+    # Deleting an alias also removes it from the room's canonical alias.
+    state["m.room.canonical_alias", ""] = {}
+    client = _router_client(state, joined=True, alias=_missing_alias())
     client.room_put_alias.return_value = nio.RoomPutAliasResponse(_ALIAS, _ROOM)
     config = _config(tmp_path, server_emoji={"enabled": True})
     _record_room(config)
@@ -331,6 +334,7 @@ async def test_deleted_alias_of_the_joined_emoji_room_is_published_again(tmp_pat
     assert await ensure_server_emoji_room(client, config, runtime_paths_for(config)) == _ROOM
 
     client.room_put_alias.assert_awaited_once_with(_ALIAS, _ROOM)
+    assert state["m.room.canonical_alias", ""] == {"alias": _ALIAS}
     client.room_create.assert_not_awaited()
 
 

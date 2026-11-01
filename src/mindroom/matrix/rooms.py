@@ -730,6 +730,19 @@ async def ensure_server_emoji_room(
     if room_id is None or snapshot is None or levels is None:
         return None
 
+    # MindRoom Chat matches the room by its canonical alias, which deleting the alias also clears.
+    canonical_alias = snapshot.events.get(("m.room.canonical_alias", ""))
+    if not isinstance(canonical_alias, dict) or canonical_alias.get("alias") != full_alias:
+        response = await client.room_put_state(room_id, "m.room.canonical_alias", {"alias": full_alias})
+        if not isinstance(response, nio.RoomPutStateResponse):
+            logger.warning(
+                "server_emoji_room_alias_failed",
+                room_alias=full_alias,
+                room_id=room_id,
+                error=str(response),
+            )
+            return None
+
     # Every other level stays as the homeserver or a room admin set it.
     desired_levels = _server_emoji_power_levels(levels, moderators_only=config.server_emoji.moderators_only)
     if desired_levels != levels:
