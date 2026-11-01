@@ -730,15 +730,11 @@ describe("connections", () => {
       connected = connectedAfter;
       popup.closed = true;
       if (!connectedAfter)
-        expect(
-          await screen.findByRole("alert", {}, { timeout: 3000 }),
-        ).toHaveTextContent("Authorization was cancelled.");
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+          "Authorization was cancelled.",
+        );
       expect(
-        await screen.findByRole(
-          "button",
-          { name: expectedButton },
-          { timeout: 3000 },
-        ),
+        await screen.findByRole("button", { name: expectedButton }),
       ).toBeEnabled();
       // One read to decide; a connection also reloads the portal's own status.
       if (connectedAfter)

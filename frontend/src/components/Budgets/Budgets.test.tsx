@@ -546,11 +546,7 @@ describe("Budgets", () => {
     current = status;
 
     expect(
-      await screen.findByRole(
-        "button",
-        { name: "Add user" },
-        { timeout: 3000 },
-      ),
+      await screen.findByRole("button", { name: "Add user" }),
     ).toBeInTheDocument();
   });
 

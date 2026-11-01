@@ -98,6 +98,8 @@ export function Credentials() {
   const [isJsonVisible, setIsJsonVisible] = useState(false);
   // Most people never need the raw payloads, so they stay out of the way until opened.
   const [rawOpen, setRawOpen] = useState(false);
+  // The list's own problem, owned by loadServices, so a service's error or an action cannot erase it.
+  const [listError, setListError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const latestCredentialsRequestRef = useRef(0);
   const selectedServiceRef = useRef("");
@@ -142,16 +144,17 @@ export function Credentials() {
         };
       });
       setServices(statuses);
-      // Callers clear the error before loading, so a success here keeps an error another load just reported.
-      if (statusResults.some((result) => result.status === "rejected")) {
-        setError(PARTIAL_STATUS_ERROR);
-      }
+      setListError(
+        statusResults.some((result) => result.status === "rejected")
+          ? PARTIAL_STATUS_ERROR
+          : null,
+      );
     } catch (err) {
       const message =
         err instanceof Error
           ? err.message
           : "Failed to load credential services";
-      setError(message);
+      setListError(message);
     } finally {
       setIsLoadingServices(false);
     }
@@ -284,6 +287,17 @@ export function Credentials() {
     }
   }, []);
 
+  // The service's credentials first, unless another service was selected meanwhile, then the list.
+  const reload = useCallback(
+    async (service: string) => {
+      if (service && selectedServiceRef.current === service) {
+        await loadCredentials(service);
+      }
+      await loadServices();
+    },
+    [loadCredentials, loadServices],
+  );
+
   const handleSave = useCallback(async () => {
     if (!selectedService) {
       return;
@@ -368,19 +382,15 @@ export function Credentials() {
     setIsDeleting(true);
     setError(null);
     try {
-      // The environment can still supply a deleted service, so the response says what happened and the page reloads
-      // the service's credentials, unless another service was selected meanwhile, then the list. A service that is gone
-      // gives way to the first remaining one, and one that still resolves shows what now applies.
+      // The environment can still supply a deleted service, so the response says what happened and the page reloads.
+      // A service that is gone gives way to the first remaining one, and one that still resolves shows what now applies.
       const response = await fetchJSON<{ message: string }>(
         API_ENDPOINTS.credentials.delete(selectedService),
         {
           method: "DELETE",
         },
       );
-      if (selectedServiceRef.current === selectedService) {
-        await loadCredentials(selectedService);
-      }
-      await loadServices();
+      await reload(selectedService);
       toast({
         title: "Delete credentials",
         description: response.message,
@@ -397,7 +407,7 @@ export function Credentials() {
     } finally {
       setIsDeleting(false);
     }
-  }, [loadCredentials, loadServices, selectedService, toast]);
+  }, [reload, selectedService, toast]);
 
   const handleTest = useCallback(async () => {
     if (!selectedService) {
@@ -442,11 +452,8 @@ export function Credentials() {
       return;
     }
     setError(null);
-    await loadServices();
-    if (selectedService) {
-      await loadCredentials(selectedService);
-    }
-  }, [hasUnsavedChanges, loadCredentials, loadServices, selectedService]);
+    await reload(selectedService);
+  }, [hasUnsavedChanges, reload, selectedService]);
 
   const handleCopy = useCallback(async () => {
     if (!selectedService) {
@@ -687,10 +694,11 @@ export function Credentials() {
           )}
         </Card>
 
-        {error ? (
+        {listError || error ? (
           <Card className="border-destructive/30">
-            <CardContent className="py-3 text-sm text-destructive">
-              {error}
+            <CardContent className="space-y-1 py-3 text-sm text-destructive">
+              {listError ? <p>{listError}</p> : null}
+              {error ? <p>{error}</p> : null}
             </CardContent>
           </Card>
         ) : null}
