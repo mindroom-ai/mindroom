@@ -7532,7 +7532,7 @@ Even your own messages in a contact room start contact turns, so use your person
 Every message, edit, and reaction an agent sends into its contact room passes the policy before anything is sent, including one you ask it to send from your personal room.
 The checks run in order:
 
-1. A new message is refused once the conversation already ends with [`defaults.max_consecutive_agent_replies`](https://docs.mindroom.chat/configuration/agents/#defaults) (default `50`) agent messages in a row, until a person writes.
+1. A new message is refused once the conversation already ends with [`defaults.max_consecutive_agent_replies`](https://docs.mindroom.chat/configuration/agents/#defaults) agent messages in a row, until a person writes.
 2. Plugin hooks on [`contact:before_send`](https://docs.mindroom.chat/hooks/#policy) run in priority order and can rewrite, return, or block the message.
 3. When `contacts.judge` is set, the judge decides whether the text follows the agent's rules for the contact.
    It sees only the message and the rules, not the conversation.
@@ -7548,9 +7548,7 @@ The judge answering no is a revise whose feedback quotes the rules.
 The policy fails closed: a hook that fails or times out, a hook that leaves the message blank, a judge that fails, times out, or abstains, and a message the judge cannot be given all deny.
 The judge is never given a message that looks like it contains a secret such as an API key or password, or a message that, together with the rules, exceeds 16 KB, so with a judge set such messages are denied; without a judge, nothing checks for secrets.
 
-### Writing a `contact:before_send` Hook
-
-A hook is a [plugin](https://docs.mindroom.chat/plugins/) function that reads `ctx.text` and `ctx.rules` and calls `ctx.rewrite(text)`, `ctx.revise(feedback)`, or `ctx.deny(reason)`; [Hooks](https://docs.mindroom.chat/hooks/#policy) lists every context field.
+[Policy hooks](https://docs.mindroom.chat/hooks/#policy) explains how to write a `contact:before_send` hook; this one rewrites every message to hide email addresses:
 
 ```python
 import re
