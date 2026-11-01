@@ -77,7 +77,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
     setRefreshing(false)
   }
 
-  const handleAction = async (action: 'start' | 'stop' | 'restart' | 'delete' | 'reprovision') => {
+  const handleAction = async (action: 'start' | 'stop' | 'restart' | 'reprovision') => {
     if (!instance) return
 
     setActionLoading(action)
@@ -98,9 +98,6 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
           const { provisionInstance } = await import('@/lib/api')
           await provisionInstance()
           break
-        case 'delete':
-          // Delete not implemented yet
-          throw new Error('Delete not implemented')
       }
 
       // Refresh instance status
