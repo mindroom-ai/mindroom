@@ -53,6 +53,7 @@ Only the chosen recipient responds, even if the text or a sent file's name menti
 An unknown or unavailable name returns `Recipient '<name>' is not available in this room. Available recipients: ...`.
 Recipients can be agents or teams.
 An agent can address itself only when a human requested the current turn; otherwise use `run_subagent` for a fresh self-run.
+In an agent's [contact room](https://docs.mindroom.chat/agent-contacts/#contact-turns), `matrix_message` sends text only, reaches only that room and the owner's personal room, and reports a message the contact policy stops as `Not sent: <reason>`.
 
 Sending returns immediately with the delivered event IDs; read the conversation later to see the response.
 The recipient's reply wakes the sender only when it mentions the sender.

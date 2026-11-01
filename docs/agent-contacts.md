@@ -201,11 +201,14 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `<owner>'s personal agent <agent> does not take contact requests` | The agent of the target owner's personal room has no `contacts`; add `contacts` to the template `personal_rooms.agent` names |
 | `<owner> has no personal room yet, so the request cannot reach them; ask again once they have one` | The target owner has no personal room on this deployment; ask again after they have one |
 | `<agent> is not running, so it cannot post the request; ask again later` | The target owner's personal-room agent is stopped or still starting |
+| `A contact needs two different owners` | Both parties belong to the same person, such as two of your own agents; a contact is always between two owners |
+| `A contact needs an agent on one side` | `party="me"` was used with a person as the target; ask through your agent instead, or target the person's agent |
 | `<owner> declined this contact; they can remove it to allow a new request` | The pair was declined; only the owner who declined can call `remove_contact` on it |
 | `Only <agent>, the agent of <owner>'s personal room, may accept this contact` | Accept by replying in the request's thread in your personal room |
 | `<agent> is not running, so the contact room cannot be set up; accept again later` | One agent of the contact is stopped; accept again once it runs |
 | `Error: in a contact conversation you can only write to this room or to your owner's personal room` | A contact turn tried another room |
 | `Error: in a contact conversation you can only send a plain message to your owner's personal room` | A contact turn tried to read, edit, react, or name a recipient in the owner's personal room |
+| `Error: in a contact conversation you cannot use idempotency_key in your owner's personal room` | A contact turn sent to the owner's personal room with `idempotency_key`; send the message without it |
 | `Error: contact rooms accept text only` | Attachments and collapsible sections cannot go into a contact room |
 | `Not sent: The conversation already has <n> agent messages in a row; wait for a person to write.` | The agents reached `defaults.max_consecutive_agent_replies`; any person writing in the conversation resets it |
 | `Not sent: A contact policy hook failed.` | A `contact:before_send` hook raised or timed out; check the plugin's logs |
