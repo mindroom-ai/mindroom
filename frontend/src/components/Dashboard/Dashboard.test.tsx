@@ -91,7 +91,11 @@ function respond(data: unknown, status = 200) {
 function stubApis(
   usage: unknown = report,
   usageStatus = 200,
-  schedules: unknown = { timezone: "America/Los_Angeles", tasks: [schedule] },
+  schedules: unknown = {
+    timezone: "America/Los_Angeles",
+    tasks: [schedule],
+    unreadable_rooms: [],
+  },
   scheduleStatus = 200,
 ) {
   vi.stubGlobal(
@@ -187,6 +191,7 @@ describe("Home", () => {
     stubApis({ ...report, daily_breakdown: [] }, 200, {
       timezone: "UTC",
       tasks: [],
+      unreadable_rooms: [],
     });
     renderHome();
     expect(await screen.findByText("0")).toBeVisible();
@@ -196,9 +201,23 @@ describe("Home", () => {
       "/schedules",
     );
   });
+  it("never shows a room whose schedules could not be read as nothing scheduled", async () => {
+    stubApis(report, 200, {
+      timezone: "UTC",
+      tasks: [],
+      unreadable_rooms: [
+        { room_id: "!ops:example.org", room_alias: null, error: "M_FORBIDDEN" },
+      ],
+    });
+    renderHome();
+    expect(
+      await screen.findByText("Schedules in 1 room could not be read"),
+    ).toBeVisible();
+    expect(screen.queryByText("Nothing scheduled")).not.toBeInTheDocument();
+  });
   it.each([
-    { timezone: "UTC", tasks: [null] },
-    { timezone: "not/a-zone", tasks: [] },
+    { timezone: "UTC", tasks: [null], unreadable_rooms: [] },
+    { timezone: "not/a-zone", tasks: [], unreadable_rooms: [] },
   ])(
     "contains malformed schedules or timezone without hiding usage (%j)",
     async (bad) => {
