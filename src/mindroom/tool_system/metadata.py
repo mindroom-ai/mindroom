@@ -62,7 +62,7 @@ _MEDIA_MODEL_DEFAULT_FIELDS = {
 }
 
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
-_TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "string[]", "text", "url"})
+_TEXT_CONFIG_FIELD_TYPES = frozenset({"select", "string[]", "text", "url"})
 _TOOLKIT_FILTER_CONFIG_FIELDS = (
     ConfigField(
         name="include_tools",
@@ -306,14 +306,14 @@ def validate_authored_tool_entry_overrides(
     for field_name, value in overrides.items():
         field = fields_by_name[field_name]
         full_path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)
-        if field.type == "password":
-            msg = (
-                f"{full_path}: authored overrides are not allowed for password fields; "
-                "save the secret on the dashboard's Tools page or in the environment variable the tool's docs name."
-            )
-            raise ToolConfigOverrideError(msg)
         if not field.authored_override:
-            msg = f"{full_path}: authored overrides are not allowed for this field."
+            reason = (
+                "authored overrides are not allowed for password fields; "
+                "save the secret on the dashboard's Tools page or in the environment variable the tool's docs name."
+                if field.type == "password"
+                else "authored overrides are not allowed for this field."
+            )
+            msg = f"{full_path}: {reason}"
             raise ToolConfigOverrideError(msg)
         validated_value = _validate_authored_override_value(
             field,
