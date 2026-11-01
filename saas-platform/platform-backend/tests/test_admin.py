@@ -49,57 +49,8 @@ class TestAdminEndpoints:
         yield
         app.dependency_overrides.clear()
 
-    def test_admin_stats_success(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
-        """Test getting admin statistics successfully."""
-        # Setup - create separate mock chains for each table query
-        accounts_mock = MagicMock()
-        accounts_mock.select.return_value = accounts_mock
-        accounts_mock.execute.return_value = Mock(data=[{}, {}, {}, {}, {}, {}, {}, {}, {}, {}])  # 10 accounts
-
-        subscriptions_mock = MagicMock()
-        subscriptions_mock.select.return_value = subscriptions_mock
-        subscriptions_mock.eq.return_value = subscriptions_mock
-        subscriptions_mock.neq.return_value = subscriptions_mock
-        subscriptions_mock.execute.return_value = Mock(data=[{}, {}, {}, {}, {}, {}, {}, {}])  # 8 active
-
-        instances_mock = MagicMock()
-        instances_mock.select.return_value = instances_mock
-        instances_mock.eq.return_value = instances_mock
-        instances_mock.execute.return_value = Mock(data=[{}, {}, {}, {}, {}, {}, {}])  # 7 running
-
-        audit_mock = MagicMock()
-        audit_mock.select.return_value = audit_mock
-        audit_mock.order.return_value = audit_mock
-        audit_mock.limit.return_value = audit_mock
-        audit_mock.execute.return_value = Mock(data=[])  # no recent logs
-
-        # Configure table method to return different mocks
-        def table_side_effect(table_name):
-            if table_name == "accounts":
-                return accounts_mock
-            elif table_name == "subscriptions":
-                return subscriptions_mock
-            elif table_name == "instances":
-                return instances_mock
-            elif table_name == "audit_logs":
-                return audit_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
-
-        # Make request
-        response = client.get("/admin/stats")
-
-        # Verify
-        assert response.status_code == 200
-        data = response.json()
-        assert data["accounts"] == 10
-        assert data["active_subscriptions"] == 8
-        subscriptions_mock.neq.assert_called_with("tier", "free")
-        assert data["running_instances"] == 7
-
-    def test_admin_stats_unauthorized(self, client: TestClient):
-        """Test accessing admin stats without authorization."""
+    def test_admin_dashboard_metrics_unauthorized(self, client: TestClient):
+        """Test accessing admin dashboard metrics without authorization."""
         from main import app  # noqa: PLC0415
         from backend.deps import verify_admin
         from fastapi import HTTPException
@@ -109,7 +60,7 @@ class TestAdminEndpoints:
 
         app.dependency_overrides[verify_admin] = override_verify_admin
         try:
-            response = client.get("/admin/stats")
+            response = client.get("/admin/metrics/dashboard")
             assert response.status_code == 401
         finally:
             app.dependency_overrides.clear()
@@ -539,88 +490,47 @@ class TestAdminEndpoints:
         data = response.json()
         assert "data" in data
 
-    def test_admin_dashboard_metrics(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
-        """Test admin dashboard metrics."""
-        # Setup mock queries for each specific table call
-        # Mock accounts query
-        accounts_mock = MagicMock()
-        accounts_mock.select = MagicMock(return_value=accounts_mock)
-        accounts_result = Mock()
-        accounts_result.count = 100
-        accounts_mock.execute.return_value = accounts_result
+    def test_admin_dashboard_metrics_cover_every_row(
+        self, client: TestClient, fake_db: FakeSupabase, mock_verify_admin: Mock
+    ):
+        """Every dashboard figure counts all rows, past PostgREST's per-request row cap."""
+        fake_db.max_rows = 2
+        fake_db.tables = {
+            "accounts": [{"id": f"account-{i}"} for i in range(5)],
+            "subscriptions": [
+                # MRR counts each subscription's recorded Stripe price per month, and nothing before a price is recorded.
+                {"id": "sub-1", "status": "active", "tier": "byok", "billing_cycle": "monthly", "price_cents": 1000},
+                {"id": "sub-2", "status": "active", "tier": "byok", "billing_cycle": "yearly", "price_cents": 9600},
+                {"id": "sub-3", "status": "active", "tier": "hobby", "billing_cycle": "yearly", "price_cents": 19990},
+                {"id": "sub-4", "status": "active", "tier": "pro", "billing_cycle": None, "price_cents": None},
+                {"id": "sub-5", "status": "active", "tier": "free", "billing_cycle": "monthly", "price_cents": 0},
+                {"id": "sub-6", "status": "cancelled", "tier": "pro", "billing_cycle": "monthly", "price_cents": 5000},
+            ],
+            "instances": [
+                {"instance_id": i, "status": status}
+                for i, status in enumerate(["running", "running", "running", "stopped"])
+            ],
+        }
 
-        # Mock active subscriptions query
-        active_subs_mock = MagicMock()
-        active_subs_mock.select = MagicMock(return_value=active_subs_mock)
-        active_subs_mock.eq.return_value = active_subs_mock
-        active_subs_mock.neq.return_value = active_subs_mock
-        active_subs_result = Mock()
-        active_subs_result.count = 70
-        active_subs_mock.execute.return_value = active_subs_result
-
-        # Mock subscriptions data for MRR
-        subs_data_mock = MagicMock()
-        subs_data_mock.select.return_value = subs_data_mock
-        subs_data_mock.eq.return_value = subs_data_mock
-        subs_data_mock.neq.return_value = subs_data_mock
-        # MRR counts each subscription's recorded Stripe price per month, and nothing before a price is recorded.
-        subs_data_mock.execute.return_value = Mock(
-            data=[
-                {"tier": "byok", "billing_cycle": "monthly", "price_cents": 1000},
-                {"tier": "byok", "billing_cycle": "yearly", "price_cents": 9600},
-                {"tier": "hobby", "billing_cycle": "yearly", "price_cents": 19990},
-                {"tier": "pro", "billing_cycle": None, "price_cents": None},
-            ]
-        )
-
-        # Instances for status counts
-        instances_db = FakeSupabase({"instances": [{"status": "running"}, {"status": "stopped"}]})
-
-        # Mock audit logs
-        audit_mock = MagicMock()
-        audit_mock.select.return_value = audit_mock
-        audit_mock.order.return_value = audit_mock
-        audit_mock.limit.return_value = audit_mock
-        audit_mock.execute.return_value = Mock(data=[])
-
-        # Set up table method to return the right mock for each table
-        subscription_calls = [0]
-
-        def table_side_effect(table_name):
-            if table_name == "accounts":
-                return accounts_mock
-            elif table_name == "subscriptions":
-                # Track subscription calls to distinguish between different queries
-                subscription_calls[0] += 1
-                if subscription_calls[0] == 1:  # First call is for active subs count
-                    return active_subs_mock
-                else:  # Second call is for tier data
-                    return subs_data_mock
-            elif table_name == "instances":
-                return instances_db.table(table_name)
-            elif table_name == "audit_logs":
-                return audit_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
-
-        # Make request
         response = client.get("/admin/metrics/dashboard")
 
-        # Verify
         assert response.status_code == 200
         data = response.json()
-        assert "total_accounts" in data
-        assert "active_subscriptions" in data
-        assert "total_instances" in data
-        assert "subscription_revenue" in data
-        assert data["total_accounts"] == 100
-        active_subs_mock.neq.assert_called_with("tier", "free")
-        subs_data_mock.select.assert_called_with("tier,billing_cycle,price_cents")
-        subs_data_mock.neq.assert_called_with("tier", "free")
-        assert data["active_subscriptions"] == 70
-        assert data["total_instances"] == 2  # We have 2 instances total in the mock
+        assert data["total_accounts"] == 5
+        assert data["active_subscriptions"] == 4
         assert data["subscription_revenue"] == 35.0  # 10 + 8 + 16.66 (199.90 / 12), rounded to whole dollars
+        assert data["instances_by_status"] == {"running": 3, "stopped": 1}
+
+    def test_admin_dashboard_metrics_fail_instead_of_reporting_zeros(
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock
+    ):
+        """A database failure is an error response, not a dashboard of zero figures."""
+        mock_supabase.table.side_effect = RuntimeError("database unavailable")
+
+        response = client.get("/admin/metrics/dashboard")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to fetch dashboard metrics"}
 
     def test_admin_resource_not_in_allowlist(self, client: TestClient, mock_verify_admin: Mock):
         """Test admin accessing resource not in allowlist."""

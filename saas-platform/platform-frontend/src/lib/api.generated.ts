@@ -224,26 +224,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/admin/stats": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Admin Stats
-         * @description Get platform statistics for admin dashboard.
-         */
-        get: operations["get_admin_stats_admin_stats_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/admin/sync-instances": {
         parameters: {
             query?: never;
@@ -1076,20 +1056,10 @@ export interface components {
             recent_instances: {
                 [key: string]: unknown;
             }[];
-            /** Recent Signups */
-            recent_signups: {
-                [key: string]: unknown;
-            }[];
             /** Subscription Revenue */
             subscription_revenue: number;
-            /** Subscriptions By Tier */
-            subscriptions_by_tier: {
-                [key: string]: number;
-            };
             /** Total Accounts */
             total_accounts: number;
-            /** Total Instances */
-            total_instances: number;
         };
         /**
          * AdminDeleteResponse
@@ -1137,18 +1107,6 @@ export interface components {
             }[];
             /** Total */
             total: number;
-        };
-        /**
-         * AdminStatsOut
-         * @description Admin statistics output model.
-         */
-        AdminStatsOut: {
-            /** Accounts */
-            accounts: number;
-            /** Active Subscriptions */
-            active_subscriptions: number;
-            /** Running Instances */
-            running_instances: number;
         };
         /**
          * AdminStatusOut
@@ -2051,37 +2009,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminDashboardMetricsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_admin_stats_admin_stats_get: {
-        parameters: {
-            query?: never;
-            header?: {
-                authorization?: string;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AdminStatsOut"];
                 };
             };
             /** @description Validation Error */

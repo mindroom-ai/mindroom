@@ -265,42 +265,20 @@
             "title": "Recent Instances",
             "type": "array"
           },
-          "recent_signups": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "title": "Recent Signups",
-            "type": "array"
-          },
           "subscription_revenue": {
             "title": "Subscription Revenue",
             "type": "number"
           },
-          "subscriptions_by_tier": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "title": "Subscriptions By Tier",
-            "type": "object"
-          },
           "total_accounts": {
             "title": "Total Accounts",
-            "type": "integer"
-          },
-          "total_instances": {
-            "title": "Total Instances",
             "type": "integer"
           }
         },
         "required": [
           "total_accounts",
           "active_subscriptions",
-          "total_instances",
           "instances_by_status",
           "subscription_revenue",
-          "subscriptions_by_tier",
-          "recent_signups",
           "recent_instances"
         ],
         "title": "AdminDashboardMetricsResponse",
@@ -403,30 +381,6 @@
           "total"
         ],
         "title": "AdminListResponse",
-        "type": "object"
-      },
-      "AdminStatsOut": {
-        "description": "Admin statistics output model.",
-        "properties": {
-          "accounts": {
-            "title": "Accounts",
-            "type": "integer"
-          },
-          "active_subscriptions": {
-            "title": "Active Subscriptions",
-            "type": "integer"
-          },
-          "running_instances": {
-            "title": "Running Instances",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "accounts",
-          "active_subscriptions",
-          "running_instances"
-        ],
-        "title": "AdminStatsOut",
         "type": "object"
       },
       "AdminStatusOut": {
@@ -2438,46 +2392,6 @@
           }
         },
         "summary": "Get Dashboard Metrics"
-      }
-    },
-    "/admin/stats": {
-      "get": {
-        "description": "Get platform statistics for admin dashboard.",
-        "operationId": "get_admin_stats_admin_stats_get",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "title": "Authorization",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AdminStatsOut"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Admin Stats"
       }
     },
     "/admin/sync-instances": {
