@@ -90,6 +90,21 @@ def test_lets_everyone_add_emoji_but_only_moderators_post_and_keeps_the_other_po
     assert api.power_levels == server_levels_with_emoji_level(0)
 
 
+def test_raises_explicit_message_levels_below_50() -> None:
+    """A server whose defaults let members send messages by type still ends up with a room members cannot post in."""
+    api = MatrixAPI()
+    api.server_levels = {
+        **SERVER_POWER_LEVELS,
+        "events": {**SERVER_POWER_LEVELS["events"], "m.room.message": 0, "m.room.encrypted": 10},
+    }
+    with api.client() as client:
+        create_server_emoji_room(client, name="Example", alias="emoji", moderators_only=False)
+    assert api.power_levels["events"]["m.room.message"] == 50
+    assert api.power_levels["events"]["m.room.encrypted"] == 50
+    assert api.power_levels["events"]["m.room.name"] == 50
+    assert api.power_levels["events"]["im.ponies.room_emotes"] == 0
+
+
 def test_keeps_a_message_level_that_is_already_higher_than_50() -> None:
     """A server that already limits posting to admins is not loosened to moderators."""
     api = MatrixAPI()

@@ -108,7 +108,7 @@ Simple Mode (**Settings → General → Interface**) hides the Emojis & Stickers
 
 Members cannot post messages in the room.
 A message there would notify everyone on the server, and MindRoom Chat gives users no way to mute a room it hides.
-The script raises the room's `events_default` power level to at least `50` for this.
+The script raises the room's `events_default` power level to at least `50` for this, and any explicit `m.room.message` or `m.room.encrypted` level below that.
 If you create the room by hand, raise it too.
 
 - A kick does not last, because MindRoom Chat joins the room again by itself.

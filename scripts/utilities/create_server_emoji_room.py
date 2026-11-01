@@ -61,9 +61,14 @@ def create_server_emoji_room(client: httpx.Client, *, name: str, alias: str, mod
     # A create-time override would replace the whole events map and drop the levels the server chose.
     levels_path = f"/_matrix/client/v3/rooms/{quote(room_id, safe='')}/state/m.room.power_levels"
     levels = _json(client.get(levels_path))
-    levels.setdefault("events", {})[EMOJI_PACK_EVENT] = 50 if moderators_only else 0
+    events = levels.setdefault("events", {})
+    events[EMOJI_PACK_EVENT] = 50 if moderators_only else 0
     # Members join this hidden room by themselves and cannot mute it, so a message there would notify the whole server.
+    # Explicit levels for message types would undercut events_default, so raise those too.
     levels["events_default"] = max(levels.get("events_default", 0), 50)
+    for message_type in ("m.room.message", "m.room.encrypted"):
+        if message_type in events:
+            events[message_type] = max(events[message_type], 50)
     _json(client.put(levels_path, json=levels))
     server_name = user_id.partition(":")[2]
     return room_id, f"#{alias}:{server_name}"

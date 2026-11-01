@@ -430,8 +430,8 @@ def test_client_chart_publishes_bug_report_admins_in_matrix_client_discovery(
 @pytest.mark.parametrize("rtc", [False, True], ids=["no-rtc", "rtc"])
 @pytest.mark.parametrize(
     "room",
-    ["", "#emoji:chat.example.com", "!Zk3vQ9mT1nXb7YpLhR2sWc5dEoA8jUfGiN4tBqHyV-w"],
-    ids=["no-room", "alias", "room-id"],
+    ["", "#emoji:chat.example.com", "#emoji:chat.example.com:8448", "!Zk3vQ9mT1nXb7YpLhR2sWc5dEoA8jUfGiN4tBqHyV-w"],
+    ids=["no-room", "alias", "alias-port", "room-id"],
 )
 def test_client_chart_publishes_the_server_emoji_room_in_matrix_client_discovery(
     tmp_path: Path,
@@ -504,6 +504,7 @@ def test_client_chart_keeps_matrix_rtc_discovery_unchanged_without_other_discove
         ('serverEmoji:\n  room: "#a\\x85b:chat.example.com"\n', _EMOJI_ROOM_ERROR),
         ('serverEmoji:\n  room: "#a\'b:chat.example.com"\n', _EMOJI_ROOM_ERROR),
         ('serverEmoji:\n  room: "#emoji:chat$host"\n', _EMOJI_ROOM_ERROR),
+        ('serverEmoji:\n  room: "#emoji:example.com/path"\n', _EMOJI_ROOM_ERROR),
         (
             'matrix:\n  homeserverUrl: ""\n  defaultServerName: chat.example.com\nserverEmoji:\n  room: "#emoji:chat.example.com"\n',
             "matrix.homeserverUrl is required when serverEmoji.room is set",
@@ -529,6 +530,7 @@ def test_client_chart_keeps_matrix_rtc_discovery_unchanged_without_other_discove
         "emoji-control",
         "emoji-quote",
         "emoji-dollar",
+        "emoji-path",
         "emoji-no-homeserver-url",
         "emoji-existing-nginx",
     ],
