@@ -364,10 +364,7 @@ class OutlookMailTools(Toolkit):
         validate: Callable[[], object] | None = None,
         mailbox: str | None = None,
     ) -> str:
-        """Refuse malformed arguments before any request, then run the operation.
-
-        Every result and Graph error of a call that names a valid mailbox repeats it; a connect prompt does not.
-        """
+        """Refuse malformed arguments before any request, then run the operation."""
 
         def run() -> Mapping[str, object]:
             if validate is not None:

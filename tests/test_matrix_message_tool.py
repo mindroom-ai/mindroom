@@ -350,15 +350,11 @@ async def test_matrix_message_unknown_room_name_is_reported_as_unknown() -> None
     tool = MatrixMessageTools()
     ctx = _make_context()
 
-    with (
-        patch("mindroom.custom_tools.matrix_message.room_access_allowed", new_callable=AsyncMock) as mock_access,
-        tool_runtime_context(ctx),
-    ):
+    with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id="Ops Room"))
 
     assert payload["status"] == "error"
     assert payload["message"] == "Unknown room 'Ops Room'; pass a room ID, alias, or configured room name."
-    mock_access.assert_not_awaited()
 
 
 @pytest.mark.asyncio

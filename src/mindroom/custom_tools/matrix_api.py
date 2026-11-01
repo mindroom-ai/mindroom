@@ -1071,7 +1071,7 @@ class MatrixApiTools(Toolkit):
             allow_dangerous=allow_dangerous,
         )
 
-    async def _redact(
+    async def _redact(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
         *,
@@ -1095,31 +1095,26 @@ class MatrixApiTools(Toolkit):
 
         assert normalized_event_id is not None
 
-        error_message = await self._redaction_thread_resolution_error(
+        thread_error = await self._redaction_thread_resolution_error(
             context,
             room_id=room_id,
             event_id=normalized_event_id,
         )
-        dangerous = False
-        if error_message is None:
-            state_policy_error, dangerous = await self._redaction_state_policy_error(
-                context,
-                room_id=room_id,
-                event_id=normalized_event_id,
-                allow_dangerous=allow_dangerous,
-            )
-            if state_policy_error is not None:
-                return state_policy_error
-            if not dry_run:
-                error_message = self._check_rate_limit(context, room_id, action="redact")
-
-        if error_message is not None:
+        if thread_error is not None:
             return self._error_payload(
                 action="redact",
                 room_id=room_id,
                 target_event_id=normalized_event_id,
-                message=error_message,
+                message=thread_error,
             )
+        state_policy_error, dangerous = await self._redaction_state_policy_error(
+            context,
+            room_id=room_id,
+            event_id=normalized_event_id,
+            allow_dangerous=allow_dangerous,
+        )
+        if state_policy_error is not None:
+            return state_policy_error
 
         if dry_run:
             return self._payload(
@@ -1133,6 +1128,14 @@ class MatrixApiTools(Toolkit):
                     "event_id": normalized_event_id,
                     "reason": normalized_reason,
                 },
+            )
+
+        if (limit_error := self._check_rate_limit(context, room_id, action="redact")) is not None:
+            return self._error_payload(
+                action="redact",
+                room_id=room_id,
+                target_event_id=normalized_event_id,
+                message=limit_error,
             )
 
         try:
