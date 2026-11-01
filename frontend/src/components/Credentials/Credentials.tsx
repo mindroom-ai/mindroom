@@ -376,10 +376,10 @@ export function Credentials() {
           method: "DELETE",
         },
       );
+      await loadServices();
       setSelectedService("");
       setJsonDraft(EMPTY_JSON);
       setLoadedDraft(EMPTY_JSON);
-      await loadServices();
       toast({
         title: "Delete credentials",
         description: response.message,

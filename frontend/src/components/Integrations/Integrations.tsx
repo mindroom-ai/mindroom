@@ -63,6 +63,11 @@ const SHARED_ONLY_PROVIDER_IDS = new Set(["spotify", "homeassistant"]);
 
 type FilterMode = "all" | "available" | "unconfigured" | "configured";
 
+interface DisconnectToast {
+  title: string;
+  description: string;
+}
+
 const CATEGORIES = [
   { id: "email", name: "Email & Calendar" },
   { id: "productivity", name: "Productivity" },
@@ -530,8 +535,8 @@ export function Integrations() {
 
   const runDisconnectOperation = async (
     integration: Integration,
-    disconnect: () => Promise<void>,
-    success?: { title: string; description: string },
+    disconnect: () => Promise<DisconnectToast | void>,
+    success?: DisconnectToast,
   ) => {
     if (blocksScopedDashboardCredentials(integration)) {
       toast({
@@ -545,16 +550,18 @@ export function Integrations() {
 
     setLoading(true);
     try {
-      await disconnect();
+      const result = await disconnect();
 
       // Refetch tools to update status
       await refetchTools();
 
-      toast({
-        title: success?.title ?? "Disconnected",
-        description:
-          success?.description ?? `${integration.name} has been disconnected.`,
-      });
+      toast(
+        result ??
+          success ?? {
+            title: "Disconnected",
+            description: `${integration.name} has been disconnected.`,
+          },
+      );
     } catch (error) {
       toast({
         title: "Disconnect Failed",
@@ -582,6 +589,9 @@ export function Integrations() {
       if (!response.ok) {
         throw new Error("Failed to disconnect");
       }
+      // The environment can still supply deleted credentials, so the server says what happened.
+      const { message } = (await response.json()) as { message: string };
+      return { title: integration.name, description: message };
     });
 
   const getActionButton = (integration: Integration) => {

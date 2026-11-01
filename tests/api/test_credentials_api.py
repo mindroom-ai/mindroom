@@ -1959,8 +1959,8 @@ class TestCredentialsAPI:
         assert response.json() == {
             "status": "success",
             "message": (
-                "Credentials for openai come from the OPENAI_API_KEY environment variable and still apply; "
-                "remove it from the environment or .env and restart MindRoom."
+                "Credentials for openai now come from the OPENAI_API_KEY environment variable; "
+                "to remove them, edit it in the environment or .env and restart MindRoom."
             ),
         }
         assert "openai" in client.get("/api/credentials/list").json()
@@ -1979,7 +1979,7 @@ class TestCredentialsAPI:
         assert response.status_code == 200
         assert response.json() == {
             "status": "success",
-            "message": "Credentials for openai still come from the shared credentials; delete them there.",
+            "message": "Credentials for openai now come from the shared credentials granted to this agent.",
         }
         assert manager.load_credentials("openai") == {"api_key": "sk-shared-dummy", "_source": "ui"}
 

@@ -534,8 +534,8 @@ describe("Credentials", () => {
   it("keeps a service the environment still supplies after deleting it", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const message =
-      "Credentials for openai come from the OPENAI_API_KEY environment variable and still apply; " +
-      "remove it from the environment or .env and restart MindRoom.";
+      "Credentials for openai now come from the OPENAI_API_KEY environment variable; " +
+      "to remove them, edit it in the environment or .env and restart MindRoom.";
     let deleted = false;
     (global.fetch as any).mockImplementation(
       async (input: string, init?: RequestInit) => {

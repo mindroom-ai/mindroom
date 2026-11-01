@@ -476,14 +476,14 @@ async def delete_credentials(
 
     if access.load(service) is None:
         return {"status": "success", "message": f"Credentials deleted for {service}"}
-    # Deleting cannot remove what the environment or a granted shared credential still supplies.
+    # Deleting cannot remove what the environment or a granted shared credential supplies.
     variable = access.target.base_manager.declared_variable(service)
     if variable is None:
-        message = f"Credentials for {service} still come from the shared credentials; delete them there."
+        message = f"Credentials for {service} now come from the shared credentials granted to this agent."
     else:
         message = (
-            f"Credentials for {service} come from the {variable} environment variable and still apply; "
-            "remove it from the environment or .env and restart MindRoom."
+            f"Credentials for {service} now come from the {variable} environment variable; "
+            "to remove them, edit it in the environment or .env and restart MindRoom."
         )
     return {"status": "success", "message": message}
 

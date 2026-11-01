@@ -1146,6 +1146,48 @@ describe("Integrations", () => {
     expect(mockHomeAssistantDisconnect).toHaveBeenCalledOnce();
   });
 
+  it("shows the server's answer when the environment still supplies a disconnected tool", async () => {
+    const refetch = vi.fn();
+    const message =
+      "Credentials for openai now come from the OPENAI_API_KEY environment variable; " +
+      "to remove them, edit it in the environment or .env and restart MindRoom.";
+    listTools(
+      [
+        tool({
+          name: "openai",
+          display_name: "OpenAI",
+          description: "OpenAI models",
+          setup_type: "api_key",
+          status: "connected",
+        }),
+      ],
+      { refetch },
+    );
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: "success", message }),
+    });
+
+    render(<Integrations />);
+
+    fireEvent.click(
+      within(await findCard("OpenAI")).getByRole("button", {
+        name: "Disconnect",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "OpenAI",
+        description: message,
+      });
+    });
+    expect(global.fetch).toHaveBeenCalledWith("/api/credentials/openai", {
+      method: "DELETE",
+    });
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
   it("lists worker-scoped and private agents in the scope selector", async () => {
     useConfigStore.setState({
       agents: [
@@ -1598,7 +1640,13 @@ describe("Integrations", () => {
         }),
       },
     });
-    global.fetch = vi.fn().mockResolvedValue({ ok: true });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        status: "success",
+        message: "Credentials deleted for github",
+      }),
+    });
 
     render(<Integrations />);
     await selectScope("Scoped Agent");
@@ -1631,7 +1679,13 @@ describe("Integrations", () => {
       [githubTool({ status: "available", manual_auth_configured: true })],
       { refetch },
     );
-    global.fetch = vi.fn().mockResolvedValue({ ok: true });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        status: "success",
+        message: "Credentials deleted for github",
+      }),
+    });
 
     render(<Integrations />);
 
