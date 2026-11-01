@@ -338,6 +338,18 @@ _MODELS = {"default": {"provider": "openai", "id": "test-model"}}
         ),
         (
             {
+                "agents": {
+                    "general": {
+                        **_FILE_MEMORY_AGENT,
+                        "automations": [{"name": "prompt_curation", "room": _OUTSIDE_ALIAS}],
+                    },
+                },
+            },
+            "agents.general.automations.prompt_curation.room",
+            _OUTSIDE_ALIAS,
+        ),
+        (
+            {
                 "defaults": {"automations": [{"name": "prompt_curation", "room": "ideas"}]},
                 "agents": {"general": _FILE_MEMORY_AGENT},
             },
@@ -345,7 +357,7 @@ _MODELS = {"default": {"provider": "openai", "id": "test-model"}}
             "ideas",
         ),
     ],
-    ids=["agent-rooms", "team-rooms", "top-level-rooms", "room-thread-modes", "unlisted-key"],
+    ids=["agent-rooms", "team-rooms", "top-level-rooms", "room-thread-modes", "agent-automation", "unlisted-key"],
 )
 def test_a_room_reference_that_names_no_room_fails_naming_where(
     tmp_path: Path,
@@ -394,7 +406,13 @@ def test_only_the_exact_alias_mindroom_creates_for_a_room_key_names_that_room(
         "models": _MODELS,
         "agents": {
             "one": {"display_name": "One", "rooms": ["lobby"]},
-            "two": {"display_name": "Two", "rooms": [alias], "room_thread_modes": {alias: "room"}},
+            "two": {
+                "display_name": "Two",
+                "rooms": [alias],
+                "memory_backend": "file",
+                "room_thread_modes": {alias: "room"},
+                "automations": [{"name": "prompt_curation", "room": alias}],
+            },
         },
     }
     if valid:

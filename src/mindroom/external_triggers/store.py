@@ -59,7 +59,7 @@ class ExternalTriggerTarget(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    room_id: str = Field(description="Configured room key, room alias, or Matrix room ID")
+    room_id: str = Field(description="Configured room key, that room's full alias, or Matrix room ID")
     thread_id: str | None = Field(default=None, description="Optional Matrix thread event ID")
     agent: str = Field(description="Agent or team name to mention")
     new_thread: bool = Field(default=False, description="Whether the trigger starts a new thread")

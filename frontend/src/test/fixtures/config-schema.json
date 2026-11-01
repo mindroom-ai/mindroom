@@ -1698,7 +1698,7 @@
             }
           ],
           "default": null,
-          "description": "Room key or Matrix room ID for the prompt; defaults to the agent's first configured room",
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
           "title": "Room"
         },
         "model": {
@@ -2173,7 +2173,7 @@
             }
           ],
           "default": null,
-          "description": "Room key or Matrix room ID for the prompt; defaults to the agent's first configured room",
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
           "title": "Room"
         },
         "model": {
@@ -4110,7 +4110,7 @@
             }
           ],
           "default": null,
-          "description": "Room key or Matrix room ID for the prompt; defaults to the agent's first configured room",
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
           "title": "Room"
         },
         "model": {
@@ -4238,7 +4238,7 @@
             }
           ],
           "default": null,
-          "description": "Room key or Matrix room ID for the prompt; defaults to the agent's first configured room",
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
           "title": "Room"
         },
         "model": {

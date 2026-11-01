@@ -264,8 +264,8 @@ Smaller changes that need operator action:
   Before upgrading, set again any such variable you removed after MindRoom imported it, or save that credential in the dashboard, or the key stops working; startup logs each removed service whose variable is no longer set.
 - **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
 - **Public address setting**: `MINDROOM_BASE_URL` is removed and `mindroom run` refuses to start while it is set, so before upgrading, move its value to `MINDROOM_PUBLIC_URL` unless that is already set, and delete it.
-- **Room references**: a config fails to load when a room reference names no room MindRoom can find, such as a `#` alias of a room MindRoom did not create or a room key nothing lists in `rooms`, `room_thread_modes`, or an automation's `room`, or an automation `room` its agent does not list.
-  `mindroom run` refuses to start with such a config, so run `mindroom config validate` before upgrading and replace each reference it names with a room key or the room's `!` room ID, as [Rooms](https://docs.mindroom.chat/rooms/#configuration) describes.
+- **Room references**: `rooms`, `room_thread_modes`, and an automation's `room` must name a room MindRoom can find, so a `#` alias of a room MindRoom did not create, or a room key no agent, team, or top-level `rooms` lists, now fails config load and `mindroom run` refuses to start.
+  Run the new release's `mindroom config validate` and replace each reference it names with a room key or the room's `!` room ID, as [Rooms](https://docs.mindroom.chat/rooms/#configuration) describes.
 
 ### Compaction History
 

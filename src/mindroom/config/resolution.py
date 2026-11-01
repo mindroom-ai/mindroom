@@ -188,26 +188,21 @@ def edits_knowledge_graph(config: Config, agent_name: str) -> bool:
     return edits and uses_knowledge_graph(config, agent_name)
 
 
-def automation_block_reason(config: Config, agent_name: str, automation: Automation) -> str | None:  # noqa: PLR0911 - one reason per unmet need
+def automation_block_reason(config: Config, agent_name: str, automation: Automation) -> str | None:
     """Return why an agent cannot run ``automation``, or None when it can.
 
     A private agent runs each automation for each requester in that requester's personal room, so it must own
     personal rooms and cannot post in a configured room, which would show one requester's files to everyone in it.
-    A shared agent posts the prompt itself, so a room other than a `!` room ID must be one of its own rooms.
     `prompt_curation` and `dreaming` maintain file memory, which needs the file backend; `exploration` needs the
     knowledge graph, and a room for a shared agent.
     A plugin automation's own needs are checked when it fires, once its plugin is loaded.
     """
-    agent = config.get_agent(agent_name)
-    private = agent.private is not None
+    private = config.get_agent(agent_name).private is not None
     if private:
         if config.personal_rooms is None or config.personal_rooms.agent != agent_name:
             return "is private; its automations post in personal rooms, so personal_rooms.agent must name it"
         if automation.room is not None:
             return f"is private; {automation.name} posts in each requester's personal room and cannot set room"
-    room = automation.room
-    if room is not None and not room.startswith("!") and room not in agent.rooms:
-        return f"posts {automation.name} in {room}, which is not one of its rooms"
     if automation.requires_file_memory and memory_backend(config, agent_name) != "file":
         return f"needs memory_backend: file for {automation.name}"
     if isinstance(automation, ExplorationAutomation):

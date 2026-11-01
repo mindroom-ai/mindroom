@@ -4801,6 +4801,7 @@ defaults:
 agents:
   mind:
     memory_backend: file
+    rooms: [personal]
     automations:
       - prompt_curation          # the built-in with its defaults
       # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
@@ -4811,8 +4812,7 @@ agents:
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
 - Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
 - `cron` is a five-field expression in the agent's [timezone](#timezone).
-- `room` is one of the agent's own [`rooms`](https://docs.mindroom.chat/rooms/#configuration) entries or the `!` ID of a room the agent is in, because the agent posts the prompt itself; it defaults to the agent's first configured room.
-  An agent that does not list the `room` of an inherited default entry skips that entry.
+- `room` names a room as an entry of [`rooms`](https://docs.mindroom.chat/rooms/#configuration) does, and it must be a room the agent is in, because the agent posts the prompt itself; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
 - A [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) runs its automations once for each requester who has used it, as that requester and on that requester's own files, and posts in their [personal room](https://docs.mindroom.chat/personal-rooms/) with the agent.
@@ -6929,7 +6929,7 @@ teams:
 
 Every room key listed by an agent or team, or under top-level `rooms`, is a managed room, created on startup or config reload if it does not exist yet.
 Entries starting with `!` are existing Matrix room IDs, which are joined as they are and are not created or managed.
-A `#` room alias is accepted only as the alias MindRoom gives a managed room, such as `#lobby:<server>` for `lobby`, so list a room MindRoom did not create by its `!` room ID.
+A `#` room alias is accepted only as the alias MindRoom gives a managed room (see [Room Management](#room-management)), so list a room MindRoom did not create by its `!` room ID.
 
 ## Room policy
 
@@ -22196,8 +22196,8 @@ Smaller changes that need operator action:
   Before upgrading, set again any such variable you removed after MindRoom imported it, or save that credential in the dashboard, or the key stops working; startup logs each removed service whose variable is no longer set.
 - **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
 - **Public address setting**: `MINDROOM_BASE_URL` is removed and `mindroom run` refuses to start while it is set, so before upgrading, move its value to `MINDROOM_PUBLIC_URL` unless that is already set, and delete it.
-- **Room references**: a config fails to load when a room reference names no room MindRoom can find, such as a `#` alias of a room MindRoom did not create or a room key nothing lists in `rooms`, `room_thread_modes`, or an automation's `room`, or an automation `room` its agent does not list.
-  `mindroom run` refuses to start with such a config, so run `mindroom config validate` before upgrading and replace each reference it names with a room key or the room's `!` room ID, as [Rooms](https://docs.mindroom.chat/rooms/#configuration) describes.
+- **Room references**: `rooms`, `room_thread_modes`, and an automation's `room` must name a room MindRoom can find, so a `#` alias of a room MindRoom did not create, or a room key no agent, team, or top-level `rooms` lists, now fails config load and `mindroom run` refuses to start.
+  Run the new release's `mindroom config validate` and replace each reference it names with a room key or the room's `!` room ID, as [Rooms](https://docs.mindroom.chat/rooms/#configuration) describes.
 
 ### Compaction History
 

@@ -988,6 +988,11 @@ class Config(BaseModel):
                 for room in agent.room_thread_modes
             ),
             *(
+                (f"agents.{name}.automations.{automation.name}.room", automation.room)
+                for name, agent in self.agents.items()
+                for automation in agent.automations or ()
+            ),
+            *(
                 (f"defaults.automations.{automation.name}.room", automation.room)
                 for automation in self.defaults.automations
             ),

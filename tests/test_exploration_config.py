@@ -27,7 +27,6 @@ def _config(
         agents={
             "mind": AgentConfig(
                 display_name="Mind",
-                rooms=["lab"],
                 knowledge_graph=knowledge_graph,
                 tools=["duckduckgo"],
                 automations=automations,
