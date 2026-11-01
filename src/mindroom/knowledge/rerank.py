@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import httpx
 
 from mindroom.constants import runtime_env_path
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.sync import get_api_key_for_service
 from mindroom.embeddings.signatures import ensure_sentence_transformers_dependencies
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
@@ -170,7 +171,7 @@ def create_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePaths
         return _VertexAIReranker(
             model=config.model,
             credentials_path=runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS"),
-            project=runtime_paths.env_value("GOOGLE_CLOUD_PROJECT"),
+            project=get_secret_from_env("GOOGLE_CLOUD_PROJECT", runtime_paths=runtime_paths),
         )
     api_key = config.api_key or get_api_key_for_service(config.credentials_service or "cohere", runtime_paths)
     return _CohereReranker(model=config.model, url=config.url or _COHERE_RERANK_URL, api_key=api_key)

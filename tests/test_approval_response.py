@@ -14,10 +14,10 @@ from mindroom.approval.response import (
     plan_approval_calls,
     require_ordered_pause_presentation,
 )
-from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReportedCall, RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import PausedAttempt
-from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
+from mindroom.tool_system.events import CollectedStreamPresentation, StructuredStreamChunk, ToolTraceEntry
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot
@@ -308,6 +308,28 @@ async def test_agent_continuation_defers_terminal_only_content() -> None:
     assert response.response is terminal.record
     assert response.terminal_content == "After approval."
     assert presentation.final_text() == "Before approval. "
+
+
+@pytest.mark.asyncio
+async def test_a_continued_calls_output_reaches_the_live_reply_until_it_completes() -> None:
+    """The output a call resumed after an approval reports is published with the reply it continues."""
+    presentation = CollectedStreamPresentation(show_tool_calls=True, response_text="Approved. ")
+    published: list[StructuredStreamChunk] = []
+
+    async def progress(chunk: StructuredStreamChunk) -> None:
+        published.append(chunk)
+
+    call = ReportedCall(tool_call_id="call-1", tool_name="run_shell_command", tool_args={})
+    done = ReportedCall(tool_call_id="call-1", tool_name="run_shell_command", tool_args={}, result="ok")
+    await _collect_agent_continuation(
+        _events(ToolStarted(call), ToolProgress("call-1", "step 1"), ToolCompleted(done), _finished()),
+        presentation,
+        run_id="run-1",
+        progress=progress,
+    )
+
+    assert {"call-1": "step 1"} in [chunk.tool_progress for chunk in published]
+    assert published[-1].tool_progress == {}
 
 
 @pytest.mark.asyncio

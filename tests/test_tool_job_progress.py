@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.tool_jobs.runtime import BackgroundOutcome, job_summary
-from mindroom.tool_system.progress import report_tool_progress
+from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
 from tests.tool_job_helpers import job_owner, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
@@ -53,6 +53,32 @@ async def test_a_running_job_shows_the_latest_progress_its_tool_reported(tmp_pat
         ended = job_summary((await runtime.list_jobs(owner=owner, depth=0))[0])
         assert "progress" not in ended
         assert ended["summary"] == "built"
+    finally:
+        finish.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_job_also_reports_its_progress_to_the_call_that_started_it(tmp_path: Path) -> None:
+    """While a call waits for its job, the progress the job's tool reports reaches the call's listener too."""
+    runtime = await tool_job_runtime(tmp_path)
+    owner = job_owner()
+    finish = asyncio.Event()
+    reported = asyncio.Event()
+    seen: list[str] = []
+
+    async def operation() -> BackgroundOutcome:
+        report_tool_progress("compiling 1/2")
+        await asyncio.to_thread(report_tool_progress, "compiling 2/2")
+        reported.set()
+        await finish.wait()
+        return BackgroundOutcome("completed", "built")
+
+    try:
+        with tool_progress_reporter(seen.append):
+            await runtime.start("job-1", tool_name="make", depth=0, adapter={}, owner=owner, operation=operation)
+        await asyncio.wait_for(reported.wait(), timeout=5)
+        assert seen == ["compiling 1/2", "compiling 2/2"]
     finally:
         finish.set()
         await runtime.shutdown()
