@@ -88,7 +88,7 @@ bugReports:
 # Custom emoji shared by everyone on the homeserver, kept in one room that the client joins automatically.
 serverEmoji:
   # Room alias such as #emoji:example.com, or a room ID, published in /.well-known/matrix/client as io.mindroom.emoji.
-  # Quote an alias, as in room: "#emoji:example.com": an unquoted # starts a YAML comment and the chart publishes nothing.
+  # Quote the value, as in room: "#emoji:example.com": unquoted, # starts a YAML comment and ! a YAML tag, and the chart publishes nothing.
   # Create the room with scripts/utilities/create_server_emoji_room.py.
   # Empty keeps custom emoji personal to each user.
   room: ""

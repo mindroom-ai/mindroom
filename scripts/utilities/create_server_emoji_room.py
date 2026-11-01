@@ -25,7 +25,7 @@ EMOJI_PACK_EVENT = "im.ponies.room_emotes"
 
 def _json(response: httpx.Response) -> dict[str, Any]:
     """Return the JSON object Matrix answered with, or fail with the error it gave."""
-    if response.is_error:
+    if not response.is_success:
         msg = f"{response.request.method} {response.url.path} answered {response.status_code}: {response.text}"
         raise httpx.HTTPStatusError(msg, request=response.request, response=response)
     value = response.json()

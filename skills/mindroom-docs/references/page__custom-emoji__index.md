@@ -64,7 +64,7 @@ Add that key to the homeserver's `/.well-known/matrix/client` file:
 
 `room` takes the alias the script printed, or the room ID.
 With the `mindroom-client` Helm chart, set `serverEmoji.room` to the same value and the chart serves `/.well-known/matrix/client` with the key; see the [chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#server-custom-emoji).
-Quote an alias in the values file, as in `room: "#emoji:example.com"`, because an unquoted `#` starts a YAML comment and the chart then publishes nothing.
+Quote the value in the values file, as in `room: "#emoji:example.com"`: unquoted, `#` starts a YAML comment and `!` a YAML tag, and the chart then publishes nothing.
 Tuwunel's own `[global.well_known]` section has no setting for extra keys, so when Tuwunel answers that path, serve the file from your reverse proxy or the client chart instead.
 Nothing changes in `config.yaml`.
 Without the key, custom emoji stay personal to each user.
@@ -111,6 +111,7 @@ Members cannot post messages in the room.
 A message there would notify everyone on the server, and MindRoom Chat gives users no way to mute a room it hides.
 The script raises the room's `events_default` power level to at least `50` for this, and any explicit `m.room.message` or `m.room.encrypted` level below that.
 If you create the room by hand, raise it too.
+MindRoom Chat also mutes the room when it joins it, so a mention hidden in a pack event notifies no one.
 
 - A kick does not last, because MindRoom Chat joins the room again by itself.
   Ban someone to keep them out.

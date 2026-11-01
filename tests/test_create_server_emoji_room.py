@@ -26,6 +26,7 @@ class MatrixAPI:
         self.power_levels: dict[str, Any] = {}
         self.authorization: str | None = None
         self.alias_taken = False
+        self.redirect = False
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         """Implement room creation, power levels, and the operator's identity."""
@@ -43,6 +44,8 @@ class MatrixAPI:
                 self.power_levels = json.loads(request.content)
                 return httpx.Response(200, json={"event_id": "$levels"})
         if request.method == "GET" and path.endswith("/account/whoami"):
+            if self.redirect:
+                return httpx.Response(308, headers={"Location": "https://matrix.example.com/"}, text="<html></html>")
             return httpx.Response(200, json={"user_id": "@op:example.com"})
         message = f"Unexpected Matrix request: {request.method} {path}"
         raise AssertionError(message)
@@ -166,3 +169,16 @@ def test_main_reports_why_matrix_refused_and_leaves_the_power_levels_alone(
     assert main(["--homeserver", "https://matrix.example.com", "--name", "Example"]) == 1
     assert "M_ROOM_IN_USE" in capsys.readouterr().err
     assert api.power_levels == {}
+
+
+def test_main_reports_a_redirect_instead_of_reading_it_as_json(
+    api: MatrixAPI,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A homeserver URL that redirects (for example http to https) is named in the error, and nothing is created."""
+    api.redirect = True
+    assert main(["--homeserver", "https://matrix.example.com", "--name", "Example"]) == 1
+    error = capsys.readouterr().err
+    assert "308" in error
+    assert "/account/whoami" in error
+    assert api.created == {}
