@@ -134,7 +134,7 @@ class AgentManagerTools(Toolkit):
     async def set_avatar(self, attachment_id: str) -> str:
         """Set this agent's Matrix profile picture to an image attached in this conversation, cropped to its center square.
 
-        Pass the image's attachment ID, such as `att_...`. Only this agent's owners may ask.
+        Pass the attachment ID, such as `att_...`, of a PNG, JPEG, GIF or WebP image. Only this agent's owners may ask.
         The owner approves on a card unless their own !auto_approve window is open;
         on "Tool approval needs the router in this room", call `invite_router` and retry.
         """
@@ -159,7 +159,11 @@ class AgentManagerTools(Toolkit):
             msg = f"{self.agent_name} can change its avatar only when it answers as itself, not through {context.recipient}"
             raise ValueError(msg)
         image, error = await asyncio.to_thread(
-            partial(read_context_attachment, context, attachment_id, byte_limit=MAX_SOURCE_BYTES, limit_label="avatar"),
+            read_context_attachment,
+            context,
+            attachment_id,
+            byte_limit=MAX_SOURCE_BYTES,
+            limit_label="avatar",
         )
         if image is None:
             raise ValueError(error)

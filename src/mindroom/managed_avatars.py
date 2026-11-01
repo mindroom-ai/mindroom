@@ -118,7 +118,8 @@ def normalized_avatar_png(data: bytes) -> bytes:
         Image.DecompressionBombError,
         Image.DecompressionBombWarning,
     ) as exc:
-        msg = f"Undecodable avatar image: {exc}"
+        # Pillow's own message names a Python object, which tells the owner nothing.
+        msg = "The image cannot be decoded as PNG, JPEG, GIF or WebP"
         raise ValueError(msg) from exc
     output = io.BytesIO()
     normalized.save(output, format="PNG")

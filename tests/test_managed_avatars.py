@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 import httpx
 import nio
 import pytest
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from structlog.testing import capture_logs
 
 from mindroom import constants as constants_mod
@@ -535,7 +535,7 @@ async def test_root_space_avatar_prefers_bundled_then_falls_back_to_stock(
 @pytest.mark.parametrize("data", [b"not an image", _image_bytes()[:64]], ids=["garbage", "truncated"])
 def test_undecodable_images_raise_value_error(data: bytes) -> None:
     """Pillow decode failures surface as ValueError so the event loop never imports Pillow."""
-    with pytest.raises(ValueError, match="Undecodable avatar image"):
+    with pytest.raises(ValueError, match="The image cannot be decoded as PNG, JPEG, GIF or WebP"):
         managed_avatars.normalized_avatar_png(data)
 
 
@@ -580,8 +580,10 @@ def test_postscript_is_refused_without_reaching_ghostscript() -> None:
     """Pillow renders EPS through Ghostscript, so an avatar accepts only PNG, JPEG, GIF and WebP."""
     eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 10 10\nshowpage\n"
 
-    with pytest.raises(ValueError, match="Undecodable avatar image: cannot identify image file"):
+    with pytest.raises(ValueError, match="The image cannot be decoded as PNG, JPEG, GIF or WebP") as refused:
         managed_avatars.normalized_avatar_png(eps)
+    # Without the allowlist Pillow identifies EPS and fails, or succeeds, inside Ghostscript instead.
+    assert isinstance(refused.value.__cause__, UnidentifiedImageError)
 
 
 def test_a_transparent_logo_keeps_its_transparency() -> None:

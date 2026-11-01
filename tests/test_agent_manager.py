@@ -323,7 +323,7 @@ async def test_refused_avatar_changes_come_back_as_errors_and_leave_the_profile_
 
     assert stranger == f"Error: Only {OWNER} or {CO_OWNER} may change creator_research"
     assert outside == "Error: Attachment ID is not available in this context: att_elsewhere"
-    assert not_an_image.startswith("Error: Undecodable avatar image: ")
+    assert not_an_image == "Error: The image cannot be decoded as PNG, JPEG, GIF or WebP"
     assert team == "Error: creator_research can change its avatar only when it answers as itself, not through team"
     client.upload.assert_not_awaited()
     client.set_avatar.assert_not_awaited()
