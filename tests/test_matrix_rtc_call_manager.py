@@ -6,6 +6,7 @@ import asyncio
 import base64
 import gc
 import importlib.util
+import os
 import sys
 import threading
 import time
@@ -6000,5 +6001,9 @@ def test_manager_sees_a_personal_room_written_after_its_last_check(tmp_path: Pat
     _write_personal_room(tmp_path, "helper", "@alice:example.org", "!earlier:example.org")
     manager = _manager(_client(), FakeBridge(), tmp_path, _two_call_agents())
     assert not manager._is_configured_call_room(_room())
+    directory = personal_room_record_path(test_runtime_paths(tmp_path), "helper", "").parent
+    version = directory.stat().st_mtime_ns
     _write_personal_room(tmp_path, "helper", "@bob:example.org", ROOM_ID)
+    # A coarse clock can leave the directory's mtime where the last check saw it.
+    os.utime(directory, ns=(version, version))
     assert manager._is_configured_call_room(_room())
