@@ -212,6 +212,34 @@ def test_list_schedules_reads_a_room_configured_by_alias_under_its_room_id(
     ]
 
 
+def test_list_schedules_reports_an_alias_whose_lookup_broke_off_beside_the_readable_rooms(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """An alias lookup that breaks off is reported with the reason, and the other rooms' tasks are still listed."""
+    _configure_agent_rooms(temp_config_file, ["!readable:localhost", "#flaky:example.org"])
+    client = make_matrix_client_mock()
+    client.room_resolve_alias = AsyncMock(side_effect=aiohttp.ClientPayloadError("Response payload is not completed"))
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse.from_dict(
+            [scheduled_task_state_event("abc12345", _stored(), room_id="!readable:localhost")],
+            room_id="!readable:localhost",
+        ),
+    )
+    response = _send_with(test_client, client, "GET", path="/api/schedules")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [(task["task_id"], task["room_id"]) for task in data["tasks"]] == [("abc12345", "!readable:localhost")]
+    assert data["unreadable_rooms"] == [
+        {
+            "room_id": "#flaky:example.org",
+            "room_alias": "#flaky:example.org",
+            "error": "Unable to resolve room alias: ClientPayloadError: Response payload is not completed",
+        },
+    ]
+
+
 def test_list_schedules_filtered_by_alias_reads_only_that_room(test_client: TestClient) -> None:
     """A room filter written as an alias is read under the room ID it resolves to."""
     client = make_matrix_client_mock()

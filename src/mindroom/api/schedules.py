@@ -6,6 +6,7 @@ from dataclasses import asdict
 from datetime import datetime  # noqa: TC003 - Pydantic resolves postponed annotations at runtime.
 from typing import TYPE_CHECKING, Annotated, Literal
 
+import aiohttp
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -101,6 +102,11 @@ IncludeCancelled = Annotated[bool, Query(description="Include cancelled schedule
 CancelRoomId = Annotated[str, Query(description="Room ID or alias containing the task")]
 
 
+def _unresolved_alias(alias: str, reason: object) -> UnreadableScheduleRoom:
+    """Report an alias the homeserver did not resolve under the alias itself, since no room ID is known."""
+    return UnreadableScheduleRoom(room_id=alias, room_alias=alias, error=f"Unable to resolve room alias: {reason}")
+
+
 async def _room_ids(
     client: nio.AsyncClient,
     room_refs: list[str],
@@ -113,17 +119,16 @@ async def _room_ids(
     room_ids: list[str] = []
     unresolved_rooms: list[UnreadableScheduleRoom] = []
     for room_ref in room_refs:
-        resolved = await resolve_room_reference(client, room_ref, runtime_paths)
+        try:
+            resolved = await resolve_room_reference(client, room_ref, runtime_paths)
+        except aiohttp.ClientError as exc:
+            # nio raises an alias lookup whose response broke off instead of answering it.
+            unresolved_rooms.append(_unresolved_alias(room_ref, f"{type(exc).__name__}: {exc}"))
+            continue
         if isinstance(resolved, str):
             room_ids.append(resolved)
         elif resolved is not None:
-            unresolved_rooms.append(
-                UnreadableScheduleRoom(
-                    room_id=room_ref,
-                    room_alias=room_ref,
-                    error=f"Unable to resolve room alias: {resolved}",
-                ),
-            )
+            unresolved_rooms.append(_unresolved_alias(room_ref, resolved))
     # Two references can name one room, such as its room key and its full alias.
     return list(dict.fromkeys(room_ids)), unresolved_rooms
 
