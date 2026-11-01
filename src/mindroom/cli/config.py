@@ -442,15 +442,8 @@ def activate_cli_runtime(
     *,
     storage_path: Path | None = None,
 ) -> RuntimePaths:
-    """Resolve the primary runtime for one CLI command from its config and storage path options.
-
-    An unreadable `.env` beside the config stops the command with its error instead of a traceback.
-    """
-    try:
-        return constants.resolve_primary_runtime_paths(config_path=path, storage_path=storage_path)
-    except ValueError as exc:
-        console.print(f"[red]Error:[/red] {escape(str(exc))}")
-        raise typer.Exit(1) from None
+    """Resolve the primary runtime for one CLI command from its config and storage path options."""
+    return constants.resolve_primary_runtime_paths(config_path=path, storage_path=storage_path)
 
 
 def _get_editor() -> str:

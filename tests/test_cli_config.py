@@ -38,6 +38,7 @@ from mindroom.cli.main import (
     _threads_export,
     app,
 )
+from mindroom.cli.main import main as cli_main
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
@@ -2553,17 +2554,23 @@ class TestConfigValidate:
     [["config", "init", "--no-input"], ["config", "migrate"], ["config", "validate"]],
     ids=["init", "migrate", "validate"],
 )
-def test_a_non_utf8_env_file_names_itself_and_the_fix(tmp_path: Path, command: list[str]) -> None:
+def test_a_non_utf8_env_file_names_itself_and_the_fix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: list[str],
+) -> None:
     """A `.env` saved in another encoding stops the command with an error naming the file, not a traceback."""
     env_path = tmp_path / ".env"
     env_path.write_text("OPENAI_API_KEY=sk-test\n", encoding="utf-16")
+    monkeypatch.setattr(sys, "argv", ["mindroom", *command, "--path", str(tmp_path / "config.yaml")])
 
-    result = runner.invoke(app, [*command, "--path", str(tmp_path / "config.yaml")])
+    with pytest.raises(SystemExit) as exited:
+        cli_main()
 
-    assert result.exit_code == 1, result.output
-    assert result.exception is None or isinstance(result.exception, SystemExit)
-    output = normalize_console_output(result.output)
-    assert f"{env_path.resolve()} is not UTF-8 text" in output
+    assert exited.value.code == 1
+    output = normalize_console_output(capsys.readouterr().out)
+    assert f"Error: {env_path.resolve()} is not UTF-8 text" in output
     assert "save it as UTF-8" in output
 
 
