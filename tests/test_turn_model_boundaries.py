@@ -67,7 +67,7 @@ def _config(tmp_path: Path) -> Config:
         Config(
             agents={"a": AgentConfig(display_name="A", model="m1"), "b": AgentConfig(display_name="B", model="m2")},
             teams={"crew": TeamConfig(display_name="Crew", role="Work", agents=["a", "b"], model="mt")},
-            room_models={"lobby": "m2"},
+            room_models={_ROOM: "m2"},
             models=models,
             budgets=BudgetsConfig(fallback_model="fb", monthly_limit_usd=0),
         ),
@@ -124,14 +124,12 @@ class _Layers:
 )
 def test_one_agent_resolves_model_window_and_overridden_flag_by_layer(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     layers: _Layers,
     expected: tuple[str, int | None, bool],
 ) -> None:
     """Explicit beats thread beats persisted room beats authored room_models beats the agent; only the first three count as overrides."""
     config = _config(tmp_path)
     paths = runtime_paths_for(config)
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
     if layers.room is not None:
         set_room_model_override(paths, room_id=_ROOM, model_name=layers.room)
     if layers.thread is not None:
@@ -169,7 +167,11 @@ def test_a_team_must_name_a_model() -> None:
     ("raw", "reference"),
     [
         pytest.param({"agents": {"a": {"display_name": "A", "model": "gone"}}}, "agents.a.model: 'gone'", id="agent"),
-        pytest.param({"room_models": {"lobby": "gone"}}, "room_models.lobby: 'gone'", id="room-models"),
+        pytest.param(
+            {"rooms": {"lobby": {}}, "room_models": {"lobby": "gone"}},
+            "room_models.lobby: 'gone'",
+            id="room-models",
+        ),
     ],
 )
 def test_a_model_choice_naming_no_configured_model_fails_the_config_load(

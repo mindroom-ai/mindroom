@@ -73,8 +73,8 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `calls` | Agents joining Element Call voice calls | [Voice Calls](../voice-calls.md#calls-configuration) |
 | `administrators`, `authorization`, `bot_accounts` | Platform administrators, command access, bridge aliases, and bridge bots | [Authorization](../authorization.md) |
 | `room_defaults`, `rooms` | Managed room policy, invitations, and room admins | [Rooms & Spaces](../rooms.md#room-policy) |
-| `room_models` | Map of managed room name to model name, the authored model default for a room | [Models](models.md#room_model) (`!room_model`) |
-| `room_thread_summary_models` | Map of room alias or Matrix room ID to automatic thread summary model | [Matrix & Attachments](../tools/matrix-and-attachments.md#automatic-thread-summaries) |
+| `room_models` | Map of room key or Matrix room ID to model name, the authored model default for a room | [Models](models.md#room_model) (`!room_model`) |
+| `room_thread_summary_models` | Map of room key, Matrix room ID, or agent or team name to automatic thread summary model | [Matrix & Attachments](../tools/matrix-and-attachments.md#automatic-thread-summaries) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](../rooms.md#matrix-space) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](../scheduling.md#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](../external-triggers.md) |

@@ -356,8 +356,27 @@ _MODELS = {"default": {"provider": "openai", "id": "test-model"}}
             "defaults.automations.prompt_curation.room",
             "ideas",
         ),
+        (
+            {"agents": {"general": _FILE_MEMORY_AGENT}, "room_models": {"lobbby": "default"}},
+            "room_models",
+            "lobbby",
+        ),
+        (
+            {"agents": {"general": _FILE_MEMORY_AGENT}, "room_thread_summary_models": {_OUTSIDE_ALIAS: "default"}},
+            "room_thread_summary_models",
+            _OUTSIDE_ALIAS,
+        ),
     ],
-    ids=["agent-rooms", "team-rooms", "top-level-rooms", "room-thread-modes", "agent-automation", "unlisted-key"],
+    ids=[
+        "agent-rooms",
+        "team-rooms",
+        "top-level-rooms",
+        "room-thread-modes",
+        "agent-automation",
+        "unlisted-key",
+        "room-models",
+        "room-thread-summary-models",
+    ],
 )
 def test_a_room_reference_that_names_no_room_fails_naming_where(
     tmp_path: Path,
@@ -420,6 +439,22 @@ def test_only_the_exact_alias_mindroom_creates_for_a_room_key_names_that_room(
     else:
         with pytest.raises(ValueError, match=re.escape(f"agents.two.rooms -> {alias}")):
             Config.validate_with_runtime(authored, runtime_paths)
+
+
+def test_room_model_maps_accept_rooms_and_summary_models_accept_entities(tmp_path: Path) -> None:
+    """Model maps take a room key, its full alias, or a ! room ID, and summary models also take an agent or team."""
+    rooms = {"lobby": "default", "#lobby:localhost": "default", "!outside:example.org": "default"}
+    authored = {
+        "models": _MODELS,
+        "agents": {"general": _FILE_MEMORY_AGENT},
+        "teams": {"crew": {"display_name": "Crew", "role": "Work", "agents": ["general"]}},
+        "room_models": rooms,
+        "room_thread_summary_models": {**rooms, "general": "default", "crew": "default"},
+    }
+
+    config = Config.validate_with_runtime(authored, test_runtime_paths(tmp_path))
+
+    assert config.room_models == rooms
 
 
 def test_a_room_mindroom_recorded_keeps_its_alias_and_key_after_its_key_leaves_the_config(tmp_path: Path) -> None:

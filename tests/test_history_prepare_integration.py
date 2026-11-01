@@ -241,7 +241,6 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
 @pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execution_and_budget(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     provider: _Provider,
 ) -> None:
     runtime_paths = _runtime_paths(tmp_path)
@@ -249,7 +248,7 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
         Config(
             agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -257,7 +256,6 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     with _no_memory(), _planned(PreparedHistoryState(native_history=None)) as prepare:
         await prepare_agent_and_prompt_for_test(
@@ -276,7 +274,6 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
 @pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_model(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     provider: _Provider,
 ) -> None:
     runtime_paths = _runtime_paths(tmp_path)
@@ -284,7 +281,7 @@ async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_mo
         Config(
             agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model"),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -293,7 +290,6 @@ async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_mo
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
     turn = replace(
         make_turn_context("test_agent", room_id="!room:localhost"),
         active_model_name="call_fast",
