@@ -46,5 +46,7 @@ export function agentLinkToOpen(search: string): string | null {
 
 /** Leave the portal for an agent link, replacing the portal in history. */
 export function openAgentLink(path: string) {
+  // The link and the provider pages it leads to must not reach MindRoom Chat's tab.
+  window.opener = null;
   window.location.replace(path);
 }

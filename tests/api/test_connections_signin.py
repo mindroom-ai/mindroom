@@ -961,6 +961,19 @@ def test_signed_out_connect_link_still_asks_for_a_login(signin: dict[str, Any]) 
     assert urlparse(response.headers["location"]).path == "/login"
 
 
+@pytest.mark.parametrize(
+    "params",
+    [{}, {"agent_name": "personal"}, {"agent_name": "personal", "execution_scope": "shared"}],
+)
+def test_session_does_not_open_authorize_without_a_connect_link(signin: dict[str, Any], params: dict[str, str]) -> None:
+    """Only a connect link's token lets a Chat sign-in start a flow; the dashboard's own authorize still needs a login."""
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+    response = client.get("/api/oauth/google_drive/authorize", params=params, follow_redirects=False)
+    assert response.status_code == 307
+    assert urlparse(response.headers["location"]).path == "/login"
+
+
 def _reset_link(signin: dict[str, Any], requester: str) -> str:
     """Return the path and query of the reset link the personal agent gives `requester`."""
     config = main._app_context(main.app).runtime_config
@@ -987,13 +1000,16 @@ def test_session_user_resets_own_connection_from_reset_link(signin: dict[str, An
     bob = TestClient(main.app, base_url=PORTAL_ORIGIN)
     assert sign_in(bob, "bob").status_code == 200
     assert bob.post(link, headers={"Origin": PORTAL_ORIGIN}, follow_redirects=False).status_code == 403
+    stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
+    for cross_site in ({}, {"Origin": "https://evil.example"}):
+        assert client.post(link, headers=cross_site, follow_redirects=False).status_code == 403
+        assert stored(requester_id="@alice:example.org") is not None
 
     confirmation = client.get(link, follow_redirects=False)
     assert confirmation.status_code == 200, confirmation.text
     assert "Reset and reconnect" in confirmation.text
     confirmed = client.post(link, headers={"Origin": PORTAL_ORIGIN}, follow_redirects=False)
     assert confirmed.status_code == 303, confirmed.text
-    stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
     assert stored(requester_id="@alice:example.org") is None
     location = urlparse(confirmed.headers["location"])
     assert location.netloc == "auth.example.test"

@@ -100,7 +100,7 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
  *
  * When MindRoom Chat opened the portal and its tab is still open, it ignores any existing session and only renders after
  * Chat's OpenID handshake succeeds. Otherwise the page shows the session the server reports.
- * A `?next=` connect or reset link is opened instead once signed in.
+ * A `?next=` connect or reset link is opened instead once sign-in settles, whether or not it succeeded.
  *
  * @param children - Page content shown only after sign-in succeeds.
  */
@@ -114,10 +114,8 @@ export function ConnectionsSignIn({ children }: { children: ReactNode }) {
       .then((next) => {
         if (signal.aborted) return;
         // Chat opens an agent's connect or reset link through the portal, so the link finds this session.
-        const link =
-          next.state === "ready"
-            ? agentLinkToOpen(window.location.search)
-            : null;
+        // A failed sign-in opens it too, as a plain click would have: the link checks its own sign-in.
+        const link = agentLinkToOpen(window.location.search);
         if (link) openAgentLink(link);
         else setGate(next);
       });

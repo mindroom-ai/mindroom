@@ -406,12 +406,24 @@ describe("ConnectionsSignIn with an agent link to open", () => {
     expect(openAgentLink).not.toHaveBeenCalled();
   });
 
-  it("opens nothing when sign-in fails", async () => {
+  it("still opens the link when sign-in fails, as a plain click would", async () => {
     openWith(CONNECT_LINK);
     installBackend({ post: json({ detail: "No" }, 403) });
     renderGate();
     answerFromOpener();
-    expect(await screen.findByText("No")).toBeInTheDocument();
-    expect(openAgentLink).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(openAgentLink).toHaveBeenCalledWith(CONNECT_LINK),
+    );
+    expect(screen.queryByText("No")).not.toBeInTheDocument();
+  });
+
+  it("opens the link with the existing session when nothing opened the portal", async () => {
+    setOpener(null);
+    openWith(CONNECT_LINK);
+    installBackend({ get: json({}, 401) });
+    renderGate();
+    await vi.waitFor(() =>
+      expect(openAgentLink).toHaveBeenCalledWith(CONNECT_LINK),
+    );
   });
 });

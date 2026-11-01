@@ -806,8 +806,9 @@ def _connections_session_path_honored(request: Request) -> bool:
 def _connections_session_auth_user(request: Request) -> SignedMatrixUser | None:
     """Return the Connections session identity.
 
-    It is honored on portal paths, and on dashboard routes for an administrator whose sign-in the homeserver bound
-    to this deployment, outside hosted platform mode and never on OAuth callbacks.
+    It is honored on portal paths, on OAuth routes whose handler granted it (`allow_connections_session_for_oauth_flow`),
+    and on dashboard routes for an administrator whose sign-in the homeserver bound to this deployment, outside hosted
+    platform mode and never on OAuth callbacks without that grant.
     """
     auth_state = _request_auth_state(request)
     cookie = connections_session_cookie(deployment_origin(auth_state.settings.public_url, str(request.base_url)))

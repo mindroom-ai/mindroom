@@ -24,7 +24,7 @@ Sign-in works as follows:
    It ignores any session the browser still holds, so the account signed in to Chat replaces another account's session in the same browser.
 2. MindRoom accepts only users of its configured homeserver, and only from the Chat origins it allows (see `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` below).
 
-An agent's connect and reset links, which it posts when a tool needs an account, open the same way: MindRoom Chat opens `/connections/?next=<link>` for a link to its Computers backend, and once signed in the portal opens the link, which then accepts the session of the requester it was made for.
+An agent's connect and reset links, which it posts when a tool needs an account, open the same way: MindRoom Chat opens `/connections/?next=<link>` for a link to its Computers backend, and after its sign-in attempt the portal opens the link, which accepts the session of the requester it was made for; if sign-in failed, the link behaves as if opened directly.
 The portal opens only `/api/oauth/<provider>/authorize` and `/api/oauth/<provider>/reset` links on its own origin.
 Opened outside Chat, a link works in a browser that still holds that requester's session, and otherwise asks for the dashboard login.
 
