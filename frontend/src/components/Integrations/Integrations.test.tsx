@@ -652,7 +652,7 @@ describe("Integrations", () => {
     },
   );
 
-  it("keeps keyboard focus on a card's button while its status reloads", async () => {
+  it("keeps cards mounted, and keyboard focus inside them, while statuses reload", async () => {
     oauthStatus("acme_drive", {
       status: "not_connected",
       status_error: "Status service unavailable.",
@@ -661,11 +661,15 @@ describe("Integrations", () => {
 
     render(<Integrations />);
 
+    const privacyLink = within(await findCard("Google Drive")).getByRole(
+      "link",
+      { name: "Privacy policy" },
+    );
+    privacyLink.focus();
     const retry = await within(await findCard("Acme Drive")).findByRole(
       "button",
       { name: "Retry status" },
     );
-    retry.focus();
     fireEvent.click(retry);
 
     await waitFor(() => {
@@ -677,7 +681,7 @@ describe("Integrations", () => {
       ).not.toBeDisabled();
     });
     expect(screen.getByRole("button", { name: "Retry status" })).toBe(retry);
-    expect(retry).toHaveFocus();
+    expect(privacyLink).toHaveFocus();
   });
 
   it.each(providerCardSources)(
