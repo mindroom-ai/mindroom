@@ -633,7 +633,6 @@ class TestResolvedMessageExtraction:
             test_runtime_paths(tmp_path),
         )
         runtime_paths = runtime_paths_for(config)
-        persist_entity_accounts(config, runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_removed", "mindroom_removed", "pw", domain="legacy.example.com")
         save_matrix_state(state, runtime_paths)

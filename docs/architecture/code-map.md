@@ -316,6 +316,7 @@ Matrix sync callback
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `scheduling/tasks.py` | Cron and natural-language task scheduling |
 | `scheduling/runtime.py` | The one owner of scheduled-task runners and of when each runner may use its task's owner bot |
+| `scheduling/recurring_schedule.py` | Durable checkpoints for recurring task timers and their pending Matrix trigger |
 | `scheduling/ownership.py` | Which bot runs a scheduled task, decided once at save time from the room's full state |
 | `scheduling/errors.py` | `SchedulingError`, the one failure a scheduling operation reports, with subtypes for a missing task and failed task storage, which chat, the scheduler tool, and the schedules API each render |
 | `scheduling/scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |

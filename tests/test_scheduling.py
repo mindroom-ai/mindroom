@@ -908,6 +908,7 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
     """One-time tasks should execute using the latest persisted workflow data."""
     client = make_matrix_client_mock()
     client.room_get_state_event.side_effect = joined_member_state
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
     config = Config()
     initial_workflow = ScheduledWorkflow(
         created_by="@user:server",
@@ -1027,7 +1028,7 @@ async def test_run_once_task_marks_completed_after_success() -> None:
     """One-time tasks should overwrite pending state with completed after firing."""
     client = make_matrix_client_mock()
     client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state = AsyncMock()
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
     config = Config()
     workflow = ScheduledWorkflow(
         created_by="@user:server",
@@ -1075,7 +1076,7 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
     """One-time tasks should overwrite pending state with failed when firing fails."""
     client = make_matrix_client_mock()
     client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state = AsyncMock()
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
     config = Config()
     workflow = ScheduledWorkflow(
         created_by="@user:server",
@@ -1190,12 +1191,13 @@ async def test_a_task_whose_run_raises_reports_why_it_failed(
     error: Exception,
     text: str,
 ) -> None:
-    """A task whose run raises posts a notice with the exception's text, or its type name when it has none."""
-    client = AsyncMock()
+    """A task whose run raises posts a notice with the exception's text, or its type name when it has none.
+
+    A one-time task is also stored as failed, so it does not run again.
+    """
+    client = make_matrix_client_mock(user_id="@router:example.org")
     client.room_get_state_event.side_effect = joined_member_state
-    client.homeserver = "https://example.org"
-    client.user_id = "@router:example.org"
-    client.device_id = "TEST_DEVICE"
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
     workflow = ScheduledWorkflow(
         created_by="@user:server",
         schedule_type=schedule,
@@ -1234,6 +1236,8 @@ async def test_a_task_whose_run_raises_reports_why_it_failed(
 
     failure_notice.assert_awaited_once()
     assert failure_notice.await_args.args[2].endswith(f"\nTask ID: task_failing\nError: {text}")
+    if schedule == "once":
+        assert client.room_put_state.await_args.kwargs["content"]["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -1687,8 +1691,9 @@ async def test_get_scheduled_task_raises_on_transient_matrix_error(tmp_path: Pat
         {"errcode": "M_LIMIT_EXCEEDED", "error": "Slow down"},
         "!test:server",
     )
+    serve_task_state_events(client)
 
-    with pytest.raises(ScheduledTaskStateReadError, match="Failed to get scheduled task"):
+    with pytest.raises(ScheduledTaskStateReadError, match="M_LIMIT_EXCEEDED Slow down"):
         await get_scheduled_task(client, "!test:server", "task123", schedule_runtime_paths(tmp_path))
 
 
