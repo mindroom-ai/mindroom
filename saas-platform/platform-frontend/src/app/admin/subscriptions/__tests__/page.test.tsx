@@ -30,6 +30,8 @@ describe('SubscriptionsPage', () => {
     expect(await screen.findByText('No plan')).toBeInTheDocument()
     expect(screen.queryByText('active')).not.toBeInTheDocument()
     expect(screen.getByText('cancelled')).toHaveClass('bg-red-100')
+    // The admin portal has no subscription action to offer.
+    expect(screen.queryAllByRole('button')).toEqual([])
   })
 
   it("shows each subscription's recorded Stripe price, and a dash before one is recorded", async () => {
