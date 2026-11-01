@@ -969,7 +969,7 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
 
 def test_status_and_connect_name_a_callback_the_authorization_server_refused(tmp_path: Path) -> None:
     """When the server refuses MindRoom's new callback, the dashboard shows that refusal instead of a generic error."""
-    public_url = "http://192.168.1.10:8765"
+    public_url = "https://acme.mindroom.chat"
     runtime_paths = _runtime_paths(
         tmp_path,
         {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org", "MINDROOM_PUBLIC_URL": public_url},
@@ -986,7 +986,7 @@ def test_status_and_connect_name_a_callback_the_authorization_server_refused(tmp
             RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
         },
     )
-    refusal = "The Public Mail authorization server refused to register MindRoom's new callback http://192.168.1.10:8765/api/oauth/public_mail/callback."
+    refusal = "The Public Mail authorization server refused to register MindRoom's new callback https://acme.mindroom.chat/api/oauth/public_mail/callback."
 
     async def refuse_moved_callback() -> None:
         raise OAuthCallbackRefusedError(refusal)

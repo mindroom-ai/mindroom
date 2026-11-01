@@ -764,9 +764,20 @@ class OAuthProvider:
         resolution: OAuthClientConfigResolution,
         runtime_paths: RuntimePaths,
     ) -> bool:
-        """Return whether a dynamic registration names another callback than this runtime's, as when the public URL moved."""
-        return resolution.dynamically_registered and resolution.config.redirect_uri != self.default_redirect_uri(
-            runtime_paths,
+        """Return whether a dynamic registration names another callback than this runtime's that a browser can use.
+
+        A dynamic client serves only a loopback callback or an HTTPS one on a public DNS name, so a move to any other
+        callback, such as an `http://` LAN address, keeps the stored client and the connections it issued.
+        """
+        redirect_uri = self.default_redirect_uri(runtime_paths)
+        hostname = urlparse(redirect_uri).hostname
+        return (
+            resolution.dynamically_registered
+            and resolution.config.redirect_uri != redirect_uri
+            and (
+                is_oauth_loopback_hostname(hostname)
+                or is_valid_hosted_oauth_callback_for_request(redirect_uri, hostname)
+            )
         )
 
     def _stored_client_config_from_service(

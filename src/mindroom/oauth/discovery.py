@@ -405,7 +405,7 @@ def _registration_needed(
 
 
 class _RegistrationRefusedError(OAuthProviderError):
-    """The registration endpoint answered with a client error, such as a callback it does not accept."""
+    """The registration endpoint refused the client metadata (RFC 7591's 400), such as a callback it does not accept."""
 
 
 async def _post_registration(
@@ -423,7 +423,7 @@ async def _post_registration(
                 json=_registration_payload(provider, runtime_paths),
                 headers={"Accept": _JSON_CONTENT_TYPE, "Content-Type": _JSON_CONTENT_TYPE},
             )
-            refused = 400 <= response.status_code < 500
+            refused = response.status_code == 400
             response.raise_for_status()
             registration = response.json()
     except Exception as exc:

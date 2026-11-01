@@ -698,7 +698,7 @@ async def test_mcp_oauth_reregisters_dynamic_client_when_token_endpoint_moves(
 @pytest.mark.parametrize(
     ("env", "callback"),
     [
-        ({"MINDROOM_PUBLIC_URL": "https://mindroom.example.org"}, "https://mindroom.example.org"),
+        ({"MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat"}, "https://acme.mindroom.chat"),
         ({"MINDROOM_PORT": "9000"}, "http://localhost:9000"),
     ],
     ids=["public-url-set", "port-changed"],
@@ -755,7 +755,7 @@ async def test_mcp_oauth_keeps_an_operator_client_whose_callback_differs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A client the operator saved keeps its own callback and is never replaced by a registration."""
-    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example.org")
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
     _serve_movable_discovery(monkeypatch)
     operator_client = {"client_id": "operator-client-id", "redirect_uri": "https://proxy.example.org/mcp/callback"}
     get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", operator_client)
@@ -817,12 +817,12 @@ async def test_mcp_oauth_refresh_never_registers_for_a_moved_callback(
     monkeypatch: pytest.MonkeyPatch,
     refuses_registration: bool,
 ) -> None:
-    """A token refresh needs no callback, so after the public URL changes it keeps the stored client and registers none."""
+    """A token refresh needs no callback, so after the public URL moves it keeps the stored client and registers none."""
     _serve_movable_discovery(monkeypatch)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     await provider.client_config_resolution_async(_runtime_paths(tmp_path))
     monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "refuses_registration", refuses_registration)
-    moved_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="http://192.168.1.10:8765")
+    moved_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
     grants = _serve_refresh(monkeypatch)
 
     refreshed = await provider.refresh_token_data(_expired_token("client-of-auth.example.test"), moved_paths)
@@ -832,6 +832,32 @@ async def test_mcp_oauth_refresh_never_registers_for_a_moved_callback(
     assert grants == ["client-of-auth.example.test"]
     assert len(_MovableAuthorizationServerDiscoveryClient.posts) == 1
     assert _stored_mcp_client(moved_paths)["redirect_uri"] == _LOCAL_CALLBACK
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "public_url",
+    ["http://192.168.1.10:8765", "https://192.168.1.10:8765", "https://mindroom.local"],
+    ids=["http-lan", "https-ip", "non-public-name"],
+)
+async def test_mcp_oauth_keeps_the_client_for_a_callback_no_browser_can_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    public_url: str,
+) -> None:
+    """A dynamic client cannot serve such a callback, so registering one would only disconnect everyone."""
+    _serve_movable_discovery(monkeypatch)
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+    await provider.client_config_resolution_async(_runtime_paths(tmp_path))
+    registered = _stored_mcp_client(_runtime_paths(tmp_path))
+    moved_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL=public_url)
+
+    resolution = await provider.client_config_resolution_async(moved_paths)
+
+    assert resolution is not None
+    assert resolution.config.redirect_uri == _LOCAL_CALLBACK
+    assert len(_MovableAuthorizationServerDiscoveryClient.posts) == 1
+    assert _stored_mcp_client(moved_paths) == registered
 
 
 @pytest.mark.asyncio
@@ -845,7 +871,7 @@ async def test_mcp_oauth_keeps_the_client_when_the_server_refuses_a_moved_callba
     await provider.client_config_resolution_async(_runtime_paths(tmp_path))
     registered = _stored_mcp_client(_runtime_paths(tmp_path))
     monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "refuses_registration", True)
-    moved_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="http://192.168.1.10:8765")
+    moved_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
 
     with capture_logs() as logs, pytest.raises(OAuthCallbackRefusedError) as refused:
         await provider.client_config_resolution_async(moved_paths)
@@ -854,7 +880,7 @@ async def test_mcp_oauth_keeps_the_client_when_the_server_refuses_a_moved_callba
 
     assert str(refused.value) == (
         "The Example MCP authorization server refused to register MindRoom's new callback "
-        "http://192.168.1.10:8765/api/oauth/mcp_demo/callback. Existing connections keep working; to connect, set "
+        "https://acme.mindroom.chat/api/oauth/mcp_demo/callback. Existing connections keep working; to connect, set "
         "MINDROOM_PUBLIC_URL to an address it accepts, such as an HTTPS one, or save an OAuth client for Example MCP."
     )
     assert [entry["event"] for entry in logs if entry["log_level"] == "warning"] == [
@@ -950,7 +976,7 @@ async def test_mcp_oauth_replaces_legacy_dynamic_registration_whose_callback_mov
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A registration stored before endpoint recording is replaced at once, not bound, when its callback moved."""
-    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example.org")
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
     _serve_movable_discovery(monkeypatch)
     get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", _LEGACY_REGISTRATION)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
@@ -959,7 +985,7 @@ async def test_mcp_oauth_replaces_legacy_dynamic_registration_whose_callback_mov
 
     assert resolution is not None
     assert resolution.config.client_id == "client-of-auth.example.test"
-    assert resolution.config.redirect_uri == "https://mindroom.example.org/api/oauth/mcp_demo/callback"
+    assert resolution.config.redirect_uri == "https://acme.mindroom.chat/api/oauth/mcp_demo/callback"
     assert resolution.registered_token_url == "https://auth.example.test/token"  # noqa: S105
     assert len(_MovableAuthorizationServerDiscoveryClient.posts) == 1
 
