@@ -1771,6 +1771,32 @@ class TestStreamingBehavior:
         assert "⏳" not in bodies[1]
 
     @pytest.mark.asyncio
+    async def test_trace_only_change_during_an_edit_leaves_nothing_pending(self) -> None:
+        """A tool-trace change with no new text, made while an edit is in flight, leaves no characters pending."""
+        mock_client = _make_matrix_client_mock()
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            show_tool_calls=False,
+            **reply_hooks(),
+        )
+        streaming.event_id = "$stream_123"
+
+        async def room_send(*args: object, **kwargs: object) -> nio.RoomSendResponse:
+            _ = (args, kwargs)
+            # A hidden tool's trace entry arrives, with no new text, while this edit is in flight.
+            streaming.apply_tool_trace_snapshot([_call("search_web")])
+            return nio.RoomSendResponse(event_id="$trace_only", room_id=streaming.room_id)
+
+        mock_client.room_send.side_effect = room_send
+        await push_stream_chunk(streaming, "Checking", mock_client)
+
+        assert mock_client.room_send.await_count == 1
+        assert streaming.tool_trace == [_call("search_web")]
+        assert streaming.chars_since_last_update == 0
+
+    @pytest.mark.asyncio
     async def test_stale_nonterminal_send_does_not_strand_newer_text(self) -> None:
         """Text that arrived while an edit was in flight stays pending until the throttle delivers it."""
         mock_client = _make_matrix_client_mock()
