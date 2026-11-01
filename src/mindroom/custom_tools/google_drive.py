@@ -320,7 +320,7 @@ class GoogleDriveTools(
         )
 
     def _download_refusal(self, metadata: dict[str, Any], export_format: str | None = None) -> str | None:
-        """Return the error `download_file` gives a file before any Drive request, or None when it would save it."""
+        """Return the error `download_file` gives from a file's metadata, before requesting its content, or None."""
         unsafe_filename_error = _unsafe_drive_filename_error(metadata.get("name"))
         if unsafe_filename_error:
             return unsafe_filename_error
@@ -506,12 +506,11 @@ class GoogleDriveTools(
     # refuses Office files, which Agno's MIME-based branch would extract without tables, grouped shapes, or
     # line breaks, or reject with an install hint when the extraction packages are missing.
     # Upstream issue: Tracking gap; no matching issue identified.
-    # Upstream PR: https://github.com/agno-agi/agno/pull/10473 (merged after the pinned 3.0.9) covers only grouped
+    # Upstream PR: https://github.com/agno-agi/agno/pull/10473 (in 3.0.11; MindRoom pins 3.0.9) covers only grouped
     # shapes and line breaks in `.pptx` text; https://github.com/agno-agi/agno/pull/10501 (open) covers only `.docx` tables.
-    # Remove when: Agno's `read_file` decides text by content rather than MIME type, lets a toolkit name its
-    # download function, names it only for types `download_file` can save, and extracts complete Office text
-    # with dependencies MindRoom ships or refuses it;
-    # keep MindRoom's function aliases.
+    # Remove when: Agno's `read_file` decides text by content rather than MIME type, lets a toolkit word the advice
+    # after a refused read, and extracts complete Office text with dependencies MindRoom ships or refuses it;
+    # keep MindRoom's function aliases and the advice that quotes `_download_refusal`.
     # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refuses_binary_content_and_names_enabled_download_function;
     # tests/test_google_drive_oauth_tool.py::test_google_drive_read_names_no_download_function_its_filters_leave_out;
     # tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves;
