@@ -10,7 +10,6 @@ import { formatRecordedPrice } from '@/lib/pricing-config'
 interface Subscription {
   id: string
   account_id: string
-  price_tier: string
   tier: string
   status: string
   price_cents: number | null
@@ -101,7 +100,7 @@ export default function SubscriptionsPage() {
                       </td>
                       <td className="py-3 px-4">
                         <div className={`font-medium text-gray-900 dark:text-gray-100 ${noPlan ? '' : 'capitalize'}`}>
-                          {noPlan ? 'No plan' : subscription.price_tier || subscription.tier || 'Unknown'}
+                          {noPlan ? 'No plan' : subscription.tier || 'Unknown'}
                         </div>
                       </td>
                       <td className="py-3 px-4">

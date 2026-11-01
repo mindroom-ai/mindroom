@@ -9,7 +9,6 @@ jest.mock('@/lib/logger', () => ({ logger: { error: jest.fn() } }))
 const row = (id: string, tier: string, status: string, price_cents: number | null = 2000, billing_cycle = 'monthly') => ({
   id,
   account_id: `acc-${id}`,
-  price_tier: tier,
   tier,
   status,
   price_cents,
