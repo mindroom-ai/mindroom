@@ -67,6 +67,24 @@ describe("useUnsavedDraft", () => {
     );
   });
 
+  it("also sets returnValue, which Chrome and Edge before 119 need to show the leave-page prompt", () => {
+    const addSpy = vi.spyOn(window, "addEventListener");
+    const { unmount } = renderHook(() => useUnsavedDraft(true));
+    const call = addSpy.mock.calls.find(([type]) => type === "beforeunload");
+    expect(call).toBeDefined();
+    const listener = call?.[1] as (event: BeforeUnloadEvent) => void;
+    const event = {
+      preventDefault: vi.fn(),
+      returnValue: undefined,
+    } as unknown as BeforeUnloadEvent;
+
+    listener(event);
+
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(event.returnValue).toBe(true);
+    unmount();
+  });
+
   it("asks before an editor's own action only when its draft is unsaved", () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     const clean = renderHook(() => useUnsavedDraft(false));

@@ -18,8 +18,11 @@ export function confirmLeavingUnsavedDrafts(): boolean {
 export function useBeforeUnloadPrompt(hasUnsavedChanges: boolean): void {
   useEffect(() => {
     if (!hasUnsavedChanges) return;
-    const askBeforeUnload = (event: BeforeUnloadEvent) =>
+    const askBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
+      // Chrome and Edge before 119 show the prompt only when returnValue is set.
+      event.returnValue = true;
+    };
     window.addEventListener("beforeunload", askBeforeUnload);
     return () => window.removeEventListener("beforeunload", askBeforeUnload);
   }, [hasUnsavedChanges]);
