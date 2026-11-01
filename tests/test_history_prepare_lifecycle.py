@@ -2183,6 +2183,24 @@ async def test_a_request_with_trimmed_history_leaves_no_anchor_for_the_next_repl
 
 
 @pytest.mark.asyncio
+async def test_the_replay_plan_trims_by_the_reported_size_over_the_final_budget(tmp_path: Path) -> None:
+    """A reported size over the final budget trims history even where the estimate alone would fit it.
+
+    The final prompt can leave less room than the check had, and nothing compacts when automatic compaction is off.
+    """
+    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 3_500})
+    reported = 3_500 + 500 - 400
+    assert prepared.compaction_decision.current_history_tokens == reported
+    assert estimate < 3_200 < reported
+
+    state = _finalize_with_history_budget(tmp_path, prepared, 3_200)
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode == "limited"
+    assert state.replay_plan.num_history_runs == 2
+
+
+@pytest.mark.asyncio
 async def test_a_request_on_a_native_route_leaves_no_anchor_for_the_next_reply(tmp_path: Path) -> None:
     """A native checkpoint stands in for older history, so the size the provider reports covers only what followed it.
 

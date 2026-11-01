@@ -691,27 +691,33 @@ def finalize_history_preparation(
             history_settings=history_settings,
             counter=counter,
         )
-        current_history_tokens = prepared_scope_history.reported_history_tokens
+        reported_history_tokens = prepared_scope_history.reported_history_tokens
+        current_history_tokens = reported_history_tokens
         if current_history_tokens is None:
             current_history_tokens = estimate_history_tokens(native_route=native_history_route(native_history))
+        fitting_budget = history_budget
         if history_budget is not None and current_history_tokens > history_budget:
-            # Never trim a native checkpoint by run/message count. Fall back to the
-            # existing canonical guard if the final dynamic prompt exhausts its room.
-            if native_history is not None:
-                native_history = native_history.without_native_compaction()
             current_history_tokens = estimate_history_tokens()
-        if history_budget is not None:
+            if reported_history_tokens is not None:
+                # Trimming sizes candidate replays by estimate, which the provider's count of this conversation shows
+                # to be off by reported / estimated, so the budget converts into the estimate's units.
+                fitting_budget = history_budget * current_history_tokens // reported_history_tokens
+            elif native_history is not None:
+                # Never trim a native checkpoint by run/message count. Fall back to the
+                # existing canonical guard if the final dynamic prompt exhausts its room.
+                native_history = native_history.without_native_compaction()
+        if fitting_budget is not None:
             replay_plan = plan_replay_that_fits(
                 session=session,
                 history_settings=history_settings,
-                available_history_budget=history_budget,
+                available_history_budget=fitting_budget,
                 current_history_tokens=current_history_tokens,
                 counter=counter,
             )
             log_replay_plan(
                 replay_plan=replay_plan,
                 scope=owner_scope(session),
-                available_history_budget=history_budget,
+                available_history_budget=fitting_budget,
                 current_history_tokens=current_history_tokens,
             )
         else:
