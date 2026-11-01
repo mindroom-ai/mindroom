@@ -38,12 +38,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.event_journal import IngestionRecordAdmission, IngestionRecordDisposition
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.llm.usage import TokenCounts
-from mindroom.matrix.personal_room_store import (
-    PersonalRoomRecord,
-    personal_room_ids,
-    personal_room_record_path,
-    write_personal_room,
-)
+from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_backends import (
@@ -1772,6 +1767,47 @@ async def test_positive_call_reconciliation_waits_for_admission_and_rechecks_pol
     assert _call_state(manager).session is None
 
 
+@pytest.mark.asyncio
+async def test_full_reconciliation_rereads_room_ownership_after_admission_wait(tmp_path: Path) -> None:
+    """An invite another calls agent accepts while a full pass waits for admission must stop the join."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    config.agents["helper"].rooms = []
+    config.agents["other"] = AgentConfig(display_name="Other")
+    config.calls.agents["other"] = config.calls.agents["helper"]
+    invited = {"helper": {ROOM_ID}}
+    gate = ResponseAdmissionGate()
+    assert gate.close_if_idle()
+    wait_started = asyncio.Event()
+
+    async def wait_for_admission() -> bool:
+        wait_started.set()
+        await gate.wait_until_open()
+        return True
+
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        get_invited_rooms_by_agent=lambda: {agent: set(rooms) for agent, rooms in invited.items()},
+        response_admission_gate=gate,
+        wait_for_admission_or_shutdown=wait_for_admission,
+    )
+    reconcile = asyncio.create_task(manager.reconcile_joined_rooms())
+    await asyncio.wait_for(wait_started.wait(), timeout=1)
+
+    invited["other"] = {ROOM_ID}
+    gate.reopen()
+    await reconcile
+
+    client.room_get_state.assert_not_awaited()
+    assert bridge.connected_grant is None
+
+
 class _BlockingConnectBridge(FakeBridge):
     """Hold the SFU connect step until the test releases it, and count closes."""
 
@@ -2419,11 +2455,11 @@ async def test_manager_full_reconciliation_visits_every_configured_room(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_manager_full_reconciliation_reads_room_ownership_once(
+async def test_manager_full_reconciliation_reads_room_ownership_once_per_pass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pass over every joined room reads the call agents' invited and personal rooms once, not once per room."""
+    """A full pass reads room ownership once for every joined room, and again only inside each owned room's lock."""
     other_room_id = "!other-call:example.org"
     unrelated_room_id = "!unrelated:example.org"
     config = _config()
@@ -2442,9 +2478,9 @@ async def test_manager_full_reconciliation_reads_room_ownership_once(
         invited_reads.append(None)
         return {}
 
-    def read_personal_rooms(runtime_paths: RuntimePaths, agent_name: str) -> frozenset[str]:
+    def read_personal_rooms(_runtime_paths: RuntimePaths, agent_name: str) -> frozenset[str]:
         personal_reads.append(agent_name)
-        return personal_room_ids(runtime_paths, agent_name)
+        return frozenset()
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.personal_room_ids", read_personal_rooms)
     manager = _manager(client, FakeBridge(), tmp_path, config, get_invited_rooms_by_agent=read_invited_rooms)
@@ -2452,8 +2488,9 @@ async def test_manager_full_reconciliation_reads_room_ownership_once(
     await manager.reconcile_joined_rooms()
 
     assert {request.args[0] for request in client.room_get_state.await_args_list} == {ROOM_ID, other_room_id}
-    assert len(invited_reads) == 1
-    assert personal_reads == ["helper"]
+    # One read for the pass, then one per owned room inside its lock.
+    assert len(invited_reads) == 3
+    assert personal_reads == ["helper"] * 3
 
 
 @pytest.mark.asyncio

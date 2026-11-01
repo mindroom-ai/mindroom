@@ -2973,6 +2973,31 @@ def test_ledgers_planted_in_a_worker_mounted_state_root_are_ignored(tmp_path: Pa
     assert bot._room_lifecycle._pending_room_invites == {}
 
 
+def test_repeated_invited_room_reads_resolve_the_record_path_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Call-room checks read invited rooms for every room, so later reads only stat the record."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    resolved: list[str] = []
+    resolve = invited_rooms_store.agent_state_root_path
+
+    def counting_resolve(base_storage_path: Path, agent_name: str) -> Path:
+        resolved.append(agent_name)
+        return resolve(base_storage_path, agent_name)
+
+    monkeypatch.setattr(invited_rooms_store, "agent_state_root_path", counting_resolve)
+
+    for _ in range(3):
+        assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == frozenset()
+
+    assert resolved == [ROUTER_AGENT_NAME]
+
+
 def test_invited_room_reads_see_every_write_to_the_record(tmp_path: Path) -> None:
     """A read reflects the record as it is now, whether the store or anything else wrote it."""
     config = bind_runtime_paths(
