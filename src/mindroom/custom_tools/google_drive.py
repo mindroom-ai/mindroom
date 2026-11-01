@@ -230,6 +230,8 @@ class GoogleDriveTools(
         self._wrap_oauth_function_entrypoints()
         self._wrap_write_scope_entrypoints()
         rename_toolkit_functions(self, _MODEL_FUNCTION_NAME_ALIASES)
+        # A rename, such as an additional Google workspace's prefix, renames this function in place.
+        self._download_function = self.functions.get(_MODEL_FUNCTION_NAME_ALIASES["download_file"])
 
     def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
         """Build Drive without cloning MindRoom's tracked OAuth credential."""
@@ -338,11 +340,12 @@ class GoogleDriveTools(
 
     def _read_refusal(self, error: str, metadata: dict[str, Any]) -> str:
         """Refuse a read; name the download function while offered, or quote why it would refuse the file too."""
-        if "google_drive_download_file" in toolkit_function_names(self):
+        download = self._download_function
+        if download is not None and download.name in toolkit_function_names(self):
             if download_refusal := self._download_refusal(metadata):
-                error += f" google_drive_download_file would refuse it too: {download_refusal}"
+                error += f" {download.name} would refuse it too: {download_refusal}"
             else:
-                error += " Use google_drive_download_file instead."
+                error += f" Use {download.name} instead."
         return json.dumps({"error": error, "file": metadata})
 
     @authenticate
