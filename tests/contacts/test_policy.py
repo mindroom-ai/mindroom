@@ -160,6 +160,13 @@ def test_effective_rules_puts_config_rules_first(tmp_path: Path) -> None:
     assert effective_rules(config, "mind_alice", ContactSide()) == "- Never share the budget.\n- Be brief."
 
 
+def test_effective_rules_normalize_config_rules_like_owner_rules(tmp_path: Path) -> None:
+    """A configured rule loses its own bullet and surrounding space, and a blank configured rule is left out."""
+    config, _ = _config(tmp_path, rules=["- Be brief.", "  ", "* No prices  ", "First.\n- Second."])
+
+    assert effective_rules(config, "mind_alice", ContactSide()) == "- Be brief.\n- No prices\n- First.\n- Second."
+
+
 def test_effective_rules_are_empty_without_any_rule(tmp_path: Path) -> None:
     """No configured rule and no rule of the owner give an empty string, not an empty bullet."""
     config, _ = _config(tmp_path, rules=[])

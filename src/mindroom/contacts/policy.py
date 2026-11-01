@@ -42,10 +42,13 @@ class ContactVerdict:
 
 
 def effective_rules(config: Config, agent_name: str, side: ContactSide) -> str:
-    """Return the agent's configured rules followed by its owner's rules for this contact, one bullet per rule."""
+    """Return the agent's configured rules followed by its owner's rules for this contact, one bullet per rule.
+
+    Each nonblank line of either is one rule, with its own bullet removed.
+    """
     contacts = config.agents[agent_name].contacts
-    owner_rules = (_BULLET.sub("", line.strip()) for line in (side.rules or "").splitlines())
-    rules = [*(contacts.rules if contacts is not None else ()), *(rule for rule in owner_rules if rule)]
+    texts = [*(contacts.rules if contacts is not None else ()), side.rules or ""]
+    rules = [rule for text in texts for line in text.splitlines() if (rule := _BULLET.sub("", line.strip()))]
     return "\n".join(f"- {rule}" for rule in rules)
 
 
