@@ -2522,7 +2522,7 @@
     },
     "/admin/{resource}": {
       "get": {
-        "description": "Generic list endpoint for React Admin.",
+        "description": "List a resource's rows, newest first.\n\nWithout ``limit``, every row; with it, the ``limit`` newest rows. ``total`` counts every row.",
         "operationId": "admin_get_list_admin__resource__get",
         "parameters": [
           {
@@ -2536,70 +2536,18 @@
           },
           {
             "in": "query",
-            "name": "_sort",
+            "name": "limit",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "integer"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "title": " Sort"
-            }
-          },
-          {
-            "in": "query",
-            "name": "_order",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": " Order"
-            }
-          },
-          {
-            "in": "query",
-            "name": "_start",
-            "required": false,
-            "schema": {
-              "default": 0,
-              "title": " Start",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
-            "name": "_end",
-            "required": false,
-            "schema": {
-              "default": 10,
-              "title": " End",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
-            "name": "q",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Q"
+              "title": "Limit"
             }
           },
           {

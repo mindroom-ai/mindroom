@@ -195,6 +195,7 @@ The model sees the effective file access and the unconfined tools in its tool ex
 This section holds the mechanics behind [opening Connections from MindRoom Chat](../connections-portal.md#open-it-from-mindroom-chat).
 The portal asks the window that opened it for a Matrix OpenID token over `postMessage`, waiting up to 30 seconds.
 It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
+Chat's `/connections` page instead submits the token as a form to `POST /api/connections/session/handoff`, a top-level cross-origin post whose `Origin` header the browser sets, and MindRoom checks that header the same way before redirecting to `/connections/`; the token travels in the form body, never in a URL.
 MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which defaults to MindRoom's hosted Chat plus, for a portal on a local address, any Chat on a local address; under that default, MindRoom also reads `/_matrix/client/versions` and refuses sign-in unless the homeserver binds tokens.
 It verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo` and accepts only users of that homeserver.
 MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL`, or `http://localhost:<MINDROOM_PORT>` when it is unset, as the audience, so a homeserver that binds tokens accepts only a token that Chat requested for that origin; other homeservers ignore it.

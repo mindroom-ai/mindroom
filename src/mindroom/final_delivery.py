@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.ai_run_metadata import reply_cost_usd
 from mindroom.approval.failure import cancelled_failure
 from mindroom.cancellation import cancel_failure_reason
 from mindroom.constants import AI_RUN_METADATA_KEY
@@ -170,6 +171,11 @@ class FinalDeliveryOutcome:
         metadata = (self.extra_content or {}).get(AI_RUN_METADATA_KEY)
         run_id = metadata.get("run_id") if isinstance(metadata, dict) else None
         return run_id if isinstance(run_id, str) and run_id else None
+
+    @property
+    def response_cost_usd(self) -> float | None:
+        """Read the reply's USD cost from the authoritative final delivery payload, None when the cost is unknown."""
+        return reply_cost_usd(self.extra_content, completed=self.completed)
 
     @property
     def final_visible_event_id(self) -> str | None:  # noqa: D102

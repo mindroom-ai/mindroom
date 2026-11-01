@@ -1012,11 +1012,7 @@ describe("egress broker connected accounts", () => {
     popup.closed = true;
 
     expect(
-      await screen.findByText(
-        "Shared with everyone using Agent coder",
-        {},
-        { timeout: 2000 },
-      ),
+      await screen.findByText("Shared with everyone using Agent coder"),
     ).toBeInTheDocument();
     expect(screen.getByText("octocat")).toBeInTheDocument();
     expect(screen.queryByText("Authorization was cancelled.")).toBeNull();
