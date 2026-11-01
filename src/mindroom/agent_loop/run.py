@@ -25,7 +25,7 @@ from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.failure_text import failure_text
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import is_own_model_message
-from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.runs import RunRecord, RunStatus, run_tool_executions
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
@@ -416,13 +416,16 @@ async def _store_interrupted[R: AnyRunRecord](
 def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, status: RunStatus) -> None:
     """Snapshot the live messages the run stores, stamp its status, and set its duration, counted from ``started``.
 
-    Replayed history never stores. A paused run also stores, in place, the context its requests sent but no history
-    holds (``add_to_agent_memory=False``), such as memory results and the approval receipt, so its resume sends the
-    paused request unchanged; a run that ends otherwise drops it.
+    Replayed history never stores. The turn context the run's requests sent (``add_to_agent_memory=False``), such as
+    memory results and the approval receipt, stores in place: a resume then sends the paused request unchanged, and
+    the next turn's request can extend this run's last one whole, which append-only prompt caches such as Codex's
+    need. A run that stopped after a call, or whose team member run did (``run_tool_executions``), drops it instead:
+    such a stop is normally a model switch, whose continuation attempt replays this run and sends the turn context
+    again.
     """
-    paused = status is RunStatus.paused
+    stopped = status is not RunStatus.paused and any(tool.stop_after_call for tool in run_tool_executions(record))
     record.messages = [
-        message for message in messages if not message.from_history and (paused or message.add_to_agent_memory)
+        message for message in messages if not message.from_history and (message.add_to_agent_memory or not stopped)
     ]
     record.status = status
     assert record.metrics is not None

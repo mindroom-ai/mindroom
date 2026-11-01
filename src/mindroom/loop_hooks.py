@@ -5,8 +5,8 @@ turn or resume install the hooks ``_loop_hooks`` composes once: the wait budget 
 participation gate, mid-turn compaction, the approval receipt, the output-limit answer, portable tool search, the
 tool-call middleware, the queued-message and tool-job notices, and the skill-review capture. Which of those a run
 has is an input: ``agent_loop_hooks`` and ``leader_loop_hooks`` name what an agent's and a leader's run differ by,
-and ``HookTurn`` holds what every run takes from its turn. Every run has the approval receipt hook; the receipt
-reaches only the runs the bound approval continuation names (``mindroom.approval.receipt``).
+and ``HookTurn`` holds what every run takes from its turn. Every run has the approval receipt hook; the hook adds
+the receipt only to the runs the bound approval continuation names (``mindroom.approval.receipt``).
 
 The loop lets a hook's exception fail the run, so a mistake in a hook the run depends on surfaces. A hook whose
 work a reply can do without catches and logs that work's failures itself: mid-turn compaction sends the request

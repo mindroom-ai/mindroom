@@ -324,8 +324,8 @@ def test_a_message_stores_its_flags_only_when_they_differ_from_their_defaults() 
     assert [Message.from_dict(message.to_dict()) for message in (stopped, copy)] == [stopped, copy]
 
 
-def test_only_context_no_history_keeps_stores_its_flag_and_reads_back_as_it() -> None:
-    """A paused run's turn context stores ``add_to_agent_memory: false``; every other message stores no such key."""
+def test_only_turn_context_stores_its_flag_and_reads_back_as_it() -> None:
+    """Turn context stores ``add_to_agent_memory: false``; every other message stores no such key."""
     context = Message(role="user", content="<memory>likes tea</memory>", add_to_agent_memory=False)
     prompt = Message(role="user", content="Hi")
 

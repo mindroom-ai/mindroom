@@ -201,7 +201,11 @@ async def test_the_stable_prompt_is_independent_of_the_turn_context(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_transient_context_after_the_prompt_takes_no_marker(tmp_path: Path) -> None:
-    """Per-request context must not take the breakpoint that later turns replay."""
+    """Transient context never takes a breakpoint.
+
+    A request that adds a transient block of its own, such as a participation decision, then keeps the breakpoint of
+    the reply that follows, which Claude routes merge into the same user message, so the reply reads its cache.
+    """
     transient = render_transient_context(["Current memory."])
     messages = [
         Message(role="system", content=_SHARED),
