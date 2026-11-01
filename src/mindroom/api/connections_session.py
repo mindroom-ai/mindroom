@@ -5,16 +5,17 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import is_administrator, require_connections_user
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
+    require_connections_public_origin,
     require_connections_same_origin,
     resolve_connection_user,
 )
@@ -105,13 +106,17 @@ async def _dashboard_allowed(
         return False
 
 
-@router.post("")
-async def sign_in(body: _SignIn, request: Request, response: Response, paths: _PortalPaths) -> _SignedIn:
-    """Trust a Matrix OpenID token only from an allowlisted Chat origin, then start a portal session."""
-    # The portal page reports the postMessage origin it received the token from. Without this
-    # allowlist a page the victim visits could hand the portal an attacker's token.
+async def _start_session(
+    openid_token: MatrixOpenIDToken,
+    client_origin: str,
+    request: Request,
+    response: Response,
+    paths: RuntimePaths,
+) -> str:
+    """Trust a Matrix OpenID token only from an allowlisted Chat origin, then set the portal session cookie."""
+    # Without this allowlist a page the victim visits could hand the portal an attacker's token.
     origin = deployment_origin(paths.env_value("MINDROOM_PUBLIC_URL"), str(request.base_url))
-    if not connections_client_origin_allowed(paths, body.client_origin, origin):
+    if not connections_client_origin_allowed(paths, client_origin, origin):
         raise HTTPException(403, "Connections sign-in is not allowed from this client", headers=CONNECTIONS_HEADERS)
     # Without binding, any backend a user opens from Chat could replay their token here. Request headers cannot show
     # that a portal is out of such a backend's reach, so only an operator's explicit list accepts that risk.
@@ -123,7 +128,7 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
             headers=CONNECTIONS_HEADERS,
         )
     try:
-        matrix_user_id = await verify_matrix_openid(body.openid_token, paths, request_origin=str(request.base_url))
+        matrix_user_id = await verify_matrix_openid(openid_token, paths, request_origin=str(request.base_url))
     except MatrixOpenIDError as error:
         raise HTTPException(error.status_code, error.detail, headers=CONNECTIONS_HEADERS) from error
     # Any homeserver user can obtain a valid token, so only users with portal access get a session.
@@ -135,7 +140,7 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
     token = issue_connections_session(
         matrix_user_id,
         now=time.time(),
-        dashboard=await _dashboard_allowed(body.openid_token, matrix_user_id, snapshot),
+        dashboard=await _dashboard_allowed(openid_token, matrix_user_id, snapshot),
     )
     response.headers.update(CONNECTIONS_HEADERS)
     cookie = connections_session_cookie(origin)
@@ -148,7 +153,33 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
         httponly=True,
         samesite="lax",
     )
+    return matrix_user_id
+
+
+@router.post("")
+async def sign_in(body: _SignIn, request: Request, response: Response, paths: _PortalPaths) -> _SignedIn:
+    """Start a portal session from the token MindRoom Chat posted to the portal page."""
+    # The portal page reports the postMessage origin it received the token from.
+    matrix_user_id = await _start_session(body.openid_token, body.client_origin, request, response, paths)
     return _SignedIn(matrix_user_id=matrix_user_id)
+
+
+@router.post("/handoff")
+async def hand_off(request: Request, openid_token: Annotated[str, Form()]) -> RedirectResponse:
+    """Start a portal session from the form MindRoom Chat's /connections page submits, then open the portal.
+
+    The browser sets Origin on this cross-origin post, so the Chat allowlist decides which page may submit it.
+    """
+    paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
+    require_connections_public_origin(request, paths)
+    try:
+        token = MatrixOpenIDToken.model_validate_json(openid_token)
+    except ValidationError:
+        # The validation error would carry the submitted token.
+        raise HTTPException(401, "Invalid sign-in request", headers=CONNECTIONS_HEADERS) from None
+    redirect = RedirectResponse("/connections/", status_code=303)
+    await _start_session(token, request.headers.get("origin", ""), request, redirect, paths)
+    return redirect
 
 
 @router.get("")
