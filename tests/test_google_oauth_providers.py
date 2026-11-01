@@ -790,16 +790,36 @@ def test_google_oauth_provider_keeps_stale_client_when_refresh_is_unavailable(
     assert manager.load_credentials("google_oauth_client") == stale_credentials
 
 
-def test_google_oauth_provider_refuses_a_partial_pairing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("process_env", "message"),
+    [
+        ({"MINDROOM_LOCAL_CLIENT_ID": "local-client"}, "Provisioning credentials are incomplete"),
+        (
+            {
+                "MINDROOM_LOCAL_CLIENT_ID": "local-client",
+                "MINDROOM_LOCAL_CLIENT_SECRET": "local-secret",
+                "MATRIX_HOMESERVER": "https://matrix.example.org",
+            },
+            "Google OAuth bootstrap requires MINDROOM_PROVISIONING_URL",
+        ),
+    ],
+    ids=["no-secret", "no-provisioning-url"],
+)
+def test_google_oauth_provider_refuses_a_partial_pairing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_env: dict[str, str],
+    message: str,
+) -> None:
     """A pairing that lost part of its settings is a broken pairing to restore, not an install without a client."""
     requests = _install_provisioning_transport(monkeypatch)
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
-        process_env={"MINDROOM_LOCAL_CLIENT_ID": "local-client"},
+        process_env=process_env,
     )
 
-    with pytest.raises(OAuthProviderError, match="Provisioning credentials are incomplete"):
+    with pytest.raises(OAuthProviderError, match=message):
         asyncio.run(google_oauth_provider("google_drive").client_config_resolution_async(runtime_paths))
     assert requests == []
 
