@@ -97,7 +97,7 @@ class AgentReplyMembershipSync:
             room_id = admission.room_id
             reason = "control_client_departed"
         else:
-            if admission.membership == "join" and admission.previous_membership != "join":
+            if admission.membership == "join":
                 # The router's join is what can make a grant room it could not query queryable again.
                 self._reset_refresh_backoff()
             return
