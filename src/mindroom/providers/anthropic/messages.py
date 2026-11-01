@@ -816,7 +816,8 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
             and config_key not in client_params
             and _sdk_reads_unset_export(runtime_paths, env_key)
         ):
-            msg = f"{env_key} is exported blank, which the Vertex AI SDK would use as is; unset it or set a value."
+            fix = "set a region" if config_key == "region" else "unset it for the region's endpoint, or set one"
+            msg = f"{env_key} is exported blank, which the Vertex AI SDK would use as is; {fix}."
             raise ValueError(msg)
     return with_runtime_application_credentials(kwargs, runtime_paths)
 

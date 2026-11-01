@@ -10,6 +10,7 @@ from mindroom import constants
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
 
@@ -196,3 +197,28 @@ def test_env_flag_under_a_blank_export_reads_the_env_file_then_the_default(
 
     assert runtime_paths.env_flag("MATRIX_SSL_VERIFY", default=True) is expected
     assert constants.runtime_matrix_ssl_verify(runtime_paths) is expected
+
+
+@pytest.mark.parametrize(
+    "merged_env",
+    [
+        constants.runtime_env_values,
+        constants.trusted_tool_runtime_env_values,
+        lambda runtime_paths: constants.build_execution_tool_env("python", runtime_paths),
+    ],
+    ids=["runtime", "trusted-tool", "execution-tool"],
+)
+def test_merged_env_mappings_keep_the_env_file_value_under_a_blank_export(
+    tmp_path: Path,
+    merged_env: Callable[[constants.RuntimePaths], Mapping[str, str]],
+) -> None:
+    """The env mappings tools and worker backends read follow ``env_value``; a lone exported blank still stays."""
+    (tmp_path / ".env").write_text("MINDROOM_TIMEZONE=Europe/Amsterdam\n", encoding="utf-8")
+    runtime_paths = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_TIMEZONE": "", "MINDROOM_LOCALE": ""},
+    )
+
+    env = merged_env(runtime_paths)
+
+    assert (env["MINDROOM_TIMEZONE"], env["MINDROOM_LOCALE"]) == ("Europe/Amsterdam", "")

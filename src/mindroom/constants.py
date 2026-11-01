@@ -610,10 +610,24 @@ def exported_process_env() -> dict[str, str]:
     return _copy_process_env()
 
 
+def _merged_env_layers(process_env: Mapping[str, str], env_file_values: Mapping[str, str]) -> dict[str, str]:
+    """Merge the process env over the `.env` as ``RuntimePaths.env_value`` reads them.
+
+    An exported value wins unless it counts as unset and the `.env` holds the variable; an exported blank with no
+    `.env` value stays, for the readers that give an empty value its own meaning.
+    """
+    merged_env = dict(env_file_values)
+    merged_env.update(
+        (name, value)
+        for name, value in process_env.items()
+        if name not in merged_env or not runtime_env_policy.is_unset_env_value(name, value)
+    )
+    return merged_env
+
+
 def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the effective runtime env mapping for one explicit runtime context."""
-    merged_env = dict(runtime_paths.env_file_values)
-    merged_env.update(runtime_paths.process_env)
+    merged_env = _merged_env_layers(runtime_paths.process_env, runtime_paths.env_file_values)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
@@ -723,9 +737,7 @@ def trusted_tool_runtime_env_values(
     - exported process env is filtered to the committed runtime contract
     - internal control env such as sandbox auth tokens stay excluded
     """
-    process_env, env_file_values = _trusted_tool_runtime_env_layers(runtime_paths)
-    merged_env = dict(env_file_values)
-    merged_env.update(process_env)
+    merged_env = _merged_env_layers(*_trusted_tool_runtime_env_layers(runtime_paths))
     for name in tuple(merged_env):
         if name != "GOOGLE_APPLICATION_CREDENTIALS" and not name.endswith("_FILE"):
             continue
@@ -740,9 +752,7 @@ def trusted_tool_runtime_env_values(
 
 def _execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied execution tools."""
-    process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
-    merged_env = dict(env_file_values)
-    merged_env.update(process_env)
+    merged_env = _merged_env_layers(*_isolated_runtime_env_layers(runtime_paths))
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))

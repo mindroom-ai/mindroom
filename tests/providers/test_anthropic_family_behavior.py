@@ -1716,7 +1716,7 @@ def test_a_blank_exported_vertex_endpoint_or_region_fails_the_build_and_names_th
     hide_provider_environment(monkeypatch)
     model = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5")
 
-    with pytest.raises(ValueError, match=f"{name} is exported blank"):
+    with pytest.raises(ValueError, match=f"{name} is exported blank, .*; (set a region|unset it for the region's)"):
         build_provider(model, runtime_paths)
     # A value the model or the `.env` sets reaches the SDK, which then reads nothing from the environment.
     for extra_kwargs in ({setting: value}, {"client_params": {setting: value}}):

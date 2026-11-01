@@ -49,6 +49,7 @@ from mindroom.runtime_env_policy import (
     AZURE_OPENAI_ENV_BY_KEY,
     ENV_TEMPLATE_PLACEHOLDERS,
     VERTEXAI_CLAUDE_ENV_BY_KEY,
+    is_unset_env_value,
 )
 
 if TYPE_CHECKING:
@@ -222,7 +223,10 @@ def _config_init_owner_user_id(runtime_paths: RuntimePaths) -> str | None:
     if raw_owner_user_id and owner_user_id is None:
         source = (
             "the environment"
-            if runtime_paths.process_env.get(constants.OWNER_MATRIX_USER_ID_ENV, "").strip()
+            if not is_unset_env_value(
+                constants.OWNER_MATRIX_USER_ID_ENV,
+                runtime_paths.process_env.get(constants.OWNER_MATRIX_USER_ID_ENV, ""),
+            )
             else str(runtime_paths.env_path)
         )
         _err_console.print(
@@ -305,8 +309,8 @@ def _write_env_file(
         if changed:
             console.print(f"[green]Env file updated:[/green] {env_path}")
         # `mindroom run` serves the dashboard on every interface by default, so a kept
-        # .env without a dashboard key gets one; an explicitly empty key stays empty,
-        # and an exported key takes precedence over .env, so it gets none.
+        # .env without a dashboard key gets one; an explicitly empty key, in .env or
+        # exported, is the open-access opt-out, and an exported key wins over .env.
         if "MINDROOM_API_KEY" not in os.environ and _append_missing_env_defaults(
             env_path,
             (("MINDROOM_API_KEY", _new_dashboard_api_key()),),

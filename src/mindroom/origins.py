@@ -77,7 +77,7 @@ def configured_public_url(paths: RuntimePaths) -> str | None:
 
 def with_api_port(paths: RuntimePaths, api_port: int) -> RuntimePaths:
     """Return paths whose `MINDROOM_PORT` is the port the API serves on, unless the operator set one."""
-    if (paths.env_value("MINDROOM_PORT") or "").strip():
+    if paths.env_value("MINDROOM_PORT") is not None:
         return paths
     return replace(paths, process_env=MappingProxyType({**paths.process_env, "MINDROOM_PORT": str(api_port)}))
 
@@ -125,7 +125,7 @@ def allowed_client_origins(paths: RuntimePaths, env_name: str) -> tuple[str, ...
 
 def connections_origins_configured(paths: RuntimePaths) -> bool:
     """Return whether the operator lists Connections Chat origins, which replaces the defaults."""
-    return bool((paths.env_value(CONNECTIONS_ALLOWED_ORIGINS_ENV) or "").strip())
+    return paths.env_value(CONNECTIONS_ALLOWED_ORIGINS_ENV) is not None
 
 
 def connections_client_origin_allowed(paths: RuntimePaths, client_origin: str, server_origin: str | None) -> bool:
