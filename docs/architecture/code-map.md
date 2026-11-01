@@ -361,7 +361,7 @@ Matrix sync callback
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
-| `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the fallback-model decision `turn_model.py` applies |
+| `budgets/monitor.py` | Month-to-date spend from background usage scans plus each finished reply's cost, the per-user cap store, and the fallback-model decision `turn_model.py` applies |
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
 | `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store, naming its owner, and prepares each database file once per process: the preflight archive check, the link-refusing connect, the tables of a new database, the conversion of one in an older layout, and the layout version upgrade |
 | `session_storage/store.py` | The conversation store: one SQLite database of sessions, runs with a row per stored message and per tool execution, summary rows, and the usage ledger, with full run saves refused once a run is final and single facts patched onto stored rows, each operation in one transaction on its own connection |

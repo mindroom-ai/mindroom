@@ -8511,7 +8511,7 @@ def test_a_finished_approval_continuation_tells_automations_its_source_events(
 
     deps = coordinator.approvals._approval_post_response_deps(continuation)
     assert deps.notify_response_finished is not None
-    deps.notify_response_finished()
+    deps.notify_response_finished(None)
 
     assert automations.finished == [("$prompt",)]
 
@@ -8570,7 +8570,7 @@ async def test_automations_hear_of_every_final_response(succeeded: bool) -> None
     await apply_post_response_effects(
         FinalDeliveryOutcome(ending=Completed() if succeeded else Failed(FailureCause.ERROR)),
         ResponseOutcome(response_run_id="run-1", run_succeeded=succeeded),
-        PostResponseEffectsDeps(logger=MagicMock(), notify_response_finished=lambda: calls.append("finished")),
+        PostResponseEffectsDeps(logger=MagicMock(), notify_response_finished=lambda _cost: calls.append("finished")),
     )
     assert calls == ["finished"]
 

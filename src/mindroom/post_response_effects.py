@@ -56,7 +56,8 @@ class PostResponseEffectsDeps:
     add_interactive_buttons: Callable[[str, interactive.InteractiveMetadata], Awaitable[None]] | None = None
     queue_memory_persistence: Callable[[], None] | None = None
     queue_skill_review: Callable[[str], Awaitable[None]] | None = None
-    notify_response_finished: Callable[[], None] | None = None
+    # Receives the reply's cost: zero when it used no priced model, None when the cost is unknown.
+    notify_response_finished: Callable[[float | None], None] | None = None
     persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, str | None, DeliveredResponse], None] | None = None
@@ -139,7 +140,7 @@ class PostResponseEffectsSupport:
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
-        notify_response_finished: Callable[[], None] | None = None,
+        notify_response_finished: Callable[[float | None], None] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
@@ -180,12 +181,19 @@ class PostResponseEffectsSupport:
         )
 
 
-def _notify_response_finished(outcome: ResponseOutcome, deps: PostResponseEffectsDeps) -> None:
-    """Tell automations a response is final, successful or not, so one waiting on it can verify its files."""
+def _notify_response_finished(
+    final_delivery_outcome: FinalDeliveryOutcome,
+    outcome: ResponseOutcome,
+    deps: PostResponseEffectsDeps,
+) -> None:
+    """Tell automations a response is final, successful or not, so one waiting on it can verify its files.
+
+    Budgets learn what the reply cost from the same notice.
+    """
     if deps.notify_response_finished is None:
         return
     try:
-        deps.notify_response_finished()
+        deps.notify_response_finished(final_delivery_outcome.response_cost_usd)
     except Exception:
         deps.logger.exception("Failed to notify automations of a finished response", session_id=outcome.session_id)
 
@@ -203,7 +211,7 @@ async def apply_post_response_effects(
 ) -> None:
     """Apply the shared side effects that happen after response delivery is known."""
     response_event_id = final_delivery_outcome.final_visible_event_id
-    _notify_response_finished(outcome, deps)
+    _notify_response_finished(final_delivery_outcome, outcome, deps)
     if (
         response_event_id is not None
         and deps.add_interactive_buttons is not None

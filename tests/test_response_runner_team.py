@@ -108,7 +108,7 @@ class _RecordedPostResponseEffects(PostResponseEffectsSupport):
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
-        notify_response_finished: Callable[[], None] | None = None,
+        notify_response_finished: Callable[[float | None], None] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         del room_id, membership_turn_id, queue_memory_persistence, queue_skill_review, notify_response_finished
