@@ -42,10 +42,12 @@ describe("Toaster", () => {
     act(() => {
       toast({ title: "First" });
       toast({ title: "Second" });
+      toast({ title: "Third" });
     });
     fireEvent.click(screen.getAllByRole("button")[1]);
 
     expect(screen.getByText("First")).toBeInTheDocument();
     expect(screen.queryByText("Second")).not.toBeInTheDocument();
+    expect(screen.getByText("Third")).toBeInTheDocument();
   });
 });

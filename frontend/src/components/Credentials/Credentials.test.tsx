@@ -66,10 +66,22 @@ const serveGithubToken = () =>
       }),
     });
 
-/** These services, each holding a token; a request `fails(path)` names is rejected with that message. */
+/** The answer to a read of `path` from a backend holding these services, each with the token `<service>-value`. */
+const serviceResponse = (names: string[], path: string) => {
+  const [, , , service, suffix] = path.split("/");
+  const body =
+    path === "/api/credentials/list"
+      ? names
+      : suffix === "status"
+        ? { service, has_credentials: true, key_names: ["token"] }
+        : { service, credentials: { token: `${service}-value` } };
+  return { ok: true, json: async () => body };
+};
+
+/** Serves these services; a request `fails(path)` names is rejected with that message. */
 const serveServices = (
   names: string[],
-  fails: (path: string) => string | undefined = () => undefined,
+  fails: (path: string) => string | undefined,
 ) =>
   (global.fetch as any).mockImplementation(async (input: string) => {
     const path = String(input);
@@ -77,14 +89,16 @@ const serveServices = (
     if (failure) {
       throw new Error(failure);
     }
-    const [, , , service, suffix] = path.split("/");
-    const body =
-      path === "/api/credentials/list"
-        ? names
-        : suffix === "status"
-          ? { service, has_credentials: true, key_names: ["token"] }
-          : { service, credentials: { token: `${service}-value` } };
-    return { ok: true, json: async () => body };
+    return serviceResponse(names, path);
+  });
+
+/** Waits until the raw editor shows the token `serviceResponse` gives this service. */
+const showsTokenOf = (service: string) =>
+  waitFor(() => {
+    expect(
+      (screen.getByPlaceholderText('{"api_key":"..."}') as HTMLTextAreaElement)
+        .value,
+    ).toContain(`"token": "${service}-value"`);
   });
 
 /** How many plain reads (no method) of this exact path the page made. */
@@ -617,20 +631,10 @@ describe("Credentials", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const deletion = deferred<any>();
     (global.fetch as any).mockImplementation(
-      async (input: string, init?: RequestInit) => {
-        if (init?.method === "DELETE") {
-          return deletion.promise;
-        }
-        const path = String(input);
-        const [, , , service, suffix] = path.split("/");
-        const body =
-          path === "/api/credentials/list"
-            ? ["service_a", "service_b"]
-            : suffix === "status"
-              ? { service, has_credentials: true, key_names: ["token"] }
-              : { service, credentials: { token: `${service}-value` } };
-        return { ok: true, json: async () => body };
-      },
+      async (input: string, init?: RequestInit) =>
+        init?.method === "DELETE"
+          ? deletion.promise
+          : serviceResponse(["service_a", "service_b"], String(input)),
     );
 
     renderOpen();
@@ -824,12 +828,7 @@ describe("Credentials", () => {
 
     renderOpen();
 
-    const editor = screen.getByPlaceholderText(
-      '{"api_key":"..."}',
-    ) as HTMLTextAreaElement;
-    await waitFor(() => {
-      expect(editor.value).toContain('"token": "good_service-value"');
-    });
+    await showsTokenOf("good_service");
     expect(
       screen.getByRole("button", { name: /^zbad_service/ }),
     ).toBeInTheDocument();
@@ -837,9 +836,7 @@ describe("Credentials", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^other_service/ }));
 
-    await waitFor(() => {
-      expect(editor.value).toContain('"token": "other_service-value"');
-    });
+    await showsTokenOf("other_service");
     expect(screen.getByText(PARTIAL_WARNING)).toBeInTheDocument();
   });
 
@@ -884,12 +881,7 @@ describe("Credentials", () => {
 
     // The stale list stays usable, and working with it keeps the list's error.
     fireEvent.click(screen.getByRole("button", { name: /^service_b/ }));
-    const editor = screen.getByPlaceholderText(
-      '{"api_key":"..."}',
-    ) as HTMLTextAreaElement;
-    await waitFor(() => {
-      expect(editor.value).toContain('"token": "service_b-value"');
-    });
+    await showsTokenOf("service_b");
     expect(screen.getByText("Service list unavailable")).toBeInTheDocument();
   });
 
@@ -923,12 +915,7 @@ describe("Credentials", () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /^service_b/ }));
 
-    const editor = screen.getByPlaceholderText(
-      '{"api_key":"..."}',
-    ) as HTMLTextAreaElement;
-    await waitFor(() => {
-      expect(editor.value).toContain('"token": "service_b-value"');
-    });
+    await showsTokenOf("service_b");
     expect(
       screen.queryByText("Credentials unavailable"),
     ).not.toBeInTheDocument();

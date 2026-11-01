@@ -1,5 +1,5 @@
-import { useSyncExternalStore } from "react";
 import { X } from "lucide-react";
+import { create } from "zustand";
 import { cn } from "@/lib/utils";
 
 interface Toast {
@@ -10,34 +10,24 @@ interface Toast {
 }
 
 let toastCount = 0;
-// Replaced on every change, never mutated: React compares snapshots by identity.
-let toasts: Toast[] = [];
-const listeners = new Set<() => void>();
-
-function publish(next: Toast[]) {
-  toasts = next;
-  listeners.forEach((listener) => listener());
-}
-
-function subscribe(listener: () => void) {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
-}
+const useToasts = create<{ toasts: Toast[] }>(() => ({ toasts: [] }));
 
 function dismiss(id: string) {
-  publish(toasts.filter((t) => t.id !== id));
+  useToasts.setState(({ toasts }) => ({
+    toasts: toasts.filter((t) => t.id !== id),
+  }));
 }
 
 export function toast(props: Omit<Toast, "id">) {
   const id = String(toastCount++);
-  publish([...toasts, { id, ...props }]);
+  useToasts.setState(({ toasts }) => ({
+    toasts: [...toasts, { id, ...props }],
+  }));
   setTimeout(() => dismiss(id), 5000);
 }
 
 export function Toaster() {
-  const shown = useSyncExternalStore(subscribe, () => toasts);
+  const shown = useToasts((state) => state.toasts);
 
   return (
     <div className="fixed bottom-0 right-0 z-50 p-4 space-y-2">
