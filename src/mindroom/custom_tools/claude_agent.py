@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     ResultMessage,
     TextBlock,
     ToolUseBlock,
+    UserMessage,
 )
 
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
@@ -29,6 +30,9 @@ from mindroom.providers.names import ROUTE_PROVIDERS
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
+
+if typing.TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = get_args(_PermissionMode)
@@ -319,6 +323,16 @@ async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> No
     )
 
 
+async def _prompt_message(prompt: str, prompt_id: str) -> AsyncIterator[dict[str, typing.Any]]:
+    """Yield ``prompt`` as one user message whose ``uuid`` Claude Code echoes inside the turn that uses it."""
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": prompt},
+        "parent_tool_use_id": None,
+        "uuid": prompt_id,
+    }
+
+
 def _response_text(text_parts: list[str], result: ResultMessage | None) -> str:
     """Return Claude's reply text, falling back to the result summary and marking reported errors."""
     response_text = "\n".join(part for part in text_parts if part).strip()
@@ -418,6 +432,8 @@ class ClaudeAgentTools(Toolkit):
             cli_path=self.cli_path,
             env=env,
             stderr=stderr_callback,
+            # Echo each prompt inside the turn that uses it, which tells that turn apart from the ones Claude Code starts.
+            extra_args={"replay-user-messages": None},
         )
 
     @staticmethod
@@ -587,8 +603,9 @@ class ClaudeAgentTools(Toolkit):
                     # A reused session runs each turn on that reply's model, such as an over-budget fallback.
                     await session.client.set_model(resolved_model)
                     session.model = resolved_model
-                await session.client.query(trimmed_prompt)
-                response_text, tool_names, turn = await self._collect_response(session)
+                prompt_id = str(uuid4())
+                await session.client.query(_prompt_message(trimmed_prompt, prompt_id))
+                response_text, tool_names, turns = await self._collect_response(session, prompt_id)
                 session.last_used_at = monotonic()
             except ClaudeSDKError as exc:
                 session_error = self._format_session_error(
@@ -605,22 +622,34 @@ class ClaudeAgentTools(Toolkit):
             return session_error
 
         try:
-            await _record_turn_usage(turn, resolved_model)
+            for turn in turns:
+                await _record_turn_usage(turn, resolved_model)
         except Exception as error:
             # Claude has already done the work, so a usage write failure must not hide its reply.
             logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
-        return self._format_response_output(response_text, tool_names, turn.result)
+        return self._format_response_output(response_text, tool_names, turns[-1].result)
 
     async def _collect_response(
         self,
         session: _ClaudeSessionState,
-    ) -> tuple[str, list[str], _ClaudeTurn]:
+        prompt_id: str,
+    ) -> tuple[str, list[str], list[_ClaudeTurn]]:
+        """Read Claude Code's turns through the one that used the prompt sent as ``prompt_id``.
+
+        Claude Code also starts turns on its own, such as when a background task finishes, and a prompt sent while
+        such a turn runs joins it. Turns read before the prompt's own stay in its reply and usage, so the agent still
+        sees what Claude reported.
+        """
         text_parts: list[str] = []
         tool_names: list[str] = []
-        turn = _ClaudeTurn()
+        turns = [_ClaudeTurn()]
+        answered = False
 
-        async for message in session.client.receive_response():
-            if isinstance(message, AssistantMessage):
+        async for message in session.client.receive_messages():
+            turn = turns[-1]
+            if isinstance(message, UserMessage) and message.uuid == prompt_id:
+                answered = True
+            elif isinstance(message, AssistantMessage):
                 # Placeholder messages, such as a request that failed every retry, name no real model.
                 if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL and message.message_id:
                     # Parallel tool uses split one response into messages that share its id and usage.
@@ -633,8 +662,11 @@ class ClaudeAgentTools(Toolkit):
             elif isinstance(message, ResultMessage):
                 turn.result = message
                 session.claude_session_id = message.session_id
+                if answered:
+                    break
+                turns.append(_ClaudeTurn())
 
-        return _response_text(text_parts, turn.result), tool_names, turn
+        return _response_text(text_parts, turns[-1].result), tool_names, turns
 
     def _format_response_output(
         self,
