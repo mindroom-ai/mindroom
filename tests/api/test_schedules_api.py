@@ -217,9 +217,16 @@ def test_list_schedules_reports_an_alias_whose_lookup_broke_off_beside_the_reada
     temp_config_file: Path,
 ) -> None:
     """An alias lookup that breaks off is reported with the reason, and the other rooms' tasks are still listed."""
-    _configure_agent_rooms(temp_config_file, ["!readable:localhost", "#flaky:example.org"])
+    # The broken-off lookup comes first, so the next reference must not inherit its outcome.
+    _configure_agent_rooms(temp_config_file, ["#flaky:example.org", "#readable:example.org"])
+
     client = make_matrix_client_mock()
-    client.room_resolve_alias = AsyncMock(side_effect=aiohttp.ClientPayloadError("Response payload is not completed"))
+    client.room_resolve_alias = AsyncMock(
+        side_effect=[
+            aiohttp.ClientPayloadError("Response payload is not completed"),
+            nio.RoomResolveAliasResponse(room_alias="#readable:example.org", room_id="!readable:localhost", servers=[]),
+        ],
+    )
     client.room_get_state = AsyncMock(
         return_value=nio.RoomGetStateResponse.from_dict(
             [scheduled_task_state_event("abc12345", _stored(), room_id="!readable:localhost")],
