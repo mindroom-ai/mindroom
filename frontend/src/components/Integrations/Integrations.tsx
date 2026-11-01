@@ -34,6 +34,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { apiErrorMessageFromResponse } from "@/lib/api";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   useTools,
@@ -62,6 +63,11 @@ import { FilterSelector } from "@/components/shared/FilterSelector";
 const SHARED_ONLY_PROVIDER_IDS = new Set(["spotify", "homeassistant"]);
 
 type FilterMode = "all" | "available" | "unconfigured" | "configured";
+
+interface DisconnectToast {
+  title: string;
+  description: string;
+}
 
 const CATEGORIES = [
   { id: "email", name: "Email & Calendar" },
@@ -608,8 +614,7 @@ export function Integrations() {
 
   const runDisconnectOperation = async (
     integration: Integration,
-    disconnect: () => Promise<void>,
-    success?: { title: string; description: string },
+    disconnect: () => Promise<DisconnectToast | undefined>,
   ) => {
     if (blocksScopedDashboardCredentials(integration)) {
       toast({
@@ -623,16 +628,17 @@ export function Integrations() {
 
     setLoading(true);
     try {
-      await disconnect();
+      const result = await disconnect();
 
       // Refetch tools to update status
       await refetchTools();
 
-      toast({
-        title: success?.title ?? "Disconnected",
-        description:
-          success?.description ?? `${integration.name} has been disconnected.`,
-      });
+      toast(
+        result ?? {
+          title: "Disconnected",
+          description: `${integration.name} has been disconnected.`,
+        },
+      );
     } catch (error) {
       toast({
         title: "Disconnect Failed",
@@ -658,8 +664,13 @@ export function Integrations() {
       );
 
       if (!response.ok) {
-        throw new Error("Failed to disconnect");
+        throw new Error(
+          await apiErrorMessageFromResponse(response, "Failed to disconnect"),
+        );
       }
+      // The environment or a granted shared credential can still supply deleted credentials, so the server says what happened.
+      const { message } = (await response.json()) as { message: string };
+      return { title: integration.name, description: message };
     });
 
   const getActionButton = (integration: Integration) => {
@@ -674,16 +685,15 @@ export function Integrations() {
     const provider = providerForIntegration(integration);
     const disconnectProvider = provider
       ? () =>
-          runDisconnectOperation(
-            integration,
-            () => provider.disconnect(scope),
-            integration.oauth_reset_required === true
+          runDisconnectOperation(integration, async () => {
+            await provider.disconnect(scope);
+            return integration.oauth_reset_required === true
               ? {
                   title: "Connection reset",
                   description: `${integration.name} OAuth has been reset.`,
                 }
-              : undefined,
-          )
+              : undefined;
+          })
       : undefined;
 
     const canConfigureOAuthClient =
