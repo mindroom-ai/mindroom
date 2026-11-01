@@ -56,10 +56,11 @@ function pluginValidationFailure() {
 async function savedPayload() {
   vi.mocked(fetch).mockResolvedValueOnce(Response.json({ success: true }));
   await useConfigStore.getState().saveConfig();
-  const saveCalls = (global.fetch as any).mock.calls.filter(
-    ([url]: [string]) => url === "/api/config/save",
-  );
-  return JSON.parse(saveCalls[saveCalls.length - 1][1].body);
+  const saveCalls = vi
+    .mocked(fetch)
+    .mock.calls.filter(([url]) => url === "/api/config/save");
+  const [, init] = saveCalls[saveCalls.length - 1];
+  return JSON.parse(String(init?.body));
 }
 
 // Loads `config` together with the agent policies derived for it.
@@ -809,7 +810,7 @@ describe("configStore", () => {
           assistant: makeAgentPolicy("assistant"),
         },
       });
-      (global.fetch as any).mockRejectedValueOnce(new Error("Network error"));
+      vi.mocked(fetch).mockRejectedValueOnce(new Error("Network error"));
 
       const { loadConfig } = useConfigStore.getState();
       await loadConfig();
@@ -1149,9 +1150,7 @@ describe("configStore", () => {
         .mockReturnValueOnce(pendingRawSourceResponse.promise);
 
       const loadPromise = useConfigStore.getState().loadConfig();
-      await waitFor(() =>
-        expect((global.fetch as any).mock.calls).toHaveLength(2),
-      );
+      await waitFor(() => expect(vi.mocked(fetch).mock.calls).toHaveLength(2));
 
       useConfigStore
         .getState()
@@ -1208,9 +1207,7 @@ describe("configStore", () => {
         .mockReturnValueOnce(pendingRawSourceResponse.promise);
 
       const loadPromise = useConfigStore.getState().loadConfig();
-      await waitFor(() =>
-        expect((global.fetch as any).mock.calls).toHaveLength(2),
-      );
+      await waitFor(() => expect(vi.mocked(fetch).mock.calls).toHaveLength(2));
 
       useConfigStore
         .getState()
@@ -1342,8 +1339,8 @@ describe("configStore", () => {
       const result = await useConfigStore.getState().saveRecoveryConfigSource();
 
       expect(result).toEqual({ status: "saved" });
-      expect((global.fetch as any).mock.calls[0][0]).toBe("/api/config/raw");
-      expect((global.fetch as any).mock.calls[1][0]).toBe("/api/config/load");
+      expect(vi.mocked(fetch).mock.calls[0][0]).toBe("/api/config/raw");
+      expect(vi.mocked(fetch).mock.calls[1][0]).toBe("/api/config/load");
       expect(useConfigStore.getState()).toMatchObject({
         recoveryConfigSource: null,
         recoveryConfigSourceOriginal: null,
@@ -1444,7 +1441,7 @@ describe("configStore", () => {
       const result = await savePromise;
 
       expect(result).toEqual({ status: "stale" });
-      expect((global.fetch as any).mock.calls).toHaveLength(1);
+      expect(vi.mocked(fetch).mock.calls).toHaveLength(1);
       expect(useConfigStore.getState()).toMatchObject({
         recoveryConfigSource: "agents:\n  helper:\n    role: Newer fix\n",
         recoveryConfigSourceOriginal: "agents:\n  helper:\n    role: Broken\n",
