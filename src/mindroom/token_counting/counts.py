@@ -102,10 +102,11 @@ def _without_encoder(text: str, *, calibrated: bool) -> TokenCount:
     """Estimate ``text`` while the counter's encoder is unavailable, as ``count``'s ``calibrated`` asks.
 
     That is only briefly after startup, or for good when its vocabulary cannot be loaded. A size that must not
-    undercount takes the UTF-8 byte count, an upper bound; any other takes a quarter token per character, since the
-    byte count would triple history estimates meanwhile and compact conversations that fit.
+    undercount takes the UTF-8 byte count, an upper bound; any other takes a quarter token per character, rounded up
+    so no text is free, since the byte count would triple history estimates meanwhile and compact conversations that
+    fit.
     """
-    return TokenCount(len(text) // 4 if calibrated else utf8_byte_bound(text), "estimated")
+    return TokenCount((len(text) + 3) // 4 if calibrated else utf8_byte_bound(text), "estimated")
 
 
 def cached_count(counter: TokenCounter, text: str) -> int | None:

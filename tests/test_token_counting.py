@@ -83,7 +83,7 @@ def test_estimates_wait_for_the_encoder_without_blocking(monkeypatch: pytest.Mon
     counter = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"), count=endpoint)
     text = "naïve text"
 
-    assert count(counter, text) == TokenCount(len(text) // 4, "estimated")
+    assert count(counter, text) == TokenCount(-(-len(text) // 4), "estimated")
     asyncio.run(count_exact(counter, "other text"))
     assert count(counter, text).kind == "estimated", "no calibration sample against the stand-in"
 
@@ -130,8 +130,14 @@ def test_without_its_vocabulary_a_size_that_must_not_undercount_counts_bytes() -
         TokenCounter(key="no-vocabulary", estimate=lambda _text: None),
         TokenCounter(key="no-vocabulary-own", estimate=lambda _text: None, exact_locally=True),
     ):
-        assert count(counter, text) == TokenCount(len(text) // 4, "estimated")
+        assert count(counter, text) == TokenCount(-(-len(text) // 4), "estimated")
         assert count(counter, text, calibrated=False) == TokenCount(len(text.encode()), "estimated")
+
+
+def test_without_its_vocabulary_no_text_counts_as_free() -> None:
+    """A short line costs at least one token, so a preload cap still binds on a file of short lines."""
+    counter = TokenCounter(key="no-vocabulary", estimate=lambda _text: None)
+    assert count(counter, "ab\n") == TokenCount(1, "estimated")
 
 
 def test_calibration_weighs_the_newest_provider_counts_most() -> None:
