@@ -1331,6 +1331,32 @@ def test_codex_sends_the_stable_prompt_without_an_explicit_breakpoint(tmp_path: 
     assert first == {"role": "developer", "content": "Shared agent instructions."}
 
 
+@pytest.mark.parametrize(
+    ("extra_kwargs", "reasoning"),
+    [
+        pytest.param({}, {"summary": "auto"}, id="default"),
+        pytest.param(
+            {"reasoning_effort": "high", "reasoning_summary": "detailed"},
+            {"effort": "high", "summary": "detailed"},
+            id="configured-summary",
+        ),
+        pytest.param({"reasoning": {"summary": "concise"}}, {"summary": "concise"}, id="configured-reasoning"),
+    ],
+)
+def test_codex_asks_for_a_reasoning_summary_unless_the_model_sets_one(
+    tmp_path: Path,
+    extra_kwargs: dict[str, Any],
+    reasoning: dict[str, str],
+) -> None:
+    """Like the Codex CLI, a Codex request asks for the reasoning summary that a reply shows while the model thinks."""
+    assert _request(_codex(tmp_path, **extra_kwargs), _messages("Monday"))["reasoning"] == reasoning
+
+
+def test_the_openai_route_asks_for_no_reasoning_summary_by_default(tmp_path: Path) -> None:
+    """Some API organizations may not request reasoning summaries, so the OpenAI route sends one only when configured."""
+    assert "summary" not in _request(responses_adapter(tmp_path), _messages("Monday")).get("reasoning", {})
+
+
 def test_a_disabled_cache_sends_each_system_message_without_a_breakpoint() -> None:
     """``cache_system_prompt: false`` sends each system message as its own developer message, as authored."""
     messages = _messages("Monday")
