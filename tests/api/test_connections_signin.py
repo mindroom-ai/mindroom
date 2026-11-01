@@ -18,6 +18,7 @@ from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import auth, connections_session, frontend, main
 from mindroom.api.connections_session_cookie import (
     connections_session_cookie,
@@ -26,6 +27,9 @@ from mindroom.api.connections_session_cookie import (
 )
 from mindroom.matrix_openid import MatrixOpenIDError, homeserver_binds_openid_audience, verify_matrix_openid
 from mindroom.oauth import registry as oauth_registry
+from mindroom.oauth import reset as oauth_reset
+from mindroom.oauth import service as oauth_service
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.api.conftest import (
     trusted_upstream_env,
     trusted_upstream_jwks,
@@ -48,6 +52,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from httpx import Response
+
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 PORTAL_ORIGIN = "https://portal.example.org"
 # Any route the dashboard login guards; this one reads the in-memory config the sign-in fixture publishes.
@@ -876,6 +882,123 @@ def test_portal_flow_callback_rejects_dashboard_login_only(signin: dict[str, Any
     stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
     assert stored(requester_id="@alice:example.org") is not None
     assert stored(requester_id="@owner:example.org") is None
+
+
+def _conversation_target(requester: str) -> ResolvedWorkerTarget:
+    """Resolve the credential target the personal agent uses when `requester` asks it something."""
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="personal",
+        requester_id=requester,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    return resolve_worker_target("user_agent", "personal", execution_identity=identity)
+
+
+def _connect_link(signin: dict[str, Any], requester: str) -> str:
+    """Return the path and query of the connect link the personal agent gives `requester`."""
+    target = _conversation_target(requester)
+    link = urlparse(oauth_service.oauth_connect_url(signin["provider"], signin["paths"], worker_target=target))
+    return f"{link.path}?{link.query}"
+
+
+def _open_connect_link(client: TestClient, link: str) -> str:
+    """Open a connect link and return the pending state of the provider authorization it leads to."""
+    authorize = client.get(link, follow_redirects=False)
+    assert authorize.status_code == 307, authorize.text
+    location = urlparse(authorize.headers["location"])
+    assert location.netloc == "auth.example.test"
+    return parse_qs(location.query)["state"][0]
+
+
+def _finish_link_flow(client: TestClient, state: str) -> None:
+    """Finish a flow a connect link started: the provider callback shows the connected page itself."""
+    callback = client.get(
+        "/api/oauth/google_drive/callback",
+        params={"code": "test-code", "state": state},
+        follow_redirects=False,
+    )
+    assert callback.status_code == 200, callback.text
+    assert "Test Drive connected" in callback.text
+
+
+def test_session_user_redeems_own_connect_link(signin: dict[str, Any]) -> None:
+    """A user signed in from MindRoom Chat opens the agent's connect link and connects under their own Matrix ID."""
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+    _finish_link_flow(client, _open_connect_link(client, _connect_link(signin, "@alice:example.org")))
+    stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
+    assert stored(requester_id="@alice:example.org") is not None
+    assert stored(requester_id="@owner:example.org") is None
+
+
+def test_session_user_cannot_redeem_another_users_connect_link(signin: dict[str, Any]) -> None:
+    """A connect link belongs to the person the agent gave it to; another signed-in user's attempt leaves it usable."""
+    link = _connect_link(signin, "@alice:example.org")
+    bob = TestClient(main.app, base_url=PORTAL_ORIGIN)
+    assert sign_in(bob, "bob").status_code == 200
+    _expect_styled_oauth_page(
+        bob.get(link, follow_redirects=False),
+        status=403,
+        message="OAuth link does not belong to the current user",
+    )
+
+    alice = signin["client"]
+    assert sign_in(alice, "alice").status_code == 200
+    _finish_link_flow(alice, _open_connect_link(alice, link))
+    stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
+    assert stored(requester_id="@alice:example.org") is not None
+    assert stored(requester_id="@bob:example.org") is None
+
+
+def test_signed_out_connect_link_still_asks_for_a_login(signin: dict[str, Any]) -> None:
+    """Without any sign-in the connect link sends the browser to a login, as before."""
+    response = signin["client"].get(_connect_link(signin, "@alice:example.org"), follow_redirects=False)
+    assert response.status_code == 307
+    assert urlparse(response.headers["location"]).path == "/login"
+
+
+def _reset_link(signin: dict[str, Any], requester: str) -> str:
+    """Return the path and query of the reset link the personal agent gives `requester`."""
+    config = main._app_context(main.app).runtime_config
+    assert config is not None
+    target = oauth_reset.resolve_oauth_reset_target(
+        signin["provider"].id,
+        agent_name="personal",
+        config=config,
+        runtime_paths=signin["paths"],
+        membership_index=AgentReplyMembershipIndex(),
+        execution_identity=_conversation_target(requester).execution_identity,
+    )
+    link = urlparse(asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target)))
+    return f"{link.path}?{link.query}"
+
+
+def test_session_user_resets_own_connection_from_reset_link(signin: dict[str, Any]) -> None:
+    """A user signed in from MindRoom Chat confirms the agent's reset link and reconnects under their own Matrix ID."""
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+    _finish_link_flow(client, _open_connect_link(client, _connect_link(signin, "@alice:example.org")))
+    link = _reset_link(signin, "@alice:example.org")
+
+    bob = TestClient(main.app, base_url=PORTAL_ORIGIN)
+    assert sign_in(bob, "bob").status_code == 200
+    assert bob.post(link, headers={"Origin": PORTAL_ORIGIN}, follow_redirects=False).status_code == 403
+
+    confirmation = client.get(link, follow_redirects=False)
+    assert confirmation.status_code == 200, confirmation.text
+    assert "Reset and reconnect" in confirmation.text
+    confirmed = client.post(link, headers={"Origin": PORTAL_ORIGIN}, follow_redirects=False)
+    assert confirmed.status_code == 303, confirmed.text
+    stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
+    assert stored(requester_id="@alice:example.org") is None
+    location = urlparse(confirmed.headers["location"])
+    assert location.netloc == "auth.example.test"
+    _complete_callback(client, parse_qs(location.query)["state"][0])
+    assert stored(requester_id="@alice:example.org") is not None
 
 
 @pytest.fixture

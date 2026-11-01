@@ -71,7 +71,7 @@ _PLATFORM_SSO_CLOCK_SKEW_SECONDS = 10
 _used_platform_sso_ticket_ids: dict[str, int] = {}
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 # Set only by server code; ASGI scope keys cannot come from the client.
-_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY = "mindroom.connections_session_callback"
+_CONNECTIONS_SESSION_FLOW_SCOPE_KEY = "mindroom.connections_session_flow"
 # Each Connections page names the account it shows, so a stale tab cannot act as the browser's new account.
 _CONNECTIONS_USER_HEADER = "X-MindRoom-Connections-User"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
@@ -786,16 +786,20 @@ def _is_oauth_popup_path(path: str, actions: frozenset[str]) -> bool:
     return len(parts) == 5 and parts[1:3] == ["api", "oauth"] and bool(parts[3]) and parts[4] in actions
 
 
-def allow_connections_session_for_oauth_callback(request: Request) -> None:
-    """Let this OAuth callback authenticate with the Connections session, because a session started its flow."""
-    request.scope[_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY] = True
+def allow_connections_session_for_oauth_flow(request: Request) -> None:
+    """Let this OAuth route authenticate with the Connections session.
+
+    Callers grant it on a callback whose flow a session started, and on a connect or reset link whose token names
+    the one requester the session must then be.
+    """
+    request.scope[_CONNECTIONS_SESSION_FLOW_SCOPE_KEY] = True
 
 
 def _connections_session_path_honored(request: Request) -> bool:
-    """Honor sessions on portal paths and OAuth success pages, and on callbacks only for session-started flows."""
+    """Honor sessions on portal paths and OAuth success pages, and on other OAuth browser routes only when granted."""
     path = request.scope["path"]
-    if _is_oauth_popup_path(path, frozenset({"callback"})):
-        return request.scope.get(_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY) is True
+    if _is_oauth_popup_path(path, frozenset({"authorize", "callback", "reset"})):
+        return request.scope.get(_CONNECTIONS_SESSION_FLOW_SCOPE_KEY) is True
     return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"}))
 
 

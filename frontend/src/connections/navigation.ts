@@ -22,3 +22,29 @@ export function openInPage(event: MouseEvent<HTMLAnchorElement>) {
   window.history.pushState(null, "", event.currentTarget.href);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
+
+const AGENT_LINK_PATH = /^\/api\/oauth\/[^/]+\/(authorize|reset)$/;
+
+/**
+ * The agent's connect or reset link MindRoom Chat asked the portal to open
+ * once signed in (`?next=`), as a path on this origin, or `null`. Anything
+ * else is refused, so the portal never sends its user to another page.
+ */
+export function agentLinkToOpen(search: string): string | null {
+  const next = new URLSearchParams(search).get("next");
+  if (!next) return null;
+  let url: URL;
+  try {
+    url = new URL(next, window.location.origin);
+  } catch {
+    return null;
+  }
+  if (url.origin !== window.location.origin) return null;
+  if (!AGENT_LINK_PATH.test(url.pathname)) return null;
+  return `${url.pathname}${url.search}`;
+}
+
+/** Leave the portal for an agent link, replacing the portal in history. */
+export function openAgentLink(path: string) {
+  window.location.replace(path);
+}
