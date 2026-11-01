@@ -49,6 +49,7 @@ from mindroom.memory.config import (
     recorded_embedder_failures,
 )
 from mindroom.model_defaults import (
+    ANTHROPIC_BASE_URL_DEFAULT,
     MEMORY_OLLAMA_LLM,
     OLLAMA_HOST_DEFAULT,
     OPENAI_BASE_URL_DEFAULT,
@@ -77,6 +78,8 @@ _SAVED_OLLAMA = "http://saved-ollama:11434"
 _DOTENV_URL = "http://dotenv.local/v1"
 _DOTENV_BASE_URL = f"OPENAI_BASE_URL={_DOTENV_URL}\n"
 _CONFIGURED_OLLAMA = "http://config-ollama:11434"
+_GATEWAY_URL = "http://claude-gateway.local"
+_DOTENV_ANTHROPIC_BASE_URL = f"ANTHROPIC_BASE_URL={_GATEWAY_URL}\n"
 
 
 def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) -> RuntimePaths:
@@ -900,6 +903,54 @@ class TestMemoryConfig:
         llm_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)["llm"]["config"]
 
         assert llm_config["openai_base_url"] == expected_url
+
+    @pytest.mark.parametrize(
+        ("exported", "env_file", "configured_url", "expected_url"),
+        [
+            pytest.param({}, _DOTENV_ANTHROPIC_BASE_URL, None, _GATEWAY_URL, id="env-file"),
+            pytest.param(
+                {"ANTHROPIC_BASE_URL": ""},
+                _DOTENV_ANTHROPIC_BASE_URL,
+                None,
+                _GATEWAY_URL,
+                id="env-file-under-blank-export",
+            ),
+            pytest.param({"ANTHROPIC_BASE_URL_FILE": "endpoint"}, "", None, _GATEWAY_URL, id="file-variable"),
+            pytest.param({"ANTHROPIC_BASE_URL": ""}, "", None, ANTHROPIC_BASE_URL_DEFAULT, id="blank-export"),
+            pytest.param({}, _DOTENV_ANTHROPIC_BASE_URL, "", _GATEWAY_URL, id="blank-configured"),
+            pytest.param(
+                {},
+                _DOTENV_ANTHROPIC_BASE_URL,
+                "http://memory-llm.local",
+                "http://memory-llm.local",
+                id="configured-wins",
+            ),
+        ],
+    )
+    def test_an_anthropic_memory_llm_reaches_anthropic_base_url_unless_it_sets_its_own(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        exported: dict[str, str],
+        env_file: str,
+        configured_url: str | None,
+        expected_url: str,
+    ) -> None:
+        """The Anthropic memory LLM reads `ANTHROPIC_BASE_URL` as Claude chat models do, unless it sets its own."""
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        for name, value in exported.items():
+            monkeypatch.setenv(name, value)
+        (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+        (tmp_path / "endpoint").write_text(f"{_GATEWAY_URL}\n", encoding="utf-8")
+        runtime_paths = _runtime_paths(tmp_path, exported)
+        llm = {"model": "claude-haiku-5-5", "api_key": "key", "anthropic_base_url": configured_url}
+        config = Config(memory={"llm": {"provider": "anthropic", "config": llm}}, router=RouterConfig(model="default"))
+
+        llm_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)["llm"]
+
+        assert llm_config["config"]["anthropic_base_url"] == expected_url
+        mem0_llm = LlmFactory.create(llm_config["provider"], llm_config["config"])
+        assert str(mem0_llm.client.base_url) == expected_url
 
     def test_openrouter_only_memory_uses_openrouter_for_llm_and_embedder(
         self,

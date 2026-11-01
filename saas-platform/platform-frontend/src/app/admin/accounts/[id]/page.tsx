@@ -85,7 +85,7 @@ export default function AccountDetailsPage() {
           Back to Accounts
         </Button>
         <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Account Details</h1>
-        <p className="text-gray-600 dark:text-gray-400 mt-2">View and manage account information</p>
+        <p className="text-gray-600 dark:text-gray-400 mt-2">View account information</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -178,19 +178,6 @@ export default function AccountDetailsPage() {
             )}
           </CardContent>
         </Card>
-      </div>
-
-      {/* Actions */}
-      <div className="mt-6 flex gap-3">
-        <Button variant="outline">
-          Suspend Account
-        </Button>
-        <Button variant="outline">
-          Reset Password
-        </Button>
-        <Button variant="outline" className="text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300">
-          Delete Account
-        </Button>
       </div>
     </div>
   )
