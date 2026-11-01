@@ -80,9 +80,8 @@ async def _endpoint(text: str) -> int:
     ("route", "kind"),
     [
         ("uncounted", "estimated"),
-        # A summary input that undercounts fails its request, so the family margin stays after the provider counted
-        # other text, whose rate may differ from the conversation's.
-        ("calibrated", "estimated"),
+        # A count of other text leaves the summary input on the estimate.
+        ("counted-other-text", "estimated"),
         ("own-tokenizer", "exact"),
     ],
 )
@@ -92,7 +91,7 @@ async def test_chunk_events_report_how_the_summary_input_was_counted(tmp_path: P
         if route == "own-tokenizer"
         else fake_token_counter(count=_endpoint)
     )
-    if route == "calibrated":
+    if route == "counted-other-text":
         # The endpoint counted other text at four times its estimate.
         await count_exact(counter, "x" * 40)
     config, runtime_paths = _make_config(tmp_path)

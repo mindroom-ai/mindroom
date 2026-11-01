@@ -19,6 +19,7 @@ from mindroom.config.automations import PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.llm.provider import TokenCounter
 from mindroom.memory import entrypoint_withholds_lines
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.token_counting.counts import count_exact
@@ -69,40 +70,38 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-def test_the_files_are_measured_as_the_agent_s_model_counts_them(tmp_path: Path) -> None:
-    """A model that counts the same files at twice the estimate reaches the trigger with half the text."""
+def test_the_files_are_measured_as_the_agent_s_model_estimates_them(tmp_path: Path) -> None:
+    """A model whose estimate is twice the quarter token reaches the trigger with half the text.
+
+    A check cannot wait for the provider, so plan and verify share the estimate, whatever the provider counted.
+    """
     config, automation, root = _setup(tmp_path, trigger_tokens=2_000)
     assert _plan_curation(config, root, "mind", automation, fake_token_counter()) is None
 
-    async def twice_the_estimate(text: str) -> int:
-        return len(text) // 2
+    async def quarter(text: str) -> int:
+        return len(text) // 4
 
-    counter = fake_token_counter(count=twice_the_estimate)
-    asyncio.run(count_exact(counter, (root / "MEMORY.md").read_text(encoding="utf-8")))
+    counter = TokenCounter(key="denser", estimate=lambda text: len(text) // 2, count=quarter)
+    asyncio.run(count_exact(counter, MEMORY))
     plan = _plan_curation(config, root, "mind", automation, counter)
 
     assert plan is not None
     assert plan.curated["MEMORY.md"] == len(MEMORY) // 2
 
 
-def test_verify_measures_with_the_calibration_the_plan_used(tmp_path: Path) -> None:
-    """Provider counts during the curation reply move the live calibration, never the comparison with the plan."""
-
-    async def endpoint(text: str) -> int:
-        return len(text) // 4
+def test_verify_measures_on_the_basis_the_plan_used(tmp_path: Path) -> None:
+    """A provider count of an edited file during the curation reply never moves the comparison with the plan."""
 
     async def halved(text: str) -> int:
         return len(text) // 8
 
-    counter = fake_token_counter(count=endpoint)
-    asyncio.run(count_exact(counter, "x" * 4_000))
+    counter = fake_token_counter(count=halved)
     config, automation, root = _setup(tmp_path)
     plan = _plan_curation(config, root, "mind", automation, counter)
     assert plan is not None
-    for index in range(40):
-        asyncio.run(count_exact(fake_token_counter(count=halved), f"{index} " * 2_000))
-    memory = root / "MEMORY.md"
-    memory.write_text("# Memory\n" + "".join(SECTIONS[:7]), encoding="utf-8")
+    edited = "# Memory\n" + "".join(SECTIONS[:7])
+    (root / "MEMORY.md").write_text(edited, encoding="utf-8")
+    asyncio.run(count_exact(counter, edited))
 
     result = _verify_curation(plan)
 
@@ -171,22 +170,18 @@ def test_memory_past_the_preload_token_cap_asks_for_a_cut_under_the_token_trigge
 
 
 def test_memory_the_preload_shows_whole_asks_for_no_cut(tmp_path: Path) -> None:
-    """Whether the preload withholds lines is judged as a reply builds it, from the file's own provider count.
-
-    The route's calibration, learned mostly from other text, would say otherwise.
-    """
+    """Whether the preload withholds lines is judged as a reply builds it, from the provider's count of the file."""
     config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
     config.memory.file.max_entrypoint_tokens = 1_000
 
-    async def endpoint(text: str) -> int:
-        return len(text) // (8 if text.startswith("# Memory") else 4)
+    async def half_the_estimate(text: str) -> int:
+        return len(text) // 8
 
-    counter = fake_token_counter(count=endpoint)
-    asyncio.run(count_exact(counter, "x" * 40_000))
-    # The file as a reply's preload counts it in the background, without its final newline.
+    counter = fake_token_counter(count=half_the_estimate)
+    # The file as a reply's preload counts it, without its final newline.
     asyncio.run(count_exact(counter, MEMORY.strip()))
     # Its 1,286 estimated tokens are 643 to the provider, so a reply preloads every line.
-    assert not entrypoint_withholds_lines(MEMORY, config, counter, root / "MEMORY.md")
+    assert not entrypoint_withholds_lines(MEMORY, config, counter)
 
     assert _plan_curation(config, root, "mind", automation, counter) is None
 

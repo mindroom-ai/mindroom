@@ -66,17 +66,46 @@ def estimate_prompt_visible_history_tokens(
     The history is the selection a request under ``history_settings`` sends, so the estimate counts exactly what the
     model will read. Stale Anthropic replay fields are left in place because the canonical count never reads them.
     """
+    history_messages = _prompt_visible_messages(session, history_settings)
+    tokens, has_checkpoint = _route_tokens(history_messages, counter=counter, native_route=native_route)
+    # A checkpoint covers the summary message before it, which native projection drops.
+    return tokens if has_checkpoint else estimate_summary_tokens(session, counter) + tokens
+
+
+def prompt_visible_history_texts(
+    *,
+    session: ConversationSession,
+    history_settings: ResolvedHistorySettings,
+    counter: TokenCounter,
+) -> tuple[str, ...]:
+    """Return the texts the canonical estimate of the scope's prompt-visible history counts, for a provider to count."""
+    history_messages = [
+        _without_attachments(message) for message in _prompt_visible_messages(session, history_settings)
+    ]
+    replay_estimator = counter.replay
+    uses_visual_tokens = replay_estimator is not None and replay_estimator.portable_replay_uses_visual_tokens()
+    texts = [_canonical_text(history_messages, strip_content_blocks=uses_visual_tokens)]
+    if (summary := _summary_message_text(session)) is not None:
+        texts.append(summary)
+    return tuple(texts)
+
+
+def _prompt_visible_messages(session: ConversationSession, history_settings: ResolvedHistorySettings) -> list[Message]:
     policy = history_settings.policy
-    history_messages = scope_history_messages(
+    return scope_history_messages(
         session.runs,
         scope=owner_scope(session),
         num_history_runs=policy.num_history_runs,
         num_history_messages=policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
     )
-    tokens, has_checkpoint = _route_tokens(history_messages, counter=counter, native_route=native_route)
-    # A checkpoint covers the summary message before it, which native projection drops.
-    return tokens if has_checkpoint else estimate_summary_tokens(session, counter) + tokens
+
+
+def _canonical_text(history_messages: list[Message], *, strip_content_blocks: bool) -> str:
+    return "".join(
+        _estimated_message_text(_without_image_transport(message, strip_content_blocks=strip_content_blocks))
+        for message in history_messages
+    )
 
 
 def _route_tokens(
@@ -130,13 +159,9 @@ def _estimate_messages_tokens(
         else None
     )
     provider_accounts_for_images = uses_visual_tokens and provider_estimate is not None
-    canonical_messages = [
-        _without_image_transport(message, strip_content_blocks=provider_accounts_for_images)
-        for message in history_messages
-    ]
     canonical_tokens = count(
         counter,
-        "".join(_estimated_message_text(message) for message in canonical_messages),
+        _canonical_text(history_messages, strip_content_blocks=provider_accounts_for_images),
     ).tokens
     image_fallback_tokens = 0 if provider_accounts_for_images else _image_fallback_tokens(history_messages)
     return max(canonical_tokens, provider_estimate or 0) + image_fallback_tokens + attachment_tokens
@@ -170,10 +195,13 @@ def _without_image_transport(message: Message, *, strip_content_blocks: bool) ->
 
 def estimate_summary_tokens(session: ConversationSession, counter: TokenCounter) -> int:
     """Estimate the tokens the scope's summary message adds to a request."""
+    summary = _summary_message_text(session)
+    return 0 if summary is None else count(counter, summary).tokens
+
+
+def _summary_message_text(session: ConversationSession) -> str | None:
     summary = current_summary_text(session)
-    if summary is None:
-        return 0
-    return count(counter, str(compaction_summary_message(summary, run_local=False).content)).tokens
+    return None if summary is None else str(compaction_summary_message(summary, run_local=False).content)
 
 
 def scope_visible_runs(session: ConversationSession) -> list[AnyRunRecord]:

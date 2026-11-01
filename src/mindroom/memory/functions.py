@@ -10,11 +10,10 @@ from typing import TYPE_CHECKING
 from mindroom.logging_config import get_logger
 from mindroom.prompt_templates import render_prompt_template
 from mindroom.timing import timed
-from mindroom.token_counting.counts import prefetch
 
 from ._backend import resolve_memory_backend
 from ._entrypoint_snapshots import stable_entrypoint_preamble
-from ._file_backend import append_agent_daily_file_memory
+from ._file_backend import append_agent_daily_file_memory, cap_entrypoint
 from ._prompting import format_memories_as_context
 from ._shared import MemoryEntrypointContext, MemorySearchOutcome
 
@@ -218,11 +217,9 @@ async def _entrypoint_preamble(
         backend.load_entrypoint_context,
         agent_name,
         config,
-        counter=counter,
         execution_identity=execution_identity,
     )
-    # Later turns find the file's and the preload's exact counts cached and size the preload by them.
-    prefetch(counter, entrypoint.file_text, entrypoint.text)
+    entrypoint = await cap_entrypoint(entrypoint, config, counter)
     body = (
         _render_entrypoint_body(entrypoint, config, kept_copy=conversation is not None)
         if entrypoint.text or entrypoint.omitted_lines

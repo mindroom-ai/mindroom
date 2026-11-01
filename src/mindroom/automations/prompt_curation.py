@@ -1,8 +1,8 @@
 """The prompt_curation automation: when an agent's always-loaded files grow too large, ask it to condense them.
 
 The check measures `MEMORY.md` and the always-loaded context files in the workspace it maintains (`private.context_files`
-for a private agent) as the agent's model counts tokens, by an estimate calibrated by the provider's counts and frozen for
-the plan, so verify compares sizes on the basis the plan measured them.
+for a private agent) by the agent's model's local token estimate, an upper bound, so verify compares sizes on the basis
+the plan measured them: a check runs in a worker thread and cannot wait for the provider to count.
 When they exceed the trigger, or `MEMORY.md` has more lines than the preload keeps, the prompt asks the agent for a
 bounded cut in a normal visible run.
 Agents told to "clean up" tend to cut most of a file, so verify measures the files again once the run ends and, when
@@ -25,7 +25,8 @@ from mindroom.logging_config import get_logger
 from mindroom.memory import entrypoint_withholds_lines, read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.providers.registry import model_token_counter
-from mindroom.token_counting.counts import count, frozen
+from mindroom.token_counting.counts import count, estimated
+from mindroom.token_counting.families import load_o200k
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -116,8 +117,9 @@ def _plan_curation(
 
     Raises ``OSError``, ``ValueError``, or ``UnicodeDecodeError`` for a file that cannot be read safely.
     """
-    # Verify compares its sizes with these, so both measure on the calibration ``counter`` has now.
-    measure = frozen(counter)
+    # Verify compares its sizes with these, so both measure by the estimate alone, with the encoder it needs loaded.
+    load_o200k()
+    measure = estimated(counter)
     curated_payloads = {
         path: payload for path in _curated_paths(config, agent_name) if (payload := _read(root, path)) is not None
     }
@@ -126,12 +128,7 @@ def _plan_curation(
     memory_text = curated_payloads.get(_ENTRYPOINT, b"").decode("utf-8")
     memory_lines = len(memory_text.splitlines())
     # Lines the preload withholds never reach the prompt, at any token count; judged as a reply's preload judges them.
-    if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(
-        memory_text,
-        config,
-        counter,
-        root / _ENTRYPOINT,
-    ):
+    if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(memory_text, config, counter):
         return None
     return _CurationPlan(
         agent_name=agent_name,

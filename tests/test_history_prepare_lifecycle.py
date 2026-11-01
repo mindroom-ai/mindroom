@@ -2076,10 +2076,31 @@ async def test_history_preparation_counts_off_the_event_loop(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provider_token_counts")
+async def test_without_a_usable_reported_size_the_provider_counts_the_history(tmp_path: Path) -> None:
+    """A reply after a request that recorded no system prompt and tools waits for an exact count of the history."""
+    counted: list[str] = []
+
+    async def endpoint(text: str) -> int:
+        counted.append(text)
+        return len(text)
+
+    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 8_000, "non_prompt_tokens": None},
+        counter=fake_token_counter(count=endpoint),
+    )
+
+    assert counted
+    # One token per character, against the estimate's quarter.
+    assert prepared.compaction_decision.current_history_tokens == sum(len(text) for text in counted) > 3 * estimate
+
+
+@pytest.mark.asyncio
 async def test_the_reported_request_size_decides_over_an_estimate_that_overcounts(tmp_path: Path) -> None:
     """One ratio per route cannot fit every conversation's content, so the provider's count of the history wins.
 
-    A calibrated or margin estimate that counts a conversation a third too high would otherwise compact it early.
+    An estimate that counts a conversation a third too high would otherwise compact it early.
     """
     one_per_character = TokenCounter(key="overcounts", estimate=len)
     prepared, _estimate, lifecycle = await _prepare_with_reported_usage(

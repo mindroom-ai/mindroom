@@ -63,7 +63,6 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.types import ConversationSession
 from mindroom.timestamp_formatting import format_timestamp_ms
-from mindroom.token_counting import counts as token_counts
 from mindroom.token_counting.counts import TokenCount, count
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.plugins import config_plugins
@@ -907,58 +906,49 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
 
 
 @pytest.mark.asyncio
-async def test_reply_preparation_counts_the_static_prompt_in_the_background(
+@pytest.mark.usefixtures("provider_token_counts")
+async def test_reply_preparation_sizes_the_static_prompt_by_the_providers_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A provider count of the system prompt and tools never holds up the reply; a later reply reads it cached."""
-    monkeypatch.setattr(token_counts, "_MAX_PENDING", 8)
-    endpoint_called = asyncio.Event()
-    release = asyncio.Event()
+    """The reply waits for the provider to count the system prompt and tools, and sizes them by that count."""
 
-    async def slow_endpoint(text: str) -> int:
-        endpoint_called.set()
-        await release.wait()
+    async def endpoint(text: str) -> int:
         return len(text)
 
     config, runtime_paths = _bound_agent_config(tmp_path, tools=("calculator",))
     build = _build(config, runtime_paths)
-    counter = fake_token_counter(count=slow_endpoint)
+    counter = fake_token_counter(count=endpoint)
     build = replace(build, spec=replace(build.spec, model=ScriptedModel([], token_counter=counter)))
     system_messages = prompt_for_turn(build)
-    monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
+    prepare_scope_history = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare_scope_history)
     monkeypatch.setattr(
         execution_preparation,
         "finalize_history_preparation",
         lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
     )
 
-    async with asyncio.timeout(10):
-        await _prepare_agent_execution_context_for_test(
-            make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
-            scope_context=None,
-            build=build,
-            system_messages=system_messages,
-            prompt="Current request",
-            thread_history=None,
-            runtime_paths=runtime_paths,
-            config=config,
-            resolved_runtime_model=resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent"), None),
-        )
+    await _prepare_agent_execution_context_for_test(
+        make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
+        scope_context=None,
+        build=build,
+        system_messages=system_messages,
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        resolved_runtime_model=resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent"), None),
+    )
 
-    async with asyncio.timeout(5):
-        await endpoint_called.wait()
-    assert not release.is_set(), "the reply was prepared while the provider was still counting"
     parts = build_static_token_estimator(
         counter,
         system_messages,
         PreparedTools(functions=build.spec.functions).specs(),
         build.request_template.deferred_tools.names,
     ).parts
-    assert all(count(counter, part).kind == "estimated" for part in parts)
-    release.set()
-    await asyncio.gather(*token_counts._state.pending.values())
     assert all(count(counter, part) == TokenCount(len(part), "exact") for part in parts)
+    assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == sum(len(part) for part in parts)
 
 
 @pytest.mark.asyncio

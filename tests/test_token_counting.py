@@ -1,4 +1,4 @@
-"""Tests for token counting through a route's counter: kinds, cached exact counts, calibration, and fallbacks."""
+"""Tests for token counting through a route's counter: kinds, measured exact counts, and fallbacks."""
 # ruff: noqa: D103
 
 from __future__ import annotations
@@ -7,19 +7,16 @@ import asyncio
 import math
 import threading
 import time
-from typing import TYPE_CHECKING
 
+import pytest
 import tiktoken
 from structlog.testing import capture_logs
 
 from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.token_counting import counts, families
-from mindroom.token_counting.counts import TokenCount, count, count_exact, fit_text, prefetch, text_tokens
+from mindroom.token_counting.counts import TokenCount, count, count_exact, estimated, fit_text, measure, text_tokens
 from mindroom.token_counting.families import counter_for_model, load_o200k
 from tests.fakes.token_counter import fake_token_counter, quarter_tokens
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def _o200k(text: str) -> int:
@@ -108,8 +105,6 @@ def test_estimates_wait_for_the_encoder_without_blocking(monkeypatch: pytest.Mon
     text = "naïve text"
 
     assert count(counter, text) == TokenCount(-(-len(text) // 4), "estimated")
-    asyncio.run(count_exact(counter, "other text"))
-    assert count(counter, text).kind == "estimated", "no calibration sample against the stand-in"
 
     release.set()
     assert load_o200k() is not None
@@ -123,10 +118,10 @@ def test_count_kinds() -> None:
     assert count(counter, "a" * 40) == TokenCount(10, "estimated")
 
     assert asyncio.run(count_exact(counter, "b" * 40)) == TokenCount(40, "exact")
-    # The endpoint counted four times the estimate, so later estimates of this counter scale by four.
-    assert count(counter, "a" * 40) == TokenCount(40, "calibrated")
+    # Only the text the provider counted is exact; other text keeps the counter's estimate.
     assert count(counter, "b" * 40) == TokenCount(40, "exact")
-    assert count(fake_token_counter(key="other"), "a" * 40) == TokenCount(10, "estimated")
+    assert count(counter, "a" * 40) == TokenCount(10, "estimated")
+    assert count(fake_token_counter(key="other"), "b" * 40) == TokenCount(10, "estimated")
 
 
 def test_cached_count_makes_no_endpoint_call() -> None:
@@ -155,27 +150,13 @@ def test_without_its_vocabulary_a_size_that_must_not_undercount_counts_bytes() -
         TokenCounter(key="no-vocabulary-own", estimate=lambda _text: None, exact_locally=True),
     ):
         assert count(counter, text) == TokenCount(-(-len(text) // 4), "estimated")
-        assert count(counter, text, calibrated=False) == TokenCount(len(text.encode()), "estimated")
+        assert count(counter, text, upper_bound=True) == TokenCount(len(text.encode()), "estimated")
 
 
 def test_without_its_vocabulary_no_text_counts_as_free() -> None:
     """A short line costs at least one token, so a preload cap still binds on a file of short lines."""
     counter = TokenCounter(key="no-vocabulary", estimate=lambda _text: None)
     assert count(counter, "ab\n") == TokenCount(1, "estimated")
-
-
-def test_calibration_weighs_the_newest_provider_counts_most() -> None:
-    """The route's content drifts, so each earlier provider count weighs less than the one after it."""
-
-    async def endpoint(text: str) -> int:
-        return len(text) * (2 if text.startswith("a") else 1)
-
-    counter = TokenCounter(key="drifting", estimate=len, count=endpoint)
-    asyncio.run(count_exact(counter, "a" * 100))
-    asyncio.run(count_exact(counter, "b" * 100))
-
-    # The first count weighs 0.9 of the second: (200 * 0.9 + 100) / (100 * 0.9 + 100) tokens per estimated token.
-    assert count(counter, "c" * 1_000) == TokenCount(math.ceil(1_000 * 280 / 190), "calibrated")
 
 
 def test_the_exact_count_cache_keeps_the_newest_counts_within_its_bound(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,8 +166,8 @@ def test_the_exact_count_cache_keeps_the_newest_counts_within_its_bound(monkeypa
     for text in texts:
         asyncio.run(count_exact(counter, text))
 
-    assert counts.cached_count(counter, texts[0]) is None
-    assert [counts.cached_count(counter, text) for text in texts[1:]] == [6, 6, 6]
+    assert count(counter, texts[0]).kind == "estimated"
+    assert [count(counter, text) for text in texts[1:]] == [TokenCount(6, "exact")] * 3
 
 
 def test_blank_text_never_reaches_the_endpoint() -> None:
@@ -265,8 +246,8 @@ def test_slow_count_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [log["event"] for log in logs] == ["Token count failed"]
 
 
-def test_prefetch_dedupes_caps_and_cleans_up(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(counts, "_MAX_PENDING", 8)
+@pytest.mark.usefixtures("provider_token_counts")
+def test_measure_waits_for_the_provider_and_shares_one_count_per_text() -> None:
     gate = asyncio.Event()
     counted: list[str] = []
 
@@ -278,34 +259,63 @@ def test_prefetch_dedupes_caps_and_cleans_up(monkeypatch: pytest.MonkeyPatch) ->
     counter = fake_token_counter(count=gated)
 
     async def scenario() -> None:
-        prefetch(counter, "same", "same", *(f"text {index}" for index in range(20)))
-        pending = list(counts._state.pending.values())
-        assert len(pending) == 8
+        first = asyncio.create_task(measure(counter, "same", "same", "other"))
+        second = asyncio.create_task(measure(counter, "same"))
+        await asyncio.sleep(0)
+        assert not first.done()
         gate.set()
-        await asyncio.gather(*pending)
+        await asyncio.gather(first, second)
+        assert sorted(counted) == ["other", "same"]
+        assert count(counter, "same") == TokenCount(4, "exact")
         assert counts._state.pending == {}
-        assert sorted(counted) == sorted(["same", *(f"text {index}" for index in range(7))])
-        prefetch(counter, "same")
-        assert counts._state.pending == {}, "a cached text is not counted again"
-
-        gate.clear()
-        prefetch(counter, "cancelled")
-        (task,) = counts._state.pending.values()
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        assert counts._state.pending == {}
+        await measure(counter, "same")
+        assert sorted(counted) == ["other", "same"], "a measured text is not counted again"
 
     asyncio.run(scenario())
 
 
-def test_prefetch_skips_counters_without_an_endpoint_or_with_a_local_tokenizer() -> None:
+@pytest.mark.usefixtures("provider_token_counts")
+def test_a_cancelled_reply_leaves_a_shared_count_running() -> None:
+    gate = asyncio.Event()
+
+    async def gated(text: str) -> int:
+        await gate.wait()
+        return len(text)
+
+    counter = fake_token_counter(count=gated)
+
     async def scenario() -> None:
-        prefetch(fake_token_counter(), "text")
-        load_o200k()
-        prefetch(counter_for_model(ModelIdentity(id="gpt-4o", provider="openai"), local_encoder=True), "text")
-        assert counts._state.pending == {}
+        cancelled = asyncio.create_task(measure(counter, "shared"))
+        waiting = asyncio.create_task(measure(counter, "shared"))
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        await asyncio.gather(cancelled, return_exceptions=True)
+        gate.set()
+        await waiting
+        assert count(counter, "shared") == TokenCount(6, "exact")
 
     asyncio.run(scenario())
+
+
+def test_measure_skips_counters_without_an_endpoint_or_with_a_local_tokenizer() -> None:
+    async def scenario() -> None:
+        await measure(fake_token_counter(), "text")
+        load_o200k()
+        await measure(counter_for_model(ModelIdentity(id="gpt-4o", provider="openai"), local_encoder=True), "text")
+        assert counts._state.exact == {}
+
+    asyncio.run(scenario())
+
+
+def test_an_estimated_counter_ignores_provider_counts() -> None:
+    """Two sizes taken around a provider count compare on one basis."""
+    counter = fake_token_counter(count=_Endpoint())
+    basis = estimated(counter)
+    before = count(basis, "x" * 40)
+    asyncio.run(count_exact(counter, "x" * 40))
+
+    assert count(counter, "x" * 40) == TokenCount(40, "exact")
+    assert count(basis, "x" * 40) == before == TokenCount(10, "estimated")
 
 
 def test_fit_text_always_fits() -> None:
@@ -354,26 +364,6 @@ def test_background_counts_encode_off_the_event_loop() -> None:
     assert loop_thread not in encoded_on
 
 
-def test_a_frozen_counter_keeps_the_calibration_it_started_with() -> None:
-    """Comparing sizes measured at two times needs one basis, whatever the provider counted in between."""
-
-    async def endpoint(text: str) -> int:
-        return len(text)
-
-    counter = fake_token_counter(count=endpoint)
-    asyncio.run(count_exact(counter, "a" * 400))
-    frozen = counts.frozen(counter)
-    before = count(frozen, "b" * 400).tokens
-
-    async def halved(text: str) -> int:
-        return len(text) // 8
-
-    for index in range(40):
-        asyncio.run(count_exact(fake_token_counter(count=halved), f"{index} " * 200))
-    assert count(counter, "b" * 400).tokens < 400, "the live calibration moved"
-    assert count(frozen, "b" * 400).tokens == before == 400
-
-
 def test_pieces_count_exactly_unless_a_run_has_no_newline_or_word_boundary() -> None:
     """Pieces cut after a newline or before a word count as one encode does; only a hard cut can add a token."""
     load_o200k()
@@ -384,24 +374,3 @@ def test_pieces_count_exactly_unless_a_run_has_no_newline_or_word_boundary() -> 
     assert count(counter, spaced).tokens == _o200k(spaced)
     for run in ("abc" * 6_000, " " * 20_000):
         assert abs(count(counter, run).tokens - _o200k(run)) <= len(run) // 8_192 + 1
-
-
-def test_a_frozen_counter_keeps_the_encoder_it_started_with(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A counter frozen before the encoder loads keeps its stand-in, so its two measurements share one basis."""
-    release = threading.Event()
-    real_get_encoding = tiktoken.get_encoding
-
-    def slow_get_encoding(name: str) -> tiktoken.Encoding:
-        release.wait()
-        return real_get_encoding(name)
-
-    monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
-    monkeypatch.setattr(tiktoken, "get_encoding", slow_get_encoding)
-    counter = counter_for_model(ModelIdentity(id="qwen3.8:27b", provider="ollama"))
-    frozen = counts.frozen(counter)
-    before = count(frozen, "some memory text " * 50)
-
-    release.set()
-    load_o200k()
-
-    assert count(frozen, "some memory text " * 50) == before

@@ -99,8 +99,9 @@ class MemoryEntrypointContext:
     source_path: Path | None = None
     included_lines: int = 0
     total_lines: int = 0
-    # The whole file the preload was cut from; its provider count sizes later cuts.
+    # The whole file as the preload would inline it, and its lines, which the preload is cut from.
     file_text: str = ""
+    lines: tuple[str, ...] = ()
 
     @property
     def omitted_lines(self) -> int:

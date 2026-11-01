@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -36,7 +35,6 @@ from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
-from mindroom.token_counting import counts as token_counts
 from mindroom.token_counting.counts import count, count_exact
 from mindroom.tool_system.runtime_context import current_execution_identity, detached_tool_scope
 from mindroom.tool_system.worker_routing import (
@@ -56,6 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.llm.provider import TokenCounter
     from tests.fakes.knowledge import RecordingRefreshScheduler
 
 
@@ -1537,151 +1536,60 @@ async def test_file_backend_entrypoint_token_cap_counts_newlines_across_many_sho
     assert "[Memory entrypoint truncated - showing 114 of 200 lines" in prompt_parts.session_preamble
 
 
+def _fact_lines(storage_path: Path, config: Config, count_lines: int) -> list[str]:
+    """Write a MEMORY.md of ``count_lines`` 41-character facts under a 100-token cap, and return its lines."""
+    config.memory.file.max_entrypoint_lines = 500
+    config.memory.file.max_entrypoint_tokens = 100
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    lines = [f"fact {index:02} " + "z" * 32 for index in range(count_lines)]
+    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return lines
+
+
+async def _preloaded(lines: list[str], config: Config, counter: TokenCounter) -> list[str]:
+    parts = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
+    return [line for line in lines if line in parts.session_preamble]
+
+
 @pytest.mark.asyncio
-async def test_file_backend_entrypoint_token_cap_trusts_the_providers_count_of_the_preload(
+@pytest.mark.usefixtures("provider_token_counts")
+@pytest.mark.parametrize("characters_per_token", [2, 8], ids=["denser-than-the-estimate", "sparser-than-the-estimate"])
+async def test_file_backend_entrypoint_fills_the_token_cap_as_the_provider_counts_it(
     storage_path: Path,
     config: Config,
+    characters_per_token: int,
 ) -> None:
-    """A provider count of the preload above the cap shrinks it to fit, whatever the per-line estimates said."""
-    config.memory.file.max_entrypoint_lines = 500
-    config.memory.file.max_entrypoint_tokens = 100
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    lines = [f"fact {index:02} " + "z" * 32 for index in range(20)]
-    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    async def double(text: str) -> int:
-        return len(text) // 2
-
-    counter = fake_token_counter(count=double)
-    estimated = await public_build_memory_prompt_parts(
-        "x",
-        "general",
-        config,
-        runtime_paths_for(config),
-        counter=counter,
-    )
-    assert "[Memory entrypoint truncated - showing 9 of 20 lines" in estimated.session_preamble
-    # The provider counts the nine estimated lines at twice their estimate.
-    assert (await count_exact(counter, "\n".join(lines[:9]))).tokens > 100
-
-    counted = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
-
-    kept = len([line for line in lines if line in counted.session_preamble])
-    assert count(counter, "\n".join(lines[:kept])).tokens <= 100 < count(counter, "\n".join(lines[: kept + 1])).tokens
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_grows_to_the_cap_once_the_provider_counted_the_file(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """A provider that counts fewer tokens than the margin estimate lets the preload grow toward the cap."""
-    config.memory.file.max_entrypoint_lines = 500
-    config.memory.file.max_entrypoint_tokens = 100
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    lines = [f"fact {index:02} " + "z" * 32 for index in range(40)]
-    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    async def half(text: str) -> int:
-        return len(text) // 8
-
-    counter = fake_token_counter(count=half)
-    estimated = await public_build_memory_prompt_parts(
-        "x",
-        "general",
-        config,
-        runtime_paths_for(config),
-        counter=counter,
-    )
-    estimated_lines = len([line for line in lines if line in estimated.session_preamble])
-    await asyncio.gather(*token_counts._state.pending.values())
-    await count_exact(counter, "\n".join(lines))
-
-    counted = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
-
-    kept = [line for line in lines if line in counted.session_preamble]
-    # The provider counts half the estimate, so about twice the lines fit.
-    assert len(kept) >= 2 * estimated_lines - 1
-    assert (await count_exact(counter, "\n".join(kept))).tokens <= 100
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_keeps_the_file_rate_after_an_append(storage_path: Path, config: Config) -> None:
-    """An append's text is counted after the reply that needs it, so the file's last provider rate stands in until then.
-
-    The margin estimate would shrink the preload, and the conversation would keep the smaller copy.
-    """
-    config.memory.file.max_entrypoint_lines = 500
-    config.memory.file.max_entrypoint_tokens = 100
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    lines = [f"fact {index:02} " + "z" * 32 for index in range(40)]
-    memory = workspace / "MEMORY.md"
-    memory.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    async def half(text: str) -> int:
-        return len(text) // 8
-
-    counter = fake_token_counter(count=half)
-    await count_exact(counter, "\n".join(lines))
-
-    async def kept_lines() -> list[str]:
-        parts = await public_build_memory_prompt_parts(
-            "x",
-            "general",
-            config,
-            runtime_paths_for(config),
-            counter=counter,
-        )
-        return [line for line in lines if line in parts.session_preamble]
-
-    before = await kept_lines()
-    memory.write_text("\n".join([*lines, "fact 40 " + "z" * 32]) + "\n", encoding="utf-8")
-
-    assert await kept_lines() == before
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_cut_ignores_calibration_from_other_text(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """Provider counts of other text move the route's calibration, never the cut of an unchanged file."""
-    config.memory.file.max_entrypoint_lines = 500
-    config.memory.file.max_entrypoint_tokens = 100
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    lines = [f"fact {index:02} " + "z" * 32 for index in range(40)]
-    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    other_rate = [2]
+    """The provider counts the file and the preload, so the preload holds as many lines as fit the cap, and no more."""
+    lines = _fact_lines(storage_path, config, 40)
 
     async def endpoint(text: str) -> int:
-        # Memory notes count at half the estimate, other text at a rate that drifts.
-        return len(text) // 8 if text.startswith("fact") else len(text) * other_rate[0] // 4
+        return len(text) // characters_per_token
 
     counter = fake_token_counter(count=endpoint)
-    await count_exact(counter, "\n".join(lines))
-    await count_exact(counter, "a system prompt " * 50)
+    kept = await _preloaded(lines, config, counter)
 
-    async def kept_lines() -> list[str]:
-        parts = await public_build_memory_prompt_parts(
-            "x",
-            "general",
-            config,
-            runtime_paths_for(config),
-            counter=counter,
-        )
-        return [line for line in lines if line in parts.session_preamble]
+    assert await endpoint("\n".join(kept)) <= 100 < await endpoint("\n".join(lines[: len(kept) + 1]))
 
-    first = await kept_lines()
-    other_rate[0] = 3
-    await count_exact(counter, "a tool definition " * 50)
-    assert await kept_lines() == first
-    await count_exact(counter, "\n".join(first))
-    assert await kept_lines() == first
-    assert count(counter, "\n".join(first)).tokens > 100 - 10
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("provider_token_counts")
+async def test_file_backend_entrypoint_cut_of_an_unchanged_file_is_stable(storage_path: Path, config: Config) -> None:
+    """Later replies read the provider's counts of an unchanged file and its preload, and keep the same cut."""
+    lines = _fact_lines(storage_path, config, 40)
+    calls: list[str] = []
+
+    async def endpoint(text: str) -> int:
+        calls.append(text)
+        return len(text) // 2
+
+    counter = fake_token_counter(count=endpoint)
+    first = await _preloaded(lines, config, counter)
+    counted = len(calls)
+
+    assert counted
+    assert await _preloaded(lines, config, counter) == first
+    assert len(calls) == counted
 
 
 @pytest.mark.asyncio

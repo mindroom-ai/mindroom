@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import os
 import re
 import stat
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
@@ -22,7 +21,7 @@ from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timed
-from mindroom.token_counting.counts import cached_count, count
+from mindroom.token_counting.counts import count, measure
 
 from ._policy import MemoryScope, team_scope, team_scopes, team_user_id
 from ._prompting import redact_memory_text
@@ -64,8 +63,6 @@ _MAX_MEMORY_SCAN_BYTES = 16 << 20
 _MAX_MEMORY_SCAN_ENTRIES = 4096
 _MAX_MEMORY_DIR_DEPTH = 8
 _READ_CHUNK_BYTES = 1 << 16
-# The latest provider rate of each MEMORY.md, by counter key and path.
-_file_rates: dict[tuple[str, Path], float] = {}
 
 
 @dataclass(frozen=True)
@@ -649,18 +646,19 @@ def _replace_scope_path_memory_entry(scope: MemoryScope, memory_id: str, content
     return True
 
 
-def _selected_lines(costs: list[float], first_entry: int, max_lines: int, max_tokens: float) -> list[int]:
+def _selected_lines(costs: list[int], first_entry: int, max_lines: int, budget: int) -> list[int]:
     """Return the indexes of the whole lines within both caps, withholding the oldest structured entries first.
 
-    ``costs`` holds each line's tokens with its newline. `add_memory` appends entries, so a capped preload keeps the
-    curated head before the first entry and fills the rest with the newest lines; a file without entries, or whose head
-    alone reaches a cap, keeps its leading lines. A long line is withheld whole rather than cut, so the preload never
-    shows a partial fact and the truncation marker accounts for every withheld line.
+    ``costs`` holds each line's characters with its newline, and ``budget`` the characters the token cap allows.
+    `add_memory` appends entries, so a capped preload keeps the curated head before the first entry and fills the rest
+    with the newest lines; a file without entries, or whose head alone reaches a cap, keeps its leading lines. A long
+    line is withheld whole rather than cut, so the preload never shows a partial fact and the truncation marker
+    accounts for every withheld line.
     """
     leading = 0
-    kept = 0.0
+    kept = 0
     for cost in costs[:max_lines]:
-        if kept + cost > max_tokens:
+        if kept + cost > budget:
             break
         kept += cost
         leading += 1
@@ -669,131 +667,92 @@ def _selected_lines(costs: list[float], first_entry: int, max_lines: int, max_to
     kept = sum(costs[:first_entry])
     newest: list[int] = []
     for index in range(len(costs) - 1, first_entry - 1, -1):
-        if first_entry + len(newest) >= max_lines or kept + costs[index] > max_tokens:
+        if first_entry + len(newest) >= max_lines or kept + costs[index] > budget:
             break
         kept += costs[index]
         newest.append(index)
     return [*range(first_entry), *reversed(newest)]
 
 
-def _entrypoint_text(lines: list[str]) -> str:
-    """Return the text of ``lines`` as the preamble inlines it, which is also the text counted in the background."""
+def _entrypoint_text(lines: Sequence[str]) -> str:
+    """Return the text of ``lines`` as the preamble inlines it, which is also the text the provider counts."""
     return "\n".join(lines).strip()
 
 
-def _file_rate(counter: TokenCounter, text: str, source: Path) -> float:
-    """Return how many provider tokens the file at ``source`` holds per estimated token, by its latest provider count.
-
-    An append changes the text, whose count arrives in the background after the reply that needs it, so the rate of
-    the last counted text stands in until then; neither an unchanged file nor an append moves the cut by the family
-    margin or by calibration. Before the provider counted the file, it is one.
-    """
-    key = (counter.key, source)
-    exact = cached_count(counter, text)
-    estimate = counter.estimate(text) if exact is not None else None
-    if exact is not None and estimate:
-        _file_rates[key] = exact / estimate
-    return _file_rates.get(key, 1.0)
-
-
-def _preload_tokens(counter: TokenCounter, text: str, rate: float) -> int:
-    """Count a candidate preload: exactly once its provider counted it, else by its estimate at the file's rate.
-
-    Calibration learned from other text never enters, so it never moves the cut of an unchanged file.
-    """
-    exact = cached_count(counter, text)
-    if exact is not None or counter.exact_locally:
-        return exact if exact is not None else count(counter, text).tokens
-    estimate = counter.estimate(text)
-    return count(counter, text).tokens if estimate is None else math.ceil(estimate * rate)
-
-
-def _line_cost(counter: TokenCounter, line: str) -> float:
-    """Return a line's tokens with its newline by the counter's own estimate, which no later provider count moves."""
-    text = f"{line}\n"
-    estimate = counter.estimate(text)
-    return float(count(counter, text).tokens if estimate is None else estimate)
-
-
-def _entrypoint_lines_within_caps(
-    lines: list[str],
-    max_lines: int,
-    max_tokens: int,
-    counter: TokenCounter,
-    source: Path,
-) -> list[str]:
-    """Keep whole lines within both caps, as the model the preload goes to counts them; ``source`` is the file's path.
-
-    Lines are selected by their own estimates, scaled by the whole file's provider count once cached; once the provider
-    has counted the preload they make and that count is over the cap, the line estimates scale by how far they fell
-    short and the selection repeats, each time with fewer lines. Calibration never enters, so provider counts of other
-    text never move the cut of an unchanged file and break a conversation's cached prompt.
-    """
+def _lines_within(lines: Sequence[str], max_lines: int, budget: int) -> list[str]:
+    """Keep whole lines within ``max_lines`` and ``budget`` characters, withholding the oldest entries first."""
     first_entry = next(
         (index for index, line in enumerate(lines) if FILE_MEMORY_ENTRY_PATTERN.match(line.strip())),
         len(lines),
     )
-    # Only the first and the last ``max_lines`` lines can be selected.
-    costs = [
-        _line_cost(counter, line) if index < max_lines or index >= len(lines) - max_lines else 0.0
-        for index, line in enumerate(lines)
+    return [
+        lines[index] for index in _selected_lines([len(line) + 1 for line in lines], first_entry, max_lines, budget)
     ]
-    rate = scale = _file_rate(counter, _entrypoint_text(lines), source)
-    while True:
-        selected = _selected_lines(costs, first_entry, max_lines, max_tokens / scale)
-        kept = [lines[index] for index in selected]
-        estimated = sum(costs[index] for index in selected)
-        measured = _preload_tokens(counter, _entrypoint_text(kept), rate)
-        if measured <= max_tokens or not estimated:
-            return kept
-        scale = measured / estimated
 
 
-def entrypoint_withholds_lines(text: str, config: Config, counter: TokenCounter, source: Path) -> bool:
-    """Return whether the preload of the MEMORY.md at ``source``, counted with ``counter``, would leave out any line."""
-    lines = text.splitlines()
-    file_config = config.memory.file
-    kept = _entrypoint_lines_within_caps(
-        lines,
-        file_config.max_entrypoint_lines,
-        file_config.max_entrypoint_tokens,
-        counter,
-        source,
-    )
-    return len(kept) < len(lines)
+async def _tokens(counter: TokenCounter, text: str) -> int:
+    """Count ``text`` exactly through ``counter``'s provider, waiting for it, or by estimate when that fails."""
+    await measure(counter, text)
+    return (await asyncio.to_thread(count, counter, text)).tokens
 
 
-@timed("system_prompt_assembly.memory_file_entrypoint_read")
-def _load_scope_entrypoint_context(
-    scope: MemoryScope,
+async def cap_entrypoint(
+    entrypoint: MemoryEntrypointContext,
     config: Config,
     counter: TokenCounter,
 ) -> MemoryEntrypointContext:
-    """Load the scoped `MEMORY.md` entrypoint text and what the caps withheld."""
+    """Cut the preload to both caps, as the model the preload goes to counts it.
+
+    The provider counts the whole file; a file over the token cap keeps that share of its characters, and the preload
+    those lines make is counted in turn, its character budget shrinking by any overshoot until it fits.
+    """
+    file_config = config.memory.file
+    max_tokens = file_config.max_entrypoint_tokens
+    file_tokens = await _tokens(counter, entrypoint.file_text)
+    # The characters of every line with its newline, as the line costs count them.
+    budget = sum(len(line) + 1 for line in entrypoint.lines)
+    if file_tokens > max_tokens:
+        budget = budget * max_tokens // file_tokens
+    while True:
+        kept = _lines_within(entrypoint.lines, file_config.max_entrypoint_lines, budget)
+        text = _entrypoint_text(kept)
+        tokens = await _tokens(counter, text)
+        if tokens <= max_tokens or not kept:
+            return replace(entrypoint, text=text, included_lines=len(kept))
+        budget = min(budget - 1, budget * max_tokens // tokens)
+
+
+def entrypoint_withholds_lines(text: str, config: Config, counter: TokenCounter) -> bool:
+    """Return whether the MEMORY.md preload would leave out any line of ``text``, its size counted with ``counter``."""
+    lines = text.splitlines()
+    file_config = config.memory.file
+    return (
+        len(lines) > file_config.max_entrypoint_lines
+        or count(counter, _entrypoint_text(lines)).tokens > file_config.max_entrypoint_tokens
+    )
+
+
+@timed("system_prompt_assembly.memory_file_entrypoint_read")
+def _load_scope_entrypoint_context(scope: MemoryScope) -> MemoryEntrypointContext:
+    """Load the scoped `MEMORY.md` entrypoint whole; ``cap_entrypoint`` cuts its preload."""
     payload = _read_scope_entrypoint_payload(scope.root)
     if payload is None:
         return MemoryEntrypointContext()
     entrypoint_path = scope.root / FILE_MEMORY_ENTRYPOINT
-    max_lines = config.memory.file.max_entrypoint_lines
-    max_tokens = config.memory.file.max_entrypoint_tokens
     lines = _decode_capped_text(payload).splitlines()
-    # An oversized entrypoint still reports at least one withheld line, so the
-    # preamble tells the model to read the file instead of claiming completeness.
-    total_lines = len(lines) + 1 if payload.truncated else len(lines)
     if payload.truncated:
         logger.warning(
             "Truncated oversized file memory entrypoint",
             path=str(entrypoint_path),
             max_bytes=_MAX_MEMORY_FILE_BYTES,
         )
-    file_text = _entrypoint_text(lines)
-    lines = _entrypoint_lines_within_caps(lines, max_lines, max_tokens, counter, entrypoint_path)
     return MemoryEntrypointContext(
-        text=_entrypoint_text(lines),
-        file_text=file_text,
         source_path=entrypoint_path,
-        included_lines=len(lines),
-        total_lines=total_lines,
+        # An oversized entrypoint still reports at least one withheld line, so the
+        # preamble tells the model to read the file instead of claiming completeness.
+        total_lines=len(lines) + 1 if payload.truncated else len(lines),
+        file_text=_entrypoint_text(lines),
+        lines=tuple(lines),
     )
 
 
@@ -1047,12 +1006,7 @@ class FileMemoryBackend:
         agent_name: str,
         config: Config,
         *,
-        counter: TokenCounter,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryEntrypointContext:
-        """Load the stable scoped `MEMORY.md` entrypoint context for one agent, its size counted with ``counter``."""
-        return _load_scope_entrypoint_context(
-            _agent_scope(agent_name, config, self.runtime_paths, execution_identity),
-            config,
-            counter,
-        )
+        """Load the stable scoped `MEMORY.md` entrypoint of one agent whole, before ``cap_entrypoint`` cuts it."""
+        return _load_scope_entrypoint_context(_agent_scope(agent_name, config, self.runtime_paths, execution_identity))

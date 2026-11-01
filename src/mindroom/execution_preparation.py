@@ -54,7 +54,7 @@ from mindroom.streaming import (
 )
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
-from mindroom.token_counting.counts import prefetch
+from mindroom.token_counting.counts import measure
 from mindroom.tool_system.events import has_tool_trace, strip_visible_tool_markers
 
 if TYPE_CHECKING:
@@ -868,8 +868,8 @@ async def prepare_agent_execution_context(
         PreparedTools(functions=build.spec.functions).specs(),
         build.request_template.deferred_tools.names,
     )
-    # The system prompt and tools are stable inputs: count them exactly in the background, for later replies.
-    prefetch(static_token_estimator.counter, *static_token_estimator.parts)
+    # The system prompt and tools are stable inputs: the provider counts them once, and later replies read the counts.
+    await measure(static_token_estimator.counter, *static_token_estimator.parts)
     # Every count below runs in a worker thread: encoding a long prompt would stall the replies sharing the loop.
     non_prompt_tokens = await asyncio.to_thread(lambda: static_token_estimator.non_prompt_tokens)
     compaction_config = build.history_settings.compaction_config
@@ -963,7 +963,7 @@ async def prepare_bound_team_run_context(
         leader_tools,
         frozenset(),
     )
-    prefetch(static_token_estimator.counter, *static_token_estimator.parts)
+    await measure(static_token_estimator.counter, *static_token_estimator.parts)
     non_prompt_tokens = await asyncio.to_thread(lambda: static_token_estimator.non_prompt_tokens)
     team_compaction_config = history_settings.compaction_config
 

@@ -63,7 +63,7 @@ class Capabilities:
 class TokenCounter:
     """How a route counts the tokens of text its model receives; ``mindroom.token_counting`` reads it for every count.
 
-    ``key`` identifies the counts: two counters with one key count the same text alike, so exact counts, calibration,
+    ``key`` identifies the counts: two counters with one key count the same text alike, so exact counts
     and a failing endpoint's pause are kept per key. ``estimate`` counts locally and never over the network; it
     returns None while its encoder is still loading. ``exact_locally`` says the estimate is the model's own tokenizer.
     ``count`` counts text exactly through the provider, without the framing of the message it sends the text in;

@@ -33,6 +33,7 @@ from mindroom.history.replay import (
     has_effective_persisted_replay,
     log_replay_plan,
     plan_replay_that_fits,
+    prompt_visible_history_texts,
     scope_visible_runs,
 )
 from mindroom.history.storage import (
@@ -63,6 +64,7 @@ from mindroom.model_usage import message_context_tokens
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.timing import timed
+from mindroom.token_counting.counts import measure
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -210,26 +212,22 @@ async def prepare_scope_history(
         history_settings=resolved_inputs.history_settings,
         counter=counter,
     )
-    # Large provider projections spend seconds in tokenizers that release the GIL.
-    estimated_history_tokens = await asyncio.to_thread(estimate_history_tokens, native_route=native_route)
     # A native checkpoint response is billed for the transcript it replaced, so native routes keep the estimate.
     reported_history_tokens = (
-        await asyncio.to_thread(
-            partial(
-                _reported_history_tokens,
-                session=session,
-                latest_run=visible_runs[-1],
-                resolved_inputs=resolved_inputs,
-                config=config,
-                model=model,
-                non_prompt_tokens=non_prompt_tokens,
-            ),
+        await _reported_or_measured_history(
+            session=session,
+            visible_runs=visible_runs,
+            resolved_inputs=resolved_inputs,
+            config=config,
+            model=model,
+            non_prompt_tokens=non_prompt_tokens,
         )
-        if native_route is None and visible_runs
+        if native_route is None
         else None
     )
-    # The provider's count of the latest request is closer than any estimate of the whole history, which one ratio per
-    # route cannot fit to every conversation's content.
+    # Large provider projections spend seconds in tokenizers that release the GIL.
+    estimated_history_tokens = await asyncio.to_thread(estimate_history_tokens, native_route=native_route)
+    # The provider's count of the latest request is closer than an estimate of the whole history.
     current_history_tokens = estimated_history_tokens if reported_history_tokens is None else reported_history_tokens
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
@@ -327,6 +325,49 @@ async def prepare_scope_history(
         # A compaction rewrote the history that request held.
         reported_history_tokens=reported_history_tokens if compaction_decision.mode != "required" else None,
     )
+
+
+async def _reported_or_measured_history(
+    *,
+    session: ConversationSession,
+    visible_runs: list[AnyRunRecord],
+    resolved_inputs: HistoryPreparationInputs,
+    config: Config,
+    model: ModelProvider,
+    non_prompt_tokens: int,
+) -> int | None:
+    """Return the history size the provider reported for the scope's latest request, if it still describes the history.
+
+    Without one, the provider counts the scope's prompt-visible history instead, and the reply waits for that count, so
+    its estimate of the history reads exact counts.
+    """
+    reported = (
+        await asyncio.to_thread(
+            partial(
+                _reported_history_tokens,
+                session=session,
+                latest_run=visible_runs[-1],
+                resolved_inputs=resolved_inputs,
+                config=config,
+                model=model,
+                non_prompt_tokens=non_prompt_tokens,
+            ),
+        )
+        if visible_runs
+        else None
+    )
+    if reported is None:
+        counter = model.token_counter
+        texts = await asyncio.to_thread(
+            partial(
+                prompt_visible_history_texts,
+                session=session,
+                history_settings=resolved_inputs.history_settings,
+                counter=counter,
+            ),
+        )
+        await measure(counter, *texts)
+    return reported
 
 
 def _reported_history_tokens(

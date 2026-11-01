@@ -223,11 +223,12 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalDeliveryView, EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.history.request_messages import TurnMessages
-    from mindroom.llm.provider import ModelProvider, ModelRequest
+    from mindroom.llm.provider import ModelProvider, ModelRequest, TokenCounter
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.orchestrator import _MultiAgentOrchestrator
     from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
+    from mindroom.token_counting.counts import TokenCount
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
     from mindroom.tool_system.tool_access import ToolKey
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -3777,15 +3778,28 @@ def _loaded_o200k() -> None:
     load_o200k()
 
 
+_PROVIDER_COUNT_EXACT = token_counts_module.count_exact
+
+
+async def _local_count(counter: "TokenCounter", text: str) -> "TokenCount":
+    return token_counts_module.count(counter, text)
+
+
 @pytest.fixture(autouse=True)
 def _reset_token_counts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep a test's cached exact counts, calibration, and cooldowns from leaking into later tests.
+    """Keep a test's cached exact counts and cooldowns from leaking into later tests.
 
-    No background count starts either, so a test's model wire only sees the requests the test sends; a test of
-    background counting raises ``_MAX_PENDING`` again.
+    Replies measure what they size through the provider's counting endpoint; here they count locally, so a test's
+    model wire only sees the requests the test sends. A test of provider counting asks for ``provider_token_counts``.
     """
     monkeypatch.setattr(token_counts_module, "_state", token_counts_module._Counts())
-    monkeypatch.setattr(token_counts_module, "_MAX_PENDING", 0)
+    monkeypatch.setattr(token_counts_module, "count_exact", _local_count)
+
+
+@pytest.fixture
+def provider_token_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let ``measure`` reach the counting endpoints of the counters a test builds."""
+    monkeypatch.setattr(token_counts_module, "count_exact", _PROVIDER_COUNT_EXACT)
 
 
 @pytest.fixture(autouse=True)

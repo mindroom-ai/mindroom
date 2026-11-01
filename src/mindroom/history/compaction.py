@@ -675,7 +675,7 @@ def _summary_input_tokens(summary_model: ModelProvider) -> Callable[[str], int]:
 
 def _summary_input_count(counter: TokenCounter, text: str) -> TokenCount:
     """Count summary input with its family margin kept, since a summary input that undercounts fails its request."""
-    return count(counter, text, calibrated=False)
+    return count(counter, text, upper_bound=True)
 
 
 def _after_native_checkpoint(previous_summary: str | None, runs: Sequence[AnyRunRecord]) -> _SummarySource | None:

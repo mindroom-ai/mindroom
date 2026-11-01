@@ -1,16 +1,14 @@
 """Count tokens through the counter of the route whose model receives the text, labelling how each count was made.
 
-A count is exact when the model's own tokenizer runs locally or its provider counted the same text before; calibrated
-when the counter's estimate is scaled by what its provider counted for other text; otherwise estimated. Replies never
-wait for a provider: ``count`` reads only local state, and ``prefetch`` counts in the background, so a later reply
-finds the exact count cached. Counts live in this process's memory.
+A count is exact when the model's own tokenizer runs locally or its provider counted the same text; otherwise it is
+the counter's estimate, an upper bound. ``measure`` has the provider count texts a reply sizes, waiting for it, and
+``count`` reads that exact count from then on. Counts live in this process's memory.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import math
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -27,30 +25,25 @@ if TYPE_CHECKING:
 __all__ = [
     "TokenCount",
     "TokenCountKind",
-    "cached_count",
     "count",
     "count_exact",
+    "estimated",
     "fit_text",
-    "frozen",
+    "measure",
     "opaque_tokens",
-    "prefetch",
     "text_tokens",
     "utf8_byte_bound",
 ]
 
 logger = get_logger(__name__)
 
-type TokenCountKind = Literal["exact", "calibrated", "estimated"]
+type TokenCountKind = Literal["exact", "estimated"]
 
 # One provider count, the framing count included, may take this long before the local count stands in.
-_TIMEOUT_SECONDS = 10.0
+_TIMEOUT_SECONDS = 5.0
 # After a failed provider count, the counter's key counts locally for this long.
 _COOLDOWN_SECONDS = 300.0
-# Background counts in flight at once; further prefetches wait for a later reply.
-_MAX_PENDING = 8
 _MAX_CACHED = 4096
-# Each calibration sample weighs this much less than the next one.
-_DECAY = 0.9
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,11 +59,9 @@ type _TextKey = tuple[str, bytes]
 
 @dataclass
 class _Counts:
-    """The process's exact counts, calibration, cooldowns, and background counts; the lock guards only updates."""
+    """The process's exact counts, cooldowns, and provider counts in flight; the lock guards only updates."""
 
     exact: dict[_TextKey, int] = field(default_factory=dict)
-    # A counter key's decayed sums of provider counts and of its estimates for the same texts.
-    ratios: dict[str, tuple[float, float]] = field(default_factory=dict)
     cooling_until: dict[str, float] = field(default_factory=dict)
     # Counter keys whose latest provider count failed, so a streak of failures warns once.
     failing: set[str] = field(default_factory=set)
@@ -98,49 +89,43 @@ def utf8_byte_bound(text: str) -> int:
     return len(text.encode("utf-8", "surrogatepass"))
 
 
-def _without_encoder(text: str, *, calibrated: bool) -> TokenCount:
-    """Estimate ``text`` while the counter's encoder is unavailable, as ``count``'s ``calibrated`` asks.
+def _without_encoder(text: str, *, upper_bound: bool) -> TokenCount:
+    """Estimate ``text`` while the counter's encoder is unavailable, as ``count``'s ``upper_bound`` asks.
 
     That is only briefly after startup, or for good when its vocabulary cannot be loaded. A size that must not
     undercount takes the UTF-8 byte count, an upper bound; any other takes a quarter token per character, rounded up
     so no text is free, since the byte count would triple history estimates meanwhile and compact conversations that
     fit.
     """
-    return TokenCount((len(text) + 3) // 4 if calibrated else utf8_byte_bound(text), "estimated")
+    return TokenCount(utf8_byte_bound(text) if upper_bound else (len(text) + 3) // 4, "estimated")
 
 
-def cached_count(counter: TokenCounter, text: str) -> int | None:
-    """Return the exact count of ``text`` its provider made for ``counter``'s key, or None when it has not counted it."""
-    key = _text_key(counter, text)
-    with _state.lock:
-        return _state.exact.get(key)
-
-
-def count(counter: TokenCounter, text: str, *, calibrated: bool = True) -> TokenCount:
+def count(counter: TokenCounter, text: str, *, upper_bound: bool = False) -> TokenCount:
     """Count ``text`` for ``counter``'s model from local state only, never over the network.
 
-    ``calibrated=False`` keeps an estimate's family margin, for a size that must not undercount: one ratio per route
-    cannot fit every text's content.
+    ``upper_bound`` asks for a size that must not undercount even while the counter's encoder is unavailable.
     """
     if not text:
         return TokenCount(0, "exact")
     if counter.exact_locally:
         tokens = counter.estimate(text)
-        return _without_encoder(text, calibrated=calibrated) if tokens is None else TokenCount(tokens, "exact")
-    key = _text_key(counter, text)
-    state = _state
-    with state.lock:
-        exact = state.exact.get(key)
-        ratio = state.ratios.get(counter.key)
+        return _without_encoder(text, upper_bound=upper_bound) if tokens is None else TokenCount(tokens, "exact")
+    with _state.lock:
+        exact = _state.exact.get(_text_key(counter, text))
     if exact is not None:
         return TokenCount(exact, "exact")
     estimate = counter.estimate(text)
     if estimate is None:
-        return _without_encoder(text, calibrated=calibrated)
-    if ratio is not None and calibrated:
-        counted, estimated = ratio
-        return TokenCount(math.ceil(estimate * counted / estimated), "calibrated")
+        return _without_encoder(text, upper_bound=upper_bound)
     return TokenCount(estimate, "estimated")
+
+
+def estimated(counter: TokenCounter) -> TokenCounter:
+    """Return ``counter`` counting by its local estimate alone, never by provider counts cached for its key.
+
+    Sizes measured at two times then compare on one basis, even when the provider counted one of the texts between.
+    """
+    return replace(counter, key=f"{counter.key}#estimated", count=None)
 
 
 def _cooling(counter: TokenCounter) -> bool:
@@ -151,8 +136,7 @@ def _cooling(counter: TokenCounter) -> bool:
 async def count_exact(counter: TokenCounter, text: str) -> TokenCount:
     """Count ``text`` through ``counter``'s provider unless a local count is exact; a failure counts locally.
 
-    Only background work awaits this: a reply uses ``count``. Encoding runs in a worker thread, so a long text never
-    stalls the event loop.
+    Encoding runs in a worker thread, so a long text never stalls the event loop.
     """
     local = await asyncio.to_thread(count, counter, text)
     if local.kind == "exact" or counter.count is None or not text.strip() or _cooling(counter):
@@ -169,39 +153,12 @@ async def count_exact(counter: TokenCounter, text: str) -> TokenCount:
         log = logger.debug if streak else logger.warning
         log("Token count failed", key=counter.key, fallback_kind=local.kind, error=str(error))
         return local
-    estimate = await asyncio.to_thread(counter.estimate, text)
-    key = _text_key(counter, text)
-    state = _state
-    with state.lock:
-        state.failing.discard(counter.key)
-        state.exact[key] = tokens
-        if len(state.exact) > _MAX_CACHED:
-            del state.exact[next(iter(state.exact))]
-        # Calibration scales the counter's own estimate, never the stand-in used before its encoder loads.
-        if estimate:
-            counted, estimated = state.ratios.get(counter.key, (0.0, 0.0))
-            state.ratios[counter.key] = (counted * _DECAY + tokens, estimated * _DECAY + estimate)
+    with _state.lock:
+        _state.failing.discard(counter.key)
+        _state.exact[_text_key(counter, text)] = tokens
+        if len(_state.exact) > _MAX_CACHED:
+            del _state.exact[next(iter(_state.exact))]
     return TokenCount(tokens, "exact")
-
-
-def frozen(counter: TokenCounter) -> TokenCounter:
-    """Return a counter that estimates as ``counter`` does now, calibration and encoder included, and never changes.
-
-    Sizes measured at two times compare only on one basis; later provider counts would move a live calibration, and
-    an encoder that finishes loading in between would replace the stand-in.
-    """
-    scale = 1.0
-    if not counter.exact_locally:
-        with _state.lock:
-            counted, estimated = _state.ratios.get(counter.key, (1.0, 1.0))
-        scale = counted / estimated
-    loaded = counter.estimate("a") is not None
-
-    def estimate(text: str) -> int | None:
-        tokens = counter.estimate(text) if loaded else None
-        return None if tokens is None else math.ceil(tokens * scale)
-
-    return replace(counter, key=f"{counter.key}#frozen:{scale}:{loaded}", estimate=estimate, count=None)
 
 
 def _forget(key: _TextKey, _task: asyncio.Task[TokenCount]) -> None:
@@ -209,24 +166,30 @@ def _forget(key: _TextKey, _task: asyncio.Task[TokenCount]) -> None:
         _state.pending.pop(key, None)
 
 
-def prefetch(counter: TokenCounter, *texts: str) -> None:
-    """Count ``texts`` through ``counter``'s provider in the background, so later replies read exact counts.
+async def measure(counter: TokenCounter, *texts: str) -> None:
+    """Have ``counter``'s provider count each of ``texts`` it has not counted yet, so ``count`` reads exact counts.
 
-    Call it on the event loop; it never waits for a count.
+    A reply awaits this for the text it sizes. Each count has the time limit and the route's pause after a failure, a
+    count runs on even when the reply that asked is cancelled, and concurrent requests for one text share one count.
     """
     if counter.count is None or counter.exact_locally or _cooling(counter):
         return
     loop = asyncio.get_running_loop()
-    state = _state
-    for text in texts:
+    tasks: list[asyncio.Task[TokenCount]] = []
+    for text in dict.fromkeys(texts):
         if not text.strip():
             continue
         key = _text_key(counter, text)
-        with state.lock:
-            if key in state.exact or key in state.pending or len(state.pending) >= _MAX_PENDING:
+        with _state.lock:
+            if key in _state.exact:
                 continue
-            task = state.pending[key] = loop.create_task(count_exact(counter, text))
-        task.add_done_callback(partial(_forget, key))
+            task = _state.pending.get(key)
+            if task is None:
+                task = _state.pending[key] = loop.create_task(count_exact(counter, text))
+                task.add_done_callback(partial(_forget, key))
+        tasks.append(task)
+    if tasks:
+        await asyncio.wait(tasks)
 
 
 async def text_tokens(count_message: Callable[[str], Awaitable[int]], text: str) -> int:
