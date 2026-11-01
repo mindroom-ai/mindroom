@@ -28,7 +28,7 @@ from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
@@ -5649,7 +5649,7 @@ def test_calls_config_rejects_agents_sharing_a_resolved_room(tmp_path: Path) -> 
     state.add_room("voice", ROOM_ID, "#voice:example.org", "Voice")
     save_matrix_state(state, runtime_paths)
 
-    with pytest.raises(ValueError, match=r"calls\.agents configures multiple agents for room"):
+    with pytest.raises(ConfigRuntimeValidationError, match=r"calls\.agents configures multiple agents for room"):
         Config.validate_with_runtime(
             {
                 "agents": {
@@ -5675,7 +5675,7 @@ def test_calls_config_rejects_agents_sharing_a_resolved_room(tmp_path: Path) -> 
 
 def test_calls_config_rejects_equivalent_room_refs_before_matrix_state(tmp_path: Path) -> None:
     """Managed room keys and their full aliases cannot bypass call ownership validation."""
-    with pytest.raises(ValueError, match=r"calls\.agents configures multiple agents for room"):
+    with pytest.raises(ConfigRuntimeValidationError, match=r"calls\.agents configures multiple agents for room"):
         Config.validate_with_runtime(
             {
                 "agents": {
