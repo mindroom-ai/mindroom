@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 from dataclasses import dataclass, replace
@@ -504,10 +503,7 @@ def desktop_setup(
             previous = None
             base_revision = exc.revision
         controller = PinnedMatrixDevice(controller_user_id, controller_device_id, controller_ed25519)
-        check_controller_binding(
-            runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
-            json.dumps([controller.user_id, controller.device_id, controller.ed25519]),
-        )
+        check_controller_binding(runtime_paths.storage_root, controller)
         session = load_desktop_session(session_path)
         # Saved local authority carries over only for the same controller.
         matching = previous if previous is not None and previous.controller == controller else None
@@ -546,7 +542,7 @@ def desktop_setup(
         _error_console.print(f"[red]Desktop setup failed:[/red] {exc}")
         raise typer.Exit(1) from None
     _console.print("Setup saved for both the terminal and MindRoom app.")
-    if not (config.allowed_app_ids or config.files.roots or config.shell.enabled):
+    if not config.has_local_capability:
         _console.print(
             "In MindRoom, open Computer access and choose apps, folders, or shell access, "
             "or run `mindroom desktop access`.",
@@ -975,7 +971,7 @@ def _resolve_run_config(
             else config.browser.timeout_seconds,
         ),
     )
-    if not (config.allowed_app_ids or config.files.roots or config.shell.enabled or config.browser.enabled):
+    if not config.has_local_capability:
         msg = (
             "Choose and save apps, folders, or shell access in MindRoom > Computer access, run "
             "`mindroom desktop access`, or pass --allow-app APPLICATION_ID for this run."

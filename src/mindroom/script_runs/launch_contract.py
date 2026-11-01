@@ -1,10 +1,12 @@
-"""Launch facts shared by script launchers, the shim that starts a script, and the SDK inside it.
+"""Facts shared by script launchers, the shim that starts a script, the SDK inside it, and the broker of its calls.
 
 The shim and the SDK run in the script's own process, so this module imports only the standard library.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 GATEWAY_URL_ENV = "MINDROOM_SCRIPT_GATEWAY_URL"
@@ -22,3 +24,15 @@ CAPABILITY_FILE_NAME = "capability"
 def snapshot_dir(run_id: str) -> Path:
     """Return the workspace-relative directory holding one run's source and capability."""
     return Path(".mindroom") / "script-runs" / run_id
+
+
+def digest_arguments(arguments: dict[str, object]) -> str:
+    """Hash a tool call's JSON-wire arguments, which the SDK and the broker must digest byte for byte alike."""
+    encoded = json.dumps(
+        arguments,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
