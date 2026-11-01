@@ -76,6 +76,7 @@ from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     bind_runtime_paths,
+    loop_runs_while_blocked,
     make_conversation_reader_mock,
     make_relation_lookup,
     runtime_paths_for,
@@ -1148,10 +1149,7 @@ async def test_script_broker_offloads_blocking_sync_toolkit_connect(
 
     class BlockingConnectToolkit(_ConnectedCalculator):
         def connect(self) -> None:
-            # The loop runs this callback during the connect only when the connect leaves the loop free.
-            loop_kept_running = threading.Event()
-            loop.call_soon_threadsafe(loop_kept_running.set)
-            connect_saw_loop_running.append(loop_kept_running.wait(timeout=SETTLE_TIMEOUT_SECONDS))
+            connect_saw_loop_running.append(loop_runs_while_blocked(loop))
 
     _replace_calculator_toolkit(monkeypatch, BlockingConnectToolkit)
     broker, token = _broker(tmp_path, events=[])
@@ -1272,10 +1270,7 @@ async def test_script_broker_offloads_blocking_sync_toolkit_close(
 
     class BlockingCloseToolkit(_ConnectedCalculator):
         def close(self) -> None:
-            # The loop runs this callback during the close only when the close leaves the loop free.
-            loop_kept_running = threading.Event()
-            loop.call_soon_threadsafe(loop_kept_running.set)
-            close_saw_loop_running.append(loop_kept_running.wait(timeout=SETTLE_TIMEOUT_SECONDS))
+            close_saw_loop_running.append(loop_runs_while_blocked(loop))
 
         async def add(self, a: int, b: int) -> int:
             return a + b

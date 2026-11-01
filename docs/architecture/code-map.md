@@ -225,7 +225,7 @@ Matrix sync callback
 | `script_runs/broker.py` | Authenticates a script's tool calls by capability and runs each claimed call under the run's current authority |
 | `script_runs/recovery.py` | The recovery signature that lets a restarted primary adopt a still-running worker script |
 | `script_runs/supervised.py` | Launch, status, and signal of one script process through a shell supervisor, shared by unsafe-local runs and worker routes |
-| `script_runs/launch_contract.py` | Script environment names, size limits, and snapshot layout shared by launchers, the shim, and the SDK, and the tool-call argument digest the SDK and the broker must agree on |
+| `script_runs/launch_contract.py` | Script environment names, size limits, and snapshot layout for launchers, the shim, and the SDK, plus the tool-call argument digest the SDK and the broker share |
 | `script_runs/shim.py` | Import-light entry point that verifies a run's snapshot inside the script process and runs its source |
 | `script_runs/wire.py` | The primary-worker script protocol: its version, request and response models, normalized receipts, and error |
 | `script_runs/worker_client.py` | The primary's HTTP client for a worker's script routes |
