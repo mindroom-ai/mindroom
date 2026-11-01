@@ -1,5 +1,6 @@
 """Admin-only routes for platform management."""
 
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
@@ -21,7 +22,6 @@ from backend.models import (
     AdminGetOneResponse,
     AdminInstanceLifecycleResponse,
     AdminListResponse,
-    AdminStatsOut,
     AdminUpdateResponse,
     ProvisionResponse,
     SyncResult,
@@ -58,46 +58,6 @@ def _monthly_revenue_usd(subscription: dict[str, Any]) -> float:
     """Return the monthly revenue of a subscription's recorded Stripe price, or 0 before a price is recorded."""
     months = 12 if subscription["billing_cycle"] == "yearly" else 1
     return (subscription["price_cents"] or 0) / months / 100
-
-
-@router.get("/admin/stats", response_model=AdminStatsOut)
-@limiter.limit("30/minute")
-async def get_admin_stats(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
-    """Get platform statistics for admin dashboard."""
-    audit_log_entry(account_id=admin["user_id"], action="view", resource_type="stats")
-    sb = ensure_supabase()
-
-    try:
-        accounts = sb.table("accounts").select("*", count="exact").execute()
-        subscriptions = (
-            sb.table("subscriptions").select("*", count="exact").eq("status", "active").neq("tier", "free").execute()
-        )
-        instances = sb.table("instances").select("*", count="exact").eq("status", "running").execute()
-
-        # Get recent activity for dashboard
-        recent_logs = (
-            sb.table("audit_logs").select("*, accounts(email)").order("created_at", desc=True).limit(5).execute()
-        )
-
-        recent_activity = []
-        if recent_logs.data:
-            recent_activity.extend(
-                {
-                    "type": log.get("action", "unknown"),
-                    "description": f"{log.get('resource_type', '')} {log.get('action', '')} by {log.get('accounts', {}).get('email', 'System')}",
-                    "timestamp": log.get("created_at", ""),
-                }
-                for log in recent_logs.data
-            )
-
-        return {
-            "accounts": len(accounts.data) if accounts.data else 0,
-            "active_subscriptions": len(subscriptions.data) if subscriptions.data else 0,
-            "running_instances": len(instances.data) if instances.data else 0,
-        }
-    except Exception as e:
-        logger.exception("Error fetching admin stats")
-        raise HTTPException(status_code=500, detail="Failed to fetch statistics") from e
 
 
 @router.post("/admin/instances/{instance_id}/start", response_model=ActionResult)
@@ -357,29 +317,16 @@ async def get_dashboard_metrics(
 
     try:
         accounts = sb.table("accounts").select("*", count="exact", head=True).execute()
-        active_subs = (
-            sb.table("subscriptions")
-            .select("*", count="exact", head=True)
-            .eq("status", "active")
-            .neq("tier", "free")
-            .execute()
+        active_subs = select_all_pages(
+            lambda: (
+                sb.table("subscriptions")
+                .select("billing_cycle,price_cents")
+                .eq("status", "active")
+                .neq("tier", "free")
+                .order("id")
+            )
         )
-
-        subs_data = (
-            sb.table("subscriptions")
-            .select("tier,billing_cycle,price_cents")
-            .eq("status", "active")
-            .neq("tier", "free")
-            .execute()
-        )
-        mrr = sum(_monthly_revenue_usd(sub) for sub in (subs_data.data or []))
-
-        all_instances = instances_data.list_instances(sb, columns="status")
-        status_counts: dict[str, int] = {}
-        for inst in all_instances:
-            status = inst.get("status", "unknown")
-            status_counts[status] = status_counts.get(status, 0) + 1
-
+        instances = instances_data.list_instances(sb, columns="status")
         audit_logs = (
             sb.table("audit_logs")
             .select("created_at, action, account_id")
@@ -387,40 +334,17 @@ async def get_dashboard_metrics(
             .limit(10)
             .execute()
         )
-        recent_activity = audit_logs.data if audit_logs.data else []
-    except Exception:
-        logger.exception("Error fetching metrics")
-        return {
-            "total_accounts": 0,
-            "active_subscriptions": 0,
-            "total_instances": 0,
-            "instances_by_status": {},
-            "subscription_revenue": 0.0,
-            "subscriptions_by_tier": {},
-            "recent_signups": [],
-            "recent_instances": [],
-        }
-    else:
-        # Build subscriptions by tier
-        subscriptions_by_tier = {}
-        if subs_data.data:
-            for sub in subs_data.data:
-                tier = sub.get("tier", "free")
-                subscriptions_by_tier[tier] = subscriptions_by_tier.get(tier, 0) + 1
+    except Exception as e:
+        logger.exception("Error fetching dashboard metrics")
+        raise HTTPException(status_code=500, detail="Failed to fetch dashboard metrics") from e
 
-        # Build instances by status dict
-        instances_by_status = {status: count for status, count in status_counts.items()}
-
-        return {
-            "total_accounts": accounts.count or 0,
-            "active_subscriptions": active_subs.count or 0,
-            "total_instances": len(all_instances),
-            "instances_by_status": instances_by_status,
-            "subscription_revenue": float(round(mrr)),
-            "subscriptions_by_tier": subscriptions_by_tier,
-            "recent_signups": [],  # Not implemented yet
-            "recent_instances": recent_activity if recent_activity else [],
-        }
+    return {
+        "total_accounts": accounts.count or 0,
+        "active_subscriptions": len(active_subs),
+        "instances_by_status": Counter(inst["status"] for inst in instances),
+        "subscription_revenue": float(round(sum(_monthly_revenue_usd(sub) for sub in active_subs))),
+        "recent_instances": audit_logs.data or [],
+    }
 
 
 # === Generic admin resources ===
