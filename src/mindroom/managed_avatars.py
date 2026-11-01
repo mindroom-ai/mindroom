@@ -18,6 +18,7 @@ from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import resolve_avatar_path
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import set_user_avatar_from_file, user_has_avatar
+from mindroom.media_delivery import MAX_DECODED_PIXELS, SUPPORTED_IMAGE_FORMATS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -82,28 +83,43 @@ async def _download_stock_avatar(url: str) -> bytes:
         return await collect_bounded_bytes(response.aiter_bytes(), max_bytes=_MAX_DOWNLOAD_BYTES)
 
 
-def _normalized_png(data: bytes) -> bytes:
-    """Decode an untrusted image and re-encode it as a clean 256px RGB PNG.
+def _refuse_oversized(size: tuple[int, int]) -> None:
+    width, height = size
+    if width * height > MAX_DECODED_PIXELS:
+        msg = f"Avatar image exceeds the {MAX_DECODED_PIXELS}-pixel decoded limit"
+        raise ValueError(msg)
+
+
+def normalized_avatar_png(data: bytes) -> bytes:
+    """Decode an untrusted PNG, JPEG, GIF or WebP and re-encode its center square as a 256px PNG, RGBA if transparent.
 
     Pillow decode failures are raised as ValueError, so callers never import Pillow for its exception types.
+    Blocking; run it off the event loop.
     """
     # Pillow can import NumPy; defer it to avatar work off the event loop.
-    from PIL import Image  # noqa: PLC0415
+    from PIL import Image, ImageOps  # noqa: PLC0415
 
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as image:
+            with Image.open(io.BytesIO(data), formats=SUPPORTED_IMAGE_FORMATS) as image:
+                _refuse_oversized(image.size)
                 image.verify()
-            with Image.open(io.BytesIO(data)) as image:
-                normalized = image.convert("RGB").resize(_AVATAR_SIZE, Image.Resampling.LANCZOS)
+            with Image.open(io.BytesIO(data), formats=SUPPORTED_IMAGE_FORMATS) as image:
+                # A phone photo stores its rotation in EXIF, so turn it upright before cropping.
+                upright = ImageOps.exif_transpose(image)
+                assert upright is not None  # None only when transposing in place
+                # Keeping alpha keeps a transparent logo's background from turning black.
+                mode = "RGBA" if upright.has_transparency_data else "RGB"
+                normalized = ImageOps.fit(upright.convert(mode), _AVATAR_SIZE, Image.Resampling.LANCZOS)
     except (
         OSError,
         SyntaxError,
         Image.DecompressionBombError,
         Image.DecompressionBombWarning,
     ) as exc:
-        msg = f"Undecodable stock avatar: {exc}"
+        # Pillow's own message names a Python object, which tells the owner nothing.
+        msg = "The image cannot be decoded as PNG, JPEG, GIF or WebP"
         raise ValueError(msg) from exc
     output = io.BytesIO()
     normalized.save(output, format="PNG")
@@ -150,7 +166,7 @@ async def _stock_avatar_path(name: str, runtime_paths: RuntimePaths) -> Path | N
         return None
     try:
         data = await _download_stock_avatar(_stock_avatar_url(name))
-        payload = await asyncio.to_thread(_normalized_png, data)
+        payload = await asyncio.to_thread(normalized_avatar_png, data)
         await asyncio.to_thread(_write_cache_file, path, payload)
     except (httpx.HTTPError, ByteLimitExceededError, ValueError, OSError) as exc:
         logger.warning("stock_avatar_unavailable", avatar=name, error=str(exc))

@@ -1998,7 +1998,7 @@ def test_agent_manager_functions_follow_what_the_agent_may_do(tmp_path: Path) ->
             for function in toolkit.functions
         }
 
-    managed = {"agent_settings", "update_agent"}
+    managed = {"agent_settings", "update_agent", "set_avatar"}
     assert offered("creator") == {"create_agent"}
     assert offered("creator_research") == managed | {"delete_agent"}
     assert offered("mind_alice") == managed
