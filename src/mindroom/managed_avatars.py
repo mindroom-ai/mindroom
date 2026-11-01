@@ -82,13 +82,14 @@ async def _download_stock_avatar(url: str) -> bytes:
         return await collect_bounded_bytes(response.aiter_bytes(), max_bytes=_MAX_DOWNLOAD_BYTES)
 
 
-def _normalized_png(data: bytes) -> bytes:
-    """Decode an untrusted image and re-encode it as a clean 256px RGB PNG.
+def normalized_avatar_png(data: bytes) -> bytes:
+    """Decode an untrusted image and re-encode its center square as a clean 256px PNG, RGBA only if it has transparency.
 
     Pillow decode failures are raised as ValueError, so callers never import Pillow for its exception types.
+    Blocking; run it off the event loop.
     """
     # Pillow can import NumPy; defer it to avatar work off the event loop.
-    from PIL import Image  # noqa: PLC0415
+    from PIL import Image, ImageOps  # noqa: PLC0415
 
     try:
         with warnings.catch_warnings():
@@ -96,14 +97,16 @@ def _normalized_png(data: bytes) -> bytes:
             with Image.open(io.BytesIO(data)) as image:
                 image.verify()
             with Image.open(io.BytesIO(data)) as image:
-                normalized = image.convert("RGB").resize(_AVATAR_SIZE, Image.Resampling.LANCZOS)
+                # Keeping alpha keeps a transparent logo's background from turning black.
+                mode = "RGBA" if image.has_transparency_data else "RGB"
+                normalized = ImageOps.fit(image.convert(mode), _AVATAR_SIZE, Image.Resampling.LANCZOS)
     except (
         OSError,
         SyntaxError,
         Image.DecompressionBombError,
         Image.DecompressionBombWarning,
     ) as exc:
-        msg = f"Undecodable stock avatar: {exc}"
+        msg = f"Undecodable avatar image: {exc}"
         raise ValueError(msg) from exc
     output = io.BytesIO()
     normalized.save(output, format="PNG")
@@ -150,7 +153,7 @@ async def _stock_avatar_path(name: str, runtime_paths: RuntimePaths) -> Path | N
         return None
     try:
         data = await _download_stock_avatar(_stock_avatar_url(name))
-        payload = await asyncio.to_thread(_normalized_png, data)
+        payload = await asyncio.to_thread(normalized_avatar_png, data)
         await asyncio.to_thread(_write_cache_file, path, payload)
     except (httpx.HTTPError, ByteLimitExceededError, ValueError, OSError) as exc:
         logger.warning("stock_avatar_unavailable", avatar=name, error=str(exc))

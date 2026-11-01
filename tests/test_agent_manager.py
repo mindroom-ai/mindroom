@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import io
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 import yaml
+from PIL import Image
 
+from mindroom.attachments.storage import register_local_attachment
 from mindroom.config.personal_agents import read_personal_agent_roster_file
 from mindroom.custom_tools.agent_manager import AgentManagerTools
 from mindroom.message_target import MessageTarget
@@ -26,8 +30,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-_CONFIRMED = {"create_agent", "update_agent", "delete_agent"}
-_MANAGED = {"agent_settings", "update_agent"}
+_CONFIRMED = {"create_agent", "update_agent", "set_avatar", "delete_agent"}
+_MANAGED = {"agent_settings", "update_agent", "set_avatar"}
 
 
 @contextmanager
@@ -38,18 +42,21 @@ def _as_requester(
     *,
     requester_id: str = OWNER,
     orchestrator: object | None = None,
+    client: object | None = None,
+    **context_fields: object,
 ) -> Iterator[None]:
     """Bind one live requester, and optionally a running orchestrator, for the toolkit's calls."""
     context = make_test_tool_runtime_context(
         agent_name=tool.agent_name,
         target=MessageTarget.resolve(room_id="!room:example.org", thread_id="$thread", reply_to_event_id="$request"),
         requester_id=requester_id,
-        client=MagicMock(),
+        client=client or MagicMock(),
         config=config,
         runtime_paths=paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         orchestrator=orchestrator,
+        **context_fields,
     )
     with tool_runtime_context(context):
         yield
@@ -225,3 +232,98 @@ async def test_calls_without_a_runtime_context_fail_closed(tmp_path: Path) -> No
 
     assert all(result.startswith("Error: ") for result in results)
     assert len(read_personal_agent_roster_file(paths).created) == 1
+
+
+def _avatar_client(uploads: list[bytes]) -> MagicMock:
+    """A Matrix client that records each upload and accepts a new profile avatar."""
+
+    async def upload(*, data_provider: object, **_kwargs: object) -> tuple[nio.UploadResponse, None]:
+        uploads.append(data_provider(None, None).read())
+        return nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/avatar"}), None
+
+    client = MagicMock()
+    client.user_id = "@mindroom_creator_research:localhost"
+    client.upload = AsyncMock(side_effect=upload)
+    client.set_avatar = AsyncMock(return_value=nio.ProfileSetAvatarResponse())
+    return client
+
+
+def _attach(paths: RuntimePaths, name: str, payload: bytes) -> str:
+    """Register one file the requester attached in the conversation and return its attachment ID."""
+    source = paths.storage_root / "incoming" / name
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(payload)
+    record = register_local_attachment(
+        paths.storage_root,
+        source,
+        kind="image",
+        attachment_id=f"att_{source.stem}",
+        room_id="!room:example.org",
+        thread_id="$thread",
+    )
+    assert record is not None
+    return record.attachment_id
+
+
+def _png(size: tuple[int, int]) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", size, "red").save(output, format="PNG")
+    return output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_an_owner_sets_the_avatar_from_an_attached_image(tmp_path: Path) -> None:
+    """A co-owner's attached photo becomes a square 256px PNG profile picture, without a config reload."""
+    config = _load(tmp_path, created=[_created()])
+    paths = test_runtime_paths(tmp_path)
+    tool = _created_agent_tool()
+    orchestrator = MagicMock()
+    uploads: list[bytes] = []
+    client = _avatar_client(uploads)
+    attachment_id = _attach(paths, "photo.png", _png((400, 200)))
+
+    with _as_requester(
+        tool,
+        config,
+        paths,
+        requester_id=CO_OWNER,
+        orchestrator=orchestrator,
+        client=client,
+        storage_path=paths.storage_root,
+        attachment_ids=(attachment_id,),
+    ):
+        result = await tool.set_avatar(attachment_id)
+
+    assert result == "Set the avatar of creator_research."
+    client.set_avatar.assert_awaited_once_with("mxc://localhost/avatar")
+    (uploaded,) = uploads
+    with Image.open(io.BytesIO(uploaded)) as image:
+        assert (image.format, image.size) == ("PNG", (256, 256))
+    orchestrator.config_reload.request_reload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_refused_avatar_changes_come_back_as_errors_and_leave_the_profile_alone(tmp_path: Path) -> None:
+    """A stranger, an attachment outside the conversation, a file that is no image and a team turn are each refused."""
+    config = _load(tmp_path, created=[_created()])
+    paths = test_runtime_paths(tmp_path)
+    tool = _created_agent_tool()
+    client = _avatar_client([])
+    photo = _attach(paths, "photo.png", _png((64, 64)))
+    text = _attach(paths, "notes.txt", b"not an image")
+    context = {"client": client, "storage_path": paths.storage_root, "attachment_ids": (photo, text)}
+
+    with _as_requester(tool, config, paths, requester_id=STRANGER, **context):
+        stranger = await tool.set_avatar(photo)
+    with _as_requester(tool, config, paths, **context):
+        outside = await tool.set_avatar("att_elsewhere")
+        not_an_image = await tool.set_avatar(text)
+    with _as_requester(tool, config, paths, transport_agent_name="team", **context):
+        team = await tool.set_avatar(photo)
+
+    assert stranger == f"Error: Only {OWNER} or {CO_OWNER} may change creator_research"
+    assert outside == "Error: Attachment ID is not available in this context: att_elsewhere"
+    assert not_an_image.startswith("Error: Undecodable avatar image: ")
+    assert team == "Error: creator_research can change its avatar only when it answers as itself, not through team"
+    client.upload.assert_not_awaited()
+    client.set_avatar.assert_not_awaited()

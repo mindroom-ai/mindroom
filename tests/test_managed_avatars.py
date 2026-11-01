@@ -535,8 +535,32 @@ async def test_root_space_avatar_prefers_bundled_then_falls_back_to_stock(
 @pytest.mark.parametrize("data", [b"not an image", _image_bytes()[:64]], ids=["garbage", "truncated"])
 def test_undecodable_images_raise_value_error(data: bytes) -> None:
     """Pillow decode failures surface as ValueError so the event loop never imports Pillow."""
-    with pytest.raises(ValueError, match="stock avatar"):
-        managed_avatars._normalized_png(data)
+    with pytest.raises(ValueError, match="Undecodable avatar image"):
+        managed_avatars.normalized_avatar_png(data)
+
+
+def test_a_wide_image_is_cropped_to_its_center_square() -> None:
+    """A photo that is not square keeps its proportions, losing its sides instead of being squeezed."""
+    image = Image.new("RGB", (400, 200), "red")
+    image.paste("lime", (100, 0, 300, 200))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+
+    with Image.open(io.BytesIO(managed_avatars.normalized_avatar_png(buffer.getvalue()))) as avatar:
+        assert avatar.size == (256, 256)
+        # Resampling blends a little of the neighboring red into the edge, while squeezing would make it red.
+        for red, green, _ in (avatar.getpixel((0, 128)), avatar.getpixel((255, 128))):
+            assert green > 200 > red
+
+
+def test_a_transparent_logo_keeps_its_transparency() -> None:
+    """A logo with a transparent background stays transparent instead of turning black."""
+    buffer = io.BytesIO()
+    Image.new("RGBA", (64, 64), (0, 0, 0, 0)).save(buffer, format="PNG")
+
+    with Image.open(io.BytesIO(managed_avatars.normalized_avatar_png(buffer.getvalue()))) as avatar:
+        assert avatar.mode == "RGBA"
+        assert avatar.getpixel((0, 0))[3] == 0
 
 
 def _failure_marker(runtime_paths: constants_mod.RuntimePaths, name: str) -> Path:
