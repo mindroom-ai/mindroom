@@ -33,6 +33,7 @@ export function Toaster() {
     <div
       role="status"
       aria-live="polite"
+      aria-atomic="false"
       className="fixed bottom-0 right-0 z-50 p-4 space-y-2"
     >
       {shown.map((toast) => (

@@ -43,15 +43,19 @@ describe("Toaster", () => {
     expect(screen.queryByText("Save Failed")).not.toBeInTheDocument();
   });
 
-  it("announces toasts politely to screen readers", () => {
+  it("announces each new toast politely, without repeating the ones still shown", () => {
     render(<Toaster />);
 
     act(() => {
+      toast({ title: "Credentials saved" });
       toast({ title: "Save failed", variant: "destructive" });
     });
 
     const region = screen.getByRole("status");
     expect(region).toHaveAttribute("aria-live", "polite");
+    // A status region is atomic by default, which would re-read every shown toast on each new one.
+    expect(region).toHaveAttribute("aria-atomic", "false");
+    expect(region).toHaveTextContent("Credentials saved");
     expect(region).toHaveTextContent("Save failed");
   });
 
