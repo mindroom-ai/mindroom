@@ -7,7 +7,6 @@ import hashlib
 import inspect
 import socket
 import threading
-import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -88,6 +87,7 @@ from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     bound_worker_launch_config,
     initialize_approval_store_for_test,
+    loop_runs_while_blocked,
     make_conversation_reader_mock,
     make_relation_lookup,
 )
@@ -2568,29 +2568,32 @@ async def test_reconciliation_pass_has_one_overall_deadline(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_blocking_backend_provider_cannot_stall_the_event_loop_past_pass_deadline(tmp_path: Path) -> None:
     """Potentially blocking backend construction is off-loop and bounded by the pass."""
-    heartbeat = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    release_provider = threading.Event()
+    provider_returned = threading.Event()
+    provider_saw_loop_running: list[bool] = []
 
-    def slow_provider(_locator: str | None) -> None:
-        time.sleep(0.2)
-
-    async def beat() -> None:
-        await asyncio.sleep(0.01)
-        heartbeat.set()
+    def blocking_provider(_locator: str | None) -> None:
+        provider_saw_loop_running.append(loop_runs_while_blocked(loop))
+        # Only an off-loop provider holds the pass, since nothing could release one that blocks the loop.
+        if provider_saw_loop_running[-1]:
+            release_provider.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+        provider_returned.set()
 
     runtime = _lifecycle(
         _runtime_paths(tmp_path),
         manager=_manager_stub(reconcile_durable=AsyncMock()),
-        worker_lease_provider=slow_provider,
+        worker_lease_provider=blocking_provider,
         pass_timeout_seconds=0.02,
     )
-    heartbeat_task = asyncio.create_task(beat())
-    started = asyncio.get_running_loop().time()
 
     await _reconcile_once(runtime)
 
-    assert asyncio.get_running_loop().time() - started < 0.1
-    await asyncio.wait_for(heartbeat.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-    await heartbeat_task
+    # The pass deadline ended the pass while the provider still held it.
+    assert not provider_returned.is_set()
+    release_provider.set()
+    assert await asyncio.to_thread(provider_returned.wait, SETTLE_TIMEOUT_SECONDS)
+    assert provider_saw_loop_running == [True]
 
 
 @pytest.mark.asyncio

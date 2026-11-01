@@ -96,19 +96,12 @@ async def test_history_sizing_allows_loop_progress(
 
     prepared = await prepare()
     loop = asyncio.get_running_loop()
-    entered = asyncio.Event()
-    released = threading.Event()
     loop_progress: list[bool] = []
     estimate = ResponsesAdapter.estimate_portable_replay_tokens
 
     def controlled_estimate(self: ResponsesAdapter, messages: list[Message]) -> int:
-        loop.call_soon_threadsafe(entered.set)
-        loop_progress.append(released.wait(timeout=1))
+        loop_progress.append(loop_runs_while_blocked(loop))
         return estimate(self, messages)
-
-    async def release_from_loop() -> None:
-        await entered.wait()
-        released.set()
 
     def controlled_text_estimate(
         value: str,
@@ -116,8 +109,7 @@ async def test_history_sizing_allows_loop_progress(
         model_id: str | None = None,
         conservative_fallback: bool = False,
     ) -> int:
-        loop.call_soon_threadsafe(entered.set)
-        loop_progress.append(released.wait(timeout=1))
+        loop_progress.append(loop_runs_while_blocked(loop))
         return estimate_compaction_input_tokens(
             value,
             model_id=model_id,
@@ -128,79 +120,15 @@ async def test_history_sizing_allows_loop_progress(
         monkeypatch.setattr("mindroom.history.compaction.estimate_compaction_input_tokens", controlled_text_estimate)
     else:
         monkeypatch.setattr(ResponsesAdapter, "estimate_portable_replay_tokens", controlled_estimate)
-    heartbeat = asyncio.create_task(release_from_loop())
-    try:
-        if stage == "prepare":
-            await prepare()
-        elif stage == "finalize":
-            await _finalize_prepared_history(
-                prepared_scope_history=prepared,
-                config=config,
-                static_prompt_tokens=100,
-            )
-        else:
-            monkeypatch.setattr(
-                "mindroom.history.compaction.generate_compaction_summary",
-                AsyncMock(return_value="Greeting received."),
-            )
-            outcome = await compact_scope_history(
-                storage=storage,
-                session=session,
-                state=HistoryScopeState(force_compact_before_next_run=True),
-                summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
-                available_history_budget=1000,
-                before_tokens=0,
-                replay_window_tokens=2000,
-                threshold_tokens=1000,
-                progress=None,
-                complete=_reported,
-                replay_estimator=model,
-            )
-            assert outcome is not None
-        await heartbeat
-        assert loop_progress
-        assert all(loop_progress)
-        if stage in {"prepare", "finalize"}:
-            assert session == original
-    finally:
-        released.set()
-        heartbeat.cancel()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["basis", "append"])
-async def test_history_storage_work_allows_loop_progress(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    stage: str,
-) -> None:
-    """A pending loop callback can run while compaction reads its basis or appends its summary row."""
-    model = responses_adapter(tmp_path, store=True)
-    session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = create_agent_state_storage("test_agent", tmp_path)
-    seed_session(storage, session)
-    loop = asyncio.get_running_loop()
-    entered = asyncio.Event()
-    released = threading.Event()
-    loop_progress: list[bool] = []
-    target, operation = (
-        ("mindroom.history.compaction.read_chunk_basis", read_chunk_basis)
-        if stage == "basis"
-        else ("mindroom.history.compaction.append_compaction_chunk", append_compaction_chunk)
-    )
-
-    def controlled(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        loop.call_soon_threadsafe(entered.set)
-        loop_progress.append(released.wait(timeout=1))
-        return operation(*args, **kwargs)
-
-    async def release_from_loop() -> None:
-        await entered.wait()
-        released.set()
-
-    monkeypatch.setattr(target, controlled)
-    heartbeat = asyncio.create_task(release_from_loop())
-    try:
+    if stage == "prepare":
+        await prepare()
+    elif stage == "finalize":
+        await _finalize_prepared_history(
+            prepared_scope_history=prepared,
+            config=config,
+            static_prompt_tokens=100,
+        )
+    else:
         monkeypatch.setattr(
             "mindroom.history.compaction.generate_compaction_summary",
             AsyncMock(return_value="Greeting received."),
@@ -219,11 +147,56 @@ async def test_history_storage_work_allows_loop_progress(
             replay_estimator=model,
         )
         assert outcome is not None
-        await heartbeat
-        assert loop_progress == [True]
-    finally:
-        released.set()
-        heartbeat.cancel()
+    assert loop_progress
+    assert all(loop_progress)
+    if stage in {"prepare", "finalize"}:
+        assert session == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["basis", "append"])
+async def test_history_storage_work_allows_loop_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    """A pending loop callback can run while compaction reads its basis or appends its summary row."""
+    model = responses_adapter(tmp_path, store=True)
+    session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
+    storage = create_agent_state_storage("test_agent", tmp_path)
+    seed_session(storage, session)
+    loop = asyncio.get_running_loop()
+    loop_progress: list[bool] = []
+    target, operation = (
+        ("mindroom.history.compaction.read_chunk_basis", read_chunk_basis)
+        if stage == "basis"
+        else ("mindroom.history.compaction.append_compaction_chunk", append_compaction_chunk)
+    )
+
+    def controlled(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        loop_progress.append(loop_runs_while_blocked(loop))
+        return operation(*args, **kwargs)
+
+    monkeypatch.setattr(target, controlled)
+    monkeypatch.setattr(
+        "mindroom.history.compaction.generate_compaction_summary",
+        AsyncMock(return_value="Greeting received."),
+    )
+    outcome = await compact_scope_history(
+        storage=storage,
+        session=session,
+        state=HistoryScopeState(force_compact_before_next_run=True),
+        summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
+        available_history_budget=1000,
+        before_tokens=0,
+        replay_window_tokens=2000,
+        threshold_tokens=1000,
+        progress=None,
+        complete=_reported,
+        replay_estimator=model,
+    )
+    assert outcome is not None
+    assert loop_progress == [True]
 
 
 @pytest.mark.asyncio

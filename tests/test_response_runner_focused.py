@@ -951,35 +951,27 @@ async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_ow
     )
     await response_started.wait()
     inbox.begin_process_shutdown()
-    loop = asyncio.get_running_loop()
-    started_at = loop.time()
-
-    async def delayed_release() -> None:
-        await asyncio.sleep(0.2)
-        release_proof.set()
-
-    release_task = asyncio.create_task(delayed_release())
 
     try:
         with pytest.raises(
             ResponseShutdownTimeoutError,
             match="recovery proof",
         ):
+            # The proof waits for a release sent only after this returns, so a drain waiting for it fails here.
             await asyncio.wait_for(
                 inbox.drain_inbox_responses(
                     cancel_after_seconds=0.01,
                     shutdown_intent=ORDERLY_SHUTDOWN,
                 ),
-                timeout=0.1,
+                timeout=SETTLE_TIMEOUT_SECONDS,
             )
-        assert loop.time() - started_at < 0.08
         assert proof_started.is_set()
-        await asyncio.wait_for(proof_cancelled.wait(), timeout=0.02)
+        assert not proof_finished.is_set()
+        await asyncio.wait_for(proof_cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         assert inbox.pending_inbox_response_count == 1
     finally:
         release_proof.set()
-        await asyncio.wait_for(proof_finished.wait(), timeout=0.1)
-        await release_task
+        await asyncio.wait_for(proof_finished.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         await asyncio.sleep(0)
         await asyncio.gather(response_task, return_exceptions=True)
 

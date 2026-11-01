@@ -41,7 +41,12 @@ from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import TableNames
 from mindroom.token_budget import estimate_compaction_input_tokens
-from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
+from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
+    install_model_providers,
+    prepare_history_for_run_for_test,
+    seed_session,
+)
 from tests.fakes.scripted_model import Await
 from tests.fakes.summary_model import summary_model, summary_steps, summary_turn
 from tests.history_helpers import (
@@ -120,18 +125,6 @@ class _ProviderCall:
         self.release = asyncio.Event()
         self.task: asyncio.Task[object] | None = None
 
-    async def slow_to_unwind(self) -> None:
-        self.started.set()
-        try:
-            await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            self.cancelled.set()
-            await asyncio.sleep(0.05)
-            raise
-        finally:
-            self.finished.set()
-        raise AssertionError
-
     async def swallowing_cancel(self) -> None:
         self.started.set()
         try:
@@ -160,7 +153,7 @@ class _ProviderCall:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             self.cancelled.set()
-            await asyncio.sleep(0.05)
+            await self.release.wait()
             raise
         finally:
             self.finished.set()
@@ -181,21 +174,25 @@ class _ProviderCall:
 @pytest.mark.asyncio
 async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_cleanup() -> None:
     call = _ProviderCall()
-    start = asyncio.get_running_loop().time()
 
     with pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"):
-        await generate_compaction_summary(
-            model=summary_model([Await(call.slow_to_unwind)]),
-            summary_input="Current prompt",
-            summary_prompt=COMPACTION_SUMMARY_PROMPT,
-            timeout_seconds=0.01,
-            on_usage=None,
+        # The cleanup waits for a release sent only after this returns, so a call waiting for it fails here.
+        await asyncio.wait_for(
+            generate_compaction_summary(
+                model=summary_model([Await(call.slow_cancel_cleanup)]),
+                summary_input="Current prompt",
+                summary_prompt=COMPACTION_SUMMARY_PROMPT,
+                timeout_seconds=0.01,
+                on_usage=None,
+            ),
+            timeout=SETTLE_TIMEOUT_SECONDS,
         )
 
-    assert asyncio.get_running_loop().time() - start < 0.04
-    await asyncio.wait_for(call.started.wait(), timeout=0.1)
-    await asyncio.wait_for(call.cancelled.wait(), timeout=0.1)
-    await asyncio.wait_for(call.finished.wait(), timeout=0.2)
+    assert call.started.is_set()
+    assert not call.finished.is_set()
+    await asyncio.wait_for(call.cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+    call.release.set()
+    await asyncio.wait_for(call.finished.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -268,16 +265,17 @@ async def test_compaction_summary_outer_cancellation_returns_without_waiting_for
         ),
     )
 
-    await asyncio.wait_for(call.started.wait(), timeout=0.1)
+    await asyncio.wait_for(call.started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     summary_task.cancel()
-    start = asyncio.get_running_loop().time()
 
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(summary_task, timeout=0.02)
+        # The cleanup waits for a release sent only after this returns, so a call waiting for it fails here.
+        await asyncio.wait_for(summary_task, timeout=SETTLE_TIMEOUT_SECONDS)
 
-    assert asyncio.get_running_loop().time() - start < 0.04
-    await asyncio.wait_for(call.cancelled.wait(), timeout=0.1)
-    await asyncio.wait_for(call.finished.wait(), timeout=0.2)
+    assert not call.finished.is_set()
+    await asyncio.wait_for(call.cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+    call.release.set()
+    await asyncio.wait_for(call.finished.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
