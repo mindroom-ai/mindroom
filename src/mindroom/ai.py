@@ -154,7 +154,7 @@ def _compose_current_turn_prompt(
     raw_prompt: str,
     model_prompt: str | None,
 ) -> str:
-    """Build the persisted current-turn user message without transient context."""
+    """Build the current-turn user message, which holds no transient context."""
     prompt_chunks: list[str] = []
     if raw_prompt:
         prompt_chunks.append(raw_prompt)

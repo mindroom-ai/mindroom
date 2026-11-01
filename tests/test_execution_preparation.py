@@ -1274,8 +1274,8 @@ def test_current_matrix_message_renders_timestamp_as_msg_attribute() -> None:
     )
 
 
-def test_transient_context_follows_current_prompt_without_entering_replay_context() -> None:
-    """One-turn context reaches the model after the prompt, so the request stays a prefix of the next one's replay."""
+def test_transient_context_follows_current_prompt_after_the_thread_context() -> None:
+    """Turn context reaches the model after the prompt, outside the Matrix context sent before it."""
     persisted_context = Message(role="assistant", content="Earlier answer")
     transient_context = Message(
         role="user",

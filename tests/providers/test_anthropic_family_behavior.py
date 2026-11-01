@@ -898,8 +898,9 @@ async def test_replayed_thinking_whose_context_changed_is_dropped_where_the_rout
 ) -> None:
     """A request whose earlier context changed drops the stale thinking instead of failing, on routes that accept it.
 
-    Sonnet 5.5 checks replayed thinking against the system prompt, tools, and messages before it, which MindRoom's
-    date and turn context change; Bedrock has not shown that it accepts the beta, so it sends no binding.
+    Sonnet 5.5 checks replayed thinking against the system prompt, tools, and messages before it, which the date in
+    MindRoom's system prompt, compaction, and replay limits change; Bedrock has not shown that it accepts the beta, so
+    it sends no binding.
     """
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     await claude_turn(route_provider(route, tmp_path, wire), ModelRequest(messages=_user()))

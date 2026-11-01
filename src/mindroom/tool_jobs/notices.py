@@ -100,7 +100,8 @@ async def _unnoticed_notice(notices: JobNotices) -> str | None:
 async def _turn_start_job_note() -> str | None:
     """Describe the conversation's jobs that ended before this reply, cancelled ones included, once per reply.
 
-    Every attempt of the reply asks again and gets the same note, since an attempt's prompt is not saved.
+    Every attempt of the reply asks again and gets the same note, since no later attempt replays an earlier one's
+    turn context.
     """
     notices = _NOTICES.get()
     if notices is None:
