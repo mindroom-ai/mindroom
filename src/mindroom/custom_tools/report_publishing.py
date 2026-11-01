@@ -48,7 +48,15 @@ class ReportPublishingTools(Toolkit):
         source: dict[str, Any],
         confirm_public: bool,
     ) -> str:
-        """Publish an authorized report source through a revocable public link. Supports source_type dynamic_workflow_run and static_site."""
+        """Publish an authorized report source through a revocable public link.
+
+        Args:
+            source_type: Either dynamic_workflow_run or static_site.
+            source: For dynamic_workflow_run, the workflow_id and run_id of a completed run; for static_site, a
+                workspace-relative path to a directory with index.html or to one HTML file, and a title.
+            confirm_public: Must be true; anyone with the link can open the report until it is revoked.
+
+        """
         if isinstance(context := tool_context_or_error(self._payload, "Report Publishing"), str):
             return context
         if not confirm_public:
