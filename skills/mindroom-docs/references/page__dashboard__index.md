@@ -58,6 +58,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 ### Schedules
 
 Lists scheduled tasks across rooms with room, status, schedule type, delivery mode, and next run time.
+A room whose schedules cannot be read, for example because the router is not in it, is named above the list with the reason, and the home tab counts it, instead of showing as empty.
 You can edit a task's timing, description, and visible or silent delivery, or cancel it.
 See [Scheduling](https://docs.mindroom.chat/scheduling/).
 
@@ -221,7 +222,7 @@ Upload and delete return HTTP 409 for Git-backed bases (see [Sync Behavior](http
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/schedules` | List scheduled tasks, optionally filtered by room, including each task's `silent` flag |
+| GET | `/api/schedules` | List scheduled tasks, optionally filtered by room, including each task's `silent` flag; `unreadable_rooms` names each room whose tasks could not be read, with the reason |
 | PUT | `/api/schedules/{task_id}` | Edit a scheduled task, including `silent` |
 | DELETE | `/api/schedules/{task_id}` | Cancel a scheduled task |
 
