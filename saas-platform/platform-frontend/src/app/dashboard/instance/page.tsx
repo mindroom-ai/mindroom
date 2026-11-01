@@ -32,7 +32,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
   const [loading, setLoading] = useState(!cachedInstance)
   const [refreshing, setRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
-  const { platformDomain, apiUrl } = useMemo(() => getRuntimeConfig(), [])
+  const { platformDomain } = useMemo(() => getRuntimeConfig(), [])
 
 
   useEffect(() => {

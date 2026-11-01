@@ -89,7 +89,6 @@ export function useInstance() {
     }
 
     // Poll for changes every 15 seconds for more responsive updates
-    // (avoids RLS issues with direct Supabase access)
     const interval = setInterval(async () => {
       await fetchInstance(false)  // Background update, no loading state
     }, 15000)
