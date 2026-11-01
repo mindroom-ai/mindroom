@@ -341,16 +341,6 @@ class LockedTurns:
             runtime_paths=self.deps.runtime_paths,
         )
 
-    def response_identity(self, request: ResponseRequest, *, response_kind: str) -> ResponseIdentity:
-        """Build the per-turn identity carried by delivery requests and response hooks."""
-        return ResponseIdentity(
-            response_kind=response_kind,
-            response_envelope=request.response_envelope,
-            sources=request.sources,
-            correlation_id=correlation_id_for_request(request),
-            participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
-        )
-
     async def _finalize_locked_outcome(
         self,
         lifecycle: ResponseLifecycle,
@@ -530,7 +520,13 @@ class LockedTurns:
                 logger=self.deps.logger,
                 process_shutdown_requested=current_task_is_process_shutdown,
             ),
-            identity=self.response_identity(request, response_kind=response_kind),
+            identity=ResponseIdentity(
+                response_kind=response_kind,
+                response_envelope=request.response_envelope,
+                sources=request.sources,
+                correlation_id=correlation_id_for_request(request),
+                participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
+            ),
             pipeline_timing=request.pipeline_timing,
         )
 
