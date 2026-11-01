@@ -3078,7 +3078,8 @@ Set these fields in `defaults`, on an agent, or on a team (see [Team History and
 
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
-Each turn's context, such as retrieved memories, `persist=False` enrichment, and approval receipts, replays with that turn until compaction, except under `num_history_messages`, which counts and replays only conversation messages.
+Each turn's context, such as retrieved memories, `persist=False` enrichment, and the note telling the agent how a tool approval was decided, replays with that turn until compaction, except under `num_history_messages`, which counts and replays only conversation messages.
+Text compaction summaries leave that context out, while a [native compaction](#native-compaction) summary can include it, and a later text summary keeps what that summary says.
 Tool results replay unchanged.
 
 ## Context Window
@@ -3238,7 +3239,7 @@ With `none`, the agent gets no memories in its prompt, stores none after its tur
 Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript sent to `mem0`; the transcript file itself is kept as spoken.
 What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written.
 Conversation history is separate and stays in the session; see [History & Compaction](https://docs.mindroom.chat/configuration/history/).
-Memories retrieved for a reply [stay in that conversation's history](https://docs.mindroom.chat/configuration/history/#history-settings), so its later replies can still see them after the memory is deleted, until the history is compacted; a [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction) summary can still mention them.
+Memories retrieved for a reply [stay in that conversation's history](https://docs.mindroom.chat/configuration/history/#history-settings), so its later replies can still see them after the memory is deleted.
 OpenClaw-compatible agents use this same backend selection.
 
 ## Memory Scopes
@@ -17714,8 +17715,7 @@ Persisted items are appended to the user message and kept in session history, so
 ```
 
 Items with `persist=False` go into a separate context message after the turn's prompt instead of into the message text.
-Later turns [still see that message](https://docs.mindroom.chat/configuration/history/#history-settings) where it was sent.
-Text compaction leaves it out of its summaries, while persisted items stay in them; [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction) summarizes it with the rest of the conversation, and a later text summary keeps what that summary says.
+Later turns still see that message where it was sent, and unlike persisted items it stays out of text compaction summaries; see [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings).
 Use `persist=False` for live data such as location or weather.
 Use stable keys and deterministic text for persisted items.
 

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from mindroom.agent_loop.model_loop import EndRun, SendRequest
 from mindroom.attachments.storage import mentions_attachments
 from mindroom.history.message_content import message_media_entries
-from mindroom.hooks.enrichment import is_transient_context, render_transient_context
+from mindroom.hooks.enrichment import render_transient_context
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.state import JudgmentMessage
 from mindroom.llm.messages import Message
@@ -71,11 +71,7 @@ def parse_decision(content: str) -> ParticipationDecision:
 def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMessage, ...] | None:
     """Project room text only; incomplete or media-bearing context needs the reply model."""
     conversation = [
-        message
-        for message in messages
-        if message.role in {"user", "assistant"}
-        and message.add_to_agent_memory
-        and not is_transient_context(message.content)
+        message for message in messages if message.role in {"user", "assistant"} and message.add_to_agent_memory
     ][-8:]
     for message in conversation:
         if (

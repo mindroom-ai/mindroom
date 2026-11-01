@@ -455,10 +455,11 @@ type AnyRunRecord = RunRecord | TeamRunRecord
 def run_tool_executions(record: AnyRunRecord) -> list[ToolExecution]:
     """Return the run's tool executions, then those of every member run a team run ended.
 
-    A call that stopped any of these runs continues the turn in another attempt (``stopped_calls``), so the run stores
-    no turn context. Any member's completed model-switch call surfaces here and drives a whole-fan continuation, even
-    when the team already produced visible output, as it does for an agent: gating on visible output would disable
-    continuation in coordinate mode, where the leader almost always synthesizes text around a member's truncated call.
+    A run that stopped after one of these calls stores no turn context, because a model switch continues the turn in
+    another attempt that sends it again (``stopped_calls``). Any member's completed model-switch call surfaces here
+    and drives a whole-fan continuation, even when the team already produced visible output, as it does for an agent:
+    gating on visible output would disable continuation in coordinate mode, where the leader almost always
+    synthesizes text around a member's truncated call.
     """
     members = record.ended_member_runs if isinstance(record, TeamRunRecord) else ()
     return [*(record.tools or ()), *(tool for member in members for tool in member.tools or ())]

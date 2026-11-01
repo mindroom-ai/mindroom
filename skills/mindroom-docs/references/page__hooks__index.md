@@ -267,8 +267,7 @@ Persisted items are appended to the user message and kept in session history, so
 ```
 
 Items with `persist=False` go into a separate context message after the turn's prompt instead of into the message text.
-Later turns [still see that message](https://docs.mindroom.chat/configuration/history/#history-settings) where it was sent.
-Text compaction leaves it out of its summaries, while persisted items stay in them; [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction) summarizes it with the rest of the conversation, and a later text summary keeps what that summary says.
+Later turns still see that message where it was sent, and unlike persisted items it stays out of text compaction summaries; see [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings).
 Use `persist=False` for live data such as location or weather.
 Use stable keys and deterministic text for persisted items.
 
