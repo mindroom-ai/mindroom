@@ -5739,7 +5739,7 @@ def test_calls_config_rejects_equivalent_room_refs_before_matrix_state(tmp_path:
             {
                 "agents": {
                     "one": {"display_name": "One", "rooms": ["voice"]},
-                    "two": {"display_name": "Two", "rooms": ["#voice:example.org"]},
+                    "two": {"display_name": "Two", "rooms": ["#voice:localhost"]},
                 },
                 "calls": {
                     "enabled": True,

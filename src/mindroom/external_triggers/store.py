@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mindroom.config.validation import non_empty_stripped
 from mindroom.delivery_replay import DeliveryReplayStore
 from mindroom.durable_write import write_json_file_durable
-from mindroom.entity_resolution import configured_routable_entity_names_for_room
+from mindroom.entity_resolution import configured_routable_entity_names_for_room, names_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.external_triggers.policy import is_external_trigger_administrator
 from mindroom.file_locks import advisory_file_lock
@@ -59,7 +59,7 @@ class ExternalTriggerTarget(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    room_id: str = Field(description="Configured room key, room alias, or Matrix room ID")
+    room_id: str = Field(description="Configured room key, that room's full alias, or Matrix room ID")
     thread_id: str | None = Field(default=None, description="Optional Matrix thread event ID")
     agent: str = Field(description="Agent or team name to mention")
     new_thread: bool = Field(default=False, description="Whether the trigger starts a new thread")
@@ -645,6 +645,10 @@ def _validate_target(record: ExternalTriggerRecord, config: Config, runtime_path
     target = record.target
     if target.agent not in config.agents and target.agent not in config.teams:
         msg = f"external trigger target references unknown agent or team: {target.agent}"
+        raise ExternalTriggerStoreError(msg)
+    # Delivery reads the room through MindRoom's record, so an alias it cannot map would never deliver.
+    if not names_room(config, target.room_id, runtime_paths):
+        msg = "external trigger target room must be a room key MindRoom manages, that room's full alias, or a ! room ID"
         raise ExternalTriggerStoreError(msg)
     if target.room_id in get_rooms_for_entity(target.agent, config):
         return

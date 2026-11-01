@@ -88,10 +88,11 @@ def test_resolve_managed_account_auth_rejects_empty_token_file(tmp_path: Path) -
         resolve_managed_account_auth(runtime_paths)
 
 
-def test_resolve_managed_account_auth_reads_token_file(tmp_path: Path) -> None:
-    """Appservice tokens can come from mounted secret files."""
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"], ids=["plain", "byte-order-mark"])
+def test_resolve_managed_account_auth_reads_token_file(tmp_path: Path, encoding: str) -> None:
+    """Appservice tokens can come from mounted secret files, saved with or without a byte order mark."""
     token_file = tmp_path / "appservice-token"
-    token_file.write_text(f"{APPSERVICE_TOKEN}\n", encoding="utf-8")
+    token_file.write_text(f"{APPSERVICE_TOKEN}\n", encoding=encoding)
     runtime_paths = _runtime_paths(
         tmp_path,
         MATRIX_MANAGED_ACCOUNT_AUTH="appservice",

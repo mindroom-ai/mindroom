@@ -1649,7 +1649,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_BASE_URL` | Base URL for `provider: openai` models, such as a local inference server; a model's `extra_kwargs.base_url` overrides it, and `extra_kwargs.client_params.base_url` overrides both |
+| `OPENAI_BASE_URL` | Base URL for `provider: openai` models and the `openai` memory embedder and memory LLM, such as a local inference server; a model's `extra_kwargs.base_url` overrides it, and `extra_kwargs.client_params.base_url` overrides both |
 
 ### Dashboard and API
 
@@ -1755,7 +1755,7 @@ agents:
 | `skill_learning` | object | disabled | [Automatic skill learning](https://docs.mindroom.chat/skills/#settings), separate from `learning` |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `minimal_instructions` | list | `[]` | Guidance included on every minimal-mode request; see [Prompt and `minimal_instructions`](https://docs.mindroom.chat/tools/agent-cli/#prompt-and-minimal_instructions) |
-| `rooms` | list | `[]` | Room keys, aliases, or Matrix room IDs to join; missing managed rooms are created (see [Rooms](https://docs.mindroom.chat/rooms/)) |
+| `rooms` | list | `[]` | Room keys or Matrix room IDs to join; missing managed rooms are created (see [Rooms](https://docs.mindroom.chat/rooms/#configuration)) |
 | `accept_invites` | bool or list | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID. Rooms joined this way are kept across restarts. Joining a room never grants its members access; see [Authorization](https://docs.mindroom.chat/authorization/) |
 | `access` | object | `null` | Who may converse with the agent: `current_room_members`, `members_of_rooms`, and `users`. When omitted, members of the agent's own managed `rooms` have access. See [Responder access](https://docs.mindroom.chat/authorization/#responder-access) |
 | `credential_managers` | list | `[]` | Concrete Matrix user IDs (no wildcards) allowed to manage this agent's credentials and shared OAuth connections; grants no conversation access. See [OAuth](https://docs.mindroom.chat/oauth-framework/) |
@@ -1764,7 +1764,7 @@ agents:
 | `mid_turn` | object | `null` | Judge whether messages queued during a response can wait until it finishes; see [Mid-Turn Coalescing](https://docs.mindroom.chat/configuration/threads/#mid-turn-coalescing) |
 | `cold_cache` | object | `null` | Move an idle thread to `cheap_model` for good when a judge accepts it; see [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
-| `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
+| `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
 | `markdown` | bool | `null` | Tell the agent in its system prompt that its replies are shown as Markdown; chat replies are rendered as Markdown either way. Team leaders follow `defaults.markdown`, and voice calls leave the line out |
 | `knowledge_graph` | bool | `null` | Build a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) from this agent's conversations and give it the `knowledge_graph` tool |
 | `knowledge_graph_edits` | bool | `null` | Let the agent correct its knowledge graph: delete wrong facts and entities, merge duplicate entities, and rewrite summaries; needs `knowledge_graph`. See [Letting the Agent Fix Its Graph](https://docs.mindroom.chat/knowledge-graph/#letting-the-agent-fix-its-graph) |
@@ -2695,7 +2695,7 @@ teams:
 | `role` | string | *required* | Description of the team's purpose, which the team model reads beside each member agent's own `role` when it chooses whom to delegate to |
 | `agents` | list | *required* | Names of agents under `agents:` that form the team; at least one, no duplicates |
 | `mode` | string | `coordinate` | `coordinate` or `collaborate`; any other value fails config validation |
-| `rooms` | list | `[]` | Room keys, aliases, or Matrix room IDs the team joins and responds in |
+| `rooms` | list | `[]` | Room keys or Matrix room IDs the team joins and responds in (see [Rooms](https://docs.mindroom.chat/rooms/#configuration)) |
 | `accept_invites` | bool or list | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID; this is separate from the members' own settings. Joining a room never grants its members access; see [Invitations](https://docs.mindroom.chat/authorization/#invitations) |
 | `access` | object | `null` | Who may converse with the team: `current_room_members`, `members_of_rooms`, and `users`. When omitted, members of the team's own managed `rooms` have access. See [Responder access](https://docs.mindroom.chat/authorization/#responder-access) |
 | `model` | string | `"default"` | Key under `models:` used for coordination and synthesis |
@@ -2844,7 +2844,7 @@ See also [Routing & Responder Selection](https://docs.mindroom.chat/configuratio
 
 Each agent's `thread_mode` and `room_thread_modes` fields (see [Agent Configuration](https://docs.mindroom.chat/configuration/agents/)) choose between Matrix threads and one continuous conversation per room.
 A room override set with [`!thread_mode`](#thread_mode) takes precedence for every agent, team, and the router in that room.
-Without one, an agent uses the `room_thread_modes` entry matching the current room by Matrix room ID, room key, or alias, and otherwise its `thread_mode`.
+Without one, an agent uses the `room_thread_modes` entry matching the current room by Matrix room ID, room key, or a managed room's full alias, and otherwise its `thread_mode`.
 
 A team uses its members' mode for the room when all members agree, and `thread` when they differ.
 The router uses the mode shared by all agents relevant to the room, including agents that join through `teams.<name>.rooms`, and `thread` when they differ.
@@ -3282,7 +3282,7 @@ Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_tra
 |---|---|---|
 | `provider` | `openai` | Embedding provider |
 | `config.model` | `text-embedding-3-small` | Embedding model name |
-| `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `ollama`, a configured `OLLAMA_HOST` takes precedence over `host`, and without either the host is `http://localhost:11434` |
+| `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `openai`, without it the embedder uses [`OPENAI_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else OpenAI's API; for `ollama`, a configured `OLLAMA_HOST` takes precedence over `host`, and without either the host is `http://localhost:11434` |
 | `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers |
 | `config.api_key` | `null` | Explicit API key for the `openai` provider |
 | `config.credentials_service` | `null` | Credential service that supplies the `openai` provider's key |
@@ -3365,6 +3365,7 @@ Supported providers are `ollama`, `openai`, `openrouter`, and `anthropic`.
 When `memory.llm` is omitted, MindRoom uses `gemma4` on the Ollama server set by `OLLAMA_HOST` (default `http://localhost:11434`).
 With `provider: ollama`, `config.host` names the Ollama server only when no `OLLAMA_HOST` is configured, unlike a model's `host`; without either, extraction uses `http://localhost:11434`, and other providers ignore `host`.
 With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
+With `provider: openai`, `config.openai_base_url` sets the server; without it, extraction uses [`OPENAI_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else OpenAI's API.
 For GPT-5 and GPT-6 models, with `provider: openai` or as `openai/<model>` with `provider: openrouter`, Mem0 sends no `temperature`, `top_p`, or `max_tokens` from `config` unless `config.is_reasoning_model` is `false`; set `config.reasoning_effort`, for example `low`, to choose their reasoning effort.
 
 ```yaml
@@ -4801,6 +4802,7 @@ defaults:
 agents:
   mind:
     memory_backend: file
+    rooms: [personal]
     automations:
       - prompt_curation          # the built-in with its defaults
       # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
@@ -4811,7 +4813,7 @@ agents:
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
 - Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
 - `cron` is a five-field expression in the agent's [timezone](#timezone).
-- `room` is a room alias or ID; it defaults to the agent's first configured room.
+- `room` names a room as an entry of [`rooms`](https://docs.mindroom.chat/rooms/#configuration) does, and it must be a room the agent is in, because the agent posts the prompt itself; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
 - A [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) runs its automations once for each requester who has used it, as that requester and on that requester's own files, and posts in their [personal room](https://docs.mindroom.chat/personal-rooms/) with the agent.
@@ -4895,10 +4897,11 @@ agents:
   mind:
     knowledge_graph: true
     tools: [mcp_github, duckduckgo]
+    rooms: [exploration]
     automations:
       - name: exploration
         cron: "0 */6 * * *"
-        room: "#mind-exploration"
+        room: exploration
         max_tool_calls: 30
 ```
 
@@ -6927,6 +6930,7 @@ teams:
 
 Every room key listed by an agent or team, or under top-level `rooms`, is a managed room, created on startup or config reload if it does not exist yet.
 Entries starting with `!` are existing Matrix room IDs, which are joined as they are and are not created or managed.
+A `#` room alias is accepted only as the alias MindRoom gives a managed room (see [Room Management](#room-management)), so list a room MindRoom did not create by its `!` room ID.
 
 ## Room policy
 
@@ -10884,7 +10888,8 @@ Call `action="help"` or `action="actions"` to list the actions and `act` request
 
 On the host target, `snapshot()` returns `ai` or `aria` format with element refs that later `act()` and `screenshot()` calls can use.
 `act()` takes `request.kind` set to `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, or `close`.
-A host-target call that has not finished after 120 seconds fails with an error, and the reply continues.
+A host-target call that has not finished after 120 seconds fails with an error and the reply continues, but work it already sent to the page, such as a running script or a pending upload, may keep going.
+After such a failure, check the tab with `tabs()`: close it with `close()` if it is marked unresponsive, and otherwise take a new `snapshot()` before acting on it again.
 The desktop target returns the browser's native accessibility snapshot and rejects `targetId` and host-only options such as `profile`, snapshot format hints, `inputRef`, and `timeoutMs`.
 Desktop-target calls always run in the primary process, so routing `browser` to a worker isolates only host-target calls.
 To show the worker browser to the user, see [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/#show-the-worker-browser).
@@ -22193,6 +22198,8 @@ Smaller changes that need operator action:
   Before upgrading, set again any such variable you removed after MindRoom imported it, or save that credential in the dashboard, or the key stops working; startup logs each removed service whose variable is no longer set.
 - **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
 - **Public address setting**: `MINDROOM_BASE_URL` is removed and `mindroom run` refuses to start while it is set, so before upgrading, move its value to `MINDROOM_PUBLIC_URL` unless that is already set, and delete it.
+- **Room references**: `rooms`, `room_thread_modes`, and an automation's `room` must name a room MindRoom can find, so a `#` alias of a room MindRoom did not create, or a room key no agent, team, or top-level `rooms` lists, now fails config load and `mindroom run` refuses to start.
+  Run the new release's `mindroom config validate` and replace each reference it names with a room key or the room's `!` room ID, as [Rooms](https://docs.mindroom.chat/rooms/#configuration) describes.
 
 ### Compaction History
 
