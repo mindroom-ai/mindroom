@@ -45,6 +45,7 @@ import {
   SERVICE_NAME_PATTERN,
 } from "@/lib/serviceNames";
 import { cn } from "@/lib/utils";
+import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import { ProviderLogo } from "./ProviderLogos";
 import { getProviderInfo, getProviderList } from "@/lib/providers";
 import type {
@@ -451,12 +452,12 @@ export function ModelConfig() {
 
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
   const [rowDraft, setRowDraft] = useState<RowDraft | null>(null);
-  // The model and loaded config as they were when row editing began, so
-  // Cancel can also undo More settings edits and Save only writes a Base URL
-  // the row changed.
+  // The model, row draft, and loaded config as they were when row editing
+  // began, so Cancel can also undo More settings edits, Save only writes a
+  // Base URL the row changed, and leaving the page asks only after a change.
   const [editingStart, setEditingStart] = useState<{
     config: ModelConfigType;
-    baseUrl: string;
+    draft: RowDraft;
     loadedConfig: typeof loadedConfig;
   } | null>(null);
   const [isSavingRow, setIsSavingRow] = useState(false);
@@ -464,6 +465,13 @@ export function ModelConfig() {
   const [isAddingRow, setIsAddingRow] = useState(false);
   const [newRowDraft, setNewRowDraft] = useState<RowDraft>(EMPTY_DRAFT);
   const [isSavingNewRow, setIsSavingNewRow] = useState(false);
+
+  useUnsavedDraft(
+    (rowDraft != null &&
+      JSON.stringify(rowDraft) !== JSON.stringify(editingStart?.draft)) ||
+      (isAddingRow &&
+        JSON.stringify(newRowDraft) !== JSON.stringify(EMPTY_DRAFT)),
+  );
 
   const models = useMemo(() => config?.models ?? {}, [config?.models]);
 
@@ -647,13 +655,7 @@ export function ModelConfig() {
       }
       return;
     }
-    setEditingRowId(row.modelName);
-    setEditingStart({
-      config: models[row.modelName],
-      baseUrl: row.openAIBaseUrl || "",
-      loadedConfig,
-    });
-    setRowDraft({
+    const draft: RowDraft = {
       modelName: row.modelName,
       provider: row.provider,
       modelId: row.modelId,
@@ -664,7 +666,10 @@ export function ModelConfig() {
       apiKey: "",
       selectedKeySourceModel: "",
       clearCustomKey: false,
-    });
+    };
+    setEditingRowId(row.modelName);
+    setEditingStart({ config: models[row.modelName], draft, loadedConfig });
+    setRowDraft(draft);
   };
 
   const finishEditingRow = () => {
@@ -875,7 +880,7 @@ export function ModelConfig() {
     if (rowDraft.provider === "openai") {
       // More settings may have edited extra_kwargs; keep its base_url unless
       // the row's own Base URL input changed.
-      if (rowDraft.baseUrl !== editingStart?.baseUrl) {
+      if (rowDraft.baseUrl !== editingStart?.draft.baseUrl) {
         if (normalizedBaseUrl) {
           nextExtraKwargs.base_url = normalizedBaseUrl;
         } else {

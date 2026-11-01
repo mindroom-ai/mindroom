@@ -39,6 +39,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import type { ConfigPath } from "@/lib/configSchema";
 import { getConfigValidationIssues } from "@/lib/configValidation";
 import {
@@ -222,6 +223,7 @@ function ServiceSection({
   const [preloaded] = useState(initial !== undefined);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
+  useUnsavedDraft(editor !== null && editorDirty);
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const latest = useRef(0);

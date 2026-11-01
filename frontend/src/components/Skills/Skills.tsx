@@ -18,6 +18,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "@/components/ui/toaster";
 import { useTheme } from "@/contexts/ThemeContext";
 import { useSwipeBack } from "@/hooks/useSwipeBack";
+import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import {
   createSkill,
   deleteSkill,
@@ -47,9 +48,15 @@ export function Skills() {
     ? (skills.find((s) => s.name === selectedName) ?? null)
     : null;
   const isDirty = draftContent !== originalContent;
+  const confirmDiscard = useUnsavedDraft(isDirty);
+
+  // Selecting another skill, or none, replaces the draft.
+  const handleSelect = (name: string | null) => {
+    if (name !== selectedName && confirmDiscard()) setSelectedName(name);
+  };
 
   useSwipeBack({
-    onSwipeBack: () => setSelectedName(null),
+    onSwipeBack: () => handleSelect(null),
     enabled: !!selectedSkill && window.innerWidth < 1024,
   });
 
@@ -109,13 +116,6 @@ export function Skills() {
     };
   }, [selectedName]);
 
-  const handleSelect = (name: string) => {
-    if (isDirty && selectedName !== name) {
-      if (!window.confirm("Discard unsaved changes?")) return;
-    }
-    setSelectedName(name);
-  };
-
   const handleSave = async () => {
     if (!selectedSkill) return;
     setSaving(true);
@@ -150,6 +150,7 @@ export function Skills() {
       });
       return false;
     }
+    if (!confirmDiscard()) return false;
     try {
       await createSkill(trimmed, trimmed);
       toast({
@@ -275,7 +276,8 @@ export function Skills() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setSelectedName(null)}
+                    onClick={() => handleSelect(null)}
+                    aria-label="Back to skills"
                     className="lg:hidden -ml-2 mt-1"
                   >
                     <ArrowLeft className="h-4 w-4" />

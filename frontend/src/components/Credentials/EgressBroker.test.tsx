@@ -25,6 +25,7 @@ import {
   pressInDialog,
   rowAction,
 } from "@/test/egressServiceTestKit";
+import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
 import { EgressBroker } from "./EgressBroker";
 
 const NOT_RUNNING =
@@ -1930,6 +1931,20 @@ describe("egress broker service editor", () => {
       await screen.findByRole("form", { name: "Edit openai" }),
     ).toBeInTheDocument();
     expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
+  });
+
+  it("asks before leaving the page drops an editor with unsaved changes", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await openEdit("GitHub");
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    expect(confirmSpy).not.toHaveBeenCalled();
+
+    openMoreOptions();
+    fill("Description", "typed but not saved");
+
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+    confirmSpy.mockRestore();
   });
 
   it("opens another service straight away when nothing was changed", async () => {

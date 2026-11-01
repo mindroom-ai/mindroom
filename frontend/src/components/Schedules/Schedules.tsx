@@ -11,6 +11,7 @@ import {
   Timer,
 } from "lucide-react";
 import { useSwipeBack } from "@/hooks/useSwipeBack";
+import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import {
   cancelSchedule,
   listSchedules,
@@ -323,8 +324,26 @@ export function Schedules() {
     }
   }, [roomFilter, selectedTaskId, visibleTasks]);
 
+  const confirmDiscard = useUnsavedDraft(isDirty);
+
+  // Selecting another schedule, or none, replaces the draft.
+  const handleSelect = (taskId: string | null) => {
+    if (taskId !== selectedTaskId && confirmDiscard()) {
+      setSelectedTaskId(taskId);
+    }
+  };
+
+  // A filter that hides the selected schedule deselects it.
+  const handleRoomFilterChange = (filter: string) => {
+    const hidesSelected =
+      filter !== "all" &&
+      selectedTask != null &&
+      selectedTask.room_id !== filter;
+    if (!hidesSelected || confirmDiscard()) setRoomFilter(filter);
+  };
+
   useSwipeBack({
-    onSwipeBack: () => setSelectedTaskId(null),
+    onSwipeBack: () => handleSelect(null),
     enabled: !!selectedTaskId && window.innerWidth < 1024,
   });
 
@@ -475,7 +494,7 @@ export function Schedules() {
         title={item.description || item.message}
         description={item.message}
         isSelected={isSelected}
-        onClick={setSelectedTaskId}
+        onClick={handleSelect}
         badges={badges}
       >
         <p className="mt-2 text-xs text-muted-foreground font-mono">
@@ -504,7 +523,7 @@ export function Schedules() {
               )}
             </div>
             <div className="flex items-center gap-2">
-              <Select value={roomFilter} onValueChange={setRoomFilter}>
+              <Select value={roomFilter} onValueChange={handleRoomFilterChange}>
                 <SelectTrigger className="w-[200px]">
                   <SelectValue placeholder="Filter by room" />
                 </SelectTrigger>
@@ -520,7 +539,8 @@ export function Schedules() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => void load(true)}
+                // Reloading replaces the selected schedule's draft.
+                onClick={() => confirmDiscard() && void load(true)}
                 disabled={isRefreshing || isLoading}
               >
                 {isRefreshing ? (
@@ -609,7 +629,7 @@ export function Schedules() {
               isDirty={isDirty}
               onSave={() => void handleSave()}
               onDelete={() => void handleCancelTask()}
-              onBack={() => setSelectedTaskId(null)}
+              onBack={() => handleSelect(null)}
               disableSave={isSaving}
               disableDelete={isSaving}
             >

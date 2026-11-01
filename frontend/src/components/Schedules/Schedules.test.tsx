@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ScheduleTask } from "@/types/schedule";
 
@@ -126,6 +126,108 @@ describe("Schedules", () => {
     expect(JSON.parse(String(updateRequest?.body))).toMatchObject({
       description: "Updated quiet inbox check",
       silent: true,
+    });
+  });
+
+  describe("unsaved edits", () => {
+    const lobbyTask = {
+      ...visibleTask,
+      task_id: "lobby-1",
+      room_id: "!lobby:example.org",
+      room_alias: "#lobby:example.org",
+      description: "Lobby greeting",
+    } satisfies ScheduleTask;
+    const originalInnerWidth = window.innerWidth;
+
+    beforeEach(() => {
+      vi.mocked(global.fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          timezone: "UTC",
+          tasks: [silentTask, visibleTask, lobbyTask],
+          unreadable_rooms: [],
+        }),
+      } as Response);
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      window.innerWidth = originalInnerWidth;
+    });
+
+    async function editQuietTask() {
+      render(<Schedules />);
+      fireEvent.click(await screen.findByText("Quiet inbox check"));
+      const description = screen.getByLabelText("Description");
+      fireEvent.change(description, {
+        target: { value: "Unsaved description" },
+      });
+      return description;
+    }
+
+    it("asks before selecting another schedule drops the edits", async () => {
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const description = await editQuietTask();
+
+      fireEvent.click(screen.getByText("Visible status check"));
+
+      expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+      expect(description).toHaveValue("Unsaved description");
+
+      confirmSpy.mockReturnValue(true);
+      fireEvent.click(screen.getByText("Visible status check"));
+
+      expect(screen.getByLabelText("Description")).toHaveValue(
+        "Visible status check",
+      );
+    });
+
+    it("asks before the back button or a swipe back drops the edits", async () => {
+      window.innerWidth = 400;
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const description = await editQuietTask();
+
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      fireEvent.touchStart(document, {
+        touches: [{ clientX: 10, clientY: 100 }],
+      });
+      fireEvent.touchEnd(document, {
+        changedTouches: [{ clientX: 200, clientY: 100 }],
+      });
+
+      expect(confirmSpy).toHaveBeenCalledTimes(2);
+      expect(description).toHaveValue("Unsaved description");
+    });
+
+    it("asks before a refresh drops the edits", async () => {
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const description = await editQuietTask();
+
+      fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+      expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(description).toHaveValue("Unsaved description");
+    });
+
+    it("asks before a room filter that hides the schedule drops the edits", async () => {
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const description = await editQuietTask();
+
+      fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
+      fireEvent.click(
+        await screen.findByRole("option", { name: "#ops:example.org" }),
+      );
+      expect(confirmSpy).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
+      fireEvent.click(
+        await screen.findByRole("option", { name: "#lobby:example.org" }),
+      );
+
+      expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+      expect(description).toHaveValue("Unsaved description");
+      expect(screen.getByText("Room: #ops:example.org")).toBeInTheDocument();
     });
   });
 });
