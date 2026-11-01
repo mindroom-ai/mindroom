@@ -36,7 +36,7 @@ from mindroom.hooks import render_enrichment_block, render_system_enrichment_blo
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
-from mindroom.llm.runs import RunStatus
+from mindroom.llm.runs import RunStatus, run_tool_executions
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.media_inputs import MediaInputs
@@ -60,7 +60,7 @@ from mindroom.response_turn import (
     stream_with_llm_request_log_context,
 )
 from mindroom.run_storage import bind_turn_session, scope_run_storage
-from mindroom.teams.attempt import TeamAttempt, team_tool_executions
+from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
@@ -630,7 +630,7 @@ class _TeamTurn:
         ``shown`` says whether the attempt's chunks showed a document; one that showed nothing ends with the
         no-response line.
         """
-        tool_executions = team_tool_executions(record)
+        tool_executions = run_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
         # The text records the document the attempt's events built and its failed runs' reasons, in the configured
         # member order, without tool markers: the chunks show the trace. The "No team response generated." fallback is

@@ -152,6 +152,19 @@ class ApiAuthState:
 
 def _build_auth_settings(runtime_paths: RuntimePaths) -> _ApiAuthSettings:
     """Read dashboard auth settings from one explicit runtime context."""
+    # LEGACY_COMPAT: Retired MINDROOM_BASE_URL public origin.
+    # Legacy format: `MINDROOM_BASE_URL` named MindRoom's public origin for OAuth links and callbacks when
+    #   `MINDROOM_PUBLIC_URL` was unset, and its host answered requests without a credential.
+    # Last legacy release: v2026.11.6; replacement: v2026.11.7 reads only `MINDROOM_PUBLIC_URL`.
+    # Handling: refuse to start while it is set and name `MINDROOM_PUBLIC_URL`, so a deployment that still sets it
+    #   never silently moves its OAuth callbacks to localhost.
+    # Coverage: tests/api/test_api.py::test_retired_base_url_fails_startup.
+    if runtime_paths.env_value("MINDROOM_BASE_URL"):
+        msg = (
+            "MINDROOM_BASE_URL was removed; set MINDROOM_PUBLIC_URL to MindRoom's public origin "
+            "and remove MINDROOM_BASE_URL"
+        )
+        raise ValueError(msg)
     trusted_upstream = _build_trusted_upstream_auth_settings(runtime_paths)
     dashboard = dashboard_origin(runtime_paths)
     # Only a gateway's signed identity reaches both hosts; dashboard sign-ins and Connections sessions stay on one.

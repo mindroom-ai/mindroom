@@ -22,6 +22,7 @@ export interface Integration {
   oauth_custom_client_configured?: boolean;
   oauth_client_config_service?: string;
   oauth_client_redirect_uri_supported?: boolean;
+  oauth_default_redirect_uri?: string;
   oauth_service_account_configured?: boolean;
   oauth_reset_required?: boolean;
   status_error?: string;

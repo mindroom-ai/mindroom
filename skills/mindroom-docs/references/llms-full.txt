@@ -1656,7 +1656,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_API_KEY` | API key for dashboard/API requests; `mindroom config init` and first-run `mindroom run` add a generated key to `.env` when it has none; unset or empty means open access | _(none)_ |
-| `MINDROOM_PORT` | Port in the default OAuth callback URL when `MINDROOM_PUBLIC_URL` and `MINDROOM_BASE_URL` are unset, and in the default [Connections token audience](https://docs.mindroom.chat/connections-portal/#token-binding) and the address MindRoom Chat finds when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; it does not set the API server's bind port, which is `mindroom run --api-port`, and when unset it follows that port | the `--api-port` port, `8765` by default |
+| `MINDROOM_PORT` | Port in the default OAuth callback URL, the default [Connections token audience](https://docs.mindroom.chat/connections-portal/#token-binding), and the address MindRoom Chat finds when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; it does not set the API server's bind port, which is `mindroom run --api-port`, and when unset it follows that port | the `--api-port` port, `8765` by default |
 | `MINDROOM_DASHBOARD_URL` | Origin, HTTPS or HTTP on a local address, where administrators open the dashboard when another app owns `/` on `MINDROOM_PUBLIC_URL`; prerequisites and effects are in [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host) | _(unset: the dashboard is at `/` on the public origin)_ |
 | `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra host names that unauthenticated dashboard or `/v1` requests may address (see [Authorization](https://docs.mindroom.chat/authorization/#unauthenticated-dashboard-host-names)) | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin, or `MINDROOM_DASHBOARD_URL` on that host | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173`, or the hosted public origins when `MINDROOM_PUBLIC_URL` is set |
@@ -2095,7 +2095,7 @@ The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each h
 Fable 5.1, Opus 5.5, and Sonnet 5.5 follow the same [tool-choice rules](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide): `auto` and `none` are allowed, while forcing `any` or a named tool returns an error.
 They reject `thinking: {type: disabled}` and manual `budget_tokens`; lower effort with `extra_kwargs.output_config: {effort: low}` instead, or use `extra_kwargs.thinking: {type: between_tools}` on [Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5#turn-off-up-front-thinking).
 With adaptive thinking, the notes these models write between tool calls are hidden, so responses show tool traces without that narration; Sonnet 5.5's `between_tools` setting returns those notes as text.
-Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because that turn had context of its own, such as memory search results or enrichment, or because the date in the system prompt has changed.
+Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because the date or other content of the system prompt has changed, or a compaction or replay limit rewrote earlier turns.
 With Sonnet 5.5's `between_tools` or on `bedrock_claude`, earlier turns' reasoning is never sent, while the current turn's reasoning between tool calls always is; Haiku 5.5 with `thinking: {type: disabled}` writes no reasoning to send.
 A reply that resumes after a tool approval or a delegation keeps its reasoning, unless its history was trimmed to fit the context window or another reply or a compaction ran in the conversation while it waited; then it answers without that reasoning, and with `between_tools` or on `bedrock_claude`, an account created on or after August 31, 2026 can get a 400 error ``Invalid `signature` in `thinking` block`` on that resume.
 
@@ -2202,6 +2202,8 @@ models:
 [GPT-6 Astra, GPT-6.1 Sol, and GPT-6.1 Terra require Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Luna supports function calling in Chat Completions only with `reasoning_effort: none`.
 Through a proxy or custom alias, set `api: responses` for GPT-6 models, or tool calls on Astra, Sol, Terra, and Luna fail at their default reasoning effort.
 Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
+A reply shows the model's reasoning while it thinks only when the model requests a reasoning summary, with `extra_kwargs.reasoning_summary: auto` or `extra_kwargs.reasoning: {summary: auto}`.
+An unverified OpenAI organization then gets `Your organization must be verified to generate reasoning summaries`; verify the organization or remove the setting.
 Selecting Responses keeps any `extra_kwargs.store: false` setting.
 How `api` affects tool search is described in [Native Server-Side Tool Search](https://docs.mindroom.chat/tools/dynamic-tools/#native-server-side-tool-search).
 
@@ -2276,6 +2278,7 @@ defaults:
 
 Use `258000` as the context window: it fits the Codex window of every model above, which is smaller than the OpenAI API window.
 Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.1 Sol, GPT-6 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
+Codex models ask for a reasoning summary (`auto`, as the Codex CLI does) unless `extra_kwargs.reasoning_summary` or `extra_kwargs.reasoning.summary` sets another, so a reply shows the model's reasoning while it thinks.
 Codex clients also offer Ultra for Sol, Astra, and Terra, but Ultra's Codex-managed subagents are not available through MindRoom.
 The provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.
 The adapter depends on the Codex CLI login format and backend, so a Codex CLI update can require a MindRoom update; use `provider: openai` for the public API contract and API billing.
@@ -3080,6 +3083,8 @@ Set these fields in `defaults`, on an agent, or on a team (see [Team History and
 
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
+Each turn's context, such as retrieved memories, `persist=False` enrichment, and the note telling the agent how a tool approval was decided, replays with that turn until compaction, except under `num_history_messages`, which counts and replays only conversation messages.
+Text compaction summaries leave that context out, while a [native compaction](#native-compaction) summary can include it, and so can a later text summary that starts from a Claude checkpoint.
 Tool results replay unchanged.
 
 ## Context Window
@@ -3141,7 +3146,7 @@ With the default `reserve_tokens`, a summary model with a context window of roug
 
 A long reply, for example a tool loop that keeps reading files, can outgrow the context window before it finishes.
 Before each model request, MindRoom checks whether the request would exceed the replay window minus `reserve_tokens`; if it would, it compacts first and the reply continues.
-After that compaction the model sees its system prompt, the user's current message, any per-turn context, and a summary that records the progress made so far; earlier conversation and the reply's own earlier tool calls and results are replaced by that summary.
+After that compaction the model sees its system prompt, the user's current message, the current turn's context, and a summary that records the progress made so far; earlier conversation and the reply's own earlier tool calls and results are replaced by that summary.
 The tool calls still appear in the reply.
 If the summary and the current message together exceed the model's `context_window` minus `reserve_tokens`, the reply fails with `Saved conversation summary exceeds the available history budget` (see [Compacted history and redaction](#compacted-history-and-redaction)).
 If the summary model fails, the reply continues without compacting and may then fail with a provider error.
@@ -3239,6 +3244,7 @@ With `none`, the agent gets no memories in its prompt, stores none after its tur
 Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript sent to `mem0`; the transcript file itself is kept as spoken.
 What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written.
 Conversation history is separate and stays in the session; see [History & Compaction](https://docs.mindroom.chat/configuration/history/).
+Memories retrieved for a reply [stay in that conversation's history](https://docs.mindroom.chat/configuration/history/#history-settings), so its later replies can still see them after the memory is deleted.
 OpenClaw-compatible agents use this same backend selection.
 
 ## Memory Scopes
@@ -9316,6 +9322,7 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
 
 - **Rotate the local device**: Run `mindroom desktop login --replace`, revoke the old device in your Matrix account settings, then run `!desktop rotate` in the agent chat and follow its pairing command.
   `--replace` does not revoke the old device by itself.
+  If a `browser` tool uses the desktop target, update its `device_id` and `device_ed25519` settings to the new device, or its calls fail.
 - **Change the cloud controller**: Once the bridge has a command history, saving a different controller identity is rejected.
   Use `--storage-path` with a new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`; the new setup does not carry over pending commands or outcomes, and the macOS app has no migration action.
 - **Identity mismatch**: A device ID or Ed25519 mismatch is a hard failure; treat it as a rotation or possible substitution and do not bypass it.
@@ -10908,7 +10915,7 @@ browser_control(action="screenshot")
 
 Host-target profiles are named, with `mindroom` as the default; names starting with a dot are rejected.
 In the primary process a profile lives at `browser-profiles/<profile>` under the agent's state root, so every requester of a shared agent shares its signed-in sessions, while different agents never share them.
-This holds even with `worker_scope: user` or `user_agent` unless `browser` is in `worker_tools`, which gives each worker scope its own profiles.
+This holds even with `worker_scope: user` or `user_agent` unless `browser` is in `worker_tools`, which gives each dedicated Docker or Kubernetes worker its own profiles; for the `static_runner` backend see [Browsers in workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#browsers-in-workers).
 In the primary process a started profile keeps running, with its tabs, across replies until `action="stop"` or a MindRoom restart, and replies using it at the same time share it.
 Use a private agent when requesters need separate browser sessions.
 Chromium is taken from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable`.
@@ -12809,7 +12816,7 @@ An administrator creates one Atlassian OAuth 2.0 (3LO) app for the MindRoom inst
 5. Under **Settings**, copy the client ID and secret.
 
 For a local installation, the callback URL is `http://localhost:8765/api/oauth/atlassian/callback`.
-A hosted installation must set `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, from which MindRoom derives the callback URL, and the URL registered on the app must match exactly.
+A hosted installation must set `MINDROOM_PUBLIC_URL`, from which MindRoom derives the callback URL, and the URL registered on the app must match exactly.
 MindRoom always uses this callback and ignores any `redirect_uri` stored with the app credentials.
 
 Store the client ID and secret in the `atlassian_oauth_client` credential service through the dashboard credentials page.
@@ -13415,7 +13422,7 @@ An administrator registers one app in Microsoft Entra for the MindRoom installat
 `User.Read.All`, which `microsoft_people` requests, likewise always needs administrator consent before anyone can connect the people directory.
 
 For a local installation, the redirect URIs are `http://localhost:8765/api/oauth/<provider ID>/callback`, such as `http://localhost:8765/api/oauth/microsoft_files/callback`.
-A hosted installation must set `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, from which MindRoom derives each redirect URI, and the URIs registered on the app must match exactly.
+A hosted installation must set `MINDROOM_PUBLIC_URL`, from which MindRoom derives each redirect URI, and the URIs registered on the app must match exactly.
 Do not add application permissions; the tools only use delegated permissions, which act as the signed-in user.
 
 Store the client ID and secret in the `microsoft_oauth_client` credential service through the dashboard credentials page.
@@ -15182,6 +15189,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 Connect Home Assistant in the dashboard's **Tools** tab, using either method:
 
 - **OAuth**: enter the Home Assistant URL; Home Assistant needs no application registration, and after sign-in it returns you to `MINDROOM_DASHBOARD_URL` when you connect from that host, else to `MINDROOM_PUBLIC_URL`, or to the address MindRoom received the request on when that is unset, so set `MINDROOM_PUBLIC_URL` when a proxy in front of MindRoom terminates HTTPS.
+  Home Assistant refuses that address with `Invalid client id` when it is an IP address other than a loopback, private, or link-local one, such as a public or Tailscale `100.x` address, so set `MINDROOM_PUBLIC_URL`, or `MINDROOM_DASHBOARD_URL` when you connect from that host, to a URL with a DNS name, such as `https://mindroom.example.org`, or use the access-token method.
 - **Access token**: in your Home Assistant profile, create a long-lived access token under **Long-Lived Access Tokens**, then enter the Home Assistant URL and the token.
 
 Expired OAuth access tokens renew automatically.
@@ -15193,6 +15201,7 @@ A Home Assistant URL on a private, local, or loopback network, such as `http://h
 | `Invalid authentication token. Please reconnect Home Assistant.` | The token was revoked or OAuth renewal failed; reconnect. |
 | `Private Home Assistant URLs require explicit opt-in. ...` | Enable **Allow private or local URL** and reconnect. |
 | `Connection timeout - check if Home Assistant is accessible` | Make sure the MindRoom server can reach the Home Assistant URL. |
+| `Invalid client id` on Home Assistant's sign-in page | Give MindRoom's address a DNS name, as the **OAuth** method above describes, or connect with an access token. |
 
 ## Related Docs
 
@@ -15371,7 +15380,7 @@ Browser changes made with a dashboard sign-in or trusted upstream identity must 
 
 ### Unauthenticated dashboard host names
 
-Without a credential, the dashboard and the `/v1` API answer only requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, or `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
+Without a credential, the dashboard and the `/v1` API answer only requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_URL`, or `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
 This blocks DNS-rebinding attacks from other web pages.
 Any other name, such as `myserver.local`, fails with `Host '<host>' is not allowed without a credential; add it to MINDROOM_DASHBOARD_ALLOWED_HOSTS or configure authentication`.
 Browser pages may call it only when served from the same host, from a `localhost` name or loopback address, or from a host set through the URL settings above or `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
@@ -15595,7 +15604,7 @@ The API routes are:
 Add `agent_name` to target a connection for one agent's credential scope.
 The dashboard connects to the agent's saved scope, so save a `worker_scope` change before connecting.
 
-The provider callback URL is `<MINDROOM_PUBLIC_URL or MINDROOM_BASE_URL>/api/oauth/<provider>/callback`, or `http://localhost:<MINDROOM_PORT>/api/oauth/<provider>/callback` (port `8765` by default) when neither is set.
+The provider callback URL is `<MINDROOM_PUBLIC_URL>/api/oauth/<provider>/callback`, or `http://localhost:<MINDROOM_PORT>/api/oauth/<provider>/callback` (port `8765` by default) when it is unset.
 Register that URL on the provider's OAuth app, or store an explicit `redirect_uri` in the provider-specific client config service.
 
 Conversation connect links for a scoped connection are valid for 10 minutes, work once, and are tied to the requester, provider, and agent scope that produced them.
@@ -15647,8 +15656,8 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Spotify | [Spotify](https://docs.mindroom.chat/tools/media-and-content/#connect-spotify) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
-A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
-Otherwise the client works only when MindRoom is opened on `localhost`, and other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access.`
+A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
+Otherwise the client works only when MindRoom is opened on `localhost`, and other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL and configure a custom OAuth client for remote access.`
 
 ### Provider And Credential Service Rules
 
@@ -15676,6 +15685,7 @@ These rules apply to built-in providers and to providers that plugins register (
 
 ### Troubleshooting OAuth Connections
 
+- **`<Provider> needs its OAuth client saved in the MindRoom dashboard before it can connect`**: the provider has no OAuth app client yet; save one with **Configure client** on its integration in the dashboard **Tools** tab, or seed its client config service.
 - **Credentials cannot be read**: when a stored token exists but cannot be read, `/status` returns `reset_required: true`, and tools tell the requester that the credentials "cannot be read" and to reset the connection from the dashboard (the **Tools** tab), then reconnect.
 - **Provider token endpoint changed**: MindRoom sends refresh tokens only to the token endpoint recorded when the account was connected.
   If the provider now resolves a different endpoint, MindRoom deletes the stored credential and the user must reconnect; the log shows `oauth_credentials_refresh_failed` with `reason="token_endpoint_changed"` and both endpoint origins.
@@ -15771,7 +15781,7 @@ If two Connections tabs, on the Agents or Agent Keys page, are signed in as diff
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | unset | JSON list of the exact MindRoom Chat origins that may sign users in, such as `'["https://chat.example.org"]'`; unset or blank allows `https://chat.mindroom.chat`, plus any Chat on a local address while MindRoom itself is on a local address, and only while the homeserver binds tokens; `[]` turns sign-in from Chat off |
-| `MINDROOM_PUBLIC_URL` | unset | The origin users open the portal on, which must be HTTPS or plain HTTP on a local address; unset, the portal accepts the request's own origin, the token audience is `http://localhost:<MINDROOM_PORT>`, and OAuth callbacks use `MINDROOM_BASE_URL`, or that same localhost origin without it |
+| `MINDROOM_PUBLIC_URL` | unset | The origin users open the portal on, which must be HTTPS or plain HTTP on a local address; unset, the portal accepts the request's own origin, the token audience is `http://localhost:<MINDROOM_PORT>`, and OAuth callbacks use that same localhost origin |
 | `MINDROOM_CONNECTIONS_AGENT` | unset | Optional private agent (`private.per: user` or `user_agent`) that the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) selects for each user at first; under trusted upstream auth it also limits the dashboard to `administrators` (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)) |
 
 A configured allowlist replaces both defaults.
@@ -15918,8 +15928,10 @@ See the [Privacy Policy](https://docs.mindroom.chat/privacy/#google-api-services
 
 ## Troubleshooting
 
-- **`OAuth client configuration could not be resolved`**: MindRoom could not get a Google OAuth client, usually because the install is not paired or its pairing was revoked.
+- **`<Google service> needs its OAuth client saved in the MindRoom dashboard before it can connect`**: the install is not paired and has no custom client.
   Run `mindroom connect`, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).
+- **`OAuth client configuration could not be resolved`**: MindRoom could not fetch its Google OAuth client, usually because the pairing was revoked or the provisioning service is unreachable.
+  Run `mindroom connect` again, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).
 - **Google shows an unverified-app warning or blocks the Google Cloud connection**: `cloud-platform.read-only` is a sensitive scope, so an OAuth client that Google has not verified for it can be limited to test users.
   The provisioned client is not yours to change, so use a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup) instead, ideally one whose consent screen is Internal to your Google Workspace organization.
   On your own custom client, you can also add your account as a test user; see [Production Verification Follow-up](https://docs.mindroom.chat/deployment/google-services-oauth/#production-verification-follow-up).
@@ -15930,7 +15942,7 @@ See the [Privacy Policy](https://docs.mindroom.chat/privacy/#google-api-services
 This page covers the Google OAuth providers behind the Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud tools: which scopes each requests and why, how to set up your own Google Cloud OAuth client, and how to restrict which Google accounts may connect.
 Paired local installations need no Google Cloud setup and use MindRoom's provisioned client; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
 Use a custom client when MindRoom is opened on any address other than a local loopback address such as `localhost` or `127.0.0.1`, when the installation is not paired, or when you need organization-specific Google policies or your own consent-screen branding.
-The provisioned client works only on a loopback address; other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access.`
+The provisioned client works only on a loopback address; other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL and configure a custom OAuth client for remote access.`
 How connections are made, stored per credential scope, disconnected, and reset is covered in the [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
 ## Providers
@@ -16346,6 +16358,7 @@ Do not report or "fix" these; they are deliberate.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
 - A plugin's `tool:environment` hook decides which variables a tool call's `shell` commands receive, in the primary or a worker, including values it passes through from the primary's process environment; plugins already run with the primary's full trust, the variables travel only with that call's request, and other code in the same worker can read them, as with the CLI grant.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
+- A shared agent's later turns in a conversation replay each earlier turn's context, including another requester's `persist=False` hook items such as a location, so it can repeat them to anyone in that conversation, like persisted items; private agents keep each requester's conversations apart.
 - Unless `knowledge_graph_edits` is off, any requester of a shared agent, or a tool result that steers it, can have it delete facts and entities from the shared graph, merge its entities, or rewrite their summaries, as with any write tool; the edits reach only that agent's own graph.
 - Redacting a message does not remove facts the knowledge graph already extracted from it; ingestion skips turns derived from messages redacted before it reached them, so raising `knowledge_graph.generation` rebuilds the graphs without them; replies and voice calls already running finish on the old graphs, which stay stored until `knowledge_graph/` is deleted with MindRoom stopped; an `exploration` prompt can still list a redacted turn's tool calls until the agent next replies in that conversation.
 - An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
@@ -17518,7 +17531,7 @@ plugins:
       dawarich_url: http://dawarich.local
 ```
 
-Whenever an agent is about to answer a message, this hook adds the user's location to that turn's context, and `persist=False` keeps it out of session history.
+Whenever an agent is about to answer a message, this hook adds the user's location to that turn's context, and `persist=False` puts it in a separate context message instead of the user's message text.
 
 MindRoom finds `@hook` functions in the manifest's `hooks_module`, or in `tools_module` when `hooks_module` is omitted; see [Manifest format](https://docs.mindroom.chat/plugins/#manifest-format).
 
@@ -17745,8 +17758,10 @@ Persisted items are appended to the user message and kept in session history, so
 </mindroom_message_context>
 ```
 
-Items with `persist=False` go into a separate context message for the current turn only.
-Use `persist=False` for live data such as location or weather, so session history and provider prompt caches stay reusable.
+Items with `persist=False` go into a separate context message after the turn's prompt instead of into the message text.
+Later turns still see that message where it was sent, and unlike persisted items it stays out of text compaction summaries; see [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings).
+In a conversation several people use, those later turns include replies to someone else, so the agent can repeat one person's `persist=False` item, such as their location, to another; a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) keeps each requester's conversations apart.
+Use `persist=False` for live data such as location or weather.
 Use stable keys and deterministic text for persisted items.
 
 ## System prompt enrichment (`system:enrich`)
@@ -17777,7 +17792,7 @@ The key `matrix_message_target` is reserved; MindRoom replaces hook items that u
 
 ## Enrichment in minimal mode
 
-In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), system enrichment and non-persisted message enrichment are available to the agent through the CLI's enrichment context document instead of the prompt.
+In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), system enrichment and `persist=False` message enrichment are available to the agent through the CLI's enrichment context document instead of the prompt.
 Return an `EnrichmentItem` with `minimal_required=True` when the item must stay in the prompt without a tool call; `ctx.add_metadata()` and `ctx.add_instruction()` cannot set this flag.
 Persisted message enrichment and standard mode are unaffected.
 
@@ -20015,7 +20030,8 @@ A runner or worker restart stops running commands; see the [shell tool](https://
 Dedicated Docker and Kubernetes workers with `worker_scope: shared`, `user`, or `user_agent` keep a headless browser session across calls, including open tabs and the browser profile, when Worker Computer is disabled.
 Include `browser` in the agent's `worker_tools` to use it.
 A change to the browser configuration or the prepared process environment closes the session before the next call.
-The `static_runner` backend and unscoped workers start a fresh browser for each call.
+On the `static_runner` backend every agent routed there shares one set of browser profiles, including signed-in sessions; with the default `inprocess` runner execution mode, calls without a `worker_scope` also share one running browser and its tabs, while other calls start a fresh browser.
+Unscoped dedicated workers start a fresh browser for each call.
 An explicit `target: host` uses the worker even when `default_target: desktop` is set.
 
 [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) adds a visible headed browser and Chat viewer to dedicated Docker and Kubernetes workers; the `static_runner` backend does not support it.
@@ -22170,6 +22186,7 @@ Smaller changes that need operator action:
 - **Credentials from the environment**: the first start, or `mindroom doctor`, deletes the credential files earlier releases copied from provider-key variables, `OLLAMA_HOST`, `GITHUB_TOKEN`, `EMBEDDER_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, and credential seeds; MindRoom now reads those values from the environment at each start (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
   Before upgrading, set again any such variable you removed after MindRoom imported it, or save that credential in the dashboard, or the key stops working; startup logs each removed service whose variable is no longer set.
 - **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
+- **Public address setting**: `MINDROOM_BASE_URL` is removed and `mindroom run` refuses to start while it is set, so before upgrading, move its value to `MINDROOM_PUBLIC_URL` unless that is already set, and delete it.
 
 ### Compaction History
 

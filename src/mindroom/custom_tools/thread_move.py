@@ -20,6 +20,7 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_current_room_thread_root,
     resolve_requested_room_id,
     room_access_allowed,
+    unknown_room_error,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.entity_resolution import entity_identity_registry
@@ -268,10 +269,9 @@ async def _target_room_id(context: ToolRuntimeContext, room_id: str) -> tuple[st
     # Only aliases of configured rooms resolve locally; the user's own rooms resolve through Matrix.
     if target_room_id.startswith("#"):
         response = await context.client.room_resolve_alias(target_room_id)
-        if isinstance(response, nio.RoomResolveAliasResponse):
-            target_room_id = response.room_id
-    if not target_room_id.startswith("!"):
-        return None, f"Unknown room {room_id!r}; pass a room ID, alias, or configured room name."
+        if not isinstance(response, nio.RoomResolveAliasResponse):
+            return None, unknown_room_error(target_room_id)
+        target_room_id = response.room_id
     return target_room_id, None
 
 

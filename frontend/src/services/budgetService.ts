@@ -1,12 +1,9 @@
 import { fetchJSON } from "@/lib/api";
+import { isPlainObject } from "@/lib/configSchema";
 import type { BudgetStatus } from "@/types/budgets";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value != null && typeof value === "object" && !Array.isArray(value);
-}
-
 function isBudgetStatus(value: unknown): value is BudgetStatus {
-  if (!isRecord(value) || typeof value.enabled !== "boolean") return false;
+  if (!isPlainObject(value) || typeof value.enabled !== "boolean") return false;
   if (!value.enabled) return true;
   return (
     typeof value.period_start === "string" &&
@@ -15,7 +12,7 @@ function isBudgetStatus(value: unknown): value is BudgetStatus {
     Array.isArray(value.users) &&
     value.users.every(
       (user) =>
-        isRecord(user) &&
+        isPlainObject(user) &&
         typeof user.user_id === "string" &&
         typeof user.spend_usd === "number" &&
         typeof user.over_budget === "boolean" &&

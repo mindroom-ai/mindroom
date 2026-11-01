@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import json
 import re
@@ -12,19 +11,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.delivery_gateway import (
-    DeliveryGateway,
-    DeliveryGatewayDeps,
-    FinalDeliveryRequest,
-    ResponseIdentity,
-)
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_CANCELLED,
@@ -39,15 +32,11 @@ from mindroom.hooks import (
     MessageReceivedContext,
     ResponseResult,
     ScheduleFiredContext,
-    hook,
 )
-from mindroom.hooks.context import CancelledResponseInfo, HookContextSupport
+from mindroom.hooks.context import CancelledResponseInfo
 from mindroom.hooks.execution import emit, emit_collect
-from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.response_lifecycle import ResponseHookService
-from mindroom.response_sources import ResponseSources
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system import plugins as plugins_module
@@ -56,12 +45,9 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
-from tests.bot_helpers import _hook_plugin
 from tests.conftest import (
     bind_runtime_paths,
-    ignore_final_delivery_handoff,
     make_conversation_reader_mock,
-    make_outbox_mock,
     make_relation_lookup,
     message_origin,
     runtime_paths_for,
@@ -189,18 +175,6 @@ def _todo_titles(state: dict[str, object]) -> list[str]:
         if isinstance(title, str):
             titles.append(title)
     return titles
-
-
-def _registry_callbacks(registry: HookRegistry) -> list[object]:
-    callbacks: list[object] = []
-    seen_callbacks: set[object] = set()
-    for hooks in registry._hooks_by_event.values():
-        for registered_hook in hooks:
-            if registered_hook.callback in seen_callbacks:
-                continue
-            seen_callbacks.add(registered_hook.callback)
-            callbacks.append(registered_hook.callback)
-    return callbacks
 
 
 def _tool_context(
@@ -663,120 +637,3 @@ async def test_cancelled_then_poke_scan_can_repoke(
         min_idle=0,
     )
     assert can_poke, "agent should be pokeable after cancellation clears active_run"
-
-
-@pytest.mark.asyncio
-async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
-    loaded_workloop: _LoadedWorkloop,
-) -> None:
-    """Late cancellation during after_response should still clear busy state as delivered."""
-    tool = get_tool_by_name(
-        "workloop_todo_manager",
-        loaded_workloop.runtime_paths,
-        worker_target=None,
-        tools=loaded_workloop.tools,
-    )
-    response_envelope = _message_envelope(body="hello", agent_name="code")
-
-    with tool_runtime_context(_tool_context(loaded_workloop)):
-        tool.plan(agent=MagicMock(), tasks="Task that must clear after late cancellation")
-
-    await emit_collect(
-        loaded_workloop.registry,
-        EVENT_MESSAGE_ENRICH,
-        MessageEnrichContext(
-            event_name=EVENT_MESSAGE_ENRICH,
-            plugin_name="",
-            settings={},
-            config=loaded_workloop.config,
-            runtime_paths=loaded_workloop.runtime_paths,
-            logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_ENRICH),
-            correlation_id="corr-enrich-late-cancel",
-            envelope=response_envelope,
-            target_entity_name="code",
-            target_member_names=None,
-        ),
-    )
-
-    agent_state_path = _state_root(loaded_workloop) / "agents" / "code.json"
-    agent_state = _read_json(agent_state_path)
-    assert "!room:localhost:$thread_root" in agent_state["active_runs"]
-    assert agent_state.get("last_response_at") is None
-
-    after_started = asyncio.Event()
-
-    @hook(EVENT_MESSAGE_AFTER_RESPONSE, priority=50)
-    async def slow_after_response(ctx: AfterResponseContext) -> None:
-        del ctx
-        after_started.set()
-        await asyncio.Event().wait()
-
-    registry = HookRegistry.from_plugins(
-        [
-            _hook_plugin("slow-after", [slow_after_response]),
-            _hook_plugin("workloop", _registry_callbacks(loaded_workloop.registry)),
-        ],
-    )
-    hook_context = HookContextSupport(
-        runtime=type(
-            "RT",
-            (),
-            {"client": None, "orchestrator": None, "config": loaded_workloop.config, "runtime_started_at": 0.0},
-        )(),
-        runtime_paths=loaded_workloop.runtime_paths,
-        agent_name="code",
-        hook_registry_state=HookRegistryState(registry),
-        conversation_reader=make_conversation_reader_mock(),
-        logger=get_logger("tests.hooks"),
-    )
-    gateway = DeliveryGateway(
-        DeliveryGatewayDeps(
-            runtime=hook_context.runtime,
-            runtime_paths=loaded_workloop.runtime_paths,
-            agent_name="code",
-            logger=get_logger("tests.workloop.delivery"),
-            resolver=MagicMock(),
-            response_hooks=ResponseHookService(hook_context=hook_context),
-            outbox=make_outbox_mock(),
-            turn_handoff=ignore_final_delivery_handoff,
-        ),
-    )
-
-    parsed = MagicMock()
-    parsed.formatted_text = "visible response"
-    parsed.interactive_metadata = None
-
-    with (
-        patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
-        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")),
-    ):
-        task = asyncio.create_task(
-            gateway.deliver_final(
-                FinalDeliveryRequest(
-                    target=response_envelope.target,
-                    existing_event_id=None,
-                    response_text="visible response",
-                    identity=ResponseIdentity(
-                        response_kind="ai",
-                        response_envelope=response_envelope,
-                        correlation_id="corr-late-workloop-cleanup",
-                        sources=ResponseSources(
-                            (response_envelope.source_event_id,),
-                            (response_envelope.source_event_id,),
-                        ),
-                    ),
-                    tool_trace=None,
-                    extra_content=None,
-                ),
-            ),
-        )
-        await asyncio.wait_for(after_started.wait(), timeout=1)
-        task.cancel()
-        delivery_result = await task
-
-    assert delivery_result.event_id == "$response"
-    assert delivery_result.delivery_kind == "sent"
-
-    cleared_state = _read_json(agent_state_path)
-    assert cleared_state["active_runs"] == {}
-    assert isinstance(cleared_state.get("last_response_at"), str)

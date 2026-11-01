@@ -182,9 +182,8 @@ describe("AgentEditor", () => {
     store.setState(store.getInitialState(), true);
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string) => ({
-        ok: true,
-        json: async () =>
+      vi.fn(async (url: string) =>
+        Response.json(
           url === "/api/config/load"
             ? {
                 ...mockConfig,
@@ -192,7 +191,8 @@ describe("AgentEditor", () => {
                 agents: { test_agent: agentConfig },
               }
             : { agent_policies: makeAgentPolicies() },
-      })),
+        ),
+      ),
     );
     onTestFinished(() => {
       vi.unstubAllGlobals();

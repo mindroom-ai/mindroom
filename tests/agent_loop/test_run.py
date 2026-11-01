@@ -215,7 +215,7 @@ async def test_the_calls_of_a_run_no_store_keeps_share_its_session_s_state() -> 
 
 
 @pytest.mark.asyncio
-async def test_stored_messages_leave_out_history_copies_and_transient_context() -> None:
+async def test_stored_messages_leave_out_history_copies_and_keep_transient_context_in_place() -> None:
     model = ScriptedModel([answer("ok")])
     history = Message(role="user", content="earlier", from_history=True)
     transient = Message(role="user", content="context", add_to_agent_memory=False)
@@ -230,7 +230,7 @@ async def test_stored_messages_leave_out_history_copies_and_transient_context() 
         ),
     )
 
-    assert [message.content for message in record.messages] == ["You are Code.", "hi", "ok"]
+    assert [message.content for message in record.messages] == ["You are Code.", "hi", "context", "ok"]
     assert model.requests[0].messages[1] is history
     assert model.requests[0].messages[-1] is transient
 
@@ -1222,6 +1222,27 @@ def switch_thread_model(model_name: str) -> str:
 
     """
     return f"switched to {model_name}"
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_stopped_after_a_call_stores_no_turn_context() -> None:
+    """The attempt that continues the turn after a model switch replays this run and sends the turn context again."""
+    model = ScriptedModel([calls(tool_call("switch_thread_model", "c-switch", model_name="opus"))])
+    switch = toolkit(switch_thread_model, name="thread_model", stop_after_call=True)
+
+    _, record = await collect(
+        run_agent(
+            spec(model, switch),
+            [*_prompt(), Message(role="user", content="context", add_to_agent_memory=False)],
+            ctx=context(),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
+
+    assert record.status is RunStatus.completed
+    assert [message.role for message in record.messages] == ["system", "user", "assistant", "tool"]
+    assert all(message.add_to_agent_memory for message in record.messages)
 
 
 @pytest.mark.parametrize("stopping", ["approved", "before-pause"])
