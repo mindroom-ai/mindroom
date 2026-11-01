@@ -3,8 +3,6 @@
 import asyncio
 import io
 import json
-import threading
-import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +21,7 @@ from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ViewFileRequest
+from tests.conftest import loop_runs_while_blocked
 
 TOKEN = "view-file-test-token"  # noqa: S105
 HEADERS = {"x-mindroom-sandbox-token": TOKEN}
@@ -168,33 +167,22 @@ async def test_view_file_endpoint_keeps_event_loop_responsive_during_decode(
 ) -> None:
     """Workspace I/O, Pillow decoding, and transport encoding run off the event loop."""
     client, workspace = view_file_client
-    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    view_saw_loop_running: list[bool] = []
 
     def blocking_view(_path: str, *, workspace: Path, file_access: FileAccess) -> ToolValue:
         assert workspace.name == "workspace"
         assert file_access == "workspace"
-        release.wait(timeout=1)
+        view_saw_loop_running.append(loop_runs_while_blocked(loop))
         return ToolValue(content="decoded")
 
     monkeypatch.setattr(sandbox_runner, "view_agent_image", blocking_view)
     request = type("Request", (), {"app": client.app})()
-    started_at = time.monotonic()
-    task = asyncio.create_task(
-        sandbox_runner.view_file_in_worker(
-            request,
-            ViewFileRequest(**_view(workspace, "plot.png")),
-        ),
-    )
 
-    await asyncio.sleep(0.05)
-    elapsed = time.monotonic() - started_at
-    try:
-        assert elapsed < 0.2
-        assert not task.done()
-    finally:
-        release.set()
-    response = await task
+    response = await sandbox_runner.view_file_in_worker(request, ViewFileRequest(**_view(workspace, "plot.png")))
+
     assert response.ok is True
+    assert view_saw_loop_running == [True]
 
 
 @pytest.mark.asyncio
