@@ -309,7 +309,7 @@ agents:
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
 - Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
 - `cron` is a five-field expression in the agent's [timezone](#timezone).
-- `room` is a room key or Matrix room ID, as in an agent's [`rooms`](rooms.md#configuration); it defaults to the agent's first configured room.
+- `room` names a room as an entry of [`rooms`](rooms.md#configuration) does, and a room key must be one an agent, a team, or top-level `rooms` lists; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
 - A [private agent](configuration/agents.md#private-instances) runs its automations once for each requester who has used it, as that requester and on that requester's own files, and posts in their [personal room](personal-rooms.md) with the agent.
@@ -393,10 +393,11 @@ agents:
   mind:
     knowledge_graph: true
     tools: [mcp_github, duckduckgo]
+    rooms: [exploration]
     automations:
       - name: exploration
         cron: "0 */6 * * *"
-        room: "#mind-exploration"
+        room: exploration
         max_tool_calls: 30
 ```
 

@@ -19,6 +19,7 @@ from mindroom.config.models import DefaultsConfig, EmbedderConfig, ToolConfigEnt
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.config.voice import SpeechServiceConfig, VoiceSTTConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.matrix.state import update_matrix_state
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -308,9 +309,13 @@ _MODELS = {"default": {"provider": "openai", "id": "test-model"}}
 
 
 @pytest.mark.parametrize(
-    ("authored", "location"),
+    ("authored", "location", "room"),
     [
-        ({"agents": {"general": {"display_name": "General", "rooms": [_OUTSIDE_ALIAS]}}}, "agents.general.rooms"),
+        (
+            {"agents": {"general": {"display_name": "General", "rooms": [_OUTSIDE_ALIAS]}}},
+            "agents.general.rooms",
+            _OUTSIDE_ALIAS,
+        ),
         (
             {
                 "agents": {"code": {"display_name": "Code", "rooms": ["lobby"]}},
@@ -319,10 +324,17 @@ _MODELS = {"default": {"provider": "openai", "id": "test-model"}}
                 },
             },
             "teams.ops.rooms",
+            _OUTSIDE_ALIAS,
+        ),
+        (
+            {"rooms": {_OUTSIDE_ALIAS: {}}, "agents": {"general": _FILE_MEMORY_AGENT}},
+            "rooms",
+            _OUTSIDE_ALIAS,
         ),
         (
             {"agents": {"general": {**_FILE_MEMORY_AGENT, "room_thread_modes": {_OUTSIDE_ALIAS: "room"}}}},
             "agents.general.room_thread_modes",
+            _OUTSIDE_ALIAS,
         ),
         (
             {
@@ -334,31 +346,34 @@ _MODELS = {"default": {"provider": "openai", "id": "test-model"}}
                 },
             },
             "agents.general.automations.prompt_curation.room",
+            _OUTSIDE_ALIAS,
         ),
         (
             {
-                "defaults": {"automations": [{"name": "prompt_curation", "room": _OUTSIDE_ALIAS}]},
+                "defaults": {"automations": [{"name": "prompt_curation", "room": "ideas"}]},
                 "agents": {"general": _FILE_MEMORY_AGENT},
             },
             "defaults.automations.prompt_curation.room",
+            "ideas",
         ),
     ],
-    ids=["agent-rooms", "team-rooms", "room-thread-modes", "agent-automation", "default-automation"],
+    ids=["agent-rooms", "team-rooms", "top-level-rooms", "room-thread-modes", "agent-automation", "unlisted-key"],
 )
-def test_an_alias_of_a_room_mindroom_does_not_manage_fails_naming_where(
+def test_a_room_reference_that_names_no_room_fails_naming_where(
     tmp_path: Path,
     authored: dict[str, object],
     location: str,
+    room: str,
 ) -> None:
-    """An alias no room key owns resolves to no room at runtime, so loading the config names it and the `!` form."""
+    """An outside alias or an unlisted key resolves to no room at runtime, so loading the config names it."""
     with pytest.raises(ValueError, match="room ID") as raised:
         Config.validate_with_runtime({**authored, "models": _MODELS}, test_runtime_paths(tmp_path))
 
     assert config_validation_issues(raised.value) == [
         (
             ("config",),
-            "Room aliases must belong to rooms MindRoom creates for a room key; "
-            f"list any other room by its ! room ID: {location} -> {_OUTSIDE_ALIAS}",
+            "Each room reference must be a room key MindRoom manages, that room's full alias, or a ! room ID: "
+            f"{location} -> {room}",
         ),
     ]
 
@@ -399,3 +414,24 @@ def test_only_the_exact_alias_mindroom_creates_for_a_room_key_names_that_room(
     else:
         with pytest.raises(ValueError, match=re.escape(f"agents.two.rooms -> {alias}")):
             Config.validate_with_runtime(authored, runtime_paths)
+
+
+def test_a_room_mindroom_recorded_keeps_its_alias_and_key_after_its_key_leaves_the_config(tmp_path: Path) -> None:
+    """MindRoom's record still maps a room it created, so its alias and key keep naming it once no entity lists the key."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    update_matrix_state(
+        runtime_paths,
+        lambda state: state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby"),
+    )
+    authored = {
+        "models": _MODELS,
+        "agents": {
+            "general": {
+                **_FILE_MEMORY_AGENT,
+                "rooms": ["#lobby:localhost"],
+                "automations": [{"name": "prompt_curation", "room": "lobby"}],
+            },
+        },
+    }
+
+    assert Config.validate_with_runtime(authored, runtime_paths).agents["general"].rooms == ["#lobby:localhost"]

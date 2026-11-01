@@ -122,6 +122,7 @@ from mindroom.git_urls import credential_free_repo_url
 from mindroom.integrations import validate_integrations
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import managed_account_key
+from mindroom.matrix.state import resolve_room_id
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     is_managed_room_key,
@@ -968,17 +969,21 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_room_aliases_name_managed_rooms(self, info: ValidationInfo) -> Config:
-        """Reject any room alias but those MindRoom gives its room keys, the only aliases its runtime maps to room IDs."""
+    def validate_room_references_name_rooms(self, info: ValidationInfo) -> Config:
+        """Reject a room reference that the runtime cannot map to a room ID, which it does through MindRoom's record only.
+
+        A configured room key and the alias MindRoom gives it name a room before the room is created and recorded.
+        """
         runtime_paths = _context_runtime_paths(info)
         if runtime_paths is None:
             return self
         domain = self.get_domain(runtime_paths)
-        managed_aliases = {
-            f"#{managed_room_alias_localpart(room_key, runtime_paths=runtime_paths)}:{domain}"
-            for room_key in self.managed_room_keys()
+        room_keys = self.managed_room_keys()
+        named_rooms = room_keys | {
+            f"#{managed_room_alias_localpart(room_key, runtime_paths=runtime_paths)}:{domain}" for room_key in room_keys
         }
         references = [
+            *(("rooms", room) for room in self.rooms),
             *((f"agents.{name}.rooms", room) for name, agent in self.agents.items() for room in agent.rooms),
             *((f"teams.{name}.rooms", room) for name, team in self.teams.items() for room in team.rooms),
             *(
@@ -996,15 +1001,15 @@ class Config(BaseModel):
                 for automation in self.defaults.automations
             ),
         ]
-        outside_aliases = sorted(
+        unknown_rooms = sorted(
             f"{location} -> {room}"
             for location, room in references
-            if room is not None and room.startswith("#") and room not in managed_aliases
+            if room is not None and room not in named_rooms and not resolve_room_id(room, runtime_paths).startswith("!")
         )
-        if outside_aliases:
+        if unknown_rooms:
             msg = (
-                "Room aliases must belong to rooms MindRoom creates for a room key; "
-                "list any other room by its ! room ID: " + ", ".join(outside_aliases)
+                "Each room reference must be a room key MindRoom manages, that room's full alias, or a ! room ID: "
+                + ", ".join(unknown_rooms)
             )
             raise ValueError(msg)
         return self

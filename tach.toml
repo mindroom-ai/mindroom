@@ -3534,6 +3534,7 @@ depends_on = [
     "mindroom.git_urls",
     "mindroom.integrations",
     "mindroom.matrix_identifiers",
+    "mindroom.matrix.state",
     "mindroom.prompt_templates",
     "mindroom.prompts",
     "mindroom.room_thread_modes",
