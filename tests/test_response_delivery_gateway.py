@@ -73,6 +73,7 @@ from mindroom.reply_scope import current_span
 from mindroom.reply_turn.inbox import InboxResponses
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.streaming import ProgressPermission
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_record import TurnRecord
 from tests.conftest import (
@@ -773,6 +774,51 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
         assert outcome.final_visible_event_id == "$placeholder"
         assert reply.state is rl.ReplyState.FAILED
+        assert send.await_args.args[2]["m.new_content"]["body"] == note_segment(NoteKind.NOTHING_TO_SHOW).text
+
+    async def test_a_regeneration_that_streamed_only_its_placeholder_ends_it_with_a_note(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A regeneration whose progress replaced the earlier answer with the placeholder notes that it wrote nothing.
+
+        The progress edit's confirmation is still the span's own, not yet in the reply's records.
+        """
+        gateway = _gateway(tmp_path, alice)
+        send = AsyncMock(side_effect=delivered_matrix_side_effect("$note"))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            async with reply_span(
+                alice,
+                source_event_id="$cause",
+                room_id=_ROOM_ID,
+                regenerated_event_id="$prior_answer",
+            ) as handle:
+                assert await handle.runtime.write_ahead(handle, Presentation()) is ProgressPermission.SEND
+                handle.unconfirmed_progress = rl.ProgressConfirmation(event_id="$prior_answer", placeholder_only=True)
+                outcome = await gateway.finalize_streamed_response(
+                    FinalizeStreamedResponseRequest(
+                        target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                        stream_transport_outcome=StreamTransportOutcome(
+                            last_physical_stream_event_id="$prior_answer",
+                            rendered_body="Thinking...",
+                            visible_body_state="placeholder_only",
+                        ),
+                        initial_delivery_kind="edited",
+                        identity=_identity(),
+                        tool_trace=None,
+                        extra_content=None,
+                        existing_event_id="$prior_answer",
+                        existing_event_is_placeholder=False,
+                    ),
+                )
+
+        reply = await alice.replies.for_event("$prior_answer")
+        assert reply is not None
+        assert reply.state is rl.ReplyState.FAILED
+        assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
+        assert outcome.final_visible_event_id == "$prior_answer"
         assert send.await_args.args[2]["m.new_content"]["body"] == note_segment(NoteKind.NOTHING_TO_SHOW).text
 
     @pytest.mark.parametrize("generated_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])

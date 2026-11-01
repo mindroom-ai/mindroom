@@ -607,17 +607,19 @@ class DeliveryGateway:
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
     ) -> FinalDeliveryOutcome:
-        """End a reply that has nothing to show.
+        """End a reply whose turn has nothing to show.
 
-        A turn that finished without an answer notes that on the placeholder it showed, because its hidden tool calls
-        may have run; otherwise the reply's records remove the placeholder.
+        A turn that finished without an answer says so where its placeholder stands, because hidden tool calls may
+        have run; any other reply ends as a suppressed answer does.
         """
         ending = Failed(cause)
         handle = self._live_span()
         if handle is not None:
             reply = await self.deps.outbox.replies.load(handle.reply_id)
             assert reply is not None, "a span's reply exists while the span ends"
-            if cause is FailureCause.NOTHING_TO_SHOW and reply.event_id is not None and reply.placeholder_only:
+            # The span's latest progress edit counts, though its confirmation is not in the records yet.
+            shown = rl.confirm_progress(reply, handle.unconfirmed_progress)
+            if cause is FailureCause.NOTHING_TO_SHOW and shown.placeholder_only:
                 noted = await self.end_interrupted_span(handle, target, ending=ending, delivery_started=True)
                 assert noted is not None, "a failure always ends with its note"
                 return noted
