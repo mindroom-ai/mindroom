@@ -6258,7 +6258,7 @@ def test_google_status_and_connect_on_unpaired_install_without_client(tmp_path: 
     assert status_response.json()["connected"] is False
     assert connect_response.status_code == 503
     assert connect_response.json()["detail"] == (
-        "Google Drive has no OAuth client configured. Configure one in the MindRoom dashboard."
+        "Google Drive needs its OAuth client saved in the MindRoom dashboard before it can connect."
     )
 
 

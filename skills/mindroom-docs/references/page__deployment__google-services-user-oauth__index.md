@@ -59,7 +59,7 @@ See the [Privacy Policy](https://docs.mindroom.chat/privacy/#google-api-services
 
 ## Troubleshooting
 
-- **`<Google service> has no OAuth client configured`**: the install is not paired and has no custom client.
+- **`<Google service> needs its OAuth client saved in the MindRoom dashboard before it can connect`**: the install is not paired and has no custom client.
   Run `mindroom connect`, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).
 - **`OAuth client configuration could not be resolved`**: MindRoom could not fetch its Google OAuth client, usually because the pairing was revoked or the provisioning service is unreachable.
   Run `mindroom connect` again, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).

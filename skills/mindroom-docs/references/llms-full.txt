@@ -15651,7 +15651,7 @@ These rules apply to built-in providers and to providers that plugins register (
 
 ### Troubleshooting OAuth Connections
 
-- **`<Provider> has no OAuth client configured`**: the provider has no OAuth app client yet; save one with **Configure client** on its integration in the dashboard **Tools** tab, or seed its client config service.
+- **`<Provider> needs its OAuth client saved in the MindRoom dashboard before it can connect`**: the provider has no OAuth app client yet; save one with **Configure client** on its integration in the dashboard **Tools** tab, or seed its client config service.
 - **Credentials cannot be read**: when a stored token exists but cannot be read, `/status` returns `reset_required: true`, and tools tell the requester that the credentials "cannot be read" and to reset the connection from the dashboard (the **Tools** tab), then reconnect.
 - **Provider token endpoint changed**: MindRoom sends refresh tokens only to the token endpoint recorded when the account was connected.
   If the provider now resolves a different endpoint, MindRoom deletes the stored credential and the user must reconnect; the log shows `oauth_credentials_refresh_failed` with `reason="token_endpoint_changed"` and both endpoint origins.
@@ -15890,7 +15890,7 @@ See the [Privacy Policy](https://docs.mindroom.chat/privacy/#google-api-services
 
 ## Troubleshooting
 
-- **`<Google service> has no OAuth client configured`**: the install is not paired and has no custom client.
+- **`<Google service> needs its OAuth client saved in the MindRoom dashboard before it can connect`**: the install is not paired and has no custom client.
   Run `mindroom connect`, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).
 - **`OAuth client configuration could not be resolved`**: MindRoom could not fetch its Google OAuth client, usually because the pairing was revoked or the provisioning service is unreachable.
   Run `mindroom connect` again, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).

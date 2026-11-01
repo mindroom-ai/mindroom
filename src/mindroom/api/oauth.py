@@ -313,7 +313,9 @@ async def _issue_authorization_url(
         target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
         context = _credential_context(provider, target)
     if resolution is None:
-        detail = f"{provider.display_name} has no OAuth client configured. Configure one in the MindRoom dashboard."
+        detail = (
+            f"{provider.display_name} needs its OAuth client saved in the MindRoom dashboard before it can connect."
+        )
         raise HTTPException(status_code=503, detail=detail)
     try:
         payload = (
