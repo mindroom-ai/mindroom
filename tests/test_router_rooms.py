@@ -44,17 +44,6 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
 
 
 @pytest.fixture
-def room_aliases_resolve_to_themselves(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make bots use configured room aliases unchanged as room IDs."""
-
-    def resolve_room_aliases(aliases: list[str], runtime_paths: object | None = None) -> list[str]:
-        del runtime_paths
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", resolve_room_aliases)
-
-
-@pytest.fixture
 def config_with_rooms() -> Config:
     """Create a config with agents and teams that have rooms."""
     return Config(
@@ -82,7 +71,6 @@ def config_with_rooms() -> Config:
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 async def test_router_gets_all_configured_rooms(
     config_with_rooms: Config,
     tmp_path: Path,
@@ -112,7 +100,6 @@ async def test_router_gets_all_configured_rooms(
     assert set(router_bot.rooms) == expected_rooms
 
 
-@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 def test_team_bot_uses_defaults_streaming_setting(
     config_with_rooms: Config,
     tmp_path: Path,
@@ -141,7 +128,6 @@ def test_team_bot_uses_defaults_streaming_setting(
     assert team_bot._runtime_view.config.defaults.enable_streaming is False
 
 
-@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 def test_team_bot_uses_persisted_member_usernames(
     config_with_rooms: Config,
     tmp_path: Path,
@@ -175,7 +161,6 @@ def test_team_bot_uses_persisted_member_usernames(
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 async def test_router_joins_rooms_on_start(
     config_with_rooms: Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -224,7 +209,6 @@ async def test_router_joins_rooms_on_start(
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 async def test_orchestrator_creates_router_with_all_rooms(
     config_with_rooms: Config,
     tmp_path: Path,
@@ -250,7 +234,6 @@ async def test_orchestrator_creates_router_with_all_rooms(
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 async def test_router_updates_rooms_on_config_change(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -311,12 +294,8 @@ async def test_router_updates_rooms_on_config_change(
         setup_rooms.reset_mock()
         setup_rooms.side_effect = reconcile_room_aliases
 
-        async def mock_stop(*, shutdown_intent: object | None = None) -> None:
-            del shutdown_intent
-
+        # A reload reconciles the rooms of running bots only.
         for bot in orchestrator.agent_bots.values():
-            monkeypatch.setattr(bot, "stop", mock_stop)
-            # A reload reconciles the rooms of running bots only.
             bot.running = True
 
         # Update config

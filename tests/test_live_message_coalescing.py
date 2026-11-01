@@ -78,7 +78,6 @@ from mindroom.inbound_turn_normalizer import (
 )
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.journal_ingress import _inbound_event
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.room_membership import cached_joined_member_ids, room_membership_is_complete
@@ -125,7 +124,7 @@ from tests.threading_helpers import seed_hydrated_conversation, seed_unhydrated_
 from tests.turn_dispatch_helpers import dispatch_test_turn, nothing_else_queued, prepared_turn_recorder
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -6630,6 +6629,42 @@ def test_prepared_turn_preserves_formatted_body_mentions() -> None:
     assert "@mindroom_test_agent:localhost" in batch.payload.formatted_bodies[0]
 
 
+def _resolver_mention_context(
+    bot: AgentBot,
+    captured_event_ids: list[str] | None = None,
+) -> Callable[..., Awaitable[MessageContext]]:
+    """Return an ``extract_dispatch_context`` that reads no thread history and takes the resolver's mentions.
+
+    As in production, the mentions are the resolver's for the turn's payload. ``captured_event_ids`` collects the
+    events whose context took this normal path.
+    """
+
+    async def extract_dispatch_context(
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
+        *,
+        thread_id: str | None,
+        payload_metadata: DispatchPayloadMetadata | None = None,
+    ) -> MessageContext:
+        if captured_event_ids is not None:
+            captured_event_ids.append(event.event_id)
+        mentioned_agents, _am_i_mentioned = bot._conversation_resolver.pre_hydration_mentions(
+            room=room,
+            event=event,
+            payload_metadata=payload_metadata,
+        )
+        return MessageContext(
+            am_i_mentioned=True,
+            is_thread=thread_id is not None,
+            thread_id=thread_id,
+            thread_history=[],
+            mentioned_agents=mentioned_agents,
+            has_non_agent_mentions=False,
+        )
+
+    return extract_dispatch_context
+
+
 async def _capture_gate_dispatches(
     bot: AgentBot,
     room: nio.MatrixRoom,
@@ -6640,8 +6675,7 @@ async def _capture_gate_dispatches(
 ) -> tuple[list[MessageEnvelope], list[list[object]], list[DispatchPayloadWithAttachmentsRequest]]:
     """Dispatch queued events through the real handoff path and capture final envelopes.
 
-    The dispatch context reads no thread history; its mentions are the resolver's for the turn's payload, as
-    production's are. ``captured_context_event_ids`` collects the events whose context took that normal path.
+    ``captured_context_event_ids`` collects the events whose dispatch context took the normal path.
     """
     envelopes: list[MessageEnvelope] = []
     media_batches: list[list[object]] = []
@@ -6674,29 +6708,6 @@ async def _capture_gate_dispatches(
             return cast("str | None", coalescing_thread_id_overrides[event.event_id])
         return await original_coalescing_thread_id(room, event)
 
-    async def extract_dispatch_context(
-        room: nio.MatrixRoom,
-        event: DispatchEvent,
-        *,
-        thread_id: str | None,
-        payload_metadata: DispatchPayloadMetadata | None = None,
-    ) -> object:
-        if captured_context_event_ids is not None:
-            captured_context_event_ids.append(event.event_id)
-        mentioned_agents, _am_i_mentioned = bot._conversation_resolver.pre_hydration_mentions(
-            room=room,
-            event=event,
-            payload_metadata=payload_metadata,
-        )
-        return MessageContext(
-            am_i_mentioned=True,
-            is_thread=thread_id is not None,
-            thread_id=thread_id,
-            thread_history=[],
-            mentioned_agents=mentioned_agents,
-            has_non_agent_mentions=False,
-        )
-
     with (
         patch.object(
             bot._conversation_resolver,
@@ -6706,7 +6717,7 @@ async def _capture_gate_dispatches(
         patch.object(
             bot._conversation_resolver,
             "extract_dispatch_context",
-            new=AsyncMock(side_effect=extract_dispatch_context),
+            new=AsyncMock(side_effect=_resolver_mention_context(bot, captured_context_event_ids)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
         patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
@@ -7412,27 +7423,11 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
     async def record_response(*args: object, **_kwargs: object) -> None:
         await prepare_payload_via_seam(bot, args)
 
-    async def extract_dispatch_context(
-        _room: nio.MatrixRoom,
-        _event: nio.Event | PreparedIngress,
-        *,
-        thread_id: str | None,
-        **_kwargs: object,
-    ) -> object:
-        return MessageContext(
-            am_i_mentioned=True,
-            is_thread=thread_id is not None,
-            thread_id=thread_id,
-            thread_history=[],
-            mentioned_agents=[MatrixID(username="mindroom_test_agent", domain="localhost")],
-            has_non_agent_mentions=False,
-        )
-
     with (
         patch.object(
             bot._conversation_resolver,
             "extract_dispatch_context",
-            new=AsyncMock(side_effect=extract_dispatch_context),
+            new=AsyncMock(side_effect=_resolver_mention_context(bot)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
         patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
