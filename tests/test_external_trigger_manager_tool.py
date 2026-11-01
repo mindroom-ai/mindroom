@@ -248,6 +248,20 @@ def test_generated_agent_create_trigger_accepts_current_dynamic_room(
     assert payload["trigger"]["target"]["room_id"] == "!personal:localhost"
 
 
+def test_generated_agent_create_trigger_rejects_room_configured_for_others(tmp_path: Path) -> None:
+    """A room with configured responders answers only them, so a generated agent may not bind a trigger there."""
+    config = _load(tmp_path, created=[_created()])
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(
+        _context(tmp_path, requester_id=OWNER, room_id="lobby", config=config, agent_name="creator_research"),
+    ):
+        payload = _payload(tool.create_trigger("lobby-campground", public_key=_PUBLIC_KEY))
+
+    assert payload["status"] == "error"
+    assert "target room must already be configured" in payload["message"]
+
+
 def test_shared_agent_create_trigger_rejects_current_dynamic_room(tmp_path: Path) -> None:
     """Shared agents still need a configured target room, even when it is the current room."""
     config = _config()

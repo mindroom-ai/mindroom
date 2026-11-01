@@ -657,7 +657,8 @@ def _validate_target(record: ExternalTriggerRecord, config: Config, runtime_path
     )
     if target.agent in configured_entities:
         return
-    if _targets_own_current_room(record, config, runtime_paths):
+    # A room with configured responders answers only them, so another agent's trigger there would never be answered.
+    if not configured_entities and _targets_own_current_room(record, config, runtime_paths):
         return
     msg = "external trigger target room must already be configured for the target entity"
     raise ExternalTriggerStoreError(msg)
