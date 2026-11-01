@@ -263,6 +263,7 @@ Smaller changes that need operator action:
 - **Credentials from the environment**: the first start, or `mindroom doctor`, deletes the credential files earlier releases copied from provider-key variables, `OLLAMA_HOST`, `GITHUB_TOKEN`, `EMBEDDER_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, and credential seeds; MindRoom now reads those values from the environment at each start (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
   Before upgrading, set again any such variable you removed after MindRoom imported it, or save that credential in the dashboard, or the key stops working; startup logs each removed service whose variable is no longer set.
 - **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
+- **Public address setting**: `MINDROOM_BASE_URL` is removed and `mindroom run` refuses to start while it is set, so before upgrading, move its value to `MINDROOM_PUBLIC_URL` unless that is already set, and delete it.
 
 ### Compaction History
 

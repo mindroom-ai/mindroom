@@ -2,7 +2,13 @@ import { StrictMode } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectionsSignIn } from "./ConnectionsSignIn";
+import { openAgentLink } from "./navigation";
 import { requestConnection, setSignedInUser } from "./request";
+
+vi.mock("./navigation", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./navigation")>()),
+  openAgentLink: vi.fn(),
+}));
 
 const SESSION = "/api/connections/session";
 const OPEN_FROM_CHAT =
@@ -96,9 +102,13 @@ async function sentUser() {
 const messageListeners = (spy: { mock: { calls: unknown[][] } }) =>
   spy.mock.calls.filter(([type]) => type === "message").length;
 
-beforeEach(() => setOpener({ postMessage: vi.fn() }));
+beforeEach(() => {
+  setOpener({ postMessage: vi.fn() });
+  vi.mocked(openAgentLink).mockClear();
+});
 afterEach(() => {
   cleanup();
+  window.history.replaceState({}, "", "/");
   setSignedInUser(null);
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -351,5 +361,69 @@ describe("ConnectionsSignIn without an opener", () => {
     renderGate();
     expect(await screen.findByText(RELOAD)).toBeInTheDocument();
     expect(screen.queryByText("Portal content")).not.toBeInTheDocument();
+  });
+});
+
+describe("ConnectionsSignIn with an agent link to open", () => {
+  const CONNECT_LINK =
+    "/api/oauth/slack/authorize?connect_token=t&agent_name=mind_alice&execution_scope=user";
+  const openWith = (next: string) =>
+    window.history.replaceState(
+      {},
+      "",
+      `/connections/?next=${encodeURIComponent(next)}`,
+    );
+
+  it.each([
+    CONNECT_LINK,
+    "/api/oauth/google_gmail/reset?reset_token=t&agent_name=mind_alice",
+    `${window.location.origin}${CONNECT_LINK}`,
+  ])("opens %s once Chat signs in, instead of the portal", async (next) => {
+    openWith(next);
+    installBackend();
+    renderGate();
+    expect(openAgentLink).not.toHaveBeenCalled();
+    answerFromOpener();
+    await vi.waitFor(() => expect(openAgentLink).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(openAgentLink).mock.calls[0][0]).toBe(
+      next.replace(window.location.origin, ""),
+    );
+    expect(screen.queryByText("Portal content")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    "https://evil.example/api/oauth/slack/authorize?connect_token=t",
+    "//evil.example/api/oauth/slack/authorize?connect_token=t",
+    "/api/oauth/slack/callback?code=c&state=s",
+    "/api/oauth/slack/../../connections/egress",
+    "/connections/egress",
+  ])("shows the portal and opens nothing for %s", async (next) => {
+    openWith(next);
+    installBackend();
+    renderGate();
+    answerFromOpener();
+    expect(await screen.findByText("Portal content")).toBeInTheDocument();
+    expect(openAgentLink).not.toHaveBeenCalled();
+  });
+
+  it("still opens the link when sign-in fails, as a plain click would", async () => {
+    openWith(CONNECT_LINK);
+    installBackend({ post: json({ detail: "No" }, 403) });
+    renderGate();
+    answerFromOpener();
+    await vi.waitFor(() =>
+      expect(openAgentLink).toHaveBeenCalledWith(CONNECT_LINK),
+    );
+    expect(screen.queryByText("No")).not.toBeInTheDocument();
+  });
+
+  it("opens the link with the existing session when nothing opened the portal", async () => {
+    setOpener(null);
+    openWith(CONNECT_LINK);
+    installBackend({ get: json({}, 401) });
+    renderGate();
+    await vi.waitFor(() =>
+      expect(openAgentLink).toHaveBeenCalledWith(CONNECT_LINK),
+    );
   });
 });

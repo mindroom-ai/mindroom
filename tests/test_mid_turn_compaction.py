@@ -201,11 +201,11 @@ def _scoped_agent(
 
 
 def _turn(prompt: Sequence[Message] | str) -> TurnMessages:
-    """Split a run's input as a reply does: transient context, the prompt (its last stored user message), context."""
+    """Split a run's input as a reply does: transient context, the prompt (its last other message), context."""
     messages = [Message(role="user", content=prompt)] if isinstance(prompt, str) else list(prompt)
     transient = tuple(message for message in messages if not message.add_to_agent_memory)
-    stored = [message for message in messages if message.add_to_agent_memory]
-    return TurnMessages(prompt=stored[-1], context=tuple(stored[:-1]), transient=transient)
+    conversation = [message for message in messages if message.add_to_agent_memory]
+    return TurnMessages(prompt=conversation[-1], context=tuple(conversation[:-1]), transient=transient)
 
 
 async def _run(
@@ -637,6 +637,45 @@ async def test_unseen_thread_context_is_folded_and_transient_context_kept(
 
 
 @pytest.mark.asyncio
+async def test_an_earlier_turns_stored_context_folds_as_history_not_as_this_turns_context(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+) -> None:
+    config, paths = _config(tmp_path)
+    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
+    earlier_context = Message(role="user", content="earlier turn context", add_to_agent_memory=False)
+    seed_session(
+        storage,
+        _session(
+            "session-1",
+            runs=[
+                _completed_run(
+                    "run-1",
+                    messages=[
+                        Message(role="user", content="q1"),
+                        earlier_context,
+                        Message(role="assistant", content="a1"),
+                    ],
+                ),
+            ],
+        ),
+    )
+    model = ToolLoopModel(tool_rounds=5)
+    transient = Message(role="user", content="transient turn context", add_to_agent_memory=False)
+
+    await _run(_scoped_agent(model, config, paths, storage), [Message(role="user", content="Do the task"), transient])
+
+    assert model.requests[0].contents[:3] == ["q1", "earlier turn context", "a1"]
+    compacted = _first_compacted(model)
+    assert "earlier turn context" not in compacted.contents
+    assert compacted.contents[-3] == "Do the task"
+    assert is_compaction_summary(compacted.messages[-2])
+    assert compacted.contents[-1] == "transient turn context"
+    assert "q1" in summary_calls.inputs[0]
+    assert "earlier turn context" not in summary_calls.inputs[0]
+
+
+@pytest.mark.asyncio
 async def test_rewritten_request_carries_no_response_chain(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
@@ -953,7 +992,7 @@ def test_tool_results_after_an_interleaved_message_fold_with_their_call() -> Non
         role="assistant",
         tool_calls=[{"id": "c1", "type": "function", "function": {"name": "probe", "arguments": "{}"}}],
     )
-    # Turn context no history keeps sits between a call and its result.
+    # Turn context sits between a call and its result.
     context = Message(role="user", content="Noted.", add_to_agent_memory=False)
     result = Message(role="tool", tool_call_id="c1", content="r")
     messages = [Message(role="system", content="Be precise."), prompt, call, context, result]

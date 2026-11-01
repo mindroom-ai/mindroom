@@ -128,6 +128,10 @@ export function oauthIntegrationProvider(
               : undefined,
           oauth_client_redirect_uri_supported:
             data.client_config_redirect_uri_supported === true,
+          oauth_default_redirect_uri:
+            typeof data.default_redirect_uri === "string"
+              ? data.default_redirect_uri
+              : undefined,
           oauth_service_account_configured:
             data.has_service_account_config === true,
           oauth_reset_required: resetRequired,

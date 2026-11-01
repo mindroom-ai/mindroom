@@ -341,7 +341,7 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
         )
 
     assert prepared_run.prepared_history.replays_persisted_history is False
-    # Unstored turn context follows the prompt, so the next request repeats this one up to it.
+    # Turn context follows the prompt, after the thread context sent before it.
     expected = [
         render_msg_tag(sender="alice", body="Earlier context", event_id="$earlier"),
         render_msg_tag(sender="bob", body="More context", event_id="$more"),
@@ -791,40 +791,43 @@ async def _three_turns(
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and_compaction(
+async def test_each_turn_replays_its_previous_request_whole_and_keeps_turn_context_out_of_compaction(
     tmp_path: Path,
     provider: _Provider,
 ) -> None:
+    """Every request extends the previous turn's whole request, turn context included, as append-only caches need."""
     requests, config, runtime_paths = await _three_turns(tmp_path, provider)
-    second_request, third_request = requests[1], requests[2]
+    first_request, second_request, third_request = requests
 
-    assert stable_serialize(second_request[:-1]) == stable_serialize(third_request[: len(second_request) - 1])
-    assert [message["content"] for message in requests[0]] == [
+    assert stable_serialize(first_request) == stable_serialize(second_request[: len(first_request)])
+    assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
+    assert [message["content"] for message in third_request] == [
         "First prompt",
         render_transient_context(("turn context one",)),
-    ]
-    assert [message["content"] for message in second_request] == [
-        "First prompt",
         "ok",
         "Second prompt",
         render_transient_context(("turn context two",)),
-    ]
-    assert [message["content"] for message in third_request] == [
-        "First prompt",
-        "ok",
-        "Second prompt",
         "ok",
         "Third prompt",
         render_transient_context(("turn context three",)),
     ]
-    assert third_request[-2]["add_to_agent_memory"] is True
-    assert third_request[-1]["add_to_agent_memory"] is False
+    assert [message["add_to_agent_memory"] for message in third_request[-2:]] == [True, False]
 
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     persisted = storage.load_session("session-1")
     assert persisted is not None
     persisted_contents = [str(message.content) for run in persisted.runs for message in run.messages]
-    assert persisted_contents == ["First prompt", "ok", "Second prompt", "ok", "Third prompt", "ok"]
+    assert persisted_contents == [
+        "First prompt",
+        render_transient_context(("turn context one",)),
+        "ok",
+        "Second prompt",
+        render_transient_context(("turn context two",)),
+        "ok",
+        "Third prompt",
+        render_transient_context(("turn context three",)),
+        "ok",
+    ]
 
     summary_input, included_runs = build_summary_input(
         previous_summary=None,
@@ -859,7 +862,7 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
     )
     second_request, third_request = requests[1], requests[2]
 
-    assert stable_serialize(second_request[:-1]) == stable_serialize(third_request[: len(second_request) - 1])
+    assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
     assert third_request[-1] == {
         "role": "user",
         "content": render_transient_context(("turn context three",)),

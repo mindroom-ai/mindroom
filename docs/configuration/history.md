@@ -20,6 +20,8 @@ Set these fields in `defaults`, on an agent, or on a team (see [Team History and
 
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
+Each turn's context, such as retrieved memories, `persist=False` enrichment, and the note telling the agent how a tool approval was decided, replays with that turn until compaction, except under `num_history_messages`, which counts and replays only conversation messages.
+Text compaction summaries leave that context out, while a [native compaction](#native-compaction) summary can include it, and so can a later text summary that starts from a Claude checkpoint.
 Tool results replay unchanged.
 
 ## Context Window
@@ -94,7 +96,7 @@ With the default `reserve_tokens`, a summary model with a context window of roug
 
 A long reply, for example a tool loop that keeps reading files, can outgrow the context window before it finishes.
 Before each model request, MindRoom checks whether the request would exceed the replay window minus `reserve_tokens`; if it would, it compacts first and the reply continues.
-After that compaction the model sees its system prompt, the user's current message, any per-turn context, and a summary that records the progress made so far; earlier conversation and the reply's own earlier tool calls and results are replaced by that summary.
+After that compaction the model sees its system prompt, the user's current message, the current turn's context, and a summary that records the progress made so far; earlier conversation and the reply's own earlier tool calls and results are replaced by that summary.
 The tool calls still appear in the reply.
 If the summary and the current message together exceed the model's `context_window` minus `reserve_tokens`, the reply fails with `Saved conversation summary exceeds the available history budget` (see [Compacted history and redaction](#compacted-history-and-redaction)).
 If the summary model fails, the reply continues without compacting and may then fail with a provider error.

@@ -85,23 +85,18 @@ def _reset_embedder_health_generation() -> EmbedderHealthRecorder:
         return EmbedderHealthRecorder(_health_generation)
 
 
-def handle_embedder_credential_change(
-    config: Config | None = None,
-    runtime_paths: RuntimePaths | None = None,
-) -> EmbedderHealthRecorder:
-    """Invalidate old writers and optionally probe the replacement credential."""
+def handle_embedder_credential_change(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Invalidate old writers and probe the replacement credential."""
     health_recorder = _reset_embedder_health_generation()
-    if config is not None and runtime_paths is not None:
-        create_background_task(
-            check_embedder_health(
-                config,
-                runtime_paths,
-                reason="credential_change",
-                health_recorder=health_recorder,
-            ),
-            name="embedder_credential_change_health_check",
-        )
-    return health_recorder
+    create_background_task(
+        check_embedder_health(
+            config,
+            runtime_paths,
+            reason="credential_change",
+            health_recorder=health_recorder,
+        ),
+        name="embedder_credential_change_health_check",
+    )
 
 
 def embedder_in_use(config: Config) -> bool:

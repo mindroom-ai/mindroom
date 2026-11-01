@@ -7,7 +7,13 @@ export interface ToolFieldSchema {
   name: string;
   label: string;
   type:
-    "boolean" | "number" | "password" | "select" | "string[]" | "text" | "url";
+    | "boolean"
+    | "number"
+    | "password"
+    | "select"
+    | "string[]"
+    | "text"
+    | "url";
   required?: boolean;
   default?: unknown;
   placeholder?: string | null;
@@ -15,6 +21,8 @@ export interface ToolFieldSchema {
   requiredWhenFieldChanges?: string | null;
   options?: Array<{ label: string; value: string }> | null;
   validation?: Record<string, unknown> | null;
+  /** False when a tool entry may not set the field, such as a password field, whose secret the Tools page saves. */
+  authored_override?: boolean;
 }
 
 export interface ToolInfo {

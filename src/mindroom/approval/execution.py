@@ -26,7 +26,7 @@ from mindroom.delegation.execution import answered_delegation_calls, drive_deleg
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
-from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
@@ -117,6 +117,9 @@ async def _collect_agent_continuation(
             elif isinstance(event, ToolCompleted):
                 presentation.complete_tool(event.call)
                 completed_ids.add(event.call.tool_call_id)
+                await presentation.publish(progress)
+            elif isinstance(event, ToolProgress):
+                presentation.show_tool_progress(event.tool_call_id, event.text)
                 await presentation.publish(progress)
     response = finished.terminal(run_id)
     # The run's own calls this continuation completed; child approval results are projected into the root

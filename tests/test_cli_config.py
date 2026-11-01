@@ -39,6 +39,7 @@ from mindroom.cli.main import (
     app,
 )
 from mindroom.cli.main import main as cli_main
+from mindroom.cli.service import _shell_service_keys
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
@@ -2572,6 +2573,30 @@ def test_a_non_utf8_env_file_names_itself_and_the_fix(
     output = normalize_console_output(capsys.readouterr().out)
     assert f"Error: {env_path.resolve()} is not UTF-8 text" in output
     assert "save it as UTF-8" in output
+
+
+def test_a_utf8_bom_env_file_keeps_its_first_variable(tmp_path: Path) -> None:
+    """A `.env` saved as UTF-8 with a byte order mark reads its first variable, and setup never adds a second one."""
+    target = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    env_path.write_text("MINDROOM_API_KEY=dashboard-existing\nOPENAI_API_KEY=sk-existing\n", encoding="utf-8-sig")
+    original = env_path.read_bytes()
+
+    result = runner.invoke(
+        app,
+        ["config", "init", "--path", str(target), "--matrix-server", "self-hosted", "--no-input"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert env_path.read_bytes() == original
+    assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
+    runtime_paths = constants_module.resolve_runtime_paths(
+        config_path=target,
+        process_env={"MINDROOM_API_KEY": "dashboard-existing", "OPENAI_API_KEY": "sk-existing"},
+    )
+    assert runtime_paths.env_file_values["MINDROOM_API_KEY"] == "dashboard-existing"
+    # The service reads `.env`, which already holds both keys this shell exports, so it saves neither.
+    assert _shell_service_keys(runtime_paths) == {}
 
 
 # ---------------------------------------------------------------------------

@@ -1036,7 +1036,7 @@ class MatrixApiTools(Toolkit):
             allow_dangerous=allow_dangerous,
         )
 
-    async def _redact(
+    async def _redact(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
         *,
@@ -1061,34 +1061,26 @@ class MatrixApiTools(Toolkit):
         assert normalized_event_id is not None
 
         # A redaction whose thread membership is unknown fails closed.
-        thread_known = await redaction_thread_membership_known(
+        if not await redaction_thread_membership_known(
             context.conversation_reader,
             context.relations,
             room_id,
             event_id=normalized_event_id,
-        )
-        error_message = None if thread_known else "Failed to resolve redaction target thread mapping."
-        dangerous = False
-        if error_message is None:
-            state_policy_error, dangerous = await self._redaction_state_policy_error(
-                context,
-                room_id=room_id,
-                event_id=normalized_event_id,
-                allow_dangerous=allow_dangerous,
-            )
-            if state_policy_error is not None:
-                return state_policy_error
-
-        if not dry_run and (limit_error := self._check_rate_limit(context, room_id, action="redact")) is not None:
-            error_message = limit_error
-
-        if error_message is not None:
+        ):
             return self._error_payload(
                 action="redact",
                 room_id=room_id,
                 target_event_id=normalized_event_id,
-                message=error_message,
+                message="Failed to resolve redaction target thread mapping.",
             )
+        state_policy_error, dangerous = await self._redaction_state_policy_error(
+            context,
+            room_id=room_id,
+            event_id=normalized_event_id,
+            allow_dangerous=allow_dangerous,
+        )
+        if state_policy_error is not None:
+            return state_policy_error
 
         if dry_run:
             return self._payload(
@@ -1102,6 +1094,14 @@ class MatrixApiTools(Toolkit):
                     "event_id": normalized_event_id,
                     "reason": normalized_reason,
                 },
+            )
+
+        if (limit_error := self._check_rate_limit(context, room_id, action="redact")) is not None:
+            return self._error_payload(
+                action="redact",
+                room_id=room_id,
+                target_event_id=normalized_event_id,
+                message=limit_error,
             )
 
         try:

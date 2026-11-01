@@ -3,8 +3,12 @@
 # Playwright bounds neither a page script nor a wait, so the toolkit bounds each host call itself, wherever it runs and
 # whether or not it runs as a job, at the limit a worker gives a call by default.
 HOST_CALL_TIMEOUT_SECONDS = 120.0
-# Time for a worker to answer a call stopped at its limit, which closes the worker's browser first.
+# Time for a call stopped at its limit to finish stopping and for the worker's answer to reach the relaying process.
 _RELAY_GRACE_SECONDS = 30.0
+
+
+class HostCallTimeLimitError(TimeoutError):
+    """A host browser call the toolkit stopped at its time limit, which leaves the browser and its other tabs open."""
 
 
 def browser_request_budget_seconds(tool_name: str, function_name: str) -> float:

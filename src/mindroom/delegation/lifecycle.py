@@ -29,7 +29,7 @@ from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.requester_identity import is_access_checked_requester_id
-from mindroom.tool_system.progress import cap_progress, report_tool_progress
+from mindroom.tool_system.progress import cap_report, report_tool_progress
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
@@ -273,7 +273,7 @@ async def child_run_context(
 def _report_child_activity(observation: ChildRunObservation, event: TextDelta | ToolStarted) -> None:
     text = event.text if isinstance(event, TextDelta) else f"\nCalling {event.call.tool_name}\n"
     if text:
-        observation.activity = cap_progress(observation.activity + text)
+        observation.activity = cap_report(observation.activity + text)
         report_tool_progress(observation.activity)
 
 

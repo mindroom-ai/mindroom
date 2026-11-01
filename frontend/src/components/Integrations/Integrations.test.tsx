@@ -913,6 +913,8 @@ describe("Integrations", () => {
       oauth_client_configured: false,
       oauth_client_config_service: "google_drive_oauth_client",
       oauth_client_redirect_uri_supported: true,
+      oauth_default_redirect_uri:
+        "https://mindroom.example.org/api/oauth/google_drive/callback",
     });
 
     render(<Integrations />);
@@ -929,7 +931,8 @@ describe("Integrations", () => {
           expect.objectContaining({ name: "client_secret", required: true }),
           expect.objectContaining({
             name: "redirect_uri",
-            placeholder: `${window.location.origin}/api/oauth/google_drive/callback`,
+            placeholder:
+              "https://mindroom.example.org/api/oauth/google_drive/callback",
           }),
         ],
       });
@@ -1198,6 +1201,80 @@ describe("Integrations", () => {
     expect(mockHomeAssistantDisconnect).toHaveBeenCalledOnce();
   });
 
+  it("shows the server's answer when the environment still supplies a disconnected tool", async () => {
+    const refetch = vi.fn();
+    const message =
+      "Credentials for openai now come from the OPENAI_API_KEY environment variable; " +
+      "to remove them, edit it in the environment or .env and restart MindRoom.";
+    listTools(
+      [
+        tool({
+          name: "openai",
+          display_name: "OpenAI",
+          description: "OpenAI models",
+          setup_type: "api_key",
+          status: "available",
+        }),
+      ],
+      { refetch },
+    );
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: "success", message }),
+    });
+
+    render(<Integrations />);
+
+    fireEvent.click(
+      within(await findCard("OpenAI")).getByRole("button", {
+        name: "Disconnect",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "OpenAI",
+        description: message,
+      });
+    });
+    expect(global.fetch).toHaveBeenCalledWith("/api/credentials/openai", {
+      method: "DELETE",
+    });
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the server's reason when deleting a tool's credentials fails", async () => {
+    listTools([
+      tool({
+        name: "openai",
+        display_name: "OpenAI",
+        description: "OpenAI models",
+        setup_type: "api_key",
+        status: "available",
+      }),
+    ]);
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      json: async () => ({ detail: "Stored credentials are unreadable" }),
+    });
+
+    render(<Integrations />);
+
+    fireEvent.click(
+      within(await findCard("OpenAI")).getByRole("button", {
+        name: "Disconnect",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Disconnect Failed",
+        description: "Stored credentials are unreadable",
+        variant: "destructive",
+      });
+    });
+  });
+
   it("lists worker-scoped and private agents in the scope selector", async () => {
     useConfigStore.setState({
       agents: [
@@ -1285,6 +1362,33 @@ describe("Integrations", () => {
     expect(
       screen.getByText(/OAuth-backed integrations can be connected/i),
     ).toBeInTheDocument();
+  });
+
+  it("keeps the new scope's cards when the previous scope's load finishes last", async () => {
+    const sharedLoad = createDeferred();
+    mockOAuthLoadStatus.mockImplementation(
+      async (_id: string, scope: typeof sharedScope) => {
+        if (scope.agentName === null) await sharedLoad.promise;
+        return { status: "available" };
+      },
+    );
+    useConfigStore.setState(privateAgentState);
+
+    render(<Integrations />);
+
+    await waitFor(() =>
+      expect(mockOAuthLoadStatus).toHaveBeenCalledWith(
+        "google_drive",
+        sharedScope,
+      ),
+    );
+    await selectScope("Private Agent");
+    expect(await screen.findByText("Private Mail")).toBeInTheDocument();
+
+    await act(async () => sharedLoad.resolve());
+
+    expect(screen.getByText("Private Mail")).toBeInTheDocument();
+    expect(screen.queryByText("Weather")).not.toBeInTheDocument();
   });
 
   it("hides shared-only integrations for isolating worker scopes", async () => {
@@ -1650,7 +1754,13 @@ describe("Integrations", () => {
         }),
       },
     });
-    global.fetch = vi.fn().mockResolvedValue({ ok: true });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        status: "success",
+        message: "Credentials deleted for github",
+      }),
+    });
 
     render(<Integrations />);
     await selectScope("Scoped Agent");
@@ -1683,7 +1793,13 @@ describe("Integrations", () => {
       [githubTool({ status: "available", manual_auth_configured: true })],
       { refetch },
     );
-    global.fetch = vi.fn().mockResolvedValue({ ok: true });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        status: "success",
+        message: "Credentials deleted for github",
+      }),
+    });
 
     render(<Integrations />);
 

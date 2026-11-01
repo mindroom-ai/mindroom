@@ -71,7 +71,7 @@ _PLATFORM_SSO_CLOCK_SKEW_SECONDS = 10
 _used_platform_sso_ticket_ids: dict[str, int] = {}
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 # Set only by server code; ASGI scope keys cannot come from the client.
-_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY = "mindroom.connections_session_callback"
+_CONNECTIONS_SESSION_FLOW_SCOPE_KEY = "mindroom.connections_session_flow"
 # Each Connections page names the account it shows, so a stale tab cannot act as the browser's new account.
 _CONNECTIONS_USER_HEADER = "X-MindRoom-Connections-User"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
@@ -152,6 +152,19 @@ class ApiAuthState:
 
 def _build_auth_settings(runtime_paths: RuntimePaths) -> _ApiAuthSettings:
     """Read dashboard auth settings from one explicit runtime context."""
+    # LEGACY_COMPAT: Retired MINDROOM_BASE_URL public origin.
+    # Legacy format: `MINDROOM_BASE_URL` named MindRoom's public origin for OAuth links and callbacks when
+    #   `MINDROOM_PUBLIC_URL` was unset, and its host answered requests without a credential.
+    # Last legacy release: v2026.11.7; replacement: v2026.11.8 reads only `MINDROOM_PUBLIC_URL`.
+    # Handling: refuse to start while it is set and name `MINDROOM_PUBLIC_URL`, so a deployment that still sets it
+    #   never silently moves its OAuth callbacks to localhost.
+    # Coverage: tests/api/test_api.py::test_retired_base_url_fails_startup.
+    if runtime_paths.env_value("MINDROOM_BASE_URL"):
+        msg = (
+            "MINDROOM_BASE_URL was removed; set MINDROOM_PUBLIC_URL to MindRoom's public origin "
+            "and remove MINDROOM_BASE_URL"
+        )
+        raise ValueError(msg)
     trusted_upstream = _build_trusted_upstream_auth_settings(runtime_paths)
     dashboard = dashboard_origin(runtime_paths)
     # Only a gateway's signed identity reaches both hosts; dashboard sign-ins and Connections sessions stay on one.
@@ -786,24 +799,29 @@ def _is_oauth_popup_path(path: str, actions: frozenset[str]) -> bool:
     return len(parts) == 5 and parts[1:3] == ["api", "oauth"] and bool(parts[3]) and parts[4] in actions
 
 
-def allow_connections_session_for_oauth_callback(request: Request) -> None:
-    """Let this OAuth callback authenticate with the Connections session, because a session started its flow."""
-    request.scope[_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY] = True
+def allow_connections_session_for_oauth_flow(request: Request) -> None:
+    """Let this OAuth route authenticate with the Connections session.
+
+    Callers grant it on a callback whose flow a session started, and on a connect or reset link whose token names
+    the one requester the session must then be.
+    """
+    request.scope[_CONNECTIONS_SESSION_FLOW_SCOPE_KEY] = True
 
 
 def _connections_session_path_honored(request: Request) -> bool:
-    """Honor sessions on portal paths and OAuth success pages, and on callbacks only for session-started flows."""
+    """Honor sessions on portal paths and OAuth success pages, and on other OAuth browser routes only when granted."""
     path = request.scope["path"]
-    if _is_oauth_popup_path(path, frozenset({"callback"})):
-        return request.scope.get(_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY) is True
+    if _is_oauth_popup_path(path, frozenset({"authorize", "callback", "reset"})):
+        return request.scope.get(_CONNECTIONS_SESSION_FLOW_SCOPE_KEY) is True
     return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"}))
 
 
 def _connections_session_auth_user(request: Request) -> SignedMatrixUser | None:
     """Return the Connections session identity.
 
-    It is honored on portal paths, and on dashboard routes for an administrator whose sign-in the homeserver bound
-    to this deployment, outside hosted platform mode and never on OAuth callbacks.
+    It is honored on portal paths, on OAuth routes whose handler granted it (`allow_connections_session_for_oauth_flow`),
+    and on dashboard routes for an administrator whose sign-in the homeserver bound to this deployment, outside hosted
+    platform mode and never on OAuth callbacks without that grant.
     """
     auth_state = _request_auth_state(request)
     cookie = connections_session_cookie(deployment_origin(auth_state.settings.public_url, str(request.base_url)))

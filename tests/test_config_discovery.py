@@ -67,7 +67,6 @@ _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
     "get_tool_by_name": "worker_target",
     "load_scoped_credentials": "worker_target",
     "resolve_knowledge_binding": "execution_identity",
-    "resolve_worker_execution_scope": "execution_identity",
     "resolve_worker_target": "execution_identity",
     "resolve_agent_execution": "execution_identity",
     "resolve_agent_runtime": "execution_identity",
@@ -83,7 +82,6 @@ _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS = {
     ("src/mindroom/runtime_resolution.py", "resolve_agent_runtime", "execution_identity"),
     ("src/mindroom/runtime_resolution.py", "resolve_knowledge_binding", "execution_identity"),
     ("src/mindroom/tool_system/worker_routing.py", "build_worker_target_from_runtime_env", "execution_identity"),
-    ("src/mindroom/tool_system/worker_routing.py", "resolve_worker_execution_scope", "execution_identity"),
     ("src/mindroom/tool_system/worker_routing.py", "resolve_worker_target", "execution_identity"),
     ("src/mindroom/tool_system/metadata.py", "get_tool_by_name", "worker_target"),
 }

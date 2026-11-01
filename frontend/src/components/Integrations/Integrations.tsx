@@ -1,4 +1,12 @@
-import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
+import {
+  useState,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
 import {
   Settings,
   CheckCircle2,
@@ -34,6 +42,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { apiErrorMessageFromResponse } from "@/lib/api";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   useTools,
@@ -60,8 +69,14 @@ import { EnhancedConfigDialog } from "./EnhancedConfigDialog";
 import { FilterSelector } from "@/components/shared/FilterSelector";
 
 const SHARED_ONLY_PROVIDER_IDS = new Set(["spotify", "homeassistant"]);
+const NO_INTEGRATIONS: Integration[] = [];
 
 type FilterMode = "all" | "available" | "unconfigured" | "configured";
+
+interface DisconnectToast {
+  title: string;
+  description: string;
+}
 
 const CATEGORIES = [
   { id: "email", name: "Email & Calendar" },
@@ -326,7 +341,9 @@ export function Integrations() {
   const [loading, setLoading] = useState(false);
   const loadRequestIdRef = useRef(0);
   const currentScopeKeyRef = useRef(currentScopeKey);
-  currentScopeKeyRef.current = currentScopeKey;
+  useLayoutEffect(() => {
+    currentScopeKeyRef.current = currentScopeKey;
+  }, [currentScopeKey]);
   const isCurrentScope = (scopeKey: string) =>
     currentScopeKeyRef.current === scopeKey;
   const isCurrentLoadRequest = (requestId: number, scopeKey: string) =>
@@ -361,10 +378,6 @@ export function Integrations() {
       setScopeAgentName(null);
     }
   }, [scopeAgentName, scopedAgents]);
-
-  useEffect(() => {
-    loadIntegrations();
-  }, [backendTools, currentScopeKey]);
 
   const loadIntegrations = async (forceRefresh = false) => {
     const scopeKey = currentScopeKey;
@@ -467,6 +480,11 @@ export function Integrations() {
     }
   };
 
+  const reloadIntegrations = useEffectEvent(loadIntegrations);
+  useEffect(() => {
+    reloadIntegrations();
+  }, [backendTools, currentScopeKey]);
+
   // OAuth cards connect for the selected agent's scope; other credentials stay shared-only.
   const blocksScopedDashboardCredentials = (integration: Integration) =>
     disablesDashboardCredentialManagement &&
@@ -527,7 +545,7 @@ export function Integrations() {
         label: "Redirect URI",
         type: "text",
         required: false,
-        placeholder: `${window.location.origin}/api/oauth/${integration.id}/callback`,
+        placeholder: integration.oauth_default_redirect_uri,
         description: "Optional provider-specific redirect URI",
       });
     }
@@ -608,8 +626,7 @@ export function Integrations() {
 
   const runDisconnectOperation = async (
     integration: Integration,
-    disconnect: () => Promise<void>,
-    success?: { title: string; description: string },
+    disconnect: () => Promise<DisconnectToast | undefined>,
   ) => {
     if (blocksScopedDashboardCredentials(integration)) {
       toast({
@@ -623,16 +640,17 @@ export function Integrations() {
 
     setLoading(true);
     try {
-      await disconnect();
+      const result = await disconnect();
 
       // Refetch tools to update status
       await refetchTools();
 
-      toast({
-        title: success?.title ?? "Disconnected",
-        description:
-          success?.description ?? `${integration.name} has been disconnected.`,
-      });
+      toast(
+        result ?? {
+          title: "Disconnected",
+          description: `${integration.name} has been disconnected.`,
+        },
+      );
     } catch (error) {
       toast({
         title: "Disconnect Failed",
@@ -658,9 +676,19 @@ export function Integrations() {
       );
 
       if (!response.ok) {
-        throw new Error("Failed to disconnect");
+        throw new Error(
+          await apiErrorMessageFromResponse(response, "Failed to disconnect"),
+        );
       }
+      // The environment or a granted shared credential can still supply deleted credentials, so the server says what happened.
+      const { message } = (await response.json()) as { message: string };
+      return { title: integration.name, description: message };
     });
+
+  const integrations =
+    integrationsState.scopeKey === currentScopeKey
+      ? integrationsState.integrations
+      : NO_INTEGRATIONS;
 
   const getActionButton = (integration: Integration) => {
     if (blocksScopedDashboardCredentials(integration)) {
@@ -674,16 +702,15 @@ export function Integrations() {
     const provider = providerForIntegration(integration);
     const disconnectProvider = provider
       ? () =>
-          runDisconnectOperation(
-            integration,
-            () => provider.disconnect(scope),
-            integration.oauth_reset_required === true
+          runDisconnectOperation(integration, async () => {
+            await provider.disconnect(scope);
+            return integration.oauth_reset_required === true
               ? {
                   title: "Connection reset",
                   description: `${integration.name} OAuth has been reset.`,
                 }
-              : undefined,
-          )
+              : undefined;
+          })
       : undefined;
 
     const canConfigureOAuthClient =
@@ -996,11 +1023,6 @@ export function Integrations() {
       actionButton
     );
   };
-
-  const integrations =
-    integrationsState.scopeKey === currentScopeKey
-      ? integrationsState.integrations
-      : [];
 
   const filteredIntegrations = useMemo(() => {
     let filtered = integrations;

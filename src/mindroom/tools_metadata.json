@@ -62,7 +62,7 @@
       "category": "communication",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -291,7 +291,7 @@
       "category": "communication",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "When empty, OpenAI models use OPENAI_API_KEY and OpenRouter voice models use OPENROUTER_API_KEY.",
           "env": [],
@@ -578,7 +578,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -959,7 +959,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -974,7 +974,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -989,7 +989,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -1168,7 +1168,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -1212,7 +1212,7 @@
       "category": "communication",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "WhatsApp Business API access token",
           "env": [
@@ -1448,6 +1448,7 @@
         "agent_settings",
         "create_agent",
         "update_agent",
+        "set_avatar",
         "delete_agent"
       ],
       "helper_text": null,
@@ -1545,7 +1546,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Apify API token for authentication",
           "env": [
@@ -1697,7 +1698,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Basic-auth password for deployments that support it; use token for Bitbucket Cloud.",
           "env": [
@@ -1712,7 +1713,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Scoped Bitbucket Cloud API token; takes precedence over password.",
           "env": [
@@ -1827,7 +1828,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -2026,7 +2027,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -2149,7 +2150,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -2175,7 +2176,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Optional bearer token for Anthropic-compatible gateways.",
           "env": [],
@@ -2483,7 +2484,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Confluence password",
           "env": [
@@ -2498,7 +2499,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Confluence API key, alternative to password",
           "env": [
@@ -2585,7 +2586,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -2598,7 +2599,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -2611,7 +2612,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Default headers sent only to the Base URL (JSON format)",
           "env": [],
@@ -2704,7 +2705,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Daytona API key",
           "env": [
@@ -2812,7 +2813,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Environment variables for the sandbox (JSON format)",
           "env": [],
@@ -3054,7 +3055,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -3142,7 +3143,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -3278,7 +3279,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -3768,7 +3769,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -3837,7 +3838,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -3989,7 +3990,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4071,7 +4072,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4310,7 +4311,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4564,7 +4565,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -4741,7 +4742,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4756,7 +4757,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4881,7 +4882,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4931,7 +4932,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -5075,7 +5076,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "The ModelsLab API key for authentication",
           "env": [
@@ -5324,7 +5325,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Neo4j password",
           "env": [
@@ -5448,7 +5449,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -5670,7 +5671,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -5859,7 +5860,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -6125,7 +6126,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -6197,7 +6198,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6212,7 +6213,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6227,7 +6228,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6316,7 +6317,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6683,7 +6684,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6698,7 +6699,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6713,7 +6714,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6952,7 +6953,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -7181,7 +7182,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -7456,7 +7457,7 @@
       "category": "email",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -7838,7 +7839,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Composio API key",
           "env": [],
@@ -8075,7 +8076,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Shopify Admin API access token.",
           "env": [
@@ -8277,7 +8278,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "API key from ClickUp",
           "env": [
@@ -9091,7 +9092,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -9502,7 +9503,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Internal integration token",
           "env": [
@@ -9614,7 +9615,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "OpenBB PAT for premium data providers. Optional - works without it using yfinance.",
           "env": [
@@ -9979,7 +9980,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -10005,7 +10006,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -10213,7 +10214,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -10454,7 +10455,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -10578,7 +10579,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -10783,7 +10784,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -10890,7 +10891,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Brandfetch API key for Brand API",
           "env": [
@@ -11016,7 +11017,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -11379,7 +11380,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -11973,7 +11974,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -12202,7 +12203,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -12633,7 +12634,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -12782,7 +12783,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -12961,7 +12962,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Oxylabs dashboard password",
           "env": [
@@ -13126,7 +13127,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -13375,7 +13376,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -13458,7 +13459,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -13742,7 +13743,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -14393,7 +14394,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "API access key from Unsplash Developer account",
           "env": [
@@ -14611,7 +14612,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Long-lived access token from Home Assistant",
           "env": [],
@@ -14691,7 +14692,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -14736,7 +14737,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -14799,7 +14800,7 @@
       "category": "social",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Twitter API Bearer token",
           "env": [
@@ -14814,7 +14815,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Twitter API consumer key",
           "env": [
@@ -14829,7 +14830,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Twitter API consumer secret",
           "env": [
@@ -14844,7 +14845,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Twitter API access token",
           "env": [
@@ -14859,7 +14860,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Twitter API access token secret",
           "env": [
@@ -14963,7 +14964,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Client secret from Server-to-Server OAuth app",
           "env": [

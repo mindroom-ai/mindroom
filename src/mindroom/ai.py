@@ -51,7 +51,7 @@ from mindroom.hooks import (
     render_transient_context,
 )
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
-from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -147,7 +147,7 @@ __all__ = [
     "run_delegated_child_response",
     "stream_agent_response",
 ]
-AIStreamChunk = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RunFinished | FailedReply
+AIStreamChunk = TextDelta | ReasoningDelta | ToolStarted | ToolProgress | ToolCompleted | RunFinished | FailedReply
 
 
 def _compose_current_turn_prompt(
@@ -155,7 +155,7 @@ def _compose_current_turn_prompt(
     raw_prompt: str,
     model_prompt: str | None,
 ) -> str:
-    """Build the persisted current-turn user message without transient context."""
+    """Build the current-turn user message, which holds no transient context."""
     prompt_chunks: list[str] = []
     if raw_prompt:
         prompt_chunks.append(raw_prompt)
@@ -1197,6 +1197,9 @@ async def _process_stream_events(  # noqa: C901, PLR0912
             if isinstance(event, ReasoningDelta):
                 if show_reasoning and event.text:
                     yield event
+                continue
+            if isinstance(event, ToolProgress):
+                yield event
                 continue
             if isinstance(event, TextDelta):
                 if not event.text:

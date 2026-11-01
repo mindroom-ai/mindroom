@@ -6,7 +6,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -641,53 +641,6 @@ class TestAgentBot(AgentBotTestBase):
             assert [event["tool_name"] for event in delivered[TOOL_TRACE_CONTENT_KEY]["events"]] == ["touch"]
         else:
             assert TOOL_TRACE_CONTENT_KEY not in delivered
-
-    @pytest.mark.asyncio
-    async def test_generate_team_response_helper_preserves_enrichment_in_shared_team_session(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Shared team responses should never scrub enriched history after delivery."""
-        config = self._config_for_storage(tmp_path)
-        config.defaults.show_stop_button = False
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        install_direct_response_admission(bot)
-        bot.client = _make_matrix_client_mock()
-        bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
-        with (
-            patch(
-                "mindroom.delivery_gateway.send_message_outcome",
-                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
-            ),
-            patch(
-                "mindroom.delivery_gateway.edit_message_outcome",
-                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-            ),
-            patch_response_runner_module(
-                typing_indicator=_noop_typing_indicator,
-                should_use_streaming=AsyncMock(return_value=False),
-                team_response_stream=scripted_team_stream("Team reply"),
-            ),
-        ):
-            resolution = await bot._response_runner.generate_team_response_helper(
-                ResponseRequest(
-                    sources=ResponseSources(
-                        pending_event_ids=("$team-root",),
-                        logical_source_event_ids=("$team-root",),
-                    ),
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    prompt="team prompt",
-                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
-                    correlation_id="corr-team",
-                ),
-                member_names=["calculator", "general"],
-                team_mode="collaborate",
-            )
-
-        assert resolution == Owned()
-        assert await recorded_reply_event(bot, "$team-root") == "$team"
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_merges_raw_prompt_with_model_prompt(

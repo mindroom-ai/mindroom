@@ -6,6 +6,7 @@ import asyncio
 import base64
 import gc
 import importlib.util
+import os
 import sys
 import threading
 import time
@@ -37,6 +38,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.event_journal import IngestionRecordAdmission, IngestionRecordDisposition
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.llm.usage import TokenCounts
+from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_backends import (
@@ -5898,3 +5900,132 @@ async def test_join_retries_when_the_audio_process_cannot_start(tmp_path: Path) 
 
     assert _call_state(manager).retry_task is not None
     await manager.shutdown()
+
+
+def test_manager_joins_calls_in_its_own_personal_room(tmp_path: Path) -> None:
+    """An agent creates its owner's personal room itself, so that room is its call room without configured rooms."""
+    config = Config(
+        models={},
+        agents={"helper": AgentConfig(display_name="Helper")},
+        calls=CallsConfig(
+            enabled=True,
+            profiles={
+                "voice": RealtimeCallProfile(
+                    backend="realtime",
+                    model="gpt-realtime",
+                    credentials_service="openai",
+                    voice="marin",
+                ),
+            },
+            agents={"helper": "voice"},
+        ),
+    )
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
+    assert not manager._is_configured_call_room(_room())
+    write_personal_room(
+        personal_room_record_path(test_runtime_paths(tmp_path), "helper", "@alice:example.org"),
+        PersonalRoomRecord(
+            user_id="@alice:example.org",
+            alias="#personal_alice:example.org",
+            source_room_id="!lobby:example.org",
+            room_id=ROOM_ID,
+        ),
+    )
+    assert manager._is_configured_call_room(_room())
+
+
+def test_manager_keeps_its_configured_room_when_another_call_agents_record_is_damaged(tmp_path: Path) -> None:
+    """A damaged record of another call agent leaves out only that record's room."""
+    config = Config(
+        models={},
+        agents={
+            "helper": AgentConfig(display_name="Helper", rooms=[ROOM_ID]),
+            "other": AgentConfig(display_name="Other"),
+        },
+        calls=CallsConfig(
+            enabled=True,
+            profiles={
+                "voice": RealtimeCallProfile(
+                    backend="realtime",
+                    model="gpt-realtime",
+                    credentials_service="openai",
+                    voice="marin",
+                ),
+            },
+            agents={"helper": "voice", "other": "voice"},
+        ),
+    )
+    record = personal_room_record_path(test_runtime_paths(tmp_path), "other", "@bob:example.org")
+    record.parent.mkdir(parents=True)
+    record.write_text('{"user_id": "@bob:example.org", "field_from_a_newer_release": true}')
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
+    assert manager._is_configured_call_room(_room())
+
+
+def _two_call_agents(**helper: object) -> Config:
+    return Config(
+        models={},
+        agents={"helper": AgentConfig(display_name="Helper", **helper), "other": AgentConfig(display_name="Other")},
+        calls=CallsConfig(
+            enabled=True,
+            profiles={
+                "voice": RealtimeCallProfile(
+                    backend="realtime",
+                    model="gpt-realtime",
+                    credentials_service="openai",
+                    voice="marin",
+                ),
+            },
+            agents={"helper": "voice", "other": "voice"},
+        ),
+    )
+
+
+def _write_personal_room(tmp_path: Path, agent_name: str, user_id: str, room_id: str) -> None:
+    write_personal_room(
+        personal_room_record_path(test_runtime_paths(tmp_path), agent_name, user_id),
+        PersonalRoomRecord(
+            user_id=user_id,
+            alias=f"#personal_{agent_name}:example.org",
+            source_room_id="!lobby:example.org",
+            room_id=room_id,
+        ),
+    )
+
+
+def test_invited_call_agent_does_not_answer_in_another_agents_personal_room(tmp_path: Path) -> None:
+    """A personal room's own agent and an invited call agent leave the room to neither, as for two invited agents.
+
+    The room's members are not consulted: lazy-loaded membership may not list the personal room's agent yet.
+    """
+    _write_personal_room(tmp_path, "other", "@alice:example.org", ROOM_ID)
+    manager = _manager(
+        _client(),
+        FakeBridge(),
+        tmp_path,
+        _two_call_agents(accept_invites=True),
+        invited_rooms_by_agent={"helper": {ROOM_ID}},
+    )
+    assert not manager._is_configured_call_room(_room())
+
+
+def test_manager_keeps_its_configured_room_when_one_of_its_records_is_damaged(tmp_path: Path) -> None:
+    """A damaged personal-room record leaves out only its own room."""
+    record = personal_room_record_path(test_runtime_paths(tmp_path), "helper", "@bob:example.org")
+    record.parent.mkdir(parents=True)
+    record.write_text('{"user_id": "@bob:example.org", "field_from_a_newer_release": true}')
+    manager = _manager(_client(), FakeBridge(), tmp_path, _two_call_agents(rooms=[ROOM_ID]))
+    assert manager._is_configured_call_room(_room())
+
+
+def test_manager_sees_a_personal_room_written_after_its_last_check(tmp_path: Path) -> None:
+    """Writing a record makes its room a call room at the next check, whatever the directory's mtime resolution."""
+    _write_personal_room(tmp_path, "helper", "@alice:example.org", "!earlier:example.org")
+    manager = _manager(_client(), FakeBridge(), tmp_path, _two_call_agents())
+    assert not manager._is_configured_call_room(_room())
+    directory = personal_room_record_path(test_runtime_paths(tmp_path), "helper", "").parent
+    version = directory.stat().st_mtime_ns
+    _write_personal_room(tmp_path, "helper", "@bob:example.org", ROOM_ID)
+    # A coarse clock can leave the directory's mtime where the last check saw it.
+    os.utime(directory, ns=(version, version))
+    assert manager._is_configured_call_room(_room())

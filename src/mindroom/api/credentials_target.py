@@ -33,7 +33,6 @@ from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
-    require_worker_key_for_scope,
     resolve_worker_target,
     unsupported_shared_only_integration_message,
     unsupported_shared_only_integration_names,
@@ -186,12 +185,6 @@ def resolve_request_credentials_target(
         )
 
     reject_unbound_private_dashboard_requester(execution_scope, execution_identity)
-    require_worker_key_for_scope(
-        execution_scope,
-        execution_identity=execution_identity,
-        agent_name=scope_request.agent_name,
-        failure_message=f"Could not resolve worker credentials for agent '{scope_request.agent_name}'.",
-    )
     return RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=base_manager,
@@ -237,12 +230,6 @@ def resolve_requester_credentials_target(
             runtime_paths=base_target.runtime_paths,
         )
     reject_unbound_private_dashboard_requester("user", execution_identity)
-    require_worker_key_for_scope(
-        "user",
-        execution_identity=execution_identity,
-        agent_name=agent_name,
-        failure_message="Could not resolve requester-scoped OAuth credentials.",
-    )
     return replace(
         base_target,
         worker_scope="user",

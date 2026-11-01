@@ -72,6 +72,13 @@ function envInputs(): HTMLInputElement[] {
   return screen.queryAllByPlaceholderText("Env Passthrough");
 }
 
+/** The fields the panel offers, by their Override boxes, in order. */
+function overrideLabels(): (string | null)[] {
+  return screen
+    .getAllByRole("checkbox", { name: /^Override / })
+    .map((box) => box.getAttribute("aria-label"));
+}
+
 describe("ToolConfigPanel", () => {
   beforeEach(() => {
     useConfigStore.setState(useConfigStore.getInitialState(), true);
@@ -373,26 +380,18 @@ describe("ToolConfigPanel", () => {
 
   it("unticks an override to clear it", () => {
     seedStore({
-      agentTools: [{ discord: { bot_token: "agent-specific-token" } }],
+      agentTools: [{ discord: { channel: "agent-specific-channel" } }],
     });
     render(
       <ToolConfigPanel
         target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
         toolName="discord"
         toolDisplayName="Discord"
-        configFields={[
-          {
-            name: "bot_token",
-            label: "Bot Token",
-            type: "password",
-            required: true,
-            description: "Discord bot token",
-          },
-        ]}
+        configFields={[{ name: "channel", label: "Channel", type: "text" }]}
       />,
     );
 
-    const toggle = screen.getByRole("checkbox", { name: "Override Bot Token" });
+    const toggle = screen.getByRole("checkbox", { name: "Override Channel" });
     expect(toggle).toBeChecked();
     fireEvent.click(toggle);
 
@@ -400,33 +399,126 @@ describe("ToolConfigPanel", () => {
     expect(toggle).not.toBeChecked();
   });
 
-  it("falls back to configFields when no overrideFields are provided", () => {
+  it("shows an unticked config field with its default", () => {
     seedStore({ agentTools: ["discord"] });
     render(
       <ToolConfigPanel
         target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
         toolName="discord"
         toolDisplayName="Discord"
-        overrideFields={null}
         configFields={[
           {
-            name: "bot_token",
-            label: "Bot Token",
-            type: "password",
-            description: "Discord bot token",
-            default: "default-token",
+            name: "channel",
+            label: "Channel",
+            type: "text",
+            description: "Discord channel",
+            default: "general",
           },
         ]}
       />,
     );
 
-    expect(screen.getByText("Default: ••••••••")).toBeInTheDocument();
+    expect(screen.getByText("Default: general")).toBeInTheDocument();
     expect(
-      screen.getByRole("checkbox", { name: "Override Bot Token" }),
+      screen.getByRole("checkbox", { name: "Override Channel" }),
     ).not.toBeChecked();
   });
 
-  it("prefers overrideFields over configFields when both are present", () => {
+  it("offers only fields a tool entry may set and points secrets to the Tools page", () => {
+    seedStore({ agentTools: ["reddit"] });
+    render(
+      <ToolConfigPanel
+        target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
+        toolName="reddit"
+        toolDisplayName="Reddit"
+        configFields={[
+          { name: "client_id", label: "Client ID", type: "text" },
+          {
+            name: "client_secret",
+            label: "Client Secret",
+            type: "password",
+            authored_override: false,
+          },
+          {
+            name: "password",
+            label: "Password",
+            type: "password",
+            authored_override: false,
+          },
+          {
+            name: "base_dir",
+            label: "Base Dir",
+            type: "text",
+            authored_override: false,
+          },
+        ]}
+      />,
+    );
+
+    expect(
+      screen.getByRole("checkbox", { name: "Override Client ID" }),
+    ).toBeInTheDocument();
+    for (const label of ["Client Secret", "Password", "Base Dir"]) {
+      expect(
+        screen.queryByRole("checkbox", { name: `Override ${label}` }),
+      ).not.toBeInTheDocument();
+    }
+    expect(
+      screen.getByText(
+        "Secrets are set on the Tools page: Client Secret, Password.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a list stored on a text field as the comma-separated text the backend reads", () => {
+    seedStore({
+      defaultTools: [{ shell: { extra_env_passthrough: ["GITEA_*", "HOME"] } }],
+    });
+    render(
+      <ToolConfigPanel
+        target={{ kind: "defaults" }}
+        toolName="shell"
+        toolDisplayName="Shell"
+        configFields={[
+          {
+            name: "extra_env_passthrough",
+            label: "Extra Env Passthrough",
+            type: "text",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByPlaceholderText("Extra Env Passthrough")).toHaveValue(
+      "GITEA_*, HOME",
+    );
+  });
+
+  it("offers an agent entry its config fields and its agent-only fields", () => {
+    seedStore({ agentTools: ["slack"] });
+    render(
+      <ToolConfigPanel
+        target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
+        toolName="slack"
+        toolDisplayName="Slack"
+        overrideFields={[
+          { name: "channels", label: "Project Channels", type: "string[]" },
+          { name: "room", label: "Room", type: "text" },
+        ]}
+        configFields={[
+          { name: "write", label: "Allow Write", type: "boolean" },
+        ]}
+      />,
+    );
+
+    expect(overrideLabels()).toEqual([
+      "Override Allow Write",
+      "Override Project Channels",
+      "Override Room",
+    ]);
+  });
+
+  it("shows a config field once, in the list form its agent-only twin takes", () => {
     seedStore();
     render(
       <ToolConfigPanel
@@ -440,12 +532,25 @@ describe("ToolConfigPanel", () => {
             type: "string[]",
           },
         ]}
-        configFields={[{ name: "timeout", label: "Timeout", type: "number" }]}
+        configFields={[
+          {
+            name: "enable_run_shell_command",
+            label: "Run Shell Command",
+            type: "boolean",
+          },
+          {
+            name: "extra_env_passthrough",
+            label: "Extra Env Passthrough",
+            type: "text",
+          },
+        ]}
       />,
     );
 
-    expect(screen.getByText("Env Passthrough")).toBeInTheDocument();
-    expect(screen.queryByText("Timeout")).not.toBeInTheDocument();
+    expect(overrideLabels()).toEqual([
+      "Override Run Shell Command",
+      "Override Env Passthrough",
+    ]);
   });
 
   it("keeps a draft to the agent it was typed for", () => {
@@ -540,17 +645,15 @@ describe("ToolConfigPanel", () => {
 
   it("edits shared default tool overrides without lazy-loading controls", () => {
     seedStore({
-      agentTools: [{ discord: { bot_token: "agent" } }],
-      defaultTools: [{ discord: { bot_token: "abc" } }],
+      agentTools: [{ discord: { channel: "agent" } }],
+      defaultTools: [{ discord: { channel: "abc" } }],
     });
     render(
       <ToolConfigPanel
         target={{ kind: "defaults" }}
         toolName="discord"
         toolDisplayName="Discord"
-        configFields={[
-          { name: "bot_token", label: "Bot Token", type: "password" },
-        ]}
+        configFields={[{ name: "channel", label: "Channel", type: "text" }]}
       />,
     );
 
@@ -558,12 +661,10 @@ describe("ToolConfigPanel", () => {
     expect(
       screen.queryByRole("checkbox", { name: "Defer until searched" }),
     ).not.toBeInTheDocument();
-    fireEvent.click(
-      screen.getByRole("checkbox", { name: "Override Bot Token" }),
-    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "Override Channel" }));
     expect(
       useConfigStore.getState().getDefaultToolOverrides("discord"),
     ).toBeNull();
-    expect(agentOverrides("discord")).toEqual({ bot_token: "agent" });
+    expect(agentOverrides("discord")).toEqual({ channel: "agent" });
   });
 });

@@ -454,22 +454,28 @@ _VERTEX_CREDENTIALS = {"credentials": Credentials(token="registry-google-token")
     ],
     ids=["openai-chat", "openai-responses", "groq", "cerebras", "anthropic", "vertexai_claude"],
 )
+@pytest.mark.parametrize("source", ["process", "env-file-under-blank-export"])
 async def test_an_endpoint_the_runtime_env_sets_has_no_idle_limit_by_default(
     fields: dict[str, Any],
     variable: str,
     endpoint: str,
+    source: str,
     tmp_path: Path,
     wire: Wire,
 ) -> None:
-    """The endpoint variable a route sends its requests to lifts the hosted idle limit, as a ``base_url`` does."""
+    """The endpoint variable a route sends its requests to lifts the hosted idle limit, as a ``base_url`` does.
+
+    A blank export of the variable is unset, so the ``.env`` value under it is the endpoint for both.
+    """
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     hosted = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
-    proxied = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "data",
-        process_env={variable: endpoint},
-    )
+    if source == "process":
+        process_env = {variable: endpoint}
+    else:
+        (tmp_path / ".env").write_text(f"{variable}={endpoint}\n", encoding="utf-8")
+        process_env = {variable: ""}
+    proxied = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=process_env)
     model_config = ModelConfig(**fields, api_key=None if fields["provider"] == "vertexai_claude" else "k")
     wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
 
