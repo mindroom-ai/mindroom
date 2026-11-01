@@ -8931,13 +8931,8 @@ async def test_git_refresh_marks_duplicate_source_sibling_stale(
 
 
 @pytest.mark.asyncio
-async def test_git_pull_that_changes_one_file_only_reindexes_that_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_git_pull_that_changes_one_file_only_reindexes_that_file(tmp_path: Path) -> None:
     """A one-file commit must cost one file's indexing, not the whole checkout's."""
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 
@@ -9667,6 +9662,69 @@ async def test_refresh_subprocess_returns_exact_result(tmp_path: Path) -> None:
     assert result.index_published is True
     assert result.availability is KnowledgeAvailability.READY
     assert result.last_error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_refresh_child")
+async def test_an_oversized_file_warns_once_across_refresh_children(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Each refresh runs in a new child, so the children report a file above the read cap and the runtime warns once."""
+    monkeypatch.setattr(knowledge_file_listing_module, "_WARNED_OVERSIZED_FILES", set())
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "one.md").write_text("one", encoding="utf-8")
+    with (docs / "huge.md").open("wb") as huge:
+        huge.truncate(65 << 20)
+    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"])
+    config.knowledge_bases["docs"].mode = "files"
+    runtime_paths = runtime_paths_for(config)
+
+    with capture_logs() as logs:
+        for _ in range(2):
+            result = await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+                "docs",
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+            assert result.last_error is None
+
+    skipped = [entry for entry in logs if entry["event"] == "Skipping a knowledge file above the read cap"]
+    assert [(entry["log_level"], entry["base_id"], entry["path"]) for entry in skipped] == [
+        ("warning", "docs", str(docs.resolve() / "huge.md")),
+        ("debug", "docs", str(docs.resolve() / "huge.md")),
+    ]
+    assert "above the read cap" not in capfd.readouterr().err
+
+
+def test_a_failed_refresh_child_still_reports_its_oversized_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh that fails after listing reports the files it skipped with its error, so the runtime still warns."""
+    docs = (tmp_path / "docs").resolve()
+    docs.mkdir()
+    with (docs / "huge.md").open("wb") as huge:
+        huge.truncate(65 << 20)
+    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"])
+
+    async def _list_then_fail(_payload: bytes) -> _RefreshChildResult:
+        await asyncio.to_thread(list_knowledge_files, config, "docs", docs)
+        msg = "No space left on device"
+        raise OSError(msg)
+
+    monkeypatch.setattr(knowledge_refresh_runner, "_run_subprocess_refresh_request", _list_then_fail)
+    with capture_logs() as logs:
+        result = knowledge_refresh_runner._run_child_request(b"{}")
+
+    assert result.error == "No space left on device"
+    assert result.oversized_files == (
+        knowledge_file_listing_module.OversizedKnowledgeFile("docs", str(docs / "huge.md"), 65 << 20),
+    )
+    skipped = [entry["log_level"] for entry in logs if entry["event"] == "Skipping a knowledge file above the read cap"]
+    assert skipped == ["debug"]
 
 
 @pytest.mark.asyncio

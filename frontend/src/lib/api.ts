@@ -102,10 +102,12 @@ function stringField(
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-export function apiErrorMessageFromPayload(
-  payload: unknown,
+/** The error message of a failed response, or `fallback` when its body has none. */
+export async function apiErrorMessageFromResponse(
+  response: Response,
   fallback: string,
-): string {
+): Promise<string> {
+  const payload: unknown = await response.json().catch(() => null);
   if (payload == null || typeof payload !== "object") {
     return fallback;
   }
@@ -153,14 +155,12 @@ export async function fetchJSON<T>(
     clearTimeout(timeoutId);
 
     if (!response.ok) {
-      let detail = `API call failed: ${response.status} ${response.statusText}`;
-      try {
-        const payload = await response.json();
-        detail = apiErrorMessageFromPayload(payload, detail);
-      } catch {
-        // Keep fallback detail text.
-      }
-      throw new Error(detail);
+      throw new Error(
+        await apiErrorMessageFromResponse(
+          response,
+          `API call failed: ${response.status} ${response.statusText}`,
+        ),
+      );
     }
 
     if (response.status === 204) {

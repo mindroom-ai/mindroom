@@ -1481,7 +1481,7 @@ class TestAgentBot(AgentBotTestBase):
                         visible_body_state="none",
                     ),
                     initial_delivery_kind="edited",
-                    identity=runner.locked.response_identity(request, response_kind="ai"),
+                    identity=runner.locked.build_lifecycle(request, response_kind="ai").identity,
                     tool_trace=None,
                     extra_content=None,
                     existing_event_id="$existing",
@@ -2848,7 +2848,7 @@ class TestAgentBot(AgentBotTestBase):
             return suppressed
 
         runner = unwrap_extracted_collaborator(bot._response_runner)
-        identity = runner.locked.response_identity(request, response_kind="ai")
+        identity = runner.locked.build_lifecycle(request, response_kind="ai").identity
 
         async def finalize(outcome: FinalDeliveryOutcome, **_kwargs: object) -> FinalDeliveryOutcome:
             events.append("cleanup_complete")

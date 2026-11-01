@@ -47,9 +47,7 @@ if TYPE_CHECKING:
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound config for routing tests."""
     runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
-    bound_config = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound_config, runtime_paths)
-    return bound_config
+    return bind_runtime_paths(config, runtime_paths)
 
 
 async def suggest_responder_for_message(

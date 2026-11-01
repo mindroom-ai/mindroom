@@ -73,24 +73,32 @@ def test_mcp_server_config_normalizes_tool_filters() -> None:
     assert config.exclude_tools == ["pong"]
 
 
-def test_mcp_server_config_normalizes_description() -> None:
-    """Trim the server description and collapse blank values to None."""
-    auth = {
-        "type": "oauth",
-        "discovery": "manual",
-        "authorization_url": "https://auth.example.test/authorize",
-        "token_url": "https://auth.example.test/token",
-    }
+@pytest.mark.parametrize(("raw", "expected"), [("  Demo  ", "Demo"), ("   ", None)])
+def test_mcp_server_config_normalizes_display_metadata(raw: str, expected: str | None) -> None:
+    """Trim server and OAuth display metadata and collapse blank values to None."""
     config = MCPServerConfig(
         transport="streamable-http",
         url="https://mcp.example.test/mcp",
-        description="  Demo workspace tools.  ",
-        auth=auth,
+        display_name=raw,
+        summary=raw,
+        icon=raw,
+        description=raw,
+        auth={
+            "type": "oauth",
+            "display_name": raw,
+            "discovery": "manual",
+            "authorization_url": "https://auth.example.test/authorize",
+            "token_url": "https://auth.example.test/token",
+        },
     )
-    assert config.description == "Demo workspace tools."
+    assert config.auth is not None
+    values = (config.display_name, config.summary, config.icon, config.description, config.auth.display_name)
+    assert values == (expected,) * 5
 
-    blank = MCPServerConfig(transport="stdio", command="npx", description="   ")
-    assert blank.description is None
+
+def test_mcp_server_config_accepts_blank_description_without_auth() -> None:
+    """A blank description counts as unset, so it does not require OAuth auth."""
+    assert MCPServerConfig(transport="stdio", command="npx", description="   ").description is None
 
 
 def test_mcp_server_config_rejects_description_without_auth() -> None:

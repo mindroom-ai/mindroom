@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import inspect
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -30,6 +30,7 @@ from tests.conftest import (
     make_conversation_reader_mock,
     make_latest_thread_event_id_mock,
     make_relation_lookup,
+    make_thread_reply_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -266,12 +267,35 @@ async def test_matrix_voice_message_room_sentinel_forces_room_level_send(tmp_pat
         )
 
     context.conversation_reader.latest_thread_event_id.assert_not_awaited()
+    # The sentinel is not an event ID, so nothing looks it up as one.
+    cast("AsyncMock", context.relations.runtime.client.room_get_event).assert_not_awaited()
     assert speech.send_audio.await_args.kwargs["thread_id"] is None
     assert speech.send_audio.await_args.kwargs["latest_thread_event_id"] is None
 
     payload = _payload(result)
     assert payload["status"] == "ok"
     assert payload["thread_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_matrix_voice_message_to_a_thread_reply_sends_in_its_thread(
+    tmp_path: Path,
+    speech: _SpeechMocks,
+) -> None:
+    """A reply event ID as thread_id sends into that reply's thread, since Matrix rejects a reply as a thread root."""
+    context = replace(
+        _context(tmp_path, thread_id=None),
+        relations=make_thread_reply_lookup("$reply-in-thread", "$thread-root"),
+    )
+
+    with tool_runtime_context(context):
+        result = await MatrixVoiceMessageTools(api_key="sk-test", model="tts-test").matrix_voice_message(
+            "into the thread",
+            thread_id="$reply-in-thread",
+        )
+
+    assert speech.send_audio.await_args.kwargs["thread_id"] == "$thread-root"
+    assert _payload(result)["thread_id"] == "$thread-root"
 
 
 @pytest.mark.asyncio
