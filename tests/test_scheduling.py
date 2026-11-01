@@ -1697,8 +1697,9 @@ async def test_get_scheduled_task_raises_on_transient_matrix_error(tmp_path: Pat
         {"errcode": "M_LIMIT_EXCEEDED", "error": "Slow down"},
         "!test:server",
     )
+    serve_task_state_events(client)
 
-    with pytest.raises(ScheduledTaskStateReadError, match="Failed to get scheduled task"):
+    with pytest.raises(ScheduledTaskStateReadError, match="M_LIMIT_EXCEEDED Slow down"):
         await get_scheduled_task(client, "!test:server", "task123", schedule_runtime_paths(tmp_path))
 
 
