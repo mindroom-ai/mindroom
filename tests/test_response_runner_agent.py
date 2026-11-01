@@ -129,6 +129,7 @@ from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import (
     attempt_in_place,
     delivered_turn,
+    failed_answer,
     recorded_reply_event,
     stream_transport,
     streamed_answer,
@@ -2640,10 +2641,6 @@ class TestAgentBot(AgentBotTestBase):
         """A delivered non-streaming Matrix error reply should not be a successful run outcome."""
         captured_outcomes: list[ResponseOutcome] = []
 
-        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
-            assert {"post" + "_response_compaction_checks_collector"}.isdisjoint(kwargs)
-            return "friendly-error"
-
         async def fake_apply_post_response_effects(
             _delivery: FinalDeliveryOutcome,
             outcome: ResponseOutcome,
@@ -2664,7 +2661,7 @@ class TestAgentBot(AgentBotTestBase):
         with patch_response_runner_module(
             typing_indicator=_noop_typing_indicator,
             should_use_streaming=AsyncMock(return_value=False),
-            stream_agent_response=streamed_answer(AsyncMock(side_effect=fake_ai_response)),
+            stream_agent_response=failed_answer("friendly-error"),
             apply_post_response_effects=AsyncMock(side_effect=fake_apply_post_response_effects),
         ):
             await bot._response_runner.generate_response(
@@ -2686,7 +2683,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        assert len(captured_outcomes) == 1
+        assert [outcome.run_succeeded for outcome in captured_outcomes] == [False]
 
     @pytest.mark.asyncio
     async def test_generate_response_marks_streaming_model_error_unsuccessful_for_post_effects(
@@ -2696,15 +2693,6 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A delivered streaming Matrix error reply should not be a successful run outcome."""
         captured_outcomes: list[ResponseOutcome] = []
-
-        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str]:
-            assert {"post" + "_response_compaction_checks_collector"}.isdisjoint(kwargs)
-            yield "friendly-error"
-
-        async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            response_stream = cast("AsyncGenerator[object]", args[4])
-            body_parts = [str(chunk) async for chunk in response_stream]
-            return stream_transport("$response", "".join(body_parts))
 
         async def fake_apply_post_response_effects(
             _delivery: FinalDeliveryOutcome,
@@ -2721,12 +2709,12 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
-                new=AsyncMock(side_effect=fake_send_streaming_response),
+                new=AsyncMock(side_effect=_consuming_send(stream_transport("$response", "friendly-error"))),
             ),
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=True),
-                stream_agent_response=MagicMock(side_effect=fake_stream_agent_response),
+                stream_agent_response=failed_answer("friendly-error"),
                 apply_post_response_effects=AsyncMock(side_effect=fake_apply_post_response_effects),
             ),
         ):
@@ -2749,7 +2737,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        assert len(captured_outcomes) == 1
+        assert [outcome.run_succeeded for outcome in captured_outcomes] == [False]
 
     @pytest.mark.asyncio
     async def test_generate_response_runs_post_effects_after_cancellable_wrapper(

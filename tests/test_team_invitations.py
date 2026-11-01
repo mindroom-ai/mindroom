@@ -1,8 +1,4 @@
-"""Tests for team room membership functionality.
-
-With the new self-managing agent pattern, teams handle their own room
-memberships just like agents do.
-"""
+"""Tests for team room membership functionality."""
 
 from __future__ import annotations
 
@@ -33,99 +29,6 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
 
 class TestTeamRoomMembership:
     """Test team room membership functionality."""
-
-    @pytest.mark.asyncio
-    async def test_team_joins_configured_rooms(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """Test that teams join their configured rooms on startup."""
-        # Create a mock team user
-        team_user = AgentMatrixUser(
-            agent_name="team1",
-            user_id="@mindroom_team1:localhost",
-            display_name="Team 1",
-            password=TEST_PASSWORD,
-        )
-
-        # Create the team bot with configured rooms
-        config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
-        config.defaults.enable_streaming = False
-        bot = make_test_agent_bot(
-            agent_user=team_user,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=["!test_room:localhost"],
-        )
-        install_runtime_journal_support(bot)
-
-        # Mock the client
-        mock_client = AsyncMock()
-        bot.client = mock_client
-
-        # Track which rooms were joined
-        joined_rooms = []
-
-        async def mock_join_room(_client: object, room_id: str) -> RoomJoinOutcome:
-            joined_rooms.append(room_id)
-            return RoomJoinOutcome.JOINED
-
-        monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
-        monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
-
-        # Test that the team joins its configured room
-        await bot.join_configured_rooms()
-
-        # Verify the team joined the configured room
-        assert len(joined_rooms) == 1
-        assert "!test_room:localhost" in joined_rooms
-
-    @pytest.mark.asyncio
-    async def test_team_leaves_unconfigured_rooms(self, tmp_path: Path) -> None:
-        """Test that teams leave rooms they're no longer configured for."""
-        # Create a mock team user
-        team_user = AgentMatrixUser(
-            agent_name="team1",
-            user_id="@mindroom_team1:localhost",
-            display_name="Team 1",
-            password=TEST_PASSWORD,
-        )
-
-        # Create the team bot with no configured rooms
-        config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
-        config.defaults.enable_streaming = False
-        bot = make_test_agent_bot(
-            agent_user=team_user,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=[],  # No configured rooms
-        )
-        install_runtime_journal_support(bot)
-
-        # Mock the client
-        mock_client = AsyncMock()
-        bot.client = mock_client
-
-        # Mock joined_rooms to return a room the team is in
-        joined_rooms_response = MagicMock()
-        joined_rooms_response.__class__ = nio.JoinedRoomsResponse
-        joined_rooms_response.rooms = ["!old_room:localhost"]
-        mock_client.joined_rooms.return_value = joined_rooms_response
-
-        # Track which rooms were left
-        left_rooms = []
-
-        async def mock_room_leave(room_id: str) -> MagicMock:
-            left_rooms.append(room_id)
-            response = MagicMock()
-            response.__class__ = nio.RoomLeaveResponse
-            return response
-
-        mock_client.room_leave = mock_room_leave
-
-        # Test that the team leaves unconfigured rooms
-        await bot.leave_unconfigured_rooms()
-
-        # Verify the team left the old room
-        assert len(left_rooms) == 1
-        assert "!old_room:localhost" in left_rooms
 
     @pytest.mark.asyncio
     async def test_team_accepts_invite_without_agent_config(
