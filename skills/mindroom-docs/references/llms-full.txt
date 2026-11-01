@@ -5353,7 +5353,7 @@ Configuration loading fails with one of these errors when references are wrong:
 - `calls.agents references unknown profile(s): ...`
 - `calls.agents references unknown agent(s): ...`
 - `calls.agents configures multiple agents for room(s): ...`, because a room can have at most one calls-enabled agent.
-- `calls.agents names personal_agents.<key>, whose agent lists rooms; ...`, because every user's agent from that template would join the same rooms.
+- `calls.agents names personal_agents.<key>, whose agent lists rooms in the template or a user's override; ...`, because a room takes only one calls-enabled agent.
 - `calls.profiles references unknown cascaded model(s): ...` or `calls.profiles references unknown Live agent model(s): ...`, when a profile's model alias is not in the top-level `models` mapping.
 
 ### Realtime profile fields
@@ -7228,7 +7228,8 @@ calls:
 
 Each generated agent then uses that profile in its owner's personal room, including agents of people onboarded after the config was loaded.
 The saved config keeps `mind`, not the generated agent names.
-The template's `agent` must not list `rooms`, because every user's agent would join those rooms and a room takes only one calls-enabled agent; config loading fails with `calls.agents names personal_agents.mind, whose agent lists rooms`.
+A generated agent that `calls.agents` also names directly keeps the profile given there.
+Neither the template's `agent` nor its `users` overrides may list `rooms`, because a room takes only one calls-enabled agent; config loading fails with `calls.agents names personal_agents.mind, whose agent lists rooms in the template or a user's override`.
 
 ## Onboarding Behavior
 
