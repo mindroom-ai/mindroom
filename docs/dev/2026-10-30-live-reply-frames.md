@@ -33,7 +33,8 @@ Reasoning and finer progress the runtime already had never reached the user.
 - A running tool call's latest output (what its tool reports as progress, such as a shell command's output tail) reaches only live frames, as an optional `progress` string on the call's tools entry, capped at its last 1000 characters and dropped when the call completes.
   Output changes many times a second and is noise once the result exists, so durable edits, the final message, and the stored tool trace never carry it; Element and other clients without frames see only the result.
   It is redacted like result previews, before it is cut to its latest characters, so a long credential keeps the label that identifies it and a script that prints a credential does not show it to the room; team replies do not forward members' or the leader's output.
-  Redaction fails closed on a line it cannot delimit, such as `password:` with its value on the next line, so such a line hides the output only while it is shown, not for the rest of the command.
+  Redaction fails closed on a line it cannot delimit, such as `password:` with its value on the next line, so the output shows `[redaction failed]`, as the call's result preview does, until newer output pushes that line out of the report.
+  Masking only the shown part when that happens was tried and rejected: each rule it needed to keep a value from showing without its label exposed another way to show one.
   A call keeps only its newest report and shows it at most ten times a second, the rate live frames go out, so a worker that floods reports costs the primary at most ten redactions a second per call.
   A call's output stays with that call: a delegated agent's tool output does not reach the parent's delegation entry, which shows the delegation's own activity, and only a job forwards its output to the call that started it and may be waiting for it.
 

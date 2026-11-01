@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
-from mindroom.redaction import REDACTION_FAILED, private_key_start, redact_sensitive_text
+from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -36,21 +36,9 @@ def cap_progress(text: str) -> str:
 def shown_progress(text: str) -> str:
     """Mask credentials in a report and keep the latest characters a live reply shows.
 
-    Masking sees the whole report, so a long credential keeps the label that identifies it. Redaction fails closed on a
-    line it cannot delimit, such as ``password:`` with its value on the next line; then only the shown part is masked,
-    from the line above it and from the first line of a private key that runs into it, so such a line hides the output
-    only while it is shown.
+    Masking sees the whole report, so a long credential keeps the label that identifies it.
     """
-    masked = redact_sensitive_text(text)
-    if masked == REDACTION_FAILED:
-        shown_line = text.rfind("\n", 0, max(0, len(text) - _SHOWN_PROGRESS_CHARS))
-        line_above = text.rfind("\n", 0, max(0, shown_line)) + 1
-        masked = redact_sensitive_text(text[private_key_start(text, line_above) :])
-        if masked != REDACTION_FAILED:
-            # The line above only tells redaction what the shown part's first line holds; masked text can be shorter,
-            # so drop it before the cut could bring it into view.
-            masked = masked.partition("\n")[2]
-    return masked[-_SHOWN_PROGRESS_CHARS:]
+    return redact_sensitive_text(text)[-_SHOWN_PROGRESS_CHARS:]
 
 
 def cap_report(text: str) -> str:
