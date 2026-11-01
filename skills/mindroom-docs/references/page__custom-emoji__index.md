@@ -73,8 +73,8 @@ Without the key, custom emoji stay personal to each user.
 When a call fails, the script prints `Room creation stopped:` and the reason, such as Matrix's own error, and exits with status 1.
 `M_ROOM_IN_USE` means the alias is taken, so pick another `--alias`.
 
-If the script stops after it created the room, for example while setting the power levels, the room stays with the server's default levels, where only moderators may add emoji, and no key is printed.
-Publish `#<alias>:<server name>` as the key yourself and [set who may add emoji](#who-may-add-emoji), or run the script again with another `--alias`.
+If the script stops after it created the room, for example while setting the power levels, the room stays with the server's default levels, where only moderators may add emoji and every member may post messages, and no key is printed.
+Publish `#<alias>:<server name>` as the key yourself after you [set who may add emoji](#who-may-add-emoji) and [stop members from posting](#moderate-the-room), or run the script again with another `--alias`.
 
 ## Check that it works
 
