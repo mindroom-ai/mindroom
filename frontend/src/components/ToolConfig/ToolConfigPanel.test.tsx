@@ -72,6 +72,13 @@ function envInputs(): HTMLInputElement[] {
   return screen.queryAllByPlaceholderText("Env Passthrough");
 }
 
+/** The fields the panel offers, by their Override boxes, in order. */
+function overrideLabels(): (string | null)[] {
+  return screen
+    .getAllByRole("checkbox", { name: /^Override / })
+    .map((box) => box.getAttribute("aria-label"));
+}
+
 describe("ToolConfigPanel", () => {
   beforeEach(() => {
     useConfigStore.setState(useConfigStore.getInitialState(), true);
@@ -392,14 +399,13 @@ describe("ToolConfigPanel", () => {
     expect(toggle).not.toBeChecked();
   });
 
-  it("falls back to configFields when no overrideFields are provided", () => {
+  it("shows an unticked config field with its default", () => {
     seedStore({ agentTools: ["discord"] });
     render(
       <ToolConfigPanel
         target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
         toolName="discord"
         toolDisplayName="Discord"
-        overrideFields={null}
         configFields={[
           {
             name: "channel",
@@ -505,11 +511,7 @@ describe("ToolConfigPanel", () => {
       />,
     );
 
-    expect(
-      screen
-        .getAllByRole("checkbox", { name: /^Override / })
-        .map((box) => box.getAttribute("aria-label")),
-    ).toEqual([
+    expect(overrideLabels()).toEqual([
       "Override Allow Write",
       "Override Project Channels",
       "Override Room",
@@ -545,11 +547,10 @@ describe("ToolConfigPanel", () => {
       />,
     );
 
-    expect(
-      screen
-        .getAllByRole("checkbox", { name: /^Override / })
-        .map((box) => box.getAttribute("aria-label")),
-    ).toEqual(["Override Run Shell Command", "Override Env Passthrough"]);
+    expect(overrideLabels()).toEqual([
+      "Override Run Shell Command",
+      "Override Env Passthrough",
+    ]);
   });
 
   it("keeps a draft to the agent it was typed for", () => {

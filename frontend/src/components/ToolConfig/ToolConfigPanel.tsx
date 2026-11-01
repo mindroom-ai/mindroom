@@ -36,23 +36,23 @@ interface ToolConfigPanelProps {
 
 /**
  * The fields a tool entry may set, as the backend merges them: the
- * configFields, each in the form of its same-name agent-only twin, then the
- * other agent-only fields, without those the backend refuses in a tool entry.
+ * configFields, then the agent-only fields, without those the backend refuses
+ * in a tool entry. A same-name agent-only field replaces its config twin in
+ * place, because a Map keeps a key's first position when it is set again.
  */
 function resolveFields(
   overrideFields?: ToolFieldSchema[] | null,
   configFields?: ToolFieldSchema[] | null,
 ): ToolFieldSchema[] {
-  const agentOnly = overrideFields ?? [];
-  const config = configFields ?? [];
-  return [
-    ...config.map(
-      (field) => agentOnly.find((twin) => twin.name === field.name) ?? field,
-    ),
-    ...agentOnly.filter(
-      (field) => !config.some((twin) => twin.name === field.name),
-    ),
-  ].filter((field) => field.authored_override !== false);
+  const fields = new Map(
+    [...(configFields ?? []), ...(overrideFields ?? [])].map((field) => [
+      field.name,
+      field,
+    ]),
+  );
+  return [...fields.values()].filter(
+    (field) => field.authored_override !== false,
+  );
 }
 
 function coerceEditValue(

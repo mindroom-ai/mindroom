@@ -31,6 +31,15 @@ function CardWithDialog({
   );
 }
 
+/** Focuses the Configure button and opens the dialog from it, which moves focus inside. */
+async function openDialog(): Promise<HTMLElement> {
+  const opener = screen.getByRole("button", { name: "Configure" });
+  opener.focus();
+  fireEvent.click(opener);
+  await waitFor(() => expect(opener).not.toHaveFocus());
+  return opener;
+}
+
 const pressEscape = () =>
   fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
 
@@ -52,10 +61,7 @@ describe("DialogContent", () => {
     "gives focus back to the button that opened it when $how",
     async ({ unmountOnClose, close }) => {
       render(<CardWithDialog unmountOnClose={unmountOnClose} />);
-      const opener = screen.getByRole("button", { name: "Configure" });
-      opener.focus();
-      fireEvent.click(opener);
-      await waitFor(() => expect(opener).not.toHaveFocus());
+      const opener = await openDialog();
 
       close();
 
@@ -73,16 +79,12 @@ describe("DialogContent", () => {
         }}
       />,
     );
-    const opener = screen.getByRole("button", { name: "Configure" });
-    opener.focus();
-    fireEvent.click(opener);
-    await waitFor(() => expect(opener).not.toHaveFocus());
+    await openDialog();
 
     pressEscape();
 
     await waitFor(() =>
       expect(screen.getByRole("textbox", { name: "Search" })).toHaveFocus(),
     );
-    expect(opener).not.toHaveFocus();
   });
 });

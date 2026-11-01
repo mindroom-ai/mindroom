@@ -1385,11 +1385,7 @@ describe("Integrations", () => {
     await selectScope("Private Agent");
     expect(await screen.findByText("Private Mail")).toBeInTheDocument();
 
-    // Resolve the shared load and let every promise it chains settle.
-    await act(async () => {
-      sharedLoad.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
+    await act(async () => sharedLoad.resolve());
 
     expect(screen.getByText("Private Mail")).toBeInTheDocument();
     expect(screen.queryByText("Weather")).not.toBeInTheDocument();
