@@ -24,7 +24,7 @@ from mindroom.usage.stats_storage import (
 from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, stored_token_counts
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -44,6 +44,7 @@ __all__ = [
     "UsageVoiceBreakdownRow",
     "collect_admin_usage",
     "collect_private_usage",
+    "collect_requester_daily_usage",
     "collect_self_usage",
 ]
 
@@ -622,35 +623,17 @@ class _ModelUsageAccumulator:
         expected_agent: str | None,
         expected_requester: str | None,
     ) -> list[_ModelUsageEntry]:
-        if not row.runs_available or (
-            scope == "self" and not row.source.requester_isolated and _has_unattributed_helper(row)
-        ):
-            self.unavailable_sources.add(row.source.path_label)
-        try:
-            entries = _model_entries_for_row(
-                row,
-                scope=scope,
-                expected_agent=expected_agent,
-                expected_requester=expected_requester,
-                unavailable_sources=self.unavailable_sources,
-            )
-        except ValueError:
-            self.unavailable_sources.add(row.source.path_label)
-            return []
-        accepted: list[_ModelUsageEntry] = []
-        for run, totals in entries:
-            if run.run_id is not None:
-                identity = (row.source.path_label, row.row_key, run.run_id)
-                if identity in self.seen_runs:
-                    continue
-                self.seen_runs.add(identity)
-            models = _run_model_totals(run, totals)
-            if models is None:
-                self.unavailable_sources.add(row.source.path_label)
-                models = {("unknown", "unknown"): totals}
+        entries = _admitted_runs(
+            row,
+            scope=scope,
+            expected_agent=expected_agent,
+            expected_requester=expected_requester,
+            seen_runs=self.seen_runs,
+            unavailable_sources=self.unavailable_sources,
+        )
+        for run, totals, models in entries:
             self.add_run(run, totals, models, scope=scope, source_path=row.source.path_label)
-            accepted.append((run, totals, models))
-        return accepted
+        return entries
 
     def add_run(
         self,
@@ -676,6 +659,46 @@ class _ModelUsageAccumulator:
                     models,
                     source_path=source_path,
                 )
+
+
+def _admitted_runs(
+    row: UsageSessionRow,
+    *,
+    scope: _Scope,
+    expected_agent: str | None,
+    expected_requester: str | None,
+    seen_runs: set[tuple[str, str, str]],
+    unavailable_sources: set[str],
+) -> list[_ModelUsageEntry]:
+    """Return the row's countable runs not seen before with their per-model totals, and record unusable sources."""
+    if not row.runs_available or (
+        scope == "self" and not row.source.requester_isolated and _has_unattributed_helper(row)
+    ):
+        unavailable_sources.add(row.source.path_label)
+    try:
+        entries = _model_entries_for_row(
+            row,
+            scope=scope,
+            expected_agent=expected_agent,
+            expected_requester=expected_requester,
+            unavailable_sources=unavailable_sources,
+        )
+    except ValueError:
+        unavailable_sources.add(row.source.path_label)
+        return []
+    accepted: list[_ModelUsageEntry] = []
+    for run, totals in entries:
+        if run.run_id is not None:
+            identity = (row.source.path_label, row.row_key, run.run_id)
+            if identity in seen_runs:
+                continue
+            seen_runs.add(identity)
+        models = _run_model_totals(run, totals)
+        if models is None:
+            unavailable_sources.add(row.source.path_label)
+            models = {("unknown", "unknown"): totals}
+        accepted.append((run, totals, models))
+    return accepted
 
 
 @dataclass(slots=True)
@@ -833,6 +856,55 @@ def collect_admin_usage(
     )
 
 
+def collect_requester_daily_usage(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    since: float,
+) -> tuple[dict[str | None, tuple[UsageDailyBreakdownRow, ...]], UsageCoverage]:
+    """Collect each canonical requester's daily usage by model across admin sources, with the scan's daily coverage.
+
+    The rows and coverage equal the ``user_breakdown`` daily rows and the ``daily_coverage`` of
+    ``collect_admin_usage(include_daily=True, since=since)``, without computing the report's other views.
+    """
+    canonical_requester = _canonical_requester_resolver(config, runtime_paths)
+    scanned_sources: set[str] = set()
+    seen_runs: set[tuple[str, str, str]] = set()
+    unavailable_sources: set[str] = set()
+    requester_days: dict[str | None, _DailyUsageAccumulator] = {}
+    for discovered in discover_admin_usage_sources(config=config, runtime_paths=runtime_paths):
+        if isinstance(discovered, UsageStorageDiagnostic):
+            unavailable_sources.add(discovered.path_label)
+            continue
+        scanned_sources.add(discovered.path_label)
+        for item in iter_usage_storage_rows(discovered, since=since):
+            if isinstance(item, UsageStorageDiagnostic):
+                unavailable_sources.add(item.path_label)
+                continue
+            row = _canonical_row(item, canonical_requester)
+            for run, totals, models in _admitted_runs(
+                row,
+                scope="admin",
+                expected_agent=None,
+                expected_requester=None,
+                seen_runs=seen_runs,
+                unavailable_sources=unavailable_sources,
+            ):
+                requester_days.setdefault(run.requester_id, _DailyUsageAccumulator()).add_run(
+                    run,
+                    totals,
+                    models,
+                    source_path=row.source.path_label,
+                )
+    # The report's days and these requesters' days together take the same admitted runs, so they miss the same sources.
+    for days in requester_days.values():
+        unavailable_sources |= days.unavailable_sources
+    return (
+        {requester_id: days.rows() for requester_id, days in requester_days.items()},
+        UsageCoverage(len(scanned_sources), len(unavailable_sources), _DAILY_COVERAGE_NOTE),
+    )
+
+
 def _collect_usage(
     *,
     sources: Iterable[UsageStorageSource | UsageStorageDiagnostic],
@@ -845,10 +917,7 @@ def _collect_usage(
     include_requests: bool = False,
     since: float | None = None,
 ) -> UsageReport:
-    @cache
-    def canonical_requester(requester_id: str) -> str:
-        return resolve_human_requester_alias(requester_id, config, runtime_paths)
-
+    canonical_requester = _canonical_requester_resolver(config, runtime_paths)
     usage = _UsageAccumulator()
     daily_usage = _DailyUsageAccumulator() if include_daily else None
     request_usage = _RequestUsageAccumulator(enabled=include_requests and scope == "admin")
@@ -878,21 +947,7 @@ def _collect_usage(
                 model_usage.unavailable_sources.add(item.path_label)
                 private_usage.mark_unavailable(source)
                 continue
-            owner = canonical_requester(item.source.owner_id) if item.source.owner_id is not None else None
-            row = replace(
-                item,
-                source=replace(item.source, owner_id=owner),
-                requester_id=canonical_requester(item.requester_id) if item.requester_id is not None else None,
-                runs=tuple(
-                    replace(
-                        run,
-                        requester_id=canonical_requester(run.requester_id)
-                        if run.requester_id
-                        else _run_requester(run, owner),
-                    )
-                    for run in item.runs
-                ),
-            )
+            row = _canonical_row(item, canonical_requester)
             usage.add_row(
                 row,
                 scope=scope,
@@ -961,6 +1016,33 @@ def _collect_usage(
         )
         if request_usage.enabled
         else None,
+    )
+
+
+def _canonical_requester_resolver(config: Config, runtime_paths: RuntimePaths) -> Callable[[str], str]:
+    """Return a resolver of bridge aliases to canonical requesters that resolves each requester once per scan."""
+
+    @cache
+    def canonical_requester(requester_id: str) -> str:
+        return resolve_human_requester_alias(requester_id, config, runtime_paths)
+
+    return canonical_requester
+
+
+def _canonical_row(item: UsageSessionRow, canonical_requester: Callable[[str], str]) -> UsageSessionRow:
+    """Return the row with its owner and requesters as canonical users; an ordinary run without one takes the owner."""
+    owner = canonical_requester(item.source.owner_id) if item.source.owner_id is not None else None
+    return replace(
+        item,
+        source=replace(item.source, owner_id=owner),
+        requester_id=canonical_requester(item.requester_id) if item.requester_id is not None else None,
+        runs=tuple(
+            replace(
+                run,
+                requester_id=canonical_requester(run.requester_id) if run.requester_id else _run_requester(run, owner),
+            )
+            for run in item.runs
+        ),
     )
 
 
