@@ -162,6 +162,40 @@ describe("forms rendered from the real configuration schema", () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it("edits an agent's tools by name and keeps each listed tool's entry", () => {
+    const changes: unknown[] = [];
+    const fileEntry = { file: { max_file_lines: 5 } };
+    render(
+      <SchemaSection
+        title="More settings"
+        definition="AgentConfig"
+        value={{ tools: ["shell", fileEntry] }}
+        path={["probe"]}
+        onFieldChange={(key, next) => changes.push({ [key]: next })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^More settings/ }));
+
+    expect(
+      screen.getByRole("button", { name: "Remove shell" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Remove file" }),
+    ).toBeInTheDocument();
+    fireEvent.change(
+      screen.getByRole("combobox", { name: "New tools entry" }),
+      {
+        target: { value: "calculator" },
+      },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Add tools entry" }));
+
+    expect(changes[changes.length - 1]).toEqual({
+      tools: ["shell", fileEntry, "calculator"],
+    });
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
   it.each(EDITOR_DEFINITIONS)("renders and expands %s", (definition) => {
     render(<StatefulSection definition={definition} />);
     expandEverything();

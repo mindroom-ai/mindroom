@@ -256,6 +256,7 @@ class AgentConfig(BaseModel):
     tools: list[ToolConfigEntry] = Field(
         default_factory=list,
         description="List of tool entries with optional inline per-agent overrides",
+        json_schema_extra=dashboard_hint(reference="tool"),
     )
     include_default_tools: bool = Field(
         default=True,
@@ -409,6 +410,7 @@ class AgentConfig(BaseModel):
     worker_tools: list[str] | None = Field(
         default=None,
         description="Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",
+        json_schema_extra=dashboard_hint(reference="tool"),
     )
     worker_scope: WorkerScope | None = Field(
         default=None,
