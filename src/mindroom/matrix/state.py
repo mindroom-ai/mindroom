@@ -54,6 +54,7 @@ class MatrixState(BaseModel):
     accounts: dict[str, MatrixAccount] = Field(default_factory=dict)
     rooms: dict[str, MatrixRoom] = Field(default_factory=dict)
     space_room_id: str | None = None
+    server_emoji_room_id: str | None = None
 
     @classmethod
     def load(cls, runtime_paths: constants.RuntimePaths) -> "MatrixState":
@@ -118,6 +119,10 @@ class MatrixState(BaseModel):
     def set_space_room_id(self, room_id: str | None) -> None:
         """Set the root Matrix Space room ID."""
         self.space_room_id = room_id
+
+    def set_server_emoji_room_id(self, room_id: str) -> None:
+        """Set the server custom emoji room ID."""
+        self.server_emoji_room_id = room_id
 
 
 def update_matrix_state(runtime_paths: constants.RuntimePaths, mutate: Callable[[MatrixState], object]) -> None:
