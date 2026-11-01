@@ -76,6 +76,11 @@ def managed_space_alias_localpart(runtime_paths: RuntimePaths) -> str:
     return managed_room_alias_localpart("_mindroom_root_space", runtime_paths)
 
 
+def server_emoji_alias_localpart(runtime_paths: RuntimePaths) -> str:
+    """Build the alias localpart of the server custom emoji room."""
+    return managed_room_alias_localpart("emoji", runtime_paths)
+
+
 def managed_room_key_for_alias(room_alias: str, server_name: str, runtime_paths: RuntimePaths) -> str | None:
     """Return the room key whose managed room alias is exactly ``room_alias``, or None for any other reference."""
     alias_localpart = room_alias[1:].split(":", 1)[0]
