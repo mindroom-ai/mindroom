@@ -62,8 +62,8 @@ def stored_turn_input(messages: Sequence[Message]) -> TurnInput:
     """Return the turn input a run's stored ``messages`` hold around its prompt.
 
     They start with it, after the system messages: the context, the prompt, then the run's own fold summary when a fold
-    made one. The transient context only a paused run stores, a queued-message notice, or the model's first answer
-    follows.
+    made one. The run's turn context (``add_to_agent_memory=False``), a queued-message notice, or the model's first
+    answer follows.
     """
     turn_input = list(takewhile(_is_turn_input, (message for message in messages if message.role != "system")))
     before_summary = [message for message in turn_input if not is_compaction_summary(message)]

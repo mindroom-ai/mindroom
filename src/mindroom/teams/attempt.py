@@ -14,7 +14,7 @@ from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.budgets.pricing import model_prices
 from mindroom.history.interrupted_replay import stored_turn_input
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
-from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.llm.runs import RunStatus, TeamRunRecord, run_tool_executions
 from mindroom.response_turn import TurnPartialSnapshot
 from mindroom.run_storage import TerminalRecord
 from mindroom.teams.presentation import apply_team_event
@@ -27,22 +27,12 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.history.types import PreparedHistoryState
-    from mindroom.llm.runs import AnyRunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import RunMetrics
     from mindroom.teams.members import ResolvedExactTeamMembers
     from mindroom.teams.presentation import TeamStreamPresentation
     from mindroom.teams.runtime import TeamRunEvent
     from mindroom.teams.spec import TeamSpec
-
-
-def team_tool_executions(record: TeamRunRecord) -> list[ToolExecution]:
-    """Return the leader's and every ended member run's tool executions.
-
-    Any member's completed model-switch call surfaces here and drives a whole-fan continuation, even when the team
-    already produced visible output, as it does for an agent: gating on visible output would disable continuation
-    in coordinate mode, where the leader almost always synthesizes text around a member's truncated tool call.
-    """
-    return [*(record.tools or ()), *(tool for member in record.ended_member_runs for tool in member.tools or ())]
 
 
 def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
@@ -199,9 +189,9 @@ class TeamAttempt:
             metrics=team_usage(record),
             prior_usage=prior_usage,
             context_run=record,
-            tool_count=len(team_tool_executions(record)),
+            tool_count=len(run_tool_executions(record)),
             prepared_history=self.prepared_history,
         )
 
 
-__all__ = ["TeamAttempt", "team_tool_executions"]
+__all__ = ["TeamAttempt"]

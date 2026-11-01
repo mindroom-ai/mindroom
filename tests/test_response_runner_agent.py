@@ -231,7 +231,7 @@ class TestAgentBot(AgentBotTestBase):
         source_kind: str,
         expects_quiet_instruction: bool,
     ) -> None:
-        """Only silent scheduled turns receive nonpersistent quiet-delivery guidance."""
+        """Only silent scheduled turns receive quiet-delivery guidance, as a ``persist=False`` item."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         target = MessageTarget.resolve("!test:localhost", None, "$event")

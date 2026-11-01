@@ -126,7 +126,7 @@ def with_silent_schedule_delivery(
     items: Sequence[EnrichmentItem],
     envelope: MessageEnvelope,
 ) -> tuple[EnrichmentItem, ...]:
-    """Append nonpersistent quiet-delivery guidance only for silent schedules."""
+    """Append quiet-delivery guidance, as a ``persist=False`` item, only for silent schedules."""
     enrichment_key = "silent_schedule_delivery"
     if envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND:
         return tuple(items)
