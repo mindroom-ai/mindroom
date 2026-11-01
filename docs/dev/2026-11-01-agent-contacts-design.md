@@ -68,7 +68,9 @@ The target agent creates it, or the requesting agent when the target is a person
 A room that cannot be fully set up is left again and the request stays pending, so accepting again retries.
 Agent parties keep the room across restarts through cleanup exclusions read from the contacts store, which stays the single source of truth.
 The invited-rooms store was rejected for this, because it is not persisted for agents whose `accept_invites` is false.
+Contact rooms are also left out of the rooms an agent keeps for accepted invites, because an agent that accepts invites records the contact room's invite, which arrives before the contact is stored, and would otherwise rejoin a removed contact's room at its next start.
 Removing a contact makes its agents leave; the owners keep the room and its history.
+A removed contact's room takes no more messages from its agents, because a leave can fail and a running turn can still try to post there.
 
 ### Contact turns run as the agent's owner
 
@@ -85,12 +87,13 @@ Messages from the other side and from the owner both run as the owner, so coales
 An edit made by someone other than the owner never regenerates a reply, because it would otherwise count as the owner revising their own message.
 Ingress reads the contacts store only for personal agents with `contacts`, which keeps a corrupt store from affecting other agents and saves a file check per event for them.
 
-### Contact detection by store recompute
+### Contact detection: once per turn, and from the store for tools
 
-Every seam that behaves differently for contacts (ingress, the response runner, delivery, answer suppression, `matrix_message`, the memory flush, knowledge graph ingestion, and exploration) asks the contacts store whether this agent's turns in this room are contact turns.
+A response asks the contacts store once, when it starts, whether its turn is a contact turn, and everything it shows and offers follows that answer: its progress, final reply, and error notices, its tools and instructions, and its memory.
+Asking again at each seam was rejected, because a contact removed or a config reloaded while the turn runs would let a later check show the turn's private final reply in a room where the other owner still sits.
+Ingress, the memory flush, knowledge graph ingestion, and exploration ask the store themselves, and tools ask it at each call whether a room is or was this agent's contact room, so a turn keeps its restricted destinations after a removal and no turn writes into a removed contact's room.
 Carrying a flag from ingress was rejected, because tool calls from normal turns into a contact room and the agent's own sends there have no ingress facts, and two sources could disagree.
-The store read is cached by modification time, so the repeated checks stay cheap.
-A config reload in the middle of a turn can change the answer between checks, which is accepted for now.
+The store read is cached by modification time, so the checks stay cheap.
 
 ### Who answers in a contact room
 
@@ -113,8 +116,8 @@ The trigger of a contact turn is text the owner may not have written, so a conta
 - Only the contact's tools for this side (see [Rules and tools per contact](#rules-and-tools-per-contact)) plus `matrix_message`, minus every function that a `tool_approval` rule or the tool itself would gate, because an approval card in the contact room would show the owner's tool arguments to the other side.
 - No skills, knowledge bases, or interactive questions, because none of them can be answered or shown in a turn whose reply never shows.
 - A contact's tools may not include Matrix room tools (those that require room context, such as `scheduler`, `matrix_api`, or `thread_move`), because they post into rooms without passing the policy, nor MindRoom control tools (`contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, `dynamic_tools`), because they act with the owner's authority beyond the conversation.
-- `matrix_message` acts in the contact room, and in the owner's personal room with this agent only sends a plain message, so the agent can report back to its owner and nowhere else.
-  Naming a `recipient` there would start a normal turn with the owner's full authority, reading there would expose the owner's private room to drafts written for the other side, and an `idempotency_key` there would share the owner's own keyed sends, so a matching key could deliver what an owner's turn prepared instead.
+- `matrix_message` acts in the contact room, and in the owner's personal room with this agent only sends a plain message to its timeline or a new thread, so the agent can report back to its owner and nowhere else.
+  Naming a `recipient` there would start a normal turn with the owner's full authority, reading there would expose the owner's private room to drafts written for the other side, an `idempotency_key` there would share the owner's own keyed sends, so a matching key could deliver what an owner's turn prepared instead, and an existing thread would carry text the other side shaped into one of the owner's own conversations.
 - No attachments or collapsible sections into a contact room, because the judge cannot inspect them.
 - Other tools that post into an explicitly named room refuse contact rooms, so text reaches a contact room only through `matrix_message`.
 
@@ -184,7 +187,7 @@ A separate secret scan without a judge was not added, because the judgment layer
    The call always shows Alice an approval card, like `update_agent`, whatever `tool_approval` says.
    With `party="me"` the requesting party is Alice herself instead of her agent, for when she wants to talk to Bob's agent directly.
 2. The store records a pending contact, with Alice's thread as its origin.
-   A pending or active contact for the same pair is returned instead of creating another.
+   A pending or active contact for the same pair is returned unchanged instead of creating another, and a repeated request that sets rules or tools is refused in favor of `update_contact`, so a request never claims values it did not store.
    A declined one is refused until the target owner removes it, and only the target owner may remove a declined contact, so the requester cannot undo a decline by removing it.
 3. Bob's personal-room agent posts the request as a new thread root in Bob's personal room, carrying `io.mindroom.contact_request` with the contact ID in its content.
    The text names the requesting party and its owner, quotes the reason, and lists the rules that would apply by default.
