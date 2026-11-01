@@ -9,7 +9,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
-from mindroom.matrix_identifiers import managed_room_alias, managed_room_key_for_alias
+from mindroom.matrix_identifiers import managed_room_key_for_alias
 from mindroom.requester_identity import INTERNAL_USER_ENTITY_NAME, mindroom_user_id, runtime_matrix_domain
 
 if TYPE_CHECKING:
@@ -44,10 +44,9 @@ def names_room(config: Config, room_ref: str, runtime_paths: RuntimePaths) -> bo
     A configured room key and the alias MindRoom gives it name a room before the room is created and recorded.
     """
     room_keys = config.managed_room_keys()
-    domain = runtime_matrix_domain(runtime_paths)
     return (
         room_ref in room_keys
-        or room_ref in {managed_room_alias(room_key, domain, runtime_paths) for room_key in room_keys}
+        or managed_room_key_for_alias(room_ref, runtime_matrix_domain(runtime_paths), runtime_paths) in room_keys
         or matrix_state.resolve_room_id(room_ref, runtime_paths).startswith("!")
     )
 
