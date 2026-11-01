@@ -48,3 +48,11 @@ def test_a_value_below_a_key_above_the_shown_output_stays_hidden() -> None:
     text = _MANIFEST + "x" * 3000 + "\npassword:\n" + "hunter2hunter2\n" + "y" * 1985
 
     assert "hunter2" not in shown_progress(text)
+
+
+def test_a_value_above_the_shown_output_stays_hidden_when_masking_shortens_it() -> None:
+    """The line above the shown output only helps masking; a shorter masked text never brings it into view."""
+    shown = "DB_URL=postgres://app:" + "p" * 200 + "@db/app\n" + "z" * 1770
+    text = "password:\n  value: s3cretvalue\n" + shown
+
+    assert "s3cretvalue" not in shown_progress(text)

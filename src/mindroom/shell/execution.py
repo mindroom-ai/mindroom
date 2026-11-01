@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
-from mindroom.redaction import private_key_start
 from mindroom.shell.output_capture import (
     CapturedShellStream,
     ShellOutputCapture,
@@ -46,7 +45,6 @@ _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
 # A running command reports the tail of its output at most this often, and only when it changed; replies show it live.
 _PROGRESS_INTERVAL_SECONDS = 0.5
-_PROGRESS_TAIL_LINES = 20
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 
 
@@ -144,14 +142,11 @@ class ProcessRecord:
 
 
 def _progress_lines(buffer: _OutputBuffer) -> str:
-    """Return the last lines a running command shows, each in the state it was redrawn to last.
+    """Return what a running command printed so far, each line in the state it was redrawn to last.
 
-    A private key that runs into those lines is kept whole, so whoever shows them can still mask it.
+    It is reported whole, so whoever shows its tail can mask a credential whose label sits above the tail.
     """
-    lines = [line.rstrip("\r").rsplit("\r", 1)[-1] for line in buffer.last_lines(buffer.max_lines).split("\n")]
-    text = "\n".join(lines)
-    tail = len(text) - len("\n".join(lines[-_PROGRESS_TAIL_LINES:]))
-    return text[private_key_start(text, tail) :]
+    return "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in buffer.last_lines(buffer.max_lines).split("\n"))
 
 
 class _OutputProgress:

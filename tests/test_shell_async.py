@@ -817,8 +817,8 @@ async def test_a_progress_meter_reports_only_its_latest_state(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_a_key_the_output_tail_cuts_in_two_is_reported_whole(tmp_path: Path) -> None:
-    """A private key longer than the reported tail is reported from its first line, so the shown output masks it."""
+async def test_a_running_commands_output_is_reported_whole(tmp_path: Path) -> None:
+    """A private key longer than the shown output is reported from its first line, so the shown output masks it."""
     entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
     reports: list[str] = []
     key_lines = " ".join(f"'MIIE{index:02d}{'A' * 56}'" for index in range(25))
@@ -830,7 +830,7 @@ async def test_a_key_the_output_tail_cuts_in_two_is_reported_whole(tmp_path: Pat
     with patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1), tool_progress_reporter(reports.append):
         await entrypoint(["bash", "-c", command])
 
-    assert reports[0].startswith("-----BEGIN PRIVATE KEY-----")
+    assert reports[0].startswith("provisioning\n-----BEGIN PRIVATE KEY-----")
     assert reports[0].endswith("waiting")
     assert "A" * 56 not in shown_progress(reports[0])
 

@@ -43,6 +43,10 @@ def shown_progress(text: str) -> str:
         shown_line = text.rfind("\n", 0, max(0, len(text) - _MAX_PROGRESS_CHARS))
         line_above = text.rfind("\n", 0, max(0, shown_line)) + 1
         masked = redact_sensitive_text(text[private_key_start(text, line_above) :])
+        if masked != REDACTION_FAILED:
+            # The line above only tells redaction what the shown part's first line holds; masked text can be shorter,
+            # so drop it before the cut could bring it into view.
+            masked = masked.partition("\n")[2]
     return cap_progress(masked)
 
 
