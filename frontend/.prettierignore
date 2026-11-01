@@ -13,6 +13,9 @@ build/
 package-lock.json
 bun.lock
 yarn.lock
+src/components/Integrations/iconMapping.tsx
+src/test/fixtures/config-schema.json
+src/test/fixtures/egressPresets.json
 
 # Coverage
 coverage/

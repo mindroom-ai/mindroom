@@ -100,19 +100,17 @@ repos:
       - id: pyproject-fmt
         args: ["--table-format", "long", "--no-generate-python-version-classifiers"]
 
-  # TypeScript/JavaScript hooks
-  - repo: https://github.com/pre-commit/mirrors-prettier
-    rev: v4.0.0-alpha.8
-    hooks:
-      - id: prettier
-        files: ^frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
-        exclude: ^(frontend/package-lock\.json|frontend/tsconfig.*\.json|frontend/src/test/fixtures/(config-schema|egressPresets)\.json|frontend/src/components/Integrations/iconMapping\.tsx|.*\.min\.(js|css))$
-        args: ["--cache", "--cache-location", ".cache/prettier-precommit.json"]
-        require_serial: true
-
   - repo: local
     hooks:
       # Each hook must bootstrap a fresh checkout without downloading Puppeteer's browser.
+      # Prettier reads `frontend/.prettierignore`, so `bunx prettier` in `frontend/` formats exactly like this hook.
+      - id: prettier
+        name: Prettier
+        entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bunx prettier --write "${@#frontend/}"' --
+        language: system
+        files: ^frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
+        require_serial: true
+
       - id: check-bun-lock
         name: Check bun.lock is up to date
         entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile'
