@@ -38,6 +38,7 @@ from mindroom.cli.main import (
     _threads_export,
     app,
 )
+from mindroom.cli.main import main as cli_main
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
@@ -2548,6 +2549,31 @@ class TestConfigValidate:
         assert "Missing environment variables" not in result.output
 
 
+@pytest.mark.parametrize(
+    "command",
+    [["config", "init", "--no-input"], ["config", "migrate"], ["config", "validate"]],
+    ids=["init", "migrate", "validate"],
+)
+def test_a_non_utf8_env_file_names_itself_and_the_fix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: list[str],
+) -> None:
+    """A `.env` saved in another encoding stops the command with an error naming the file, not a traceback."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENAI_API_KEY=sk-test\n", encoding="utf-16")
+    monkeypatch.setattr(sys, "argv", ["mindroom", *command, "--path", str(tmp_path / "config.yaml")])
+
+    with pytest.raises(SystemExit) as exited:
+        cli_main()
+
+    assert exited.value.code == 1
+    output = normalize_console_output(capsys.readouterr().out)
+    assert f"Error: {env_path.resolve()} is not UTF-8 text" in output
+    assert "save it as UTF-8" in output
+
+
 # ---------------------------------------------------------------------------
 # mindroom config path
 # ---------------------------------------------------------------------------
@@ -3097,7 +3123,7 @@ class TestRunFirstRunSetup:
         assert result.exit_code == 0, result.output
         assert "OpenAI API key" in result.output
         assert "OPENAI_API_KEY=sk-typed\n" in (tmp_path / ".env").read_text(encoding="utf-8")
-        assert started[0].env_value("OPENAI_API_KEY") == "sk-typed"
+        assert get_secret_from_env("OPENAI_API_KEY", started[0]) == "sk-typed"
 
     def test_skipped_key_leaves_template_placeholder_unset(self, tmp_path: Path) -> None:
         """A skipped key leaves a leftover placeholder in `.env`, and it still never counts as a configured key."""
