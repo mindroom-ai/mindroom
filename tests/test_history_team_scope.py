@@ -16,6 +16,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.execution_preparation import prepare_bound_team_run_context, render_prepared_messages_text
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -36,6 +37,7 @@ from mindroom.teams.members import (
 )
 from mindroom.teams.runtime import leader_tool_specs
 from mindroom.teams.spec import TeamMode
+from mindroom.timing import DispatchPipelineTiming
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -47,7 +49,7 @@ from tests.conftest import (
     unstored_team_scope_context,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
-from tests.history_helpers import _completed_team_run, _runtime_paths, _team_session
+from tests.history_helpers import RecordingCompactionLifecycle, _completed_team_run, _runtime_paths, _team_session
 from tests.team_turn_helpers import (
     PROBE_TOOL,
     SESSION_ID,
@@ -134,11 +136,16 @@ def _expected_static_tokens(built: BuiltTeam, prompt: str) -> int:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scheduled", [False, True])
 async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    scheduled: bool,
 ) -> None:
-    """The ad hoc team's opened scope is prepared once, on the leader's model, sized by the leader's prompt."""
+    """The opened scope is prepared once on the leader's model and the turn's window, sized by the leader's prompt.
+
+    A scheduled turn's history budget rules out native compaction.
+    """
     config, runtime_paths = _pair_config(tmp_path)
     built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
     scope_context = load_bound_scope_session(
@@ -157,9 +164,12 @@ async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
         "finalize_history_preparation",
         lambda **_kwargs: PreparedHistoryState(replays_persisted_history=True, native_history=None),
     )
+    lifecycle = RecordingCompactionLifecycle()
+    timing = DispatchPipelineTiming(source_event_id="$current", room_id="!room:localhost")
+    budget = ScheduledHistoryBudget(limit=5, source_event_id="$current") if scheduled else None
 
     prepared = await prepare_bound_team_run_context(
-        make_turn_context("team_alpha+zeta", session_id="session-1"),
+        make_turn_context("team_alpha+zeta", session_id="session-1", scheduled_history_budget=budget),
         scope_context=scope_context,
         leader_system_messages=built.spec.leader.system_messages,
         leader_tools=leader_tool_specs(built.spec),
@@ -171,7 +181,9 @@ async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
         timezone="UTC",
         history_settings=built.history_settings,
         active_model_name="default",
-        active_context_window=None,
+        active_context_window=1_500,
+        compaction_lifecycle=lifecycle,
+        pipeline_timing=timing,
     )
 
     assert prepare.await_count == 1
@@ -179,8 +191,13 @@ async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
     assert kwargs["scope_context"] is scope_context
     assert scope_context.scope == HistoryScope("team", "team_alpha+zeta")
     assert kwargs["model"] is built.spec.leader.model
+    assert (kwargs["compaction_lifecycle"], kwargs["pipeline_timing"]) == (lifecycle, timing)
+    assert kwargs["allow_native_compaction"] is not scheduled
+    resolved_inputs = kwargs["resolved_inputs"]
+    assert resolved_inputs.history_settings is built.history_settings
+    assert (resolved_inputs.active_model_name, resolved_inputs.active_context_window) == ("default", 1_500)
     sent_prompt = render_prepared_messages_text(prepared.turn.in_request_order())
-    assert kwargs["resolved_inputs"].execution_plan.static_prompt_tokens == _expected_static_tokens(built, sent_prompt)
+    assert resolved_inputs.execution_plan.static_prompt_tokens == _expected_static_tokens(built, sent_prompt)
 
 
 @pytest.mark.asyncio
