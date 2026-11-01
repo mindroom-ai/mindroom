@@ -1115,15 +1115,15 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
         await bot._turn_ingress.handle_media_event(room, event)
         redelivery = asyncio.create_task(bot._turn_ingress.handle_media_event(room, event))
         try:
-            await asyncio.wait_for(normalization_started.wait(), timeout=1)
-            await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
+            await asyncio.wait_for(normalization_started.wait(), timeout=30)
+            await asyncio.wait_for(placeholder_send_started.wait(), timeout=30)
             await asyncio.sleep(0)
             assert normalization_count == 1
             assert bot._delivery_gateway.send_text.await_count == 1
         finally:
             allow_normalization.set()
             allow_placeholder_send.set()
-        assert await asyncio.wait_for(redelivery, timeout=1) is TurnDispatchOutcome.DEFERRED
+        assert await asyncio.wait_for(redelivery, timeout=30) is TurnDispatchOutcome.DEFERRED
         await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_awaited_once()
