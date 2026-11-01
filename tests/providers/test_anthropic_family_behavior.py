@@ -1623,6 +1623,25 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
         )
 
 
+def test_bedrock_reads_the_region_variables_in_the_order_aws_tools_read_them(tmp_path: Path) -> None:
+    """Both region variables are tried in the process environment before either in ``.env``, as AWS tools try them."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("AWS_REGION=us-west-2\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "data",
+        process_env={"AWS_DEFAULT_REGION": "eu-central-1"},
+    )
+    keys = {"aws_access_key": "AKIA-static", "aws_secret_key": "static-secret"}
+    with isolated_provider_environment():
+        bedrock = build_provider(
+            ModelConfig(provider="bedrock_claude", id="anthropic.claude-sonnet-5-5", extra_kwargs=keys),
+            runtime_paths,
+        )
+    assert bedrock.settings.aws_region == "eu-central-1"
+
+
 def test_anthropic_base_url_sets_the_direct_endpoint_only_where_client_params_set_none(tmp_path: Path) -> None:
     """``ANTHROPIC_BASE_URL`` from the runtime env is the direct route's endpoint unless the model configures one."""
     config_path = tmp_path / "config.yaml"

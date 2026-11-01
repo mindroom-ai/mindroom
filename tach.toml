@@ -5646,7 +5646,6 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.skills"
 depends_on = [
-    "mindroom.constants",
     "mindroom.path_confinement",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.authoring",
