@@ -694,7 +694,7 @@ def test_a_paused_row_whose_answers_name_no_model_ends_its_input_at_the_first_ca
 
 
 def test_a_stopped_run_s_turn_input_ends_at_its_model_s_first_answer() -> None:
-    """A stopped run stores no transient context, so its model's first answer, even one without a call, ends the input."""
+    """A row without turn context ends its input at its model's first answer, even one without a call."""
     context = Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>')
     answer = Message(role="assistant", content="Partial", provider_data=model_provenance("m", "Synthetic"))
     stored = _paused_row([context, Message(role="user", content="multiply"), answer]).messages
