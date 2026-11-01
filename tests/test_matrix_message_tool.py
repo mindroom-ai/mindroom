@@ -54,6 +54,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     delivered_matrix_side_effect,
+    event_serving_client,
     make_conversation_reader_mock,
     make_latest_thread_event_id_mock,
     make_matrix_client_mock,
@@ -2081,24 +2082,12 @@ async def test_matrix_message_send_to_a_thread_reply_posts_in_its_thread() -> No
 async def test_matrix_message_send_keeps_a_thread_id_whose_lookup_fails() -> None:
     """A thread_id whose thread cannot be looked up is sent as given instead of failing the tool."""
     tool = MatrixMessageTools()
-    client = MagicMock()
-    client.room_get_event = AsyncMock(
-        return_value=nio.RoomGetEventResponse.from_dict(
-            {
-                "event_id": "$rich-reply:localhost",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1,
-                "room_id": "!room:localhost",
-                "type": "m.room.message",
-                "content": {
-                    "msgtype": "m.text",
-                    "body": "reply",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$parent:localhost"}},
-                },
-            },
-        ),
-    )
-    relations = make_relation_lookup(client=client)
+    rich_reply = {
+        "msgtype": "m.text",
+        "body": "reply",
+        "m.relates_to": {"m.in_reply_to": {"event_id": "$parent:localhost"}},
+    }
+    relations = make_relation_lookup(client=event_serving_client("$rich-reply:localhost", content=rich_reply))
     cast("FakeRelationStore", relations.store).failure = RuntimeError("journal unavailable")
     ctx = replace(_make_context(thread_id=None), relations=relations)
 

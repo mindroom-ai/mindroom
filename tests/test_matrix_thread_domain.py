@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
-import nio
 import pytest
 from structlog.testing import capture_logs
 
@@ -39,6 +38,7 @@ from tests.authorization_helpers import (
 from tests.conftest import (
     FakeRelationStore,
     bind_runtime_paths,
+    event_serving_client,
     make_conversation_reader_mock,
     make_relation_lookup,
     runtime_paths_for,
@@ -65,29 +65,6 @@ def _message_event_info(content: dict[str, object]) -> EventInfo:
             "content": content,
         },
     )
-
-
-def _serving_client(
-    event_id: str,
-    *,
-    content: dict[str, object],
-    event_type: str = "m.room.message",
-) -> MagicMock:
-    """Return a homeserver that serves one event for every point lookup."""
-    client = MagicMock()
-    client.room_get_event = AsyncMock(
-        return_value=nio.RoomGetEventResponse.from_dict(
-            {
-                "event_id": event_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 1,
-                "room_id": "!room:localhost",
-                "type": event_type,
-                "content": content,
-            },
-        ),
-    )
-    return client
 
 
 def _tool_context(
@@ -233,7 +210,7 @@ async def test_event_thread_membership_unknown_through_non_message_ancestors(
 ) -> None:
     """Reply and reference walks must enforce the conversation-family boundary."""
     relations = make_relation_lookup(
-        client=_serving_client(
+        client=event_serving_client(
             "$sticker:localhost",
             event_type="m.sticker",
             content={
@@ -268,7 +245,9 @@ def _failing_relations(failure: str) -> RelationLookup:
     relations_client.room_get_event = AsyncMock(side_effect=RuntimeError("boom"))
     if failure == "homeserver":
         return make_relation_lookup(client=relations_client)
-    relations = make_relation_lookup(client=_serving_client("$thread-reply:localhost", content=_THREAD_REPLY_CONTENT))
+    relations = make_relation_lookup(
+        client=event_serving_client("$thread-reply:localhost", content=_THREAD_REPLY_CONTENT),
+    )
     cast("FakeRelationStore", relations.store).failure = RuntimeError("boom")
     return relations
 
@@ -328,7 +307,7 @@ async def test_redaction_thread_membership_unknown_on_lookup_failure(failure: st
 async def test_redaction_thread_membership_known_for_reactions() -> None:
     """Redacting a reaction cannot affect thread membership, so it is known."""
     relations = make_relation_lookup(
-        client=_serving_client(
+        client=event_serving_client(
             "$reaction:localhost",
             event_type="m.reaction",
             content={
@@ -354,7 +333,7 @@ async def test_redaction_thread_membership_known_for_reactions() -> None:
 @pytest.mark.asyncio
 async def test_resolve_canonical_tool_thread_target_uses_context_thread(tmp_path: Path) -> None:
     """Tool-facing normalization applies the context thread before canonicalizing it."""
-    relations_client = _serving_client("$ctx-thread:localhost", content=_THREAD_REPLY_CONTENT)
+    relations_client = event_serving_client("$ctx-thread:localhost", content=_THREAD_REPLY_CONTENT)
     context = _tool_context(
         tmp_path,
         thread_id="$ctx-thread:localhost",
@@ -376,7 +355,7 @@ async def test_resolve_canonical_tool_thread_target_uses_context_thread(tmp_path
 @pytest.mark.asyncio
 async def test_resolve_canonical_tool_thread_target_requires_thread_context(tmp_path: Path) -> None:
     """Tool-facing normalization returns the shared missing-thread error when no target is available."""
-    relations_client = _serving_client("$ctx-thread:localhost", content=_THREAD_REPLY_CONTENT)
+    relations_client = event_serving_client("$ctx-thread:localhost", content=_THREAD_REPLY_CONTENT)
     context = _tool_context(tmp_path, thread_id=None, relations=make_relation_lookup(client=relations_client))
 
     target = await resolve_canonical_tool_thread_target(
@@ -394,7 +373,7 @@ async def test_resolve_canonical_tool_thread_target_requires_thread_context(tmp_
 @pytest.mark.asyncio
 async def test_resolve_canonical_tool_thread_target_fail_closed_preserves_requested_thread_id(tmp_path: Path) -> None:
     """Fail-closed tool normalization keeps the resolved request target for error reporting."""
-    relations_client = _serving_client(
+    relations_client = event_serving_client(
         "$ctx-thread:localhost",
         content={
             "body": "bridged reply",
