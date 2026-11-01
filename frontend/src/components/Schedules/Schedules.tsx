@@ -338,10 +338,7 @@ export function Schedules() {
 
   // A filter that hides the selected schedule deselects it.
   const handleRoomFilterChange = (filter: string) => {
-    const hidesSelected =
-      filter !== "all" &&
-      selectedTask != null &&
-      selectedTask.room_id !== filter;
+    const hidesSelected = filter !== "all" && selectedTask?.room_id !== filter;
     if (!hidesSelected || confirmDiscard()) setRoomFilter(filter);
   };
 

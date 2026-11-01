@@ -271,8 +271,16 @@ describe("Schedules", () => {
       fireEvent.click(
         await screen.findByRole("option", { name: "#ops:example.org" }),
       );
+      // Neither the schedule's own room nor All rooms hides it.
+      fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
+      fireEvent.click(await screen.findByRole("option", { name: "All rooms" }));
       expect(confirmSpy).not.toHaveBeenCalled();
+      expect(screen.queryByText(/^Room: /)).not.toBeInTheDocument();
 
+      fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
+      fireEvent.click(
+        await screen.findByRole("option", { name: "#ops:example.org" }),
+      );
       fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
       fireEvent.click(
         await screen.findByRole("option", { name: "#lobby:example.org" }),
