@@ -67,6 +67,7 @@ from mindroom.oauth.providers import (
 )
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.conftest import loop_runs_while_blocked
 from tests.identity_helpers import persist_entity_accounts
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 from tests.turn_model_helpers import turn_model
@@ -627,9 +628,7 @@ async def test_mcp_reconnect_link_does_not_block_event_loop(
     snapshot = oauth_service_module.load_oauth_credentials_snapshot_sync
 
     def snapshot_waiting_for_loop(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
-        loop_progress = threading.Event()
-        loop.call_soon_threadsafe(loop_progress.set)
-        assert loop_progress.wait(timeout=1), "Reconnect link blocked the event loop"
+        assert loop_runs_while_blocked(loop), "Reconnect link blocked the event loop"
         return snapshot(context)
 
     monkeypatch.setattr(oauth_service_module, "load_oauth_credentials_snapshot_sync", snapshot_waiting_for_loop)
