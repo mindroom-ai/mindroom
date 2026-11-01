@@ -125,7 +125,6 @@ def _runner_shared_storage_root(runtime_paths: RuntimePaths) -> Path | None:
     if shared_root is not None:
         return Path(shared_root.strip()).expanduser().resolve()
 
-    dedicated_root = runner_dedicated_worker_root(runtime_paths)
     worker_key = runner_dedicated_worker_key(runtime_paths)
     if worker_key is None:
         return None
@@ -135,7 +134,7 @@ def _runner_shared_storage_root(runtime_paths: RuntimePaths) -> Path | None:
         default=_DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX,
     ).strip()
     return _shared_root_from_dedicated_worker_root(
-        dedicated_root=dedicated_root,
+        dedicated_root=runner_dedicated_worker_root(runtime_paths),
         worker_key=worker_key,
         storage_subpath_prefix=storage_subpath_prefix,
     )
