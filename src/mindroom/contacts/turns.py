@@ -119,6 +119,14 @@ def contact_turn_instructions(
     )
 
 
+def answers_alone(config: Config, runtime_paths: RuntimePaths, *, room_id: str, agent_name: str) -> bool:
+    """Return whether this agent never joins a team in ``room_id``, because it is or was the agent's contact room.
+
+    Each agent answers there as its own owner's contact turn, while a team turn would show an unrestricted reply.
+    """
+    return contact_room(config, runtime_paths, room_id, agent_name) is not None
+
+
 def leaves_to_other_agent(
     config: Config,
     runtime_paths: RuntimePaths,

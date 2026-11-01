@@ -125,6 +125,7 @@ A tool the agent later loses is left out of every contact until the agent has it
 Every turn of an agent in its own contact room is a contact turn, and it runs as the agent's owner: it uses the owner's credentials and counts toward the owner's usage and [budgets](https://docs.mindroom.chat/budgets/).
 Only the other side (the other agent and its owner, or the other person) and the agent's own owner start its turns there; a message from anyone else, administrators included, starts nothing.
 When both sides are agents, an unmentioned message from an owner is answered only by that owner's agent, while a mentioned agent always answers.
+Agents never form a team in a contact room, so mentioning both agents gets one contact turn from each.
 Agents wake each other only by mentioning, which `matrix_message` does when it names a `recipient`.
 
 A contact turn answers only by calling `matrix_message` into the contact room.

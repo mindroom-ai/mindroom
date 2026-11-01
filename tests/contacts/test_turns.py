@@ -32,7 +32,7 @@ from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_lifecycle import answer_suppression
 from mindroom.response_sources import ResponseSources
 from mindroom.skill_learning.runner import SkillReviewRunner
-from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch, TurnPolicy, TurnPolicyDeps
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
@@ -80,6 +80,7 @@ def _setup(
     tools: tuple[str, ...] = ("calculator", "sleep"),
     personal_rooms: bool = False,
     memory_backend: str = "none",
+    access: dict[str, Any] | None = None,
 ) -> tuple[Config, RuntimePaths]:
     """Personal agents of Alice, Bob, and Carol with contacts and skill learning; ``sleep`` always needs approval."""
     data: dict[str, Any] = {
@@ -101,6 +102,8 @@ def _setup(
     }
     if personal_rooms:
         data["personal_rooms"] = {"agent": "mind", "onboarding_rooms": ["lobby"]}
+    if access is not None:
+        data["personal_agents"]["mind"]["agent"]["access"] = access
     config = _load(tmp_path, data, entries=[_personal(), _personal(CO_OWNER), _personal(CAROL)])
     paths = test_runtime_paths(tmp_path)
     persist_entity_accounts(config, paths)
@@ -323,7 +326,32 @@ async def _plan(
     thread_id: str | None = None,
 ) -> str:
     """Return whether ``agent_name`` answers ``sender``'s message in the contact room, which runs as ``owner``."""
-    room = nio.MatrixRoom(CONTACT_ROOM, _agent(paths, agent_name))
+    return (
+        await _dispatch_plan(
+            config,
+            paths,
+            agent_name,
+            sender=sender,
+            owner=owner,
+            mentioned=mentioned,
+            thread_id=thread_id,
+        )
+    ).kind
+
+
+async def _dispatch_plan(
+    config: Config,
+    paths: RuntimePaths,
+    agent_name: str,
+    *,
+    sender: str,
+    owner: str,
+    mentioned: tuple[str, ...] = (),
+    thread_id: str | None = None,
+    room_id: str = CONTACT_ROOM,
+) -> DispatchPlan:
+    """Return how ``agent_name`` handles ``sender``'s message in ``room_id``, which runs as ``owner``."""
+    room = nio.MatrixRoom(room_id, _agent(paths, agent_name))
     for user_id in (OWNER, CO_OWNER, DAVE, _agent(paths, "mind_alice"), _agent(paths, "mind_bob")):
         room.add_member(user_id, user_id, None)
     mentioned_ids = [current_entity_id(name, paths) for name in mentioned]
@@ -335,7 +363,7 @@ async def _plan(
         mentioned_agents=mentioned_ids,
         has_non_agent_mentions=False,
     )
-    target = MessageTarget.resolve(CONTACT_ROOM, thread_id, EVENT_ID)
+    target = MessageTarget.resolve(room_id, thread_id, EVENT_ID)
     origin = replace(message_origin(sender_id=sender, requester_id=owner), acts_for_requester=sender != owner)
     envelope = MessageEnvelope(
         source_event_id=EVENT_ID,
@@ -352,11 +380,11 @@ async def _plan(
             "event_id": EVENT_ID,
             "sender": sender,
             "origin_server_ts": 1,
-            "room_id": CONTACT_ROOM,
+            "room_id": room_id,
             "type": "m.room.message",
         },
     )
-    plan = await _policy(config, paths, agent_name).plan_turn(
+    return await _policy(config, paths, agent_name).plan_turn(
         room,
         event,
         PreparedDispatch(
@@ -368,7 +396,35 @@ async def _plan(
         ),
         has_active_response_for_target=lambda _target: False,
     )
-    return plan.kind
+
+
+def _action(plan: DispatchPlan) -> str | None:
+    return None if plan.response_action is None else plan.response_action.kind
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("status", ["active", "removed"])
+async def test_agents_mentioned_together_in_a_contact_room_never_form_a_team(tmp_path: Path, status: str) -> None:
+    """Access that lets an owner use both agents forms a team elsewhere, but in a contact room each agent answers alone.
+
+    A team turn there would show an unrestricted reply to the other side.
+    """
+    config, paths = _setup(tmp_path, access={"users": [OWNER, CO_OWNER]})
+    _contact(paths, _record(status=status))  # type: ignore[arg-type]
+    both = ("mind_alice", "mind_bob")
+
+    # Elsewhere one of the two agents answers for both as a team.
+    elsewhere = [
+        _action(
+            await _dispatch_plan(config, paths, name, sender=OWNER, owner=OWNER, mentioned=both, room_id=OTHER_ROOM),
+        )
+        for name in both
+    ]
+    assert sorted(elsewhere, key=str) == [None, "team"]
+    for agent_name, owner in (("mind_alice", OWNER), ("mind_bob", CO_OWNER)):
+        plan = await _dispatch_plan(config, paths, agent_name, sender=OWNER, owner=owner, mentioned=both)
+        assert (plan.kind, _action(plan)) == ("respond", "individual")
 
 
 @pytest.mark.asyncio
