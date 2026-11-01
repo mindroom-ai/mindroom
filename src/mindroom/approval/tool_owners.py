@@ -34,7 +34,7 @@ _PROVENANCE_PRIVATE_FIELDS = frozenset(
     {"_source_files", "_source_fingerprint", "_uses_includes", "_generated_agent_dumps"},
 )
 # Private config state kept per agent, of which only the catalog's own agent's entry counts.
-_PER_AGENT_PRIVATE_FIELDS = frozenset({"_personal_agent_instances", "_generated_agents"})
+_PER_AGENT_PRIVATE_FIELDS = frozenset({"_personal_agent_instances", "_generated_agents", "_personal_agent_call_agents"})
 
 
 def validate_approval_tool_owners(
@@ -176,8 +176,15 @@ def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None
     if agent is None:
         return None
     private = config.__pydantic_private__ or {}
+    dump = config.model_dump(exclude={"agents", "teams"})
+    # Each onboarding adds the new user's agent to calls.agents; another generated agent's entry never reaches this one.
+    dump["calls"]["agents"] = {
+        name: profile
+        for name, profile in dump["calls"]["agents"].items()
+        if name == agent_name or config.personal_agent_instance(name) is None
+    }
     return {
-        **config.model_dump(exclude={"agents", "teams"}),
+        **dump,
         "agent": agent.model_dump(exclude=set(_PROMPT_ONLY_AGENT_FIELDS)),
         "private": {
             name: value.get(agent_name) if name in _PER_AGENT_PRIVATE_FIELDS else value

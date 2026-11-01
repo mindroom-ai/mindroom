@@ -47,8 +47,13 @@ def configured_call_agent_name_for_room(
     *,
     room_aliases: Iterable[str] = (),
     invited_rooms_by_agent: Mapping[str, AbstractSet[str]],
+    personal_rooms_by_agent: Mapping[str, AbstractSet[str]],
 ) -> str | None:
-    """Return the sole calls-enabled agent for a live room, failing on ambiguity."""
+    """Return the sole calls-enabled agent for a live room, failing on ambiguity.
+
+    An agent creates its owners' personal rooms itself, so ``personal_rooms_by_agent`` lists rooms that are neither
+    configured nor invited.
+    """
     routable_names = configured_routable_entity_names_for_room(
         config,
         room_id,
@@ -59,9 +64,11 @@ def configured_call_agent_name_for_room(
     if len(call_agents) == 1:
         return next(iter(call_agents))
     for agent_name in config.calls.agents:
-        if not should_persist_invited_rooms(config, agent_name):
-            continue
-        if room_id in invited_rooms_by_agent.get(agent_name, ()):
+        invited = should_persist_invited_rooms(config, agent_name) and room_id in invited_rooms_by_agent.get(
+            agent_name,
+            (),
+        )
+        if invited or room_id in personal_rooms_by_agent.get(agent_name, ()):
             call_agents.add(agent_name)
     call_agents = sorted(call_agents)
     if len(call_agents) > 1:
