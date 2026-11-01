@@ -723,10 +723,10 @@ def trusted_tool_runtime_env_values(
     for name in tuple(merged_env):
         if name != "GOOGLE_APPLICATION_CREDENTIALS" and not name.endswith("_FILE"):
             continue
-        source_path = _runtime_env_source_path(runtime_paths, name)
+        source_path = runtime_env_path(runtime_paths, name)
         if source_path is None:
             continue
-        merged_env[name] = str(source_path.resolve())
+        merged_env[name] = str(source_path)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
@@ -771,14 +771,6 @@ def shell_execution_runtime_env_values(
     )
     merged_env.update(trusted_tool_runtime_env_values(runtime_paths))
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
-
-
-def _runtime_env_source_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
-    """Return one runtime env var, read as ``RuntimePaths._plain_env_value`` reads it, as a lexical filesystem path."""
-    if (plain := runtime_paths._plain_env_value((name,))) is None:
-        return None
-    path = Path(plain[0]).expanduser()
-    return path if path.is_absolute() else runtime_paths.config_dir / path
 
 
 def _sandbox_shell_execution_runtime_env_values(
@@ -830,14 +822,14 @@ def read_secret_file(path: Path) -> str:
 
 
 def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
-    """Resolve one runtime env var as a filesystem path.
+    """Resolve one runtime env var, read as ``RuntimePaths._plain_env_value`` reads it, as a filesystem path.
 
     Relative paths are interpreted relative to the runtime config directory.
     """
-    source_path = _runtime_env_source_path(runtime_paths, name)
-    if source_path is None:
+    if (plain := runtime_paths._plain_env_value((name,))) is None:
         return None
-    return source_path.resolve()
+    path = Path(plain[0]).expanduser()
+    return (path if path.is_absolute() else runtime_paths.config_dir / path).resolve()
 
 
 def runtime_env_flag(

@@ -19,7 +19,8 @@ Helm leaves behind the CA ConfigMap (`workers.kubernetes.agentVault.workerCaConf
 ## Upgrading to memory clients that read `OPENAI_BASE_URL` from `.env`
 
 With `OPENAI_BASE_URL` in the `.env` beside `config.yaml` or in `OPENAI_BASE_URL_FILE`, an `openai` memory embedder without `config.host` and an `openai` memory LLM without `config.openai_base_url` now use that URL, as models do, where earlier releases used it only when it was exported.
-To keep either on OpenAI's API, set that field to `https://api.openai.com/v1`; when the embedder moves to another server, reindex its knowledge bases, because vectors from different embedders do not match.
+To keep them on OpenAI's API with the memories and indexes they built, set the other server as each model's `extra_kwargs.base_url` and remove `OPENAI_BASE_URL`; setting the embedder's `config.host` instead switches Mem0 memory, knowledge bases, and knowledge graphs to [new, empty stores](../memory.md#embedder).
+When the embedder does move to the other server, reindex its knowledge bases; Mem0 memories and knowledge graphs it built from OpenAI's embeddings no longer match new searches.
 
 ## Upgrading to shared team memory
 
