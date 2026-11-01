@@ -254,7 +254,7 @@ async def test_display_long_socket_root_uses_private_bounded_owned_directory(
 
 @pytest.mark.asyncio
 async def test_timed_out_action_invalidates_uncertain_browser_state() -> None:
-    """A timed-out navigation cannot leave a live computer with uncertain page state."""
+    """An action stopped by a timeout other than the browser call's own limit stops the computer and its browser."""
     runtime = WorkerComputerRuntime(FakeDisplay())
     generation = (await runtime.ensure_started())["generation"]
 
