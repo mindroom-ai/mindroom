@@ -366,6 +366,12 @@ function AppContent() {
     <div className="relative flex h-screen overflow-hidden">
       <a
         href="#main-content"
+        // Focus without following the fragment: a fragment adds a history entry
+        // the router cannot hold back, so Back into it would drop a draft.
+        onClick={(event) => {
+          event.preventDefault();
+          document.getElementById("main-content")?.focus();
+        }}
         className="fixed left-3 top-3 z-[100] -translate-y-16 rounded-md bg-card px-3 py-2 text-sm font-medium focus:translate-y-0 focus:shadow-lg"
       >
         Skip to content

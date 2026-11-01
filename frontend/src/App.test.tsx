@@ -313,6 +313,19 @@ describe("App tab switching", () => {
     expect(screen.queryByText("Dashboard page")).not.toBeInTheDocument();
   });
 
+  it("moves focus with Skip to content without a history entry the router cannot block", () => {
+    render(<App />);
+
+    // A browser follows a native fragment link with a history entry outside
+    // the router, and the router cannot hold back a back press into it.
+    const followed = fireEvent.click(
+      screen.getByRole("link", { name: "Skip to content" }),
+    );
+
+    expect(followed).toBe(false);
+    expect(document.activeElement).toBe(screen.getByRole("main"));
+  });
+
   it("does not ask without an unsaved draft or when staying on the tab", async () => {
     const confirmSpy = vi.spyOn(window, "confirm");
     await typeSkillDraft();

@@ -250,7 +250,8 @@ export function Schedules() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ScheduleDraft | null>(null);
   const [roomFilter, setRoomFilter] = useState<string>("all");
-  const [isDirty, setIsDirty] = useState(false);
+  // The selected schedule as saved, which the draft is compared against.
+  const [savedDraft, setSavedDraft] = useState<ScheduleDraft | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -312,8 +313,9 @@ export function Schedules() {
   }, [load]);
 
   useEffect(() => {
-    setDraft(selectedTask ? toDraft(selectedTask, timezone) : null);
-    setIsDirty(false);
+    const saved = selectedTask ? toDraft(selectedTask, timezone) : null;
+    setDraft(saved);
+    setSavedDraft(saved);
   }, [selectedTask, timezone]);
 
   useEffect(() => {
@@ -324,6 +326,7 @@ export function Schedules() {
     }
   }, [roomFilter, selectedTaskId, visibleTasks]);
 
+  const isDirty = JSON.stringify(draft) !== JSON.stringify(savedDraft);
   const confirmDiscard = useUnsavedDraft(isDirty);
 
   // Selecting another schedule, or none, replaces the draft.
@@ -363,7 +366,6 @@ export function Schedules() {
   ) => {
     if (!draft) return;
     setDraft({ ...draft, [field]: value });
-    setIsDirty(true);
   };
 
   const handleSave = async () => {
@@ -421,7 +423,6 @@ export function Schedules() {
         title: "Schedule updated",
         description: `Task ${selectedTask.task_id} has been updated.`,
       });
-      setIsDirty(false);
     } catch (e) {
       toast({
         title: "Failed to update schedule",

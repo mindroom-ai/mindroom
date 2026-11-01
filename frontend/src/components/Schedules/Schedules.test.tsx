@@ -182,6 +182,25 @@ describe("Schedules", () => {
       );
     });
 
+    it("does not ask once the edits are undone", async () => {
+      const confirmSpy = vi.spyOn(window, "confirm");
+      const description = await editQuietTask();
+      fireEvent.change(description, {
+        target: { value: "Quiet inbox check" },
+      });
+      const silent = screen.getByRole("checkbox", { name: "Silent delivery" });
+      fireEvent.click(silent);
+      fireEvent.click(silent);
+
+      expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+      fireEvent.click(screen.getByText("Visible status check"));
+
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(screen.getByLabelText("Description")).toHaveValue(
+        "Visible status check",
+      );
+    });
+
     it("does not ask when the selected schedule is selected again", async () => {
       const confirmSpy = vi.spyOn(window, "confirm");
       const description = await editQuietTask();
