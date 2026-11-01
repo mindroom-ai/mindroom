@@ -252,6 +252,25 @@ async def test_hook_rewrite_is_judged_and_sent_with_rewritten_flag(
 
 
 @pytest.mark.asyncio
+async def test_hook_that_empties_the_text_denies_before_the_judge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rewrite to blank text leaves nothing to send, so it denies with the agent's own text and skips the judge."""
+    config, paths = _config(tmp_path, judge=LLM_JUDGE)
+    model = _judge_model(monkeypatch, '{"decision": true}')
+
+    @hook(EVENT_CONTACT_BEFORE_SEND)
+    async def blank(ctx: ContactBeforeSendContext) -> None:
+        ctx.rewrite("  \n ")
+
+    verdict = await _check(_tool_context(config, paths, blank))
+
+    assert verdict == ContactVerdict("deny", "Dinner at eight?", "A contact policy hook left the message empty.")
+    assert model.requests == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("action", "feedback"),
     [("revise", "Leave out the budget."), ("deny", "Not allowed.")],

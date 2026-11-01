@@ -51,7 +51,6 @@ if TYPE_CHECKING:
 
 _DIRECT_INTERACTIVE_ERROR = "Interactive prompts are only supported in normal agent responses."
 _CONTACT_TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
-_CONTACT_EMPTY_TEXT = "A contact policy hook left the message empty."
 
 
 def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
@@ -87,9 +86,11 @@ class _MessageSendState:
     newly_registered_attachment_ids: list[str] = field(default_factory=list)
 
 
-def _contact_policy_note(verdict: ContactVerdict | None, done: str) -> dict[str, str]:
-    """Return the result field that tells the agent the contact policy changed what went out."""
-    return {"note": f"{done} (changed by the contact policy)"} if verdict is not None and verdict.rewritten else {}
+def _contact_policy_fields(verdict: ContactVerdict | None, done: str) -> dict[str, str]:
+    """Return the result fields that tell the agent the contact policy changed what went out, and to what."""
+    if verdict is None or not verdict.rewritten:
+        return {}
+    return {"note": f"{done} (changed by the contact policy)", "sent_text": verdict.text}
 
 
 def _format_direct_text(text: str) -> str | None:
@@ -118,7 +119,7 @@ class MatrixMessageOperations:
         self,
         context: ToolRuntimeContext,
         *,
-        action: Literal["send", "edit"],
+        action: Literal["send", "edit", "react"],
         room_id: str,
         thread_id: str | None,
         text: str | None,
@@ -134,7 +135,7 @@ class MatrixMessageOperations:
             return None
         if text is None or not text_only:
             return self._result("error", action=action, room_id=room_id, message=_CONTACT_TEXT_ONLY_ERROR)
-        # An edit adds no message to the conversation, so only a send counts toward the agent message limit.
+        # An edit or a reaction adds no message to the conversation, so only a send counts toward the limit.
         consecutive = (
             await consecutive_agent_messages(
                 context.conversation_reader,
@@ -157,8 +158,6 @@ class MatrixMessageOperations:
             text=text,
             consecutive_agent_messages=consecutive,
         )
-        if verdict.action == "send" and not verdict.text.strip():
-            verdict = ContactVerdict("deny", text, _CONTACT_EMPTY_TEXT)
         if verdict.action == "send":
             return verdict
         retry = " Revise the message and send it again." if verdict.action == "revise" else ""
@@ -392,7 +391,7 @@ class MatrixMessageOperations:
                 return self._result("error", action="send", message=error, **asdict(state))
         if state.event_id is None and state.attachment_event_ids:
             state.event_id = state.attachment_event_ids[0]
-        return self._result("ok", action="send", **asdict(state), **_contact_policy_note(contact_verdict, "Sent"))
+        return self._result("ok", action="send", **asdict(state), **_contact_policy_fields(contact_verdict, "Sent"))
 
     async def _message_react(
         self,
@@ -400,12 +399,26 @@ class MatrixMessageOperations:
         *,
         message: str | None,
         room_id: str,
+        thread_id: str | None,
         event_id: str | None,
     ) -> MatrixMessageOperationResult:
         if event_id is None:
             return self._result("error", action="react", message="event_id is required.")
 
         reaction = (message or "").strip() or "👍"
+        # A reaction key is free text, so in a contact room it passes the policy like any message.
+        contact_verdict = await self._check_contact_message(
+            context,
+            action="react",
+            room_id=room_id,
+            thread_id=thread_id,
+            text=reaction,
+            text_only=True,
+        )
+        if isinstance(contact_verdict, MatrixMessageOperationResult):
+            return contact_verdict
+        if contact_verdict is not None:
+            reaction = contact_verdict.text
         response = await send_room_event_result(
             context.client,
             room_id,
@@ -421,6 +434,7 @@ class MatrixMessageOperations:
                 reacted_event_id=event_id,
                 reaction=reaction,
                 event_id=response.event_id,
+                **_contact_policy_fields(contact_verdict, "Reacted"),
             )
         return self._result(
             "error",
@@ -589,7 +603,7 @@ class MatrixMessageOperations:
             thread_id=thread_id,
             edited_event_id=event_id,
             event_id=delivered.event_id,
-            **_contact_policy_note(contact_verdict, "Edited"),
+            **_contact_policy_fields(contact_verdict, "Edited"),
         )
 
     async def dispatch_action(
@@ -633,7 +647,13 @@ class MatrixMessageOperations:
                 read_limit=read_limit,
             )
         if action == "react":
-            return await self._message_react(context, message=message, room_id=room_id, event_id=event_id)
+            return await self._message_react(
+                context,
+                message=message,
+                room_id=room_id,
+                thread_id=thread_id,
+                event_id=event_id,
+            )
         return await self._message_edit(
             context,
             room_id=room_id,

@@ -38,16 +38,31 @@ if TYPE_CHECKING:
 _CONTACT_DESTINATION_ERROR = (
     "Error: in a contact conversation you can only write to this room or to your owner's personal room"
 )
+_CONTACT_OWNER_ROOM_ERROR = (
+    "Error: in a contact conversation you can only send a plain message to your owner's personal room"
+)
 
 
-def _contact_turn_may_reach(context: ToolRuntimeContext, room_id: str) -> bool:
-    """Return whether this turn may use ``room_id``: a contact turn reaches only its room and its owner's with it."""
+def _contact_turn_target_error(
+    context: ToolRuntimeContext,
+    room_id: str,
+    *,
+    action: str,
+    recipient: str | None,
+) -> str | None:
+    """Return why this turn may not act in ``room_id`` this way, or None when it may.
+
+    A contact turn acts only in its own room, apart from a plain message to its owner in their personal room with it.
+    Anything more there, such as naming a recipient, would start a normal turn with the owner's full authority.
+    """
     config = context.current_config
     contact = contact_turn(config, context.runtime_paths, context.room_id, context.agent_name)
     if contact is None or room_id == context.room_id:
-        return True
+        return None
     record, side = contact
-    return personal_room_of(config, context.runtime_paths, record.party(side).owner) == (context.agent_name, room_id)
+    if personal_room_of(config, context.runtime_paths, record.party(side).owner) != (context.agent_name, room_id):
+        return _CONTACT_DESTINATION_ERROR
+    return _CONTACT_OWNER_ROOM_ERROR if action != "send" or recipient is not None else None
 
 
 def _optional_string(value: str | None, name: str) -> str | None:
@@ -177,8 +192,9 @@ class MatrixMessageTools(Toolkit):
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
-        if not _contact_turn_may_reach(context, resolved_room_id):
-            return self._payload("error", room_id=resolved_room_id, message=_CONTACT_DESTINATION_ERROR)
+        target_error = _contact_turn_target_error(context, resolved_room_id, action=action, recipient=recipient)
+        if target_error is not None:
+            return self._payload("error", room_id=resolved_room_id, message=target_error)
         if not await room_access_allowed(context, resolved_room_id, contact_room_ok=True):
             return self._payload("error", room_id=resolved_room_id, message="Not authorized to access the target room.")
         dispatch = partial(

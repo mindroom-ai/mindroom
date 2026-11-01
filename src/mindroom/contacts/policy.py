@@ -26,6 +26,7 @@ CONTACT_RULES_QUESTION_ID = "contact_rules"
 
 NO_CONTACT_RULES = "No extra rules; share only what the owner would expect."
 _HOOK_GAVE_NO_REASON = "A contact policy hook stopped this message without saying why."
+_HOOK_LEFT_IT_EMPTY = "A contact policy hook left the message empty."
 _UNCHECKED = "The message could not be checked; try again later."
 _BULLET = re.compile(r"^[-*]\s+")
 
@@ -98,6 +99,8 @@ async def check_contact_message(
             action = "revise" if hooked.verdict == "revise" else "deny"
             return ContactVerdict(action, text, hooked.feedback or _HOOK_GAVE_NO_REASON)
         final_text = hooked.text
+        if not final_text.strip():
+            return ContactVerdict("deny", text, _HOOK_LEFT_IT_EMPTY)
     contacts = config.agents[sender.id].contacts
     if contacts is not None and contacts.judge is not None:
         refusal = await _judge_refusal(
