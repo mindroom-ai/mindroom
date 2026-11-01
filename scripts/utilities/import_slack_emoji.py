@@ -31,8 +31,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from collections.abc import Set as AbstractSet
 
-# Matrix caps an event at 64 KiB with its envelope, so a pack's content stops well below that, as in MindRoom Chat.
-MAX_PACK_CONTENT_BYTES = 60_000
+# Tuwunel counts the content a write replaces toward the same 64 KiB event limit, so a pack stays under half of it.
+MAX_PACK_CONTENT_BYTES = 30_000
 # Each batch is written to the packs before the next one is uploaded, so a stopped run wastes at most one batch.
 BATCH_SIZE = 100
 MAX_ATTEMPTS = 5
@@ -83,7 +83,7 @@ def add_to_packs(
     packs: dict[str, dict[str, Any]],
     entries: Mapping[str, dict[str, Any]],
 ) -> tuple[list[str], list[str]]:
-    """Add each image where MindRoom Chat would add it, and return the changed state keys and the names skipped as taken.
+    """Place each image by MindRoom Chat's rules, and return the changed state keys and the names skipped as taken.
 
     An image goes into the first live pack, in order of state keys, that stays within the size limit.
     When none does, it starts a new pack under the smallest free number from 2 up, with the first pack's metadata.

@@ -139,6 +139,9 @@ HOMESERVER = ["--homeserver", "https://matrix.example.com"]
 ROOM = "/_matrix/client/v3/rooms/!emoji:example.com"
 PACK_STATE = f"{ROOM}/state/im.ponies.room_emotes/"
 RATE_LIMITED = {"errcode": "M_LIMIT_EXCEEDED", "error": "Too many requests", "retry_after_ms": 1}
+# Tuwunel refuses an event over 65,535 bytes, counting the content it replaces, which it keeps in the event as
+# unsigned.prev_content; IDs, hashes, and signatures around the content take up to about a kilobyte of that.
+EVENT_CONTENT_LIMIT_BYTES = 65_535 - 1_000
 
 
 class Servers:
@@ -212,11 +215,14 @@ class Servers:
         return httpx.Response(200, json={"content_uri": f"mxc://example.com/{len(self.uploads)}"})
 
     def write(self, state_key: str, content: dict[str, Any]) -> httpx.Response:
-        """Replace the pack at the state key, unless the account may not change emoji."""
+        """Replace the pack at the state key, unless the account may not change emoji or the event gets too big."""
         if self.refuse_writes:
             return httpx.Response(403, json={"errcode": "M_FORBIDDEN", "error": "Not allowed to change emoji"})
         if self.rate_limited("write"):
             return httpx.Response(429, json=RATE_LIMITED)
+        event = {"content": content, "unsigned": {"prev_content": self.packs.get(state_key, {})}}
+        if len(json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode()) > EVENT_CONTENT_LIMIT_BYTES:
+            return httpx.Response(413, json={"errcode": "M_TOO_LARGE", "error": "PDU is larger than maximum"})
         self.packs[state_key] = content
         self.writes.append(state_key)
         return httpx.Response(200, json={"event_id": "$pack"})
@@ -335,7 +341,8 @@ def test_a_failed_download_is_counted_and_the_run_continues(
     assert sorted(servers.packs[""]["images"]) == ["party-parrot", "pp", "shipit"]
     out, err = capsys.readouterr()
     assert out == "Imported 2 emoji and 1 aliases; skipped 0 taken, 1 unusable, 3 failed.\n"
-    assert [line.partition(" (")[0] for line in err.splitlines()] == [
+    # Only the script's own lines count: logging another test left configured may write to stderr too.
+    assert [line.partition(" (")[0] for line in err.splitlines() if line.startswith("Could not import ")] == [
         "Could not import broken",
         "Could not import forbidden",
         "Could not import html",
@@ -364,8 +371,23 @@ def test_slack_error_stops_before_any_upload(servers: Servers, capsys: pytest.Ca
     """A Slack token without the emoji:read scope stops the run with Slack's error code."""
     servers.slack_answer = {"ok": False, "error": "missing_scope"}
     assert main(HOMESERVER) == 1
-    assert capsys.readouterr().err == "Import stopped: Slack answered missing_scope\n"
+    assert "Import stopped: Slack answered missing_scope" in capsys.readouterr().err.splitlines()
     assert (servers.downloads, servers.uploads, servers.writes) == ([], [], [])
+
+
+def test_a_big_workspace_fills_packs_the_homeserver_accepts(
+    servers: Servers,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each pack stays small enough that a write fits in one event together with the content it replaces."""
+    for number in range(500):
+        url = f"{CDN}/emoji-{number:03d}/x.png"
+        servers.emoji[f"emoji-{number:03d}"] = url
+        servers.files[url] = (200, "image/png", PNG)
+    assert main(HOMESERVER) == 0
+    assert sorted(servers.packs) == ["", "2"]
+    assert sum(len(pack["images"]) for pack in servers.packs.values()) == 503
+    assert capsys.readouterr().out == "Imported 502 emoji and 1 aliases; skipped 0 taken, 1 unusable, 0 failed.\n"
 
 
 @pytest.mark.parametrize("variable", ["SLACK_TOKEN", "MATRIX_ACCESS_TOKEN"])
