@@ -12,12 +12,12 @@ from fastapi.testclient import TestClient
 
 from mindroom.api import main
 from tests.api.conftest import (
+    publish_api_payload,
     trusted_upstream_env,
     trusted_upstream_jwks,
     trusted_upstream_jwt,
     trusted_upstream_jwt_key,
 )
-from tests.api.test_oauth_api import _publish_config, _use_runtime_auth_settings
 from tests.test_usage_stats_private import ALIAS, ALICE, BOB, private_usage_data
 
 if TYPE_CHECKING:
@@ -43,12 +43,11 @@ def _client(
         },
     )
     main.initialize_api_app(main.app, paths)
-    _publish_config(
+    publish_api_payload(
         main.app,
         paths,
         {**data.config.model_dump(mode="json"), "models": {"default": {"provider": "openai", "id": "test-model"}}},
     )
-    _use_runtime_auth_settings(main.app)
     headers = {
         name: {
             "X-Trusted-Jwt": trusted_upstream_jwt(key, user_id=name, matrix_user_id=requester),

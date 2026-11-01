@@ -260,6 +260,11 @@ def publish_api_config(api_app: FastAPI, config: Config) -> None:
     snapshot.load_error = None
 
 
+def publish_api_payload(api_app: FastAPI, runtime_paths: "RuntimePaths", payload: dict[str, Any]) -> None:
+    """Serve `payload`, validated for `runtime_paths`, as the app's committed config without loading or committing a file."""
+    publish_api_config(api_app, Config.validate_with_runtime(payload, runtime_paths))
+
+
 def save_config(request: Request, payload: dict[str, Any], *, expected_generation: int | None = None) -> int:
     """Commit a dashboard structured save and return its generation."""
     build = partial(ConfigCommit.from_payload, payload)

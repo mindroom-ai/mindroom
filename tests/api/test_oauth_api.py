@@ -28,7 +28,7 @@ from starlette.requests import Request as StarletteRequest
 
 from mindroom import constants
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.api import auth, config_lifecycle, main
+from mindroom.api import auth, main
 from mindroom.api import oauth as oauth_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.oauth import router as oauth_router
@@ -70,7 +70,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.api.conftest import (
     login_with_api_key,
-    publish_api_config,
+    publish_api_payload,
     trusted_upstream_env,
     trusted_upstream_headers,
 )
@@ -88,13 +88,20 @@ def _allow_example_test_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+# A dashboard on another origin authenticates with the API key, as cookies would fail the same-origin check.
+_DASHBOARD_BEARER = {"Authorization": "Bearer test-key"}
+
+
 def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) -> constants.RuntimePaths:
+    process_env = process_env or {}
+    if "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED" not in process_env:
+        # Unless a trusted gateway signs requests, the dashboard requires the key `login_with_api_key` sends.
+        process_env = {"MINDROOM_API_KEY": "test-key", **process_env}
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
-        process_env=process_env or {},
+        process_env=process_env,
     )
-    process_env = process_env or {}
     client_id = process_env.get("TEST_OAUTH_CLIENT_ID")
     client_secret = process_env.get("TEST_OAUTH_CLIENT_SECRET")
     if client_id and client_secret:
@@ -248,30 +255,8 @@ def _make_test_app(runtime_paths: constants.RuntimePaths, payload: dict[str, Any
     bind_test_embedded_runtime(api_app)
     api_app.include_router(auth.router)
     api_app.include_router(oauth_router)
-    _publish_config(api_app, runtime_paths, payload)
+    publish_api_payload(api_app, runtime_paths, payload)
     return api_app
-
-
-def _publish_config(
-    api_app: FastAPI,
-    runtime_paths: constants.RuntimePaths,
-    payload: dict[str, Any],
-) -> None:
-    publish_api_config(api_app, Config.validate_with_runtime(payload, runtime_paths))
-    config_lifecycle.app_state(api_app).api_auth_state = auth.ApiAuthState(
-        runtime_paths=runtime_paths,
-        settings=auth._ApiAuthSettings(
-            supabase_url=None,
-            supabase_anon_key=None,
-            account_id=None,
-            mindroom_api_key="test-key",
-        ),
-        supabase_auth=None,
-    )
-
-
-def _use_runtime_auth_settings(api_app: FastAPI) -> None:
-    config_lifecycle.app_state(api_app).api_auth_state = None
 
 
 def _fail_connection_status(
@@ -970,7 +955,6 @@ def test_oauth_connect_from_the_dashboard_host_returns_to_the_dashboard(tmp_path
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload())
-    _use_runtime_auth_settings(api_app)
     redirect_uri = f"{public_url}/api/oauth/public_mail/callback"
     get_runtime_credentials_manager(runtime_paths).save_credentials(
         "public_mail_oauth_client",
@@ -1024,7 +1008,6 @@ def _dashboard_host_app(tmp_path: Path, env: dict[str, str]) -> tuple[FastAPI, c
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     return api_app, runtime_paths, provider
 
@@ -1313,8 +1296,8 @@ def test_oauth_entrypoints_reject_dynamic_client_without_exact_https_redirect(
     )
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
-        with TestClient(api_app, base_url=request_base_url) as client:
-            login_with_api_key(client)
+        # Most cases send the request from another origin than the deployment's, as a split-origin dashboard does.
+        with TestClient(api_app, base_url=request_base_url, headers=_DASHBOARD_BEARER) as client:
             response = client.request(method, path)
 
     assert response.status_code == 503
@@ -2424,8 +2407,6 @@ def _expect_opener_notice(
 
 
 _SPLIT_ORIGIN = "https://dashboard.example.test"
-# A dashboard on another origin authenticates with the API key, as cookies would fail the same-origin check.
-_DASHBOARD_BEARER = {"Authorization": "Bearer test-key"}
 
 
 def _split_origin_app(tmp_path: Path) -> FastAPI:
@@ -2543,7 +2524,6 @@ def test_oauth_browser_errors_are_html(tmp_path: Path, scenario: str) -> None:
     """The popup shows a styled page with the message and a close button, never raw JSON, and keeps its status."""
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider()
     bob = trusted_upstream_headers(user_id="bob", email="bob@example.com", matrix_user_id="@bob:example.org")
     identity = ToolExecutionIdentity(
@@ -2856,7 +2836,6 @@ def test_agent_user_resets_their_own_requester_scoped_account_on_a_shared_agent(
     payload = _config_payload(worker_scope="shared", allowed_users=["@alice:example.org", "@bob:example.org"])
     payload["agents"]["general"]["credential_managers"] = []
     api_app = _make_test_app(runtime_paths, payload)
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(
         provider_id="google_drive",
         credential_service="google_drive_oauth",
@@ -3183,7 +3162,7 @@ def test_shared_browser_reset_rechecks_credential_manager_authority(tmp_path: Pa
     )
     provider, target = _general_agent_reset_target(api_app, runtime_paths)
     reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
-    _publish_config(api_app, runtime_paths, _config_payload(worker_scope="shared", allowed_users=[]))
+    publish_api_payload(api_app, runtime_paths, _config_payload(worker_scope="shared", allowed_users=[]))
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
@@ -3336,7 +3315,7 @@ def test_browser_reset_rejects_target_removed_by_config_reload(tmp_path: Path) -
     reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
     reloaded_payload = _config_payload(worker_scope="user_agent")
     reloaded_payload["agents"]["general"]["tools"] = []
-    _publish_config(api_app, runtime_paths, reloaded_payload)
+    publish_api_payload(api_app, runtime_paths, reloaded_payload)
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
@@ -3402,7 +3381,7 @@ def test_browser_reset_rejects_a_target_whose_scope_changed_since_the_link(tmp_p
         ),
     )
     reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
-    _publish_config(api_app, runtime_paths, _config_payload(worker_scope="user"))
+    publish_api_payload(api_app, runtime_paths, _config_payload(worker_scope="user"))
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
@@ -3423,7 +3402,6 @@ def test_browser_reset_rejects_a_different_authenticated_requester(tmp_path: Pat
             allowed_users=["@alice:example.org"],
         ),
     )
-    _use_runtime_auth_settings(api_app)
     provider, target = _general_agent_reset_target(api_app, runtime_paths)
     reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
     bob_headers = {
@@ -3933,7 +3911,6 @@ def test_requester_scoped_conversation_link_for_user_agent_uses_user_store(tmp_p
             allowed_users=["@alice:example.org"],
         ),
     )
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(
         provider_id="github",
         credential_service="github_oauth",
@@ -4025,7 +4002,6 @@ def test_agent_users_connect_their_own_accounts_from_a_chat_link(
     payload = _config_payload(worker_scope=worker_scope, allowed_users=agent_users)
     payload["agents"]["general"]["credential_managers"] = []
     api_app = _make_test_app(runtime_paths, payload)
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(
         provider_id="github",
         credential_service="github_oauth",
@@ -4062,7 +4038,6 @@ def test_bridge_alias_reset_link_authorizes_and_callback_stores_canonical_scope(
             aliases={canonical: [alias]},
         ),
     )
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(
         provider_id="github",
         credential_service="github_oauth",
@@ -4715,7 +4690,6 @@ def test_private_agent_requester_can_redeem_own_connect_token(tmp_path: Path) ->
     agent_payload.pop("worker_scope")
     agent_payload["private"] = {"per": "user_agent"}
     api_app = _make_test_app(runtime_paths, config_payload)
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -4827,7 +4801,6 @@ def test_agent_connect_token_callback_stores_bound_scope_with_requester_login(tm
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -4871,7 +4844,6 @@ def test_agent_connect_token_callback_rechecks_link_requester_permission(tmp_pat
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -4894,12 +4866,11 @@ def test_agent_connect_token_callback_rechecks_link_requester_permission(tmp_pat
                 follow_redirects=False,
             )
             state = _state_from_auth_url(authorize_response.headers["location"])
-            _publish_config(
+            publish_api_payload(
                 api_app,
                 runtime_paths,
                 _config_payload(worker_scope="user_agent", allowed_users=["@bob:example.org"]),
             )
-            _use_runtime_auth_settings(api_app)
             callback_response = client.get(
                 f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
                 follow_redirects=False,
@@ -4924,7 +4895,6 @@ def test_agent_connect_token_rejects_changed_canonical_target(
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -4951,8 +4921,7 @@ def test_agent_connect_token_rejects_changed_canonical_target(
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, headers=trusted_upstream_headers()) as client:
             if change_before_authorize:
-                _publish_config(api_app, runtime_paths, changed_payload)
-            _use_runtime_auth_settings(api_app)
+                publish_api_payload(api_app, runtime_paths, changed_payload)
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
@@ -4962,8 +4931,7 @@ def test_agent_connect_token_rejects_changed_canonical_target(
                 stale_response = authorize_response
             else:
                 state = _state_from_auth_url(authorize_response.headers["location"])
-                _publish_config(api_app, runtime_paths, changed_payload)
-                _use_runtime_auth_settings(api_app)
+                publish_api_payload(api_app, runtime_paths, changed_payload)
                 stale_response = client.get(
                     f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
                     follow_redirects=False,
@@ -4982,7 +4950,6 @@ def test_agent_connect_token_rejects_generation_changed_after_link_issuance(tmp_
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5025,7 +4992,6 @@ def test_agent_connect_token_callback_rejects_generation_changed_after_authorize
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5105,7 +5071,6 @@ def test_agent_oauth_management_requires_same_origin(
             allowed_users=["@alice:example.org"],
         ),
     )
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     _publish_stored_oauth_credentials(
         provider,
@@ -5148,7 +5113,6 @@ def test_agent_oauth_management_rejects_requester_not_allowed_for_agent(tmp_path
             allowed_users=["@alice:example.org"],
         ),
     )
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     _publish_stored_oauth_credentials(
         provider,
@@ -5215,7 +5179,6 @@ def test_agent_oauth_callback_rechecks_agent_reply_permission(tmp_path: Path) ->
             allowed_users=["@alice:example.org"],
         ),
     )
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
@@ -5225,7 +5188,7 @@ def test_agent_oauth_callback_rechecks_agent_reply_permission(tmp_path: Path) ->
                 follow_redirects=False,
             )
             state = _state_from_auth_url(authorize_response.headers["location"])
-            _publish_config(
+            publish_api_payload(
                 api_app,
                 runtime_paths,
                 _config_payload(
@@ -5233,7 +5196,6 @@ def test_agent_oauth_callback_rechecks_agent_reply_permission(tmp_path: Path) ->
                     allowed_users=["@bob:example.org"],
                 ),
             )
-            _use_runtime_auth_settings(api_app)
             callback_response = client.get(
                 f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
                 headers=trusted_upstream_headers(),
@@ -5263,7 +5225,6 @@ def test_global_oauth_status_keeps_existing_access_without_agent_name(tmp_path: 
             allowed_users=["@alice:example.org"],
         ),
     )
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     bob_headers = trusted_upstream_headers(
         user_id="bob",
@@ -5292,7 +5253,6 @@ def test_connect_token_cannot_bypass_agent_reply_permission(tmp_path: Path) -> N
             allowed_users=["@bob:example.org"],
         ),
     )
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5322,7 +5282,6 @@ def test_connect_token_cannot_bypass_agent_reply_permission(tmp_path: Path) -> N
 def test_agent_connect_token_uses_trusted_upstream_matrix_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5363,7 +5322,6 @@ def test_agent_connect_token_uses_trusted_upstream_matrix_requester(tmp_path: Pa
 def test_agent_connect_token_accepts_trusted_upstream_derived_matrix_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_email_template_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5410,7 +5368,6 @@ def test_agent_connect_token_rejects_historical_requester_without_explicit_autho
 ) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5439,7 +5396,6 @@ def test_agent_connect_token_rejects_historical_requester_without_explicit_autho
 def test_agent_connect_token_rejects_trusted_upstream_requester_mismatch(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider()
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5474,7 +5430,6 @@ def test_agent_connect_token_rejects_trusted_upstream_requester_mismatch(tmp_pat
 def test_agent_connect_token_requires_trusted_upstream_identity(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider()
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5509,7 +5464,6 @@ def test_agent_connect_token_missing_trusted_identity_cannot_fall_back_to_standa
         _trusted_upstream_oauth_env() | {"MINDROOM_API_KEY": "dashboard-secret"},
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider()
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5543,7 +5497,6 @@ def test_agent_connect_token_requires_browser_matrix_mapping(
     env.pop("MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM")
     runtime_paths = _runtime_paths(tmp_path, env)
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider()
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5574,7 +5527,6 @@ def test_agent_connect_token_requires_browser_matrix_mapping(
 def test_agent_connect_token_callback_rejects_missing_trusted_upstream_identity(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider()
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5611,7 +5563,6 @@ def test_agent_connect_token_callback_rejects_missing_trusted_upstream_identity(
 def test_agent_connect_token_callback_rejects_changed_trusted_matrix_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    _use_runtime_auth_settings(api_app)
     provider = _fake_provider()
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5912,7 +5863,7 @@ def test_callback_rejects_changed_credential_target(tmp_path: Path) -> None:
             login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
-            _publish_config(api_app, runtime_paths, _config_payload(worker_scope="shared"))
+            publish_api_payload(api_app, runtime_paths, _config_payload(worker_scope="shared"))
             callback_response = client.get(
                 f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
             )

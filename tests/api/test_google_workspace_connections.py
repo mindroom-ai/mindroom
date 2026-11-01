@@ -20,17 +20,16 @@ from mindroom.oauth import reset as oauth_reset
 from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.api.conftest import (
+    publish_api_payload,
     trusted_upstream_env,
     trusted_upstream_jwks,
     trusted_upstream_jwt,
     trusted_upstream_jwt_key,
 )
 from tests.api.test_oauth_api import (
-    _publish_config,
     _publish_stored_oauth_credentials,
     _runtime_paths,
     _stored_oauth_credentials,
-    _use_runtime_auth_settings,
 )
 from tests.conftest import publish_test_plugins
 from tests.runtime_fakes import bind_test_embedded_runtime
@@ -132,8 +131,7 @@ def workspace_portal(
     }
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    _publish_config(main.app, paths, payload)
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, paths, payload)
     config = main._app_context(main.app).runtime_config
     assert config is not None
     providers = oauth_provider_registry(publish_test_plugins(config, paths), skip_broken_plugins=False)
