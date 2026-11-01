@@ -17,9 +17,13 @@ if TYPE_CHECKING:
 _SCRIPTS = Path(__file__).resolve().parents[3] / "cluster/scripts"
 
 
-def load_stripe_script(monkeypatch: pytest.MonkeyPatch, name: str) -> ModuleType:
+def load_stripe_script(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    secret_key: str = "sk_test_placeholder",
+) -> ModuleType:
     """Import `cluster/scripts/<name>.py` with a placeholder Stripe key."""
-    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_placeholder")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", secret_key)
     # Importing the script sets the shared Stripe client's key, so restore it afterwards.
     monkeypatch.setattr(stripe, "api_key", stripe.api_key)
     # Importing the script must not read a developer's real .env.

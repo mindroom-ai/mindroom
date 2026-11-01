@@ -48,6 +48,7 @@ TASK_ID = "task123"
 _STATE_ERROR = nio.RoomGetStateError.from_dict({"errcode": "M_FORBIDDEN", "error": "Not authorized"}, room_id=ROOM_ID)
 _STATE_WRITE_REFUSED = nio.RoomPutStateError(message="denied", status_code="M_FORBIDDEN")
 _TASK_READ_LIMITED = nio.RoomGetStateEventError(message="rate limited", status_code="M_LIMIT_EXCEEDED")
+_BROKEN_RESPONSE = aiohttp.ClientPayloadError("Response payload is not completed")
 _PARSE_FAILURE = (
     "Could not determine when to run the one-time task.\n\n"
     '💡 Include an explicit time like "today at 11:45 PM" or "in 10 minutes".'
@@ -182,10 +183,7 @@ async def test_schedule_mentioning_an_unavailable_agent(tmp_path: Path) -> None:
     ("read", "reason"),
     [
         (AsyncMock(return_value=_STATE_ERROR), str(_STATE_ERROR)),
-        (
-            AsyncMock(side_effect=aiohttp.ClientPayloadError("Response payload is not completed")),
-            "ClientPayloadError: Response payload is not completed",
-        ),
+        (AsyncMock(side_effect=_BROKEN_RESPONSE), "ClientPayloadError: Response payload is not completed"),
     ],
     ids=["error response", "broken-off response"],
 )
@@ -277,7 +275,6 @@ async def test_edit_the_parser_carries_over_unchanged(tmp_path: Path) -> None:
     client = make_matrix_client_mock()
     stored = _workflow(created_by="@creator:server")
     _serve_task(client, stored)
-    # The edit prompt shows the parser only these fields, which it carries over.
     carried_over = ScheduledWorkflow(
         schedule_type="once",
         execute_at=stored.execute_at,
@@ -308,15 +305,28 @@ async def test_edit_of_a_task_whose_state_no_longer_parses(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("body", [f"!edit_schedule {TASK_ID} in 10 minutes check logs", f"!cancel_schedule {TASK_ID}"])
-async def test_edit_or_cancel_whose_task_cannot_be_read(tmp_path: Path, body: str) -> None:
-    """An edit or cancellation whose task read fails says so, and changes nothing."""
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (_TASK_READ_LIMITED, str(_TASK_READ_LIMITED)),
+        (_BROKEN_RESPONSE, "ClientPayloadError: Response payload is not completed"),
+    ],
+    ids=["error response", "broken-off response"],
+)
+async def test_edit_or_cancel_whose_task_cannot_be_read(
+    tmp_path: Path,
+    body: str,
+    failure: object,
+    reason: str,
+) -> None:
+    """An edit or cancellation whose task read fails or raises says why, and changes nothing."""
     client = make_matrix_client_mock()
-    client.room_get_state_event = AsyncMock(return_value=_TASK_READ_LIMITED)
+    client.room_get_state_event = AsyncMock(side_effect=[failure])
     serve_task_state_events(client)
 
     reply = await _reply(tmp_path, body, client=client)
 
-    assert reply == f"❌ Failed to get scheduled task '{TASK_ID}' from room '{ROOM_ID}': {_TASK_READ_LIMITED}"
+    assert reply == f"❌ Failed to get scheduled task `{TASK_ID}` from room `{ROOM_ID}`: {reason}"
     client.room_put_state.assert_not_awaited()
 
 
