@@ -6,11 +6,9 @@ import asyncio
 import json
 import threading
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qs
 
 import httpx
 import pytest
-from authlib.integrations.httpx_client import AsyncOAuth2Client
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import manager as credentials_module
@@ -213,32 +211,6 @@ def _refreshable_provider(tmp_path: Path) -> tuple[OAuthProvider, RuntimePaths, 
         "expires_at": 1.0,
     }
     return provider, runtime_paths, token_data
-
-
-@pytest.mark.asyncio
-async def test_confidential_refresh_sends_the_stored_client_with_its_secret(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Only a public client refreshes as the client its token names; a stored secret never goes out with another ID."""
-    provider, runtime_paths, token_data = _refreshable_provider(tmp_path)
-    grants: list[dict[str, list[str]]] = []
-
-    class _RecordingTokenClient(AsyncOAuth2Client):
-        def __init__(self, **kwargs: object) -> None:
-            def handle(request: httpx.Request) -> httpx.Response:
-                grants.append(parse_qs(request.content.decode()))
-                return rotated_token_response()
-
-            super().__init__(**kwargs, transport=httpx.MockTransport(handle))
-
-    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _RecordingTokenClient)
-
-    await provider.refresh_token_data({**token_data, "client_id": "client-issued-earlier"}, runtime_paths)
-
-    assert [(grant["client_id"], grant["client_secret"]) for grant in grants] == [
-        (["example-client"], ["example-secret"]),
-    ]
 
 
 def _lost(request: httpx.Request) -> Exception:

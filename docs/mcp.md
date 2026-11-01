@@ -219,10 +219,9 @@ These variables do not relax the address rules for the MCP connection itself.
 
 With `dynamic_client_registration: true` and no stored client, MindRoom registers a client when the first user connects and reuses it for later users.
 See [Built-In Providers](oauth-framework.md#built-in-providers) for when a dynamically registered client works from a hosted address.
-If discovery later resolves a different token endpoint, MindRoom registers a new client there and logs `oauth_dynamic_client_reregistered`, and users connected through the old client must reconnect.
+If discovery later resolves a different token endpoint, or the callback moves because `MINDROOM_PUBLIC_URL` or `MINDROOM_PORT` changed, MindRoom registers a new client and logs `oauth_dynamic_client_reregistered`, and users connected through the old client must reconnect.
 With dynamic registration disabled, or when the new server offers no registration endpoint, connecting fails instead.
-When the callback moves because `MINDROOM_PUBLIC_URL` or `MINDROOM_PORT` changed, the next status check or connect registers a client for the new callback and logs `oauth_dynamic_client_reregistered`; existing connections keep working, except that users of a confidential client (`client_secret_post` or `client_secret_basic`) must reconnect.
-If the authorization server refuses the new callback, for example an `http://` address on a server that accepts only HTTPS callbacks besides `localhost`, MindRoom keeps the old client, existing connections keep working, and status and connect name the refused callback.
+If the authorization server refuses a moved callback, for example an `http://` address on a server that accepts only HTTPS callbacks besides `localhost`, MindRoom keeps the old client, existing connections keep working, and status and connect name the refused callback.
 
 To use your own OAuth app, store its client config in the credential service `<provider_id>_oauth_client`, or list other services in `client_config_services`.
 Tokens are stored in `<provider_id>_oauth`; when `provider_id` does not start with `mcp_`, both service names get an `mcp_` prefix.

@@ -867,28 +867,6 @@ async def test_mcp_oauth_keeps_the_client_when_the_server_refuses_a_moved_callba
 
 
 @pytest.mark.asyncio
-async def test_mcp_oauth_refreshes_as_the_public_client_that_issued_the_token(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A registration replaced for a moved callback leaves earlier connections refreshing through their own client."""
-    _serve_movable_discovery(monkeypatch)
-    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
-    await provider.client_config_resolution_async(_runtime_paths(tmp_path))
-    moved_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example.org")
-    await provider.client_config_resolution_async(moved_paths)
-    grants = _serve_refresh(monkeypatch)
-
-    refreshed = await provider.refresh_token_data(_expired_token("client-issued-before-the-move"), moved_paths)
-
-    assert len(_MovableAuthorizationServerDiscoveryClient.posts) == 2
-    assert _stored_mcp_client(moved_paths)["client_id"] == "client-of-auth.example.test"
-    assert grants == ["client-issued-before-the-move"]
-    assert refreshed is not None
-    assert refreshed["client_id"] == "client-issued-before-the-move"
-
-
-@pytest.mark.asyncio
 async def test_mcp_oauth_rejects_dynamic_registration_after_move_to_server_without_registration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -12,7 +12,7 @@ import secrets
 import time
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
@@ -1053,10 +1053,6 @@ class OAuthProvider:
         if stored_token_url != endpoints.token_url:
             raise OAuthTokenEndpointChangedError(stored_token_url, endpoints.token_url)
         client_config = await self._require_client_config_for_token_url(runtime_paths, endpoints.token_url)
-        issued_client_id = token_data.get("client_id")
-        if client_config.client_secret is None and isinstance(issued_client_id, str) and issued_client_id:
-            # A public client refreshes as the client that issued the token, which a new registration does not replace.
-            client_config = replace(client_config, client_id=issued_client_id)
         from authlib.integrations.httpx_client import AsyncOAuth2Client  # noqa: PLC0415
 
         async with AsyncOAuth2Client(
