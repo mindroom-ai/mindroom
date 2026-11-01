@@ -528,41 +528,51 @@ describe("Credentials", () => {
         description: "Credentials deleted for github_private",
       });
     });
-    expect(screen.queryByText("github_private")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("github_private")).not.toBeInTheDocument();
+    });
   });
 
-  it("keeps a service the environment still supplies after deleting it", async () => {
+  it("keeps a service the environment still supplies selected after deleting it", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const message =
       "Credentials for openai now come from the OPENAI_API_KEY environment variable; " +
       "to remove them, edit it in the environment or .env and restart MindRoom.";
+    const keys: Record<string, string> = {
+      anthropic: "sk-ant-env-dummy",
+      openai: "sk-env-dummy",
+    };
     (global.fetch as any).mockImplementation(
       async (input: string, init?: RequestInit) => {
-        const path = String(input);
         if (init?.method === "DELETE") {
           return {
             ok: true,
             json: async () => ({ status: "success", message }),
           };
         }
+        const path = String(input);
+        const [, , , service, suffix] = path.split("/");
         const body =
           path === "/api/credentials/list"
-            ? ["openai"]
-            : path === "/api/credentials/openai/status"
-              ? {
-                  service: "openai",
-                  has_credentials: true,
-                  key_names: ["api_key"],
-                }
-              : { service: "openai", credentials: { api_key: "sk-env-dummy" } };
+            ? Object.keys(keys)
+            : suffix === "status"
+              ? { service, has_credentials: true, key_names: ["api_key"] }
+              : { service, credentials: { api_key: keys[service] } };
         return { ok: true, json: async () => body };
       },
     );
+    const readsOf = (path: string) =>
+      (global.fetch as any).mock.calls.filter(
+        ([input, init]: [string, RequestInit | undefined]) =>
+          input === path && init?.method === undefined,
+      ).length;
 
     renderOpen();
 
+    fireEvent.click(await screen.findByRole("button", { name: /^openai/ }));
+    await screen.findByText("Active: openai");
     await waitFor(() => {
-      expect((global.fetch as any).mock.calls).toHaveLength(3);
+      expect(readsOf("/api/credentials/openai")).toBe(1);
     });
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
 
@@ -572,11 +582,9 @@ describe("Credentials", () => {
         description: message,
       });
     });
-    const listRequests = (global.fetch as any).mock.calls.filter(
-      ([input]: [string]) => input === "/api/credentials/list",
-    );
-    expect(listRequests).toHaveLength(2);
-    expect(screen.getByRole("button", { name: /^openai/ })).toBeInTheDocument();
+    expect(readsOf("/api/credentials/list")).toBe(2);
+    expect(readsOf("/api/credentials/openai")).toBe(2);
+    expect(screen.getByText("Active: openai")).toBeInTheDocument();
   });
 
   it("tests credentials for selected service", async () => {

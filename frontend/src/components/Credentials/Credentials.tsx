@@ -369,7 +369,8 @@ export function Credentials() {
     setIsDeleting(true);
     setError(null);
     try {
-      // The environment can still supply a deleted service, so the response says what happened and the list reloads.
+      // The environment can still supply a deleted service, so the response says what happened and the page reloads
+      // like Refresh: a service that is gone gives way to the next one, and one that still resolves shows what applies.
       const response = await fetchJSON<{ message: string }>(
         API_ENDPOINTS.credentials.delete(selectedService),
         {
@@ -377,9 +378,7 @@ export function Credentials() {
         },
       );
       await loadServices();
-      setSelectedService("");
-      setJsonDraft(EMPTY_JSON);
-      setLoadedDraft(EMPTY_JSON);
+      await loadCredentials(selectedService);
       toast({
         title: "Delete credentials",
         description: response.message,
@@ -396,7 +395,7 @@ export function Credentials() {
     } finally {
       setIsDeleting(false);
     }
-  }, [loadServices, selectedService, toast]);
+  }, [loadCredentials, loadServices, selectedService, toast]);
 
   const handleTest = useCallback(async () => {
     if (!selectedService) {
