@@ -154,6 +154,16 @@ describe("Skills unsaved edits", () => {
     expect(getSkill).not.toHaveBeenCalledWith("beta");
   });
 
+  it("does not ask when the selected skill is selected again", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const editor = await editAlpha();
+
+    fireEvent.click(screen.getAllByText("alpha")[0]);
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(editor).toHaveValue("unsaved edit");
+  });
+
   it("does not ask when nothing is unsaved", async () => {
     const confirmSpy = vi.spyOn(window, "confirm");
     render(<Skills />);

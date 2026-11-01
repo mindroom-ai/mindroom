@@ -182,6 +182,16 @@ describe("Schedules", () => {
       );
     });
 
+    it("does not ask when the selected schedule is selected again", async () => {
+      const confirmSpy = vi.spyOn(window, "confirm");
+      const description = await editQuietTask();
+
+      fireEvent.click(screen.getByText("Quiet inbox check"));
+
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(description).toHaveValue("Unsaved description");
+    });
+
     it("asks before the back button or a swipe back drops the edits", async () => {
       window.innerWidth = 400;
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);

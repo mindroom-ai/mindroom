@@ -1944,6 +1944,11 @@ describe("egress broker service editor", () => {
 
     expect(confirmLeavingUnsavedDrafts()).toBe(false);
     expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+
+    confirmSpy.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    expect(confirmSpy).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
   });
 
