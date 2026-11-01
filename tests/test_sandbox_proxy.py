@@ -368,11 +368,9 @@ def test_attachment_save_protocol_receipt_validation_returns_dataclass() -> None
 
 
 def _runtime_paths_from_env() -> RuntimePaths:
-    return resolve_runtime_paths(
-        config_path=Path("config.yaml"),
-        storage_path=_ENV_RUNTIME_STORAGE_ROOT,
-        process_env=dict(os.environ),
-    )
+    # A test's own MINDROOM_STORAGE_PATH export wins, as it does for the runtime.
+    storage_path = None if os.environ.get("MINDROOM_STORAGE_PATH") else _ENV_RUNTIME_STORAGE_ROOT
+    return resolve_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_path)
 
 
 def _runs_in_worker(runtime_paths: RuntimePaths, tool_name: str, worker_tools: Collection[str] | None) -> bool:
