@@ -218,5 +218,4 @@ def is_trial_enabled_for_plan(plan: str) -> bool:
 
 
 # Export pricing data for easy access
-PRICING_CONFIG = load_pricing_config()
 PRICING_CONFIG_MODEL = load_pricing_config_model()
