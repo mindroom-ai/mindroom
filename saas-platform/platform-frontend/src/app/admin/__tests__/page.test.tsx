@@ -1,6 +1,7 @@
 import { render, screen, within } from '@testing-library/react'
 import AdminDashboard from '../page'
 import { apiCall } from '@/lib/api'
+import { logger } from '@/lib/logger'
 
 jest.mock('@/lib/api', () => ({
   apiCall: jest.fn(),
@@ -13,8 +14,19 @@ jest.mock('@/lib/logger', () => ({
 describe('AdminDashboard', () => {
   const mockApiCall = apiCall as jest.Mock
 
-  function mockResponses(metrics?: Record<string, unknown>) {
+  const METRICS = {
+    total_accounts: 1500,
+    active_subscriptions: 1200,
+    instances_by_status: { running: 1100, stopped: 2 },
+    subscription_revenue: 199,
+    recent_instances: [],
+  }
+
+  function mockResponses(metrics?: Record<string, unknown>, rejectedPath?: string) {
     mockApiCall.mockImplementation((path: string) => {
+      if (path === rejectedPath) {
+        return Promise.reject(new TypeError('Failed to fetch'))
+      }
       if (path === '/health') {
         return Promise.resolve({
           ok: true,
@@ -28,7 +40,7 @@ describe('AdminDashboard', () => {
       if (path === '/admin/metrics/dashboard' && metrics) {
         return Promise.resolve({ ok: true, json: async () => metrics })
       }
-      return Promise.resolve({ ok: false })
+      return Promise.resolve({ ok: false, json: async () => ({ detail: 'Failed to fetch dashboard metrics' }) })
     })
   }
 
@@ -41,13 +53,7 @@ describe('AdminDashboard', () => {
   })
 
   it('shows each figure from the dashboard metrics, without growth figures', async () => {
-    mockResponses({
-      total_accounts: 1500,
-      active_subscriptions: 1200,
-      instances_by_status: { running: 1100, stopped: 2 },
-      subscription_revenue: 199,
-      recent_instances: [],
-    })
+    mockResponses(METRICS)
 
     render(<AdminDashboard />)
 
@@ -88,16 +94,31 @@ describe('AdminDashboard', () => {
     expect(card('System Health').getByText('Supabase: ✗ Error | Stripe: ✗ Error')).toHaveClass('text-red-600')
   })
 
-  it('says the platform API is unreachable when its requests fail outright', async () => {
-    mockApiCall.mockRejectedValue(new TypeError('Failed to fetch'))
+  it('keeps the health result when only the metrics request fails outright', async () => {
+    mockResponses(METRICS, '/admin/metrics/dashboard')
+
+    render(<AdminDashboard />)
+
+    expect(await screen.findByText('Operational')).toBeInTheDocument()
+
+    expect(card('System Health').getByText('Supabase: ✓ Healthy | Stripe: ✓ Healthy')).toBeInTheDocument()
+    expect(screen.queryByText('Platform API unreachable')).not.toBeInTheDocument()
+    expect(card('Total Accounts').getByText('—')).toBeInTheDocument()
+    expect(screen.getByText('Recent activity unavailable')).toBeInTheDocument()
+  })
+
+  it('keeps the figures when only the health request fails outright', async () => {
+    mockResponses(METRICS, '/health')
 
     render(<AdminDashboard />)
 
     expect(await screen.findByText('Degraded')).toBeInTheDocument()
 
     expect(card('System Health').getByText('Platform API unreachable')).toHaveClass('text-red-600')
-    expect(card('Total Accounts').getByText('—')).toBeInTheDocument()
-    expect(screen.getByText('Recent activity unavailable')).toBeInTheDocument()
+    expect(card('Total Accounts').getByText('1500')).toBeInTheDocument()
+    expect(card('MRR (est.)').getByText('$199')).toBeInTheDocument()
+    expect(screen.getByText('No recent activity')).toBeInTheDocument()
+    expect(logger.error).toHaveBeenCalledWith('Error fetching admin data:', expect.any(TypeError))
   })
 
   it('renders recent activity when the metrics response includes it', async () => {

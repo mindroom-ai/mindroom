@@ -35,30 +35,26 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [healthRes, metricsRes] = await Promise.all([
-          apiCall('/health'),
-          apiCall('/admin/metrics/dashboard'),
-        ])
-
-        if (healthRes.ok) {
-          const data = await healthRes.json() as HealthStatus
-          setHealth(data)
-        } else {
-          setHealth({ status: 'degraded', supabase: false, stripe: false })
-        }
-        if (metricsRes.ok) {
-          setMetrics(await metricsRes.json() as AdminMetrics)
-        }
-      } catch (error) {
-        logger.error('Error fetching admin data:', error)
-      } finally {
-        setLoading(false)
+    // Each request settles on its own, so one failing request never hides the other's result.
+    const loadHealth = async () => {
+      const res = await apiCall('/health')
+      setHealth(res.ok ? await res.json() as HealthStatus : { status: 'degraded', supabase: false, stripe: false })
+    }
+    const loadMetrics = async () => {
+      const res = await apiCall('/admin/metrics/dashboard')
+      if (res.ok) {
+        setMetrics(await res.json() as AdminMetrics)
       }
     }
 
-    fetchData()
+    Promise.allSettled([loadHealth(), loadMetrics()]).then((results) => {
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          logger.error('Error fetching admin data:', result.reason)
+        }
+      }
+      setLoading(false)
+    })
   }, [])
 
   if (loading) {
@@ -95,7 +91,7 @@ export default function AdminDashboard() {
       title: 'System Health',
       value: healthy ? 'Operational' : 'Degraded',
       icon: Activity,
-      // No health status after loading means the requests to the platform API failed outright.
+      // No health status after loading means the health request failed outright.
       detail: health ? `Supabase: ${health.supabase ? '✓ Healthy' : '✗ Error'} | Stripe: ${health.stripe ? '✓ Healthy' : '✗ Error'}` : 'Platform API unreachable',
       healthy,
     },
