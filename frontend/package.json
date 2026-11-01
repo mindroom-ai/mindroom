@@ -15,7 +15,6 @@
     "screenshot": "node scripts/screenshot.cjs",
     "test": "vitest",
     "test:ui": "vitest --ui",
-    "test:coverage": "vitest --coverage",
     "test:unit": "vitest run --reporter=verbose"
   },
   "dependencies": {
