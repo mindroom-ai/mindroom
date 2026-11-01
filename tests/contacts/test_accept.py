@@ -1,0 +1,348 @@
+"""Tests for accepting a contact: who may accept, the contact room and who is in it, and the requester's kickoff."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
+from mindroom.contacts import flow
+from mindroom.custom_tools.contacts import ContactsTools
+from mindroom.entity_resolution import current_entity_id
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.contacts.test_tools import (
+    CAROL,
+    CONTACT_ROOM,
+    ORIGIN_ROOM,
+    ORIGIN_THREAD,
+    TOOLS,
+    _context,
+    _pending,
+    _Runtime,
+    _runtime,
+    _setup,
+    _stored,
+)
+from tests.test_generated_agents import CO_OWNER, OWNER
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.contacts.store import ContactRecord
+
+ROOM_STATE = [
+    {"type": "m.room.join_rules", "state_key": "", "content": {"join_rule": "invite"}},
+    {"type": "m.room.history_visibility", "state_key": "", "content": {"history_visibility": "shared"}},
+]
+NOT_PENDING = r"^Only a pending contact can be accepted$"
+
+
+@dataclass
+class _Matrix:
+    """The stand-ins for creating the contact room and inviting to it."""
+
+    create: AsyncMock
+    invite: AsyncMock
+
+    def invited(self) -> set[tuple[Any, ...]]:
+        """Return each invite as its client, room, and user."""
+        return {call.args for call in self.invite.await_args_list}
+
+
+@contextmanager
+def _matrix(room_id: str | None = CONTACT_ROOM, *, invited: bool = True) -> Iterator[_Matrix]:
+    """Stand in for the Matrix room creation, which yields ``room_id``, and the invites, which succeed or fail."""
+    with (
+        patch("mindroom.contacts.flow.create_room", new=AsyncMock(return_value=room_id)) as create,
+        patch("mindroom.contacts.flow.invite_to_room", new=AsyncMock(return_value=invited)) as invite,
+    ):
+        yield _Matrix(create, invite)
+
+
+async def _accept(
+    config: Config,
+    paths: RuntimePaths,
+    runtime: _Runtime,
+    contact_id: str,
+    *,
+    agent_name: str = "mind_bob",
+    requester_id: str = CO_OWNER,
+    rules: str | None = None,
+    tools: list[str] | None = None,
+) -> ContactRecord:
+    return await flow.accept_contact(
+        _context(config, paths, agent_name, requester_id, runtime),
+        agent_name,
+        contact_id,
+        rules=rules,
+        tools=tools,
+    )
+
+
+def _account(paths: RuntimePaths, agent_name: str) -> str:
+    return current_entity_id(agent_name, paths).full_id
+
+
+def _joined(runtime: _Runtime) -> set[str]:
+    """Return the agents whose bots joined the contact room."""
+    joined = set()
+    for name in TOOLS:
+        membership = runtime.bots[name].change_local_membership
+        if membership.await_count:
+            membership.assert_awaited_once_with(CONTACT_ROOM, "join")
+            joined.add(name)
+    return joined
+
+
+def _kept(paths: RuntimePaths) -> set[str]:
+    """Return the agents that keep the contact room across restarts."""
+    return {name for name in TOOLS if CONTACT_ROOM in load_invited_rooms(invited_rooms_path(paths, name))}
+
+
+@pytest.mark.asyncio
+async def test_accept_requires_target_owner(tmp_path: Path) -> None:
+    """Only the target's owner accepts; the requesting owner is refused, even when writing in the target's thread."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+
+    with _matrix() as matrix:
+        with pytest.raises(ValueError, match=rf"^Only {CO_OWNER} may accept this contact$"):
+            await _accept(config, paths, runtime, record.id, agent_name="mind_alice", requester_id=OWNER)
+        with pytest.raises(ValueError, match=rf"^Only {CO_OWNER} may use the contacts of mind_bob$"):
+            await _accept(config, paths, runtime, record.id, requester_id=OWNER)
+        with pytest.raises(ValueError, match=rf"^There is no contact {record.id}$"):
+            await _accept(config, paths, runtime, record.id, agent_name="mind_carol", requester_id=CAROL)
+
+    matrix.create.assert_not_awaited()
+    assert [stored.status for stored in _stored(paths)] == ["pending"]
+
+
+@pytest.mark.asyncio
+async def test_accept_creates_room_invites_and_joins(tmp_path: Path) -> None:
+    """The target agent creates an invite-only room, invites the other agent and both owners, and both agents keep it."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+
+    with _matrix() as matrix:
+        accepted = await _accept(config, paths, runtime, record.id)
+
+    client = runtime.clients["mind_bob"]
+    matrix.create.assert_awaited_once_with(client, "Alice's Mind ↔ Bob's Mind", initial_state=ROOM_STATE)
+    invitees = (_account(paths, "mind_alice"), OWNER, CO_OWNER)
+    assert matrix.invited() == {(client, CONTACT_ROOM, user_id) for user_id in invitees}
+    assert matrix.invite.await_count == len(invitees)
+    assert _joined(runtime) == _kept(paths) == {"mind_alice", "mind_bob"}
+    assert (accepted.status, accepted.room_id) == ("active", CONTACT_ROOM)
+    assert accepted.decided_at is not None
+    assert _stored(paths) == [accepted]
+
+
+@pytest.mark.asyncio
+async def test_the_personal_room_agent_accepts_and_the_target_agent_creates_the_room(tmp_path: Path) -> None:
+    """The agent that asked the owner accepts; the target agent creates the room, and the asking agent stays out of it."""
+    config, paths = _setup(tmp_path, work=True)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime, target="work_bob")
+
+    with _matrix() as matrix:
+        refusal = rf"^Only mind_bob, the agent of {CO_OWNER}'s personal room, may accept this contact$"
+        with pytest.raises(ValueError, match=refusal):
+            await _accept(config, paths, runtime, record.id, agent_name="work_bob")
+        matrix.create.assert_not_awaited()
+        await _accept(config, paths, runtime, record.id)
+
+    client = runtime.clients["work_bob"]
+    matrix.create.assert_awaited_once_with(client, "Alice's Mind ↔ Bob's Work", initial_state=ROOM_STATE)
+    invitees = (_account(paths, "mind_alice"), OWNER, CO_OWNER)
+    assert matrix.invited() == {(client, CONTACT_ROOM, user_id) for user_id in invitees}
+    assert _joined(runtime) == _kept(paths) == {"mind_alice", "work_bob"}
+
+
+@pytest.mark.asyncio
+async def test_a_person_target_accepts_through_their_personal_agent_and_the_requesting_agent_creates_the_room(
+    tmp_path: Path,
+) -> None:
+    """A person has no agent in the room, so the requesting agent creates it and invites the person and its owner."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime, target=CAROL)
+    carol = {"agent_name": "mind_carol", "requester_id": CAROL}
+
+    with _matrix() as matrix:
+        with pytest.raises(ValueError, match=r"^A person has no rules or tools"):
+            await _accept(config, paths, runtime, record.id, rules="Be brief", **carol)
+        await _accept(config, paths, runtime, record.id, **carol)
+
+    client = runtime.clients["mind_alice"]
+    matrix.create.assert_awaited_once_with(client, f"Alice's Mind ↔ {CAROL}", initial_state=ROOM_STATE)
+    assert matrix.invited() == {(client, CONTACT_ROOM, OWNER), (client, CONTACT_ROOM, CAROL)}
+    assert _joined(runtime) == _kept(paths) == {"mind_alice"}
+
+
+@pytest.mark.asyncio
+async def test_accept_saves_rules_and_tools_after_validation(tmp_path: Path) -> None:
+    """The target side's tools are checked before a room exists; what accept leaves out keeps what was set before."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime, rules="Be brief")
+    bob = _context(config, paths, "mind_bob", CO_OWNER, runtime)
+    await flow.update_contact(bob, "mind_bob", record.id, rules=None, tools=["calculator"])
+
+    with _matrix() as matrix:
+        refusal = r"^Not among the tools a contact may use: browser; allowed: calculator, matrix_message$"
+        with pytest.raises(ValueError, match=refusal):
+            await _accept(config, paths, runtime, record.id, tools=["browser"])
+        matrix.create.assert_not_awaited()
+        assert _stored(paths)[0].status == "pending"
+        accepted = await _accept(config, paths, runtime, record.id, rules="  Only dinner ")
+
+    assert (accepted.target_side.rules, accepted.target_side.tools) == ("Only dinner", ["calculator"])
+    assert (accepted.requester_side.rules, accepted.requester_side.tools) == ("Be brief", None)
+    assert _stored(paths) == [accepted]
+
+
+@pytest.mark.asyncio
+async def test_accept_kicks_off_requesting_agent_as_its_owner(tmp_path: Path) -> None:
+    """The requesting agent mentions itself in the thread it asked from, for its owner, so it continues its task."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+
+    with _matrix():
+        await _accept(config, paths, runtime, record.id)
+
+    runtime.sent("mind_alice").assert_awaited_once_with(
+        ORIGIN_ROOM,
+        f"@mind_alice Bob's Mind accepted your contact request. Continue the task in the contact room {CONTACT_ROOM}: "
+        "Plan the dinner",
+        ORIGIN_THREAD,
+        "native:contacts",
+        {ORIGINAL_SENDER_KEY: OWNER},
+        trigger_dispatch=True,
+    )
+    for name in ("mind_bob", "mind_carol", "work_bob"):
+        runtime.sent(name).assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_kickoff_that_cannot_be_sent_keeps_the_contact_active(tmp_path: Path) -> None:
+    """The acceptance stands when the requesting agent cannot post in its thread."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    runtime.sent("mind_alice").return_value = None
+
+    with _matrix():
+        accepted = await _accept(config, paths, runtime, record.id)
+
+    runtime.sent("mind_alice").assert_awaited_once()
+    assert accepted.status == "active"
+    assert _stored(paths) == [accepted]
+
+
+@pytest.mark.asyncio
+async def test_a_person_requester_hears_from_the_accepting_agent_only_in_a_room_it_is_in(tmp_path: Path) -> None:
+    """No turn starts for a person who asked; the accepting agent tells their thread when it is in that room."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    to_bob = await _pending(config, paths, runtime, party="me")
+    to_carol = await _pending(config, paths, runtime, party="me", target="mind_carol")
+    runtime.bots["mind_carol"].current_joined_room_ids.return_value = frozenset({ORIGIN_ROOM})
+
+    with _matrix() as matrix:
+        await _accept(config, paths, runtime, to_bob.id)
+        await _accept(config, paths, runtime, to_carol.id, agent_name="mind_carol", requester_id=CAROL)
+
+    first = matrix.create.await_args_list[0]
+    assert first.args == (runtime.clients["mind_bob"], f"{OWNER} ↔ Bob's Mind")
+    for name in ("mind_alice", "mind_bob"):
+        runtime.sent(name).assert_not_awaited()
+    runtime.sent("mind_carol").assert_awaited_once_with(
+        ORIGIN_ROOM,
+        f"Carol's Mind accepted your contact request. The contact room is {CONTACT_ROOM}.",
+        ORIGIN_THREAD,
+        "native:contacts",
+        {SKIP_MENTIONS_KEY: True},
+        trigger_dispatch=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_accept_refuses_non_pending(tmp_path: Path) -> None:
+    """An accepted, declined, or removed contact cannot be accepted, so a second acceptance opens no second room."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    accepted = await _pending(config, paths, runtime)
+    declined = await _pending(config, paths, runtime, target=CAROL)
+    removed = await _pending(config, paths, runtime, party="me", target="mind_carol")
+    carol = _context(config, paths, "mind_carol", CAROL, runtime)
+    await flow.decline_contact(carol, "mind_carol", declined.id)
+    await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", removed.id)
+
+    with _matrix() as matrix:
+        await _accept(config, paths, runtime, accepted.id)
+        with pytest.raises(ValueError, match=NOT_PENDING):
+            await _accept(config, paths, runtime, accepted.id)
+        for record in (declined, removed):
+            with pytest.raises(ValueError, match=NOT_PENDING):
+                await _accept(config, paths, runtime, record.id, agent_name="mind_carol", requester_id=CAROL)
+
+    matrix.create.assert_awaited_once()
+    assert [record.status for record in _stored(paths)] == ["active", "declined", "removed"]
+
+
+@pytest.mark.asyncio
+async def test_a_room_that_cannot_be_set_up_is_left_and_the_request_stays_pending(tmp_path: Path) -> None:
+    """A stopped agent creates nothing; a failed creation, invite, or join leaves the room and keeps the request."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+
+    runtime.bots["mind_alice"].running = False
+    with _matrix() as matrix, pytest.raises(ValueError, match=r"^mind_alice is not running"):
+        await _accept(config, paths, runtime, record.id)
+    matrix.create.assert_not_awaited()
+    runtime.bots["mind_alice"].running = True
+
+    with _matrix(None), pytest.raises(ValueError, match=r"^The contact room could not be created"):
+        await _accept(config, paths, runtime, record.id)
+
+    with _matrix(invited=False), pytest.raises(ValueError, match=r"could not be invited to the contact room"):
+        await _accept(config, paths, runtime, record.id)
+    runtime.clients["mind_bob"].room_leave.assert_awaited_once_with(CONTACT_ROOM)
+    assert _joined(runtime) == set()
+
+    runtime.bots["mind_bob"].change_local_membership.return_value = False
+    with _matrix(), pytest.raises(ValueError, match=r"^mind_bob could not join the contact room"):
+        await _accept(config, paths, runtime, record.id)
+    for name in ("mind_alice", "mind_bob"):
+        runtime.clients[name].room_leave.assert_awaited_with(CONTACT_ROOM)
+    assert _kept(paths) == set()
+    assert [stored.status for stored in _stored(paths)] == ["pending"]
+    runtime.sent("mind_alice").assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_toolkit_accept_contact_names_the_room(tmp_path: Path) -> None:
+    """The toolkit answers with the contact room, or with the refusal as an Error line."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    tool = ContactsTools("mind_bob")
+
+    with tool_runtime_context(_context(config, paths, "mind_bob", CO_OWNER, runtime)), _matrix():
+        refused = await tool.accept_contact(record.id, tools=["browser"])
+        accepted = await tool.accept_contact(record.id)
+
+    assert refused.startswith("Error: Not among the tools a contact may use: browser")
+    assert accepted == f"Accepted. Contact room: {CONTACT_ROOM}."

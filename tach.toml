@@ -9663,6 +9663,7 @@ depends_on = [
     "mindroom.contacts.parties",
     "mindroom.contacts.policy",
     "mindroom.contacts.store",
+    "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.tool_system.registry",

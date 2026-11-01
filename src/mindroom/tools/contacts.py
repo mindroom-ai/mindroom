@@ -17,6 +17,13 @@ register_builtin_tool_metadata(
         icon_color="text-cyan-500",
         config_fields=[],
         dependencies=[],
-        function_names=("list_contacts", "request_contact", "decline_contact", "update_contact", "remove_contact"),
+        function_names=(
+            "list_contacts",
+            "request_contact",
+            "accept_contact",
+            "decline_contact",
+            "update_contact",
+            "remove_contact",
+        ),
     ),
 )

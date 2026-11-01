@@ -1,4 +1,4 @@
-"""The contact operations an agent's tools run: request, decline, update, remove, and list.
+"""The contact operations an agent's tools run: request, accept, decline, update, remove, and list.
 
 Each operation first checks that the requester owns the agent it runs for, then that they own a side of the contact.
 Every refusal is a ``ValueError`` whose text is meant for the agent that called.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from functools import partial
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import yaml
@@ -16,8 +16,8 @@ import yaml
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.resolution import authored_tool_entries
-from mindroom.constants import SKIP_MENTIONS_KEY
-from mindroom.contacts.parties import agent_party, person_party, personal_room_of, resolve_target
+from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
+from mindroom.contacts.parties import agent_party, party_matrix_ids, person_party, personal_room_of, resolve_target
 from mindroom.contacts.policy import effective_rules
 from mindroom.contacts.store import (
     ContactBook,
@@ -27,16 +27,21 @@ from mindroom.contacts.store import (
     read_contacts,
     update_contacts,
 )
+from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.matrix.client_room_admin import leave_room
-from mindroom.matrix.invited_rooms_store import forget_invited_room, invited_rooms_path
+from mindroom.matrix.client_room_admin import create_room, invite_to_room, leave_room
+from mindroom.matrix.invited_rooms_store import forget_invited_room, invited_rooms_path, remember_invited_room
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
+    import nio
+
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.contacts.store import SideName
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -45,6 +50,12 @@ logger = get_logger(__name__)
 CONTACT_REQUEST_KEY = "io.mindroom.contact_request"
 _SOURCE_HOOK = "native:contacts"
 _PERSON_HAS_NO_SIDE = "A person has no rules or tools; only an agent's side can have them"
+_NOT_PENDING = "Only a pending contact can be accepted"
+# Invite-only like a personal room; a member who joins later still reads the whole conversation.
+_CONTACT_ROOM_STATE = [
+    {"type": "m.room.join_rules", "state_key": "", "content": {"join_rule": "invite"}},
+    {"type": "m.room.history_visibility", "state_key": "", "content": {"history_visibility": "shared"}},
+]
 
 
 def _own_party(context: ToolRuntimeContext, agent_name: str) -> ContactParty:
@@ -88,16 +99,21 @@ def _same_pair(record: ContactRecord, first: ContactParty, second: ContactParty)
     return ends == {(first.kind, first.id), (second.kind, second.id)}
 
 
+def _display(config: Config, party: ContactParty) -> str:
+    """Return how people see a party named: an agent's display name, or a person's Matrix ID."""
+    return party.id if party.kind == "person" else config.agents[party.id].display_name
+
+
 def _label(config: Config, party: ContactParty) -> str:
     if party.kind == "person":
         return party.id
-    return f"{config.agents[party.id].display_name} ({party.id}), the agent of {party.owner}"
+    return f"{_display(config, party)} ({party.id}), the agent of {party.owner}"
 
 
 def _notice_body(config: Config, record: ContactRecord) -> str:
     """Return the request as the target owner reads it, with the rules that would apply to their side."""
     target = record.target
-    asks = "you" if target.kind == "person" else f"your agent {config.agents[target.id].display_name} ({target.id})"
+    asks = "you" if target.kind == "person" else f"your agent {_display(config, target)} ({target.id})"
     lines = [f"{_label(config, record.requester)} asks to contact {asks}.", "", f"Reason: {record.reason}", ""]
     if target.kind == "agent":
         rules = effective_rules(config, target.id, record.target_side)
@@ -117,15 +133,21 @@ def _set_notice(contact_id: str, room_id: str, event_id: str, book: ContactBook)
     record.notice_event_id = event_id
 
 
+def _request_poster(config: Config, runtime_paths: RuntimePaths, owner: str) -> tuple[str, str]:
+    """Return the agent and room of the owner's personal room, where requests to the owner are posted and accepted.
+
+    That agent and not the target agent asks, because a target agent of another template is not in that room.
+    """
+    if (personal := personal_room_of(config, runtime_paths, owner)) is None:
+        msg = f"{owner} has no personal room yet, so the request cannot reach them; ask again once they have one"
+        raise ValueError(msg)
+    return personal
+
+
 async def post_request_notice(context: ToolRuntimeContext, record: ContactRecord) -> None:
     """Post the request as a new thread in the target owner's personal room and store where it landed."""
     config, paths = context.current_config, context.runtime_paths
-    owner = record.target.owner
-    if (personal := personal_room_of(config, paths, owner)) is None:
-        msg = f"{owner} has no personal room yet, so the request cannot reach them; ask again once they have one"
-        raise ValueError(msg)
-    personal_agent, room_id = personal
-    poster = record.target.id if record.target.kind == "agent" else personal_agent
+    poster, room_id = _request_poster(config, paths, record.target.owner)
     client = None if context.orchestrator is None else context.orchestrator.running_entity_client(poster)
     if client is None:
         msg = f"{poster} is not running, so it cannot post the request; ask again later"
@@ -160,6 +182,14 @@ def _reload(context: ToolRuntimeContext, contact_id: str) -> ContactRecord:
 
 def _clean_rules(rules: str | None) -> str | None:
     return None if rules is None else rules.strip() or None
+
+
+def _change_side(side: ContactSide, rules: str | None, tools: list[str] | None) -> None:
+    """Set the rules and checked tools given; a field left None stays, and blank rules clear."""
+    if rules is not None:
+        side.rules = _clean_rules(rules)
+    if tools is not None:
+        side.tools = tools
 
 
 def _check_pair(requester: ContactParty, target: ContactParty) -> None:
@@ -232,21 +262,182 @@ async def request_contact(
     return record
 
 
-async def _tell_origin(context: ToolRuntimeContext, record: ContactRecord, text: str) -> None:
-    """Tell the thread a request came from, as the requesting agent; a person who asked needs no notice."""
-    if record.requester.kind != "agent":
+def _bot(context: ToolRuntimeContext, agent_name: str) -> AgentBot | None:
+    return None if context.orchestrator is None else context.orchestrator.agent_bots.get(agent_name)
+
+
+async def _post_to_origin(
+    context: ToolRuntimeContext,
+    record: ContactRecord,
+    agent_name: str,
+    body: str,
+    extra_content: dict[str, Any],
+    *,
+    trigger_dispatch: bool = False,
+) -> None:
+    """Post in the thread a request came from as one agent; a post that fails is logged, because the decision stands."""
+    bot = _bot(context, agent_name)
+    sent = None
+    if bot is not None:
+        sent = await bot.hook_context.send_message(
+            record.origin_room_id,
+            body,
+            record.origin_thread_id,
+            _SOURCE_HOOK,
+            extra_content,
+            trigger_dispatch=trigger_dispatch,
+        )
+    if sent is None:
+        logger.warning("contact_origin_post_failed", contact_id=record.id, agent_name=agent_name)
+
+
+def _room_creator(record: ContactRecord) -> str:
+    """Return the agent party that creates the contact room: the target agent, or else the requesting agent.
+
+    The creator stays in the room, so it must be a party; a contact between two people does not exist.
+    """
+    return record.target.id if record.target.kind == "agent" else record.requester.id
+
+
+def _running_agents(context: ToolRuntimeContext, record: ContactRecord) -> dict[str, tuple[AgentBot, nio.AsyncClient]]:
+    """Return the bot and client of each agent party, refusing before anything changes when one is not running."""
+    agents: dict[str, tuple[AgentBot, nio.AsyncClient]] = {}
+    for party in (record.requester, record.target):
+        if party.kind != "agent":
+            continue
+        bot = _bot(context, party.id)
+        client = None if bot is None or not bot.running else bot.client
+        if bot is None or client is None:
+            msg = f"{party.id} is not running, so the contact room cannot be set up; accept again later"
+            raise ValueError(msg)
+        agents[party.id] = (bot, client)
+    return agents
+
+
+async def _seat_parties(
+    context: ToolRuntimeContext,
+    record: ContactRecord,
+    room_id: str,
+    agents: dict[str, tuple[AgentBot, nio.AsyncClient]],
+) -> None:
+    """Invite everyone who speaks for either party, then make each agent party join the room and keep it."""
+    paths = context.runtime_paths
+    creator = _room_creator(record)
+    _, client = agents[creator]
+    speakers = party_matrix_ids(record.requester, paths) | party_matrix_ids(record.target, paths)
+    for user_id in sorted(speakers - {current_entity_id(creator, paths).full_id}):
+        if not await invite_to_room(client, room_id, user_id):
+            msg = f"{user_id} could not be invited to the contact room; accept again to retry"
+            raise ValueError(msg)
+    # The creator joins too, so its runtime knows the room and can send there at once.
+    for name, (bot, _) in agents.items():
+        if not await bot.change_local_membership(room_id, "join"):
+            msg = f"{name} could not join the contact room; accept again to retry"
+            raise ValueError(msg)
+        await run_blocking_until_complete(remember_invited_room, invited_rooms_path(paths, name), room_id)
+
+
+async def _leave_contact_room(context: ToolRuntimeContext, record: ContactRecord, room_id: str) -> None:
+    """Make the agents of a contact leave its room and stop keeping it across restarts."""
+    for party in (record.requester, record.target):
+        if party.kind != "agent":
+            continue
+        client = None if context.orchestrator is None else context.orchestrator.running_entity_client(party.id)
+        if client is not None:
+            await leave_room(client, room_id)
+        path = invited_rooms_path(context.runtime_paths, party.id)
+        await run_blocking_until_complete(forget_invited_room, path, room_id)
+
+
+async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecord, poster: str) -> None:
+    """Start the requesting agent's turn in the thread it asked from, as its owner, so it continues its task.
+
+    A person who asked has no agent to continue, so the accepting agent tells their thread, when it is in that room.
+    """
+    target = _display(context.current_config, record.target)
+    requester = record.requester
+    if requester.kind == "agent":
+        await _post_to_origin(
+            context,
+            record,
+            requester.id,
+            # Only a mentioned agent answers a message in a room with other responders.
+            f"@{requester.id} {target} accepted your contact request. "
+            f"Continue the task in the contact room {record.room_id}: {record.reason}",
+            {ORIGINAL_SENDER_KEY: requester.owner},
+            trigger_dispatch=True,
+        )
         return
-    bot = None if context.orchestrator is None else context.orchestrator.agent_bots.get(record.requester.id)
-    if bot is None:
-        logger.warning("contact_origin_notice_skipped", contact_id=record.id, agent_name=record.requester.id)
+    bot = _bot(context, poster)
+    joined = None if bot is None else await bot.current_joined_room_ids()
+    if joined is None or record.origin_room_id not in joined:
+        logger.info("contact_acceptance_notice_skipped", contact_id=record.id, agent_name=poster)
         return
-    await bot.hook_context.send_message(
-        record.origin_room_id,
-        text,
-        record.origin_thread_id,
-        _SOURCE_HOOK,
+    await _post_to_origin(
+        context,
+        record,
+        poster,
+        f"{target} accepted your contact request. The contact room is {record.room_id}.",
         {SKIP_MENTIONS_KEY: True},
     )
+
+
+async def accept_contact(
+    context: ToolRuntimeContext,
+    agent_name: str,
+    contact_id: str,
+    *,
+    rules: str | None,
+    tools: list[str] | None,
+) -> ContactRecord:
+    """Accept a pending request for its target owner: open the contact room, seat both parties, and tell the requester.
+
+    Only the agent of the target owner's personal room, which asked them there, accepts. The target side keeps any
+    rules or tools left out. A room that cannot be fully set up is left again and the request stays pending.
+    """
+    config, paths = context.current_config, context.runtime_paths
+    own = _own_party(context, agent_name)
+    book = await run_blocking_until_complete(read_contacts, paths)
+    record, side = _owned(book, contact_id, own.owner)
+    if side != "target":
+        msg = f"Only {record.target.owner} may accept this contact"
+        raise ValueError(msg)
+    if record.status != "pending":
+        raise ValueError(_NOT_PENDING)
+    poster, _ = _request_poster(config, paths, own.owner)
+    if agent_name != poster:
+        msg = f"Only {poster}, the agent of {own.owner}'s personal room, may accept this contact"
+        raise ValueError(msg)
+    target = record.target
+    if target.kind == "person" and (rules is not None or tools is not None):
+        raise ValueError(_PERSON_HAS_NO_SIDE)
+    checked = validate_side_tools(config, target.id, tools) if target.kind == "agent" else None
+    agents = _running_agents(context, record)
+    _, client = agents[_room_creator(record)]
+    room_name = f"{_display(config, record.requester)} ↔ {_display(config, target)}"
+    room_id = await create_room(client, room_name, initial_state=_CONTACT_ROOM_STATE)
+    if room_id is None:
+        msg = "The contact room could not be created; accept again to retry"
+        raise ValueError(msg)
+
+    def activate(book: ContactBook) -> ContactRecord:
+        current = _by_id(book, contact_id)
+        if current.status != "pending":
+            raise ValueError(_NOT_PENDING)
+        current.status = "active"
+        current.room_id = room_id
+        current.decided_at = time.time()
+        _change_side(current.target_side, rules, checked)
+        return current.model_copy(deep=True)
+
+    try:
+        await _seat_parties(context, record, room_id, agents)
+        accepted = await run_blocking_until_complete(update_contacts, paths, activate)
+    except ValueError:
+        await _leave_contact_room(context, record, room_id)
+        raise
+    await _announce_acceptance(context, accepted, poster)
+    return accepted
 
 
 async def decline_contact(context: ToolRuntimeContext, agent_name: str, contact_id: str) -> ContactRecord:
@@ -266,12 +457,16 @@ async def decline_contact(context: ToolRuntimeContext, agent_name: str, contact_
         return record.model_copy(deep=True)
 
     record = await run_blocking_until_complete(update_contacts, context.runtime_paths, decline)
-    await _tell_origin(
-        context,
-        record,
-        f"{record.target.owner} declined contact {record.id} with {record.target.id}; "
-        "they must remove it before you can ask again.",
-    )
+    # A person who asked has no agent to tell.
+    if record.requester.kind == "agent":
+        await _post_to_origin(
+            context,
+            record,
+            record.requester.id,
+            f"{record.target.owner} declined contact {record.id} with {record.target.id}; "
+            "they must remove it before you can ask again.",
+            {SKIP_MENTIONS_KEY: True},
+        )
     return record
 
 
@@ -297,12 +492,7 @@ async def update_contact(
             raise ValueError(msg)
         if (party := record.party(side)).kind != "agent":
             raise ValueError(_PERSON_HAS_NO_SIDE)
-        checked = validate_side_tools(config, party.id, tools)
-        changed = record.side(side)
-        if rules is not None:
-            changed.rules = _clean_rules(rules)
-        if checked is not None:
-            changed.tools = checked
+        _change_side(record.side(side), rules, validate_side_tools(config, party.id, tools))
         return record.model_copy(deep=True)
 
     return await run_blocking_until_complete(update_contacts, context.runtime_paths, update)
@@ -329,14 +519,7 @@ async def remove_contact(context: ToolRuntimeContext, agent_name: str, contact_i
 
     record = await run_blocking_until_complete(update_contacts, context.runtime_paths, remove)
     if record.room_id is not None:
-        for party in (record.requester, record.target):
-            if party.kind != "agent":
-                continue
-            client = None if context.orchestrator is None else context.orchestrator.running_entity_client(party.id)
-            if client is not None:
-                await leave_room(client, record.room_id)
-            path = invited_rooms_path(context.runtime_paths, party.id)
-            await run_blocking_until_complete(forget_invited_room, path, record.room_id)
+        await _leave_contact_room(context, record, record.room_id)
     return record
 
 

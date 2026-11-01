@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
 
 # The owner approves these on a card, because the model issuing the call also reads untrusted content.
-_CONFIRMED = frozenset({"request_contact", "update_contact"})
+_CONFIRMED = frozenset({"request_contact", "accept_contact", "update_contact"})
 
 
 def _require_context() -> ToolRuntimeContext:
@@ -53,6 +53,7 @@ class ContactsTools(Toolkit):
             tools=[
                 self.list_contacts,
                 self.request_contact,
+                self.accept_contact,
                 self.decline_contact,
                 self.update_contact,
                 self.remove_contact,
@@ -60,7 +61,7 @@ class ContactsTools(Toolkit):
         )
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Require confirmation of each request and each change of rules."""
+        """Require confirmation of each request, each acceptance, and each change of rules."""
         if function.name in _CONFIRMED:
             return replace(function, gate=ToolGate.CONFIRM)
         return function
@@ -105,6 +106,30 @@ class ContactsTools(Toolkit):
         except ValueError as exc:
             return f"Error: {exc}"
         return _asked(context, record)
+
+    async def accept_contact(
+        self,
+        contact_id: str,
+        rules: str | None = None,
+        tools: list[str] | None = None,
+    ) -> str:
+        """Accept a pending contact request that asks your owner, opening a room where both sides talk.
+
+        `rules` are extra rules your owner's agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.
+        Omit a field to keep what is set; a person asked has neither. Your owner approves the acceptance on a card,
+        then the requesting agent is told in the thread it asked from and continues there.
+        """
+        try:
+            record = await flow.accept_contact(
+                _require_context(),
+                self.agent_name,
+                contact_id,
+                rules=rules,
+                tools=tools,
+            )
+        except ValueError as exc:
+            return f"Error: {exc}"
+        return f"Accepted. Contact room: {record.room_id}."
 
     async def decline_contact(self, contact_id: str) -> str:
         """Decline a pending contact request that asks your owner, and tell the thread it came from.

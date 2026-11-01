@@ -139,8 +139,8 @@ Matrix sync callback
 | `config/contacts.py` | Opt-in `contacts` agent settings (rules, default tools, judge) and the control tools a contact never offers |
 | `contacts/store.py` | The contact records and their primary-only store: cached reads, locked read-modify-write, and the lookup of the active contact a room belongs to |
 | `contacts/parties.py` | Who can be a party of a contact (personal agents with `contacts`, and people by canonical Matrix ID), target resolution, the Matrix accounts that speak for a party, and a user's personal room |
-| `contacts/flow.py` | The contact operations behind the `contacts` tools: request (with the notice in the target owner's personal room), decline, update, remove, and list, each checked against the requester's ownership |
-| `custom_tools/contacts.py` | `ContactsTools`: the toolkit injected for agents with `contacts`, with confirmation cards on requests and rule changes |
+| `contacts/flow.py` | The contact operations behind the `contacts` tools: request (with the notice in the target owner's personal room), accept (creating the contact room, seating both parties, and starting the requesting agent's turn), decline, update, remove, and list, each checked against the requester's ownership |
+| `custom_tools/contacts.py` | `ContactsTools`: the toolkit injected for agents with `contacts`, with confirmation cards on requests, acceptances, and rule changes |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `thread_summary/state.py` | `SummaryState`: one walk of a thread's history into trusted summary notices, authorized human pins, and ordinary messages, and the current-title readers listings, exports, and calls share |
 | `thread_summary/schedule.py` | The process's per-thread summary baselines and write locks, the next threshold, and the pre-queue gate |

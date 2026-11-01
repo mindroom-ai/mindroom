@@ -72,6 +72,7 @@
       "function_names": [
         "list_contacts",
         "request_contact",
+        "accept_contact",
         "decline_contact",
         "update_contact",
         "remove_contact"

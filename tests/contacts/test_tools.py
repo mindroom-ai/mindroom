@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -49,7 +50,7 @@ ORIGIN_THREAD = "$thread"
 BOB_ROOM = "!bobroom:localhost"
 CAROL_ROOM = "!carolroom:localhost"
 CONTACT_ROOM = "!contact:localhost"
-TOOLS = ("mind_alice", "mind_bob", "mind_carol")
+TOOLS = ("mind_alice", "mind_bob", "mind_carol", "work_bob")
 DECLINED = f"{CO_OWNER} declined this contact; they can remove it to allow a new request"
 
 
@@ -71,8 +72,10 @@ def _runtime() -> _Runtime:
     runtime = _Runtime(orchestrator)
     for name in TOOLS:
         runtime.clients[name] = AsyncMock()
-        runtime.bots[name] = MagicMock()
-        runtime.bots[name].hook_context.send_message = AsyncMock(return_value="$origin-notice")
+        runtime.bots[name] = bot = MagicMock(running=True, client=runtime.clients[name])
+        bot.hook_context.send_message = AsyncMock(return_value="$origin-notice")
+        bot.change_local_membership = AsyncMock(return_value=True)
+        bot.current_joined_room_ids = AsyncMock(return_value=frozenset())
     orchestrator.running_entity_client.side_effect = runtime.clients.get
     orchestrator.agent_bots = runtime.bots
     return runtime
@@ -89,10 +92,18 @@ def _data(*, tools: list[str] | None = None, contacts: bool = True) -> dict[str,
     return data
 
 
-def _setup(tmp_path: Path, **data_options: Any) -> tuple[Config, RuntimePaths]:  # noqa: ANN401
-    """Three personal agents of one template, with personal rooms for Bob and Carol."""
+def _setup(tmp_path: Path, *, work: bool = False, **data_options: Any) -> tuple[Config, RuntimePaths]:  # noqa: ANN401
+    """Three personal agents of one template, with personal rooms for Bob and Carol.
+
+    With ``work`` Bob also has ``work_bob`` from a second template, which is not the agent of his personal room.
+    """
+    data = _data(**data_options)
     entries = [_personal(), _personal(CO_OWNER), _personal(CAROL)]
-    config = _load(tmp_path, _data(**data_options), entries=entries)
+    if work:
+        data["personal_agents"]["work"] = deepcopy(data["personal_agents"]["mind"])
+        data["personal_agents"]["work"]["agent"]["display_name"] = "{user_display_name}'s Work"
+        entries.append(_personal(CO_OWNER, template="work", agent_name="work_bob"))
+    config = _load(tmp_path, data, entries=entries)
     paths = test_runtime_paths(tmp_path)
     persist_entity_accounts(config, paths)
     for user_id, agent_name, room_id in ((CO_OWNER, "mind_bob", BOB_ROOM), (CAROL, "mind_carol", CAROL_ROOM)):
@@ -172,17 +183,19 @@ def _stored(paths: RuntimePaths) -> list[ContactRecord]:
 
 
 def test_confirm_gates() -> None:
-    """A model's request and a change to its rules always ask the owner; the rest only take access away or read."""
+    """A model's request, acceptance, and change of rules always ask the owner; the rest only take access away or read."""
     functions = adapt_toolkit(ContactsTools("mind_alice")).functions
     assert {function.name for function in functions} == {
         "list_contacts",
         "request_contact",
+        "accept_contact",
         "decline_contact",
         "update_contact",
         "remove_contact",
     }
     assert {function.name for function in functions if function.gate is ToolGate.CONFIRM} == {
         "request_contact",
+        "accept_contact",
         "update_contact",
     }
 
@@ -209,7 +222,7 @@ async def test_a_personal_agent_without_contacts_cannot_request(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_request_records_pending_and_posts_notice_with_txn_id(tmp_path: Path) -> None:
-    """The request is stored first, then the target agent posts a notice naming it in its owner's personal room."""
+    """The request is stored first, then the agent of the target owner's personal room posts a notice naming it there."""
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     with _delivered() as send:
@@ -253,6 +266,19 @@ async def test_a_person_target_is_asked_by_their_own_personal_agent(tmp_path: Pa
     assert record.target == ContactParty(kind="person", id=CAROL, owner=CAROL)
     assert send.await_args.args[:2] == (runtime.clients["mind_carol"], CAROL_ROOM)
     assert "Never share keys." not in send.await_args.args[2]["body"]
+
+
+@pytest.mark.asyncio
+async def test_a_target_agent_outside_its_owners_personal_room_is_asked_through_that_room(tmp_path: Path) -> None:
+    """The agent of the owner's personal room posts the request, even when the target is another of the owner's agents."""
+    config, paths = _setup(tmp_path, work=True)
+    runtime = _runtime()
+    with _delivered() as send:
+        record = await _request(config, paths, runtime, target="work_bob")
+
+    assert record.target == ContactParty(kind="agent", id="work_bob", owner=CO_OWNER)
+    assert send.await_args.args[:2] == (runtime.clients["mind_bob"], BOB_ROOM)
+    assert "your agent Bob's Work (work_bob)" in send.await_args.args[2]["body"]
 
 
 @pytest.mark.asyncio
@@ -409,7 +435,8 @@ async def test_decline_by_target_owner_only_and_notifies_origin(tmp_path: Path) 
     assert (room_id, thread_id) == (ORIGIN_ROOM, ORIGIN_THREAD)
     assert "declined" in body
     assert CO_OWNER in body
-    assert (source_hook, extra_content, args.kwargs) == ("native:contacts", {SKIP_MENTIONS_KEY: True}, {})
+    assert (source_hook, extra_content) == ("native:contacts", {SKIP_MENTIONS_KEY: True})
+    assert args.kwargs == {"trigger_dispatch": False}
     runtime.sent("mind_bob").assert_not_awaited()
     with pytest.raises(ValueError, match=r"^Only a pending contact can be declined"):
         await flow.decline_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
@@ -618,6 +645,7 @@ def test_a_personal_agent_with_contacts_is_built_with_the_contacts_tools_and_mat
     assert offered["contacts"] == {
         "list_contacts",
         "request_contact",
+        "accept_contact",
         "decline_contact",
         "update_contact",
         "remove_contact",
