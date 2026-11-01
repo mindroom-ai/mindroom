@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Editor from "@monaco-editor/react";
 import {
   ArrowLeft,
@@ -35,8 +35,6 @@ interface SkillListItem extends ListItem {
 
 export function Skills() {
   const { toast } = useToast();
-  const toastRef = useRef(toast);
-  toastRef.current = toast;
 
   const { resolvedTheme } = useTheme();
   const [skills, setSkills] = useState<SkillSummary[]>([]);
@@ -66,7 +64,7 @@ export function Skills() {
         current && data.some((s) => s.name === current) ? current : null,
       );
     } catch (error) {
-      toastRef.current({
+      toast({
         title: "Failed to load skills",
         description: error instanceof Error ? error.message : "Unknown error",
         variant: "destructive",
@@ -74,7 +72,7 @@ export function Skills() {
     } finally {
       setLoadingList(false);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
     refreshSkills();
@@ -98,7 +96,7 @@ export function Skills() {
       })
       .catch((error) => {
         if (!isActive) return;
-        toastRef.current({
+        toast({
           title: "Failed to load skill",
           description: error instanceof Error ? error.message : "Unknown error",
           variant: "destructive",
@@ -111,7 +109,7 @@ export function Skills() {
     return () => {
       isActive = false;
     };
-  }, [selectedName]);
+  }, [selectedName, toast]);
 
   const handleSelect = (name: string) => {
     if (isDirty && selectedName !== name) {

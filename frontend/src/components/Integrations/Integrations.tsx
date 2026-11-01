@@ -1,4 +1,11 @@
-import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
+import {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
 import {
   Settings,
   CheckCircle2,
@@ -61,6 +68,7 @@ import { EnhancedConfigDialog } from "./EnhancedConfigDialog";
 import { FilterSelector } from "@/components/shared/FilterSelector";
 
 const SHARED_ONLY_PROVIDER_IDS = new Set(["spotify", "homeassistant"]);
+const NO_INTEGRATIONS: Integration[] = [];
 
 type FilterMode = "all" | "available" | "unconfigured" | "configured";
 
@@ -208,10 +216,10 @@ const manualOAuthFallbackLabel = (integration: Integration) => {
 
 const IntegrationCard = ({
   integration,
-  action,
+  renderAction,
 }: {
   integration: Integration;
-  action: ReactNode;
+  renderAction: (integration: Integration) => ReactNode;
 }) => {
   const isConnected = integration.status === "connected";
   const usesGoogleUserData = integration.id.startsWith("google_");
@@ -275,7 +283,7 @@ const IntegrationCard = ({
 
       <CardContent>
         <div className="space-y-3">
-          <div className="flex gap-2">{action}</div>
+          <div className="flex gap-2">{renderAction(integration)}</div>
         </div>
       </CardContent>
     </Card>
@@ -332,7 +340,9 @@ export function Integrations() {
   const [loading, setLoading] = useState(false);
   const loadRequestIdRef = useRef(0);
   const currentScopeKeyRef = useRef(currentScopeKey);
-  currentScopeKeyRef.current = currentScopeKey;
+  useLayoutEffect(() => {
+    currentScopeKeyRef.current = currentScopeKey;
+  }, [currentScopeKey]);
   const isCurrentScope = (scopeKey: string) =>
     currentScopeKeyRef.current === scopeKey;
   const isCurrentLoadRequest = (requestId: number, scopeKey: string) =>
@@ -367,10 +377,6 @@ export function Integrations() {
       setScopeAgentName(null);
     }
   }, [scopeAgentName, scopedAgents]);
-
-  useEffect(() => {
-    loadIntegrations();
-  }, [backendTools, currentScopeKey]);
 
   const loadIntegrations = async (forceRefresh = false) => {
     const scopeKey = currentScopeKey;
@@ -472,6 +478,12 @@ export function Integrations() {
       }
     }
   };
+
+  useEffect(() => {
+    loadIntegrations();
+    // Reload when the tools or the scope change, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backendTools, currentScopeKey]);
 
   // OAuth cards connect for the selected agent's scope; other credentials stay shared-only.
   const blocksScopedDashboardCredentials = (integration: Integration) =>
@@ -1010,7 +1022,7 @@ export function Integrations() {
   const integrations =
     integrationsState.scopeKey === currentScopeKey
       ? integrationsState.integrations
-      : [];
+      : NO_INTEGRATIONS;
 
   const filteredIntegrations = useMemo(() => {
     let filtered = integrations;
@@ -1184,7 +1196,7 @@ export function Integrations() {
                     <IntegrationCard
                       key={integration.id}
                       integration={integration}
-                      action={getActionButton(integration)}
+                      renderAction={getActionButton}
                     />
                   ))}
                 </div>

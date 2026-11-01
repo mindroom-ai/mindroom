@@ -119,10 +119,6 @@ export function HomeAssistantIntegration({
       executionScope,
     );
 
-  useEffect(() => {
-    checkStatus();
-  }, []);
-
   const checkStatus = async () => {
     setLoading(true);
     try {
@@ -137,6 +133,12 @@ export function HomeAssistantIntegration({
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    checkStatus();
+    // Check once when the card opens; actions check again themselves.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const connectOAuth = async () => {
     if (!instanceUrl) {

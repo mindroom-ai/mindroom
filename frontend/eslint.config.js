@@ -40,6 +40,8 @@ export default [
         },
       ],
       "react-hooks/set-state-in-effect": "off",
+      // Only says React Compiler would skip a component using TanStack Table; the dashboard does not use the compiler.
+      "react-hooks/incompatible-library": "off",
     },
   },
   prettier,

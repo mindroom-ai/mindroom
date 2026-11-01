@@ -1,15 +1,5 @@
-import { toast as toastFn } from "./toaster";
-
-interface ToastProps {
-  title?: string;
-  description?: string;
-  variant?: "default" | "destructive";
-}
+import { toast } from "./toaster";
 
 export function useToast() {
-  const toast = (props: ToastProps) => {
-    toastFn(props);
-  };
-
   return { toast };
 }

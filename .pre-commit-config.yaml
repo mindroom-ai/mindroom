@@ -110,21 +110,6 @@ repos:
         args: ["--cache", "--cache-location", ".cache/prettier-precommit.json"]
         require_serial: true
 
-  - repo: https://github.com/pre-commit/mirrors-eslint
-    rev: v10.8.0
-    hooks:
-      - id: eslint
-        files: ^frontend/.*\.(js|jsx|ts|tsx)$
-        args: ['--fix', '--config', 'frontend/.eslintrc.json']
-        additional_dependencies:
-          - eslint@8.56.0
-          - '@typescript-eslint/eslint-plugin@6.19.0'
-          - '@typescript-eslint/parser@6.19.0'
-          - 'eslint-plugin-react@7.33.2'
-          - 'eslint-plugin-react-hooks@4.6.0'
-          - 'eslint-config-prettier@9.1.0'
-          - 'typescript@5.3.3'
-
   - repo: local
     hooks:
       # Each hook must bootstrap a fresh checkout without downloading Puppeteer's browser.
@@ -142,6 +127,13 @@ repos:
         files: ^frontend/.*\.(ts|tsx)$
         pass_filenames: false
 
+      - id: eslint
+        name: ESLint
+        entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bun run lint'
+        language: system
+        files: ^frontend/(.*\.(ts|tsx)|eslint\.config\.js)$
+        pass_filenames: false
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
@@ -151,4 +143,4 @@ repos:
       - id: pretty-format-json
         args: ['--autofix', '--indent=2']
         files: ^frontend/.*\.json$
-        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/\.eslintrc\.json|frontend/src/test/fixtures/config-schema\.json)$
+        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/src/test/fixtures/config-schema\.json)$
