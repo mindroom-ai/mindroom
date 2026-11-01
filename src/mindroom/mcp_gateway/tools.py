@@ -28,6 +28,7 @@ from mindroom.mcp_gateway.types import (
     ToolSchemaResult,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.origins import normalized_origin
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function
 from mindroom.tool_system.invocation import (
@@ -39,6 +40,7 @@ from mindroom.tool_system.invocation import (
 )
 from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_access import search_tool_metadata, validate_tool_arguments
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
@@ -68,7 +70,7 @@ _MESSAGES: dict[GatewayErrorCode, str] = {
 def _error(context: AgentToolContext, code: GatewayErrorCode, message: str | None = None) -> GatewayErrorResponse:
     error: GatewayErrorDetail = {"code": code, "message": message or _MESSAGES[code]}
     if code is GatewayErrorCode.CONNECTION_REQUIRED:
-        origin = (context.runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/")
+        origin = normalized_origin(context.runtime_paths.env_value("MINDROOM_PUBLIC_URL")) or ""
         error["connection_url"] = f"{origin}/connections"
     return {"error": error}
 
@@ -102,7 +104,7 @@ def _require_entry(context: AgentToolContext, name: str) -> EffectiveToolConfig:
 
 
 def _blocked(context: AgentToolContext, function: ToolFunction) -> bool:
-    return function.requires_confirmation is True or tool_may_require_approval(context.config, function.name)
+    return function.gate is ToolGate.CONFIRM or tool_may_require_approval(context.config, function.name)
 
 
 def _function(context: AgentToolContext, toolkit: AnyToolkit, name: str) -> ToolFunction:

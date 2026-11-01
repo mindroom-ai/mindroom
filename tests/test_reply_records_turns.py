@@ -24,6 +24,7 @@ from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, E
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
+from mindroom.llm.events import ReportedCall, ToolStarted
 from mindroom.llm.media import Image
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
@@ -35,7 +36,7 @@ from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
-from mindroom.turn_record import TurnRecord
+from mindroom.turn_record import RevisionSnapshotChangedError, TurnRecord
 from mindroom.turn_store import SourcePreparation
 from tests.agent_tool_helpers import tool_policy
 from tests.bot_helpers import unique_room_send_responses
@@ -524,6 +525,27 @@ async def test_a_redaction_of_an_event_already_gone_is_done(tmp_path: Path) -> N
     await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
 
     assert (await _reply(bot)).redaction_pending == ("$kept",)
+
+
+@pytest.mark.parametrize("failure", ["no client", "transport error"])
+async def test_a_redaction_that_cannot_reach_matrix_stays_owed(tmp_path: Path, failure: str) -> None:
+    """A bot without a client, or a redaction that raised, leaves the event owed for the next settlement."""
+    bot = await _streaming_bot(tmp_path)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
+    answered = await _reply(bot)
+    await _owe(bot, answered.reply_id, redaction_pending=("$owed",))
+    client = bot.client
+    client.room_redact = AsyncMock(side_effect=OSError("connection reset"))
+    if failure == "no client":
+        bot.client = None
+
+    with capture_logs() as logs:
+        await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
+
+    assert (await _reply(bot)).redaction_pending == ("$owed",)
+    assert client.room_redact.called is (failure == "transport error")
+    # Only a redaction that reached Matrix and failed is worth a warning; no client yet is an expected state.
+    assert any(log["event"] == "Owed reply redaction failed" for log in logs) is (failure == "transport error")
 
 
 @dataclass
@@ -1221,6 +1243,51 @@ async def _blocked_stream(
     return response
 
 
+@pytest.mark.parametrize("interruption", ["superseded", "restart"])
+async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path: Path, interruption: str) -> None:
+    """A retry that splits a coalesced turn continues its reply for the first message and answers the second anew."""
+    bot = await _streaming_bot(tmp_path)
+    await bot.journal_principal().admit(
+        InboundEvent(
+            event_id="$event2",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            source={},
+        ),
+    )
+    coalesced = replace(
+        _plain_request(_target(reply_to_event_id="$event2"), source_event_id="$event2"),
+        sources=ResponseSources(("$event2", "$event"), ("$event", "$event2")),
+    )
+    response = None
+    if interruption == "superseded":
+        # A redaction made the claimed turn's locked history stale, so its span ended with both sources pending.
+        stale = AsyncMock(side_effect=[SourcePreparation(), RevisionSnapshotChangedError("stale")])
+        with pytest.raises(RevisionSnapshotChangedError):
+            await _answer(bot, replace(coalesced, prepare_source_turn=stale), AsyncMock(return_value="never"))
+    else:
+        response = await _blocked_stream(bot, "Partial", coalesced)
+        bot = _bot(tmp_path)
+        unique_room_send_responses(bot.client)
+        await bot._take_over_replies()
+    try:
+        # With the conversation idle, the retry dispatches each text message as its own turn.
+        assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="Answer one.")) == Owned()
+        second = _plain_request(_target(reply_to_event_id="$event2"), source_event_id="$event2")
+        assert await _answer(bot, second, AsyncMock(return_value="Answer two.")) == Owned()
+    finally:
+        if response is not None:
+            response.cancel()
+            with suppress(asyncio.CancelledError):
+                await response
+    assert _sent_bodies(bot)[-2:] == ["Answer one.", "Answer two."]
+    assert not await bot._reply_runtime.store.is_pending("$event2")
+
+
 async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_path: Path) -> None:
     """The reply's records take the Stop at once, without waiting for the conversation or naming it on the turn."""
     bot = await _streaming_bot(tmp_path)
@@ -1444,6 +1511,98 @@ async def test_a_replay_continues_below_what_a_restart_stopped_and_tells_the_mod
         response.cancel()
         with suppress(asyncio.CancelledError):
             await response
+
+
+async def _stopped_in_a_tool(bot: AgentBot, *, runs: bool = True) -> asyncio.Task[SourceFate]:
+    """Start a reply that shows its `counter` call running and never returns.
+
+    The tool policy records the call as started when it ``runs``; otherwise the reply stops before the call starts.
+    """
+    bridge = tool_policy(HookRegistry.empty())
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield ToolStarted(ReportedCall(tool_call_id="call-1", tool_name="counter", tool_args={}))
+        if runs:
+            await bridge("counter", asyncio.Event().wait, {})
+        await asyncio.Event().wait()
+        yield "never"
+
+    with patch_response_runner_module(
+        stream_agent_response=stream,
+        should_use_streaming=AsyncMock(return_value=True),
+        typing_indicator=_noop_typing,
+    ):
+        response = asyncio.create_task(
+            unwrap_extracted_collaborator(bot._response_runner).generate_response(_plain_request(_target())),
+        )
+
+        async def running() -> None:
+            while not any("🔧 `counter` [1] ⏳" in body for body in _sent_bodies(bot)):  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(running(), timeout=5)
+    return response
+
+
+def _last_trace_types(bot: AgentBot) -> list[str]:
+    content = bot.client.room_send.await_args_list[-1].kwargs["content"]
+    return [event["type"] for event in content.get("m.new_content", content)["io.mindroom.tool_trace"]["events"]]
+
+
+@pytest.mark.parametrize("runs", [True, False])
+async def test_a_replay_no_longer_shows_the_call_its_stopped_attempt_left_running_as_running(
+    tmp_path: Path,
+    runs: bool,
+) -> None:
+    """Nothing completes the stopped attempt's call, so it loses its hourglass; only its record tells the model of it."""
+    old = await _streaming_bot(tmp_path)
+    response = await _stopped_in_a_tool(old, runs=runs)
+    restarted = _bot(tmp_path)
+    unique_room_send_responses(restarted.client)
+    await restarted._take_over_replies()
+    prompts: list[str] = []
+
+    async def stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        prompts.append(html.unescape(str(ctx.model_prompt)))
+        yield "The complete report."
+
+    try:
+        with patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            await unwrap_extracted_collaborator(restarted._response_runner).generate_response(
+                _plain_request(_target()),
+            )
+
+        (prompt,) = prompts
+        account = prompt.split('<item key="interrupted_attempt" cache_policy="volatile">\n', 1)[1]
+        assert ("The `counter` tool was still running" in account) is runs
+        assert "The `counter` tool finished" not in account
+        assert _sent_bodies(restarted)[-1] == (
+            f"\n\n🔧 `counter` [1]\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
+        )
+        assert _last_trace_types(restarted) == ["tool_call_completed"]
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+
+async def test_a_stop_during_a_tool_call_no_longer_shows_it_as_running(tmp_path: Path) -> None:
+    """The cancelled reply keeps the call's marker without the hourglass."""
+    bot = await _streaming_bot(tmp_path)
+    response = await _stopped_in_a_tool(bot)
+    reply = await _reply(bot)
+    assert reply.event_id is not None
+    await _pending_turn(bot)
+
+    assert await bot._user_stop_reconciler.finalize(reply.event_id, 7, room_id=_target().room_id)
+    await asyncio.wait_for(response, timeout=5)
+
+    assert _sent_bodies(bot)[-1] == "\n\n🔧 `counter` [1]\n\n**[Response cancelled by user]**"
+    assert _last_trace_types(bot) == ["tool_call_completed"]
 
 
 async def test_a_replay_of_an_attempt_that_showed_only_its_placeholder_is_warned_its_work_is_unknown(

@@ -20,6 +20,7 @@ from mindroom.history.interrupted_replay import (
     build_interrupted_replay_snapshot,
     persist_interrupted_replay_snapshot,
     split_interrupted_tool_trace,
+    stored_turn_input,
 )
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
@@ -307,6 +308,8 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         interrupted_tools=interrupted_trace,
         run_metadata=persisted.metadata,
         response_event_id=continuation.response_event_id,
+        # The paused run's metadata marks the thread messages its turn read seen, so the replay run keeps its input.
+        turn_input=stored_turn_input(persisted.messages),
     )
     # The replay run and the state the recovered call left commit together.
     await write_with_session_state(
@@ -330,11 +333,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         if continuation.show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
         return CompletedApprovalRun(response_text=presentation.final_text(), metadata_content={})
-    active_model_name = (
-        decision.model_switch_name
-        if decision.model_switch_when == "after-toolcall"
-        else continuation.runtime_model_name
-    )
+    switch = decision.continuation
     # Denied, outer-Bash and delegated outcomes changed the presentation without a live event.
     await presentation.publish(progress)
     return CliFollowUpTurn(
@@ -342,7 +341,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
             turn,
             reply_to_event_id=continuation.source_event_ids[0],
             matrix_run_metadata=deepcopy(persisted.metadata),
-            active_model_name=active_model_name,
+            active_model_name=continuation.runtime_model_name if switch is None else switch.model_name,
             transient_enrichment_items=(
                 EnrichmentItem(
                     key="cli_approval_recovery",
@@ -352,9 +351,9 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
             ),
         ),
         presentation=presentation,
-        prompt=decision.next_prompt or continuation.request_body,
-        reusable_build=None if decision.should_continue else build,
-        initial_continuation_count=continuation.continuation_count + int(decision.should_continue),
+        prompt=continuation.request_body if switch is None else switch.prompt,
+        reusable_build=build if switch is None else None,
+        initial_continuation_count=continuation.continuation_count + int(switch is not None),
         delegation_depth=payload.delegation_depth,
         media=MediaInputs(
             images=(

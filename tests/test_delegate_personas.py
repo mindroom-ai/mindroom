@@ -15,11 +15,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution as delegation_execution
-from mindroom.delegation.execution import _resolve_delegation_target
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_turn
 from mindroom.delegation.personas import inline_persona
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn
 from mindroom.delegation.state import DelegationState, SubagentPersona
+from mindroom.delegation.targets import DelegationTarget, resolve_delegation_target
 from mindroom.llm.runs import RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -45,7 +45,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.execution import _DelegationTarget
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -117,14 +116,16 @@ class _Harness:
         self.identity = _identity()
         self.toolkit = self.tools(["leader", "child"])
 
-    def tools(self, delegate_to: list[str]) -> DelegateTools:
+    def tools(self, delegate_to: list[str], delegation_depth: int = 0) -> DelegateTools:
+        config = self.config.model_copy(deep=True)
+        config.agents["leader"].delegate_to = delegate_to
         return DelegateTools(
             "leader",
-            delegate_to,
             self.paths,
-            self.config,
+            config,
             execution_identity=self.identity,
             workspace_root=_workspace(self.paths.storage_root),
+            delegation_depth=delegation_depth,
         )
 
     async def run(self, call: Awaitable[str], config: Config | None = None) -> str:
@@ -283,6 +284,27 @@ async def test_follow_up_after_caller_lost_a_tool_is_refused(
 
 
 @pytest.mark.asyncio
+async def test_a_direct_follow_up_is_refused_for_its_lost_tool_before_its_revoked_grant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A follow-up that fails both checks names the subagent's lost tool on every channel, as the native driver does."""
+    harness = _Harness(tmp_path, monkeypatch, _config())
+    await harness.run(harness.toolkit.run_subagent(task="Work", system_prompt="P", tools=["file"]))
+    subagent_id = str(harness.session_child()["subagent_id"])
+    reloaded = _config(tools=())
+    reloaded.agents["leader"].delegate_to = ["child"]
+
+    result = await harness.run(
+        harness.toolkit.continue_subagent(subagent_id=subagent_id, message="Again"),
+        config=reloaded,
+    )
+
+    assert result == "Subagent tool 'file' is no longer available to you; start a new subagent."
+    assert authored_prompts(harness.model) == ["P"]
+
+
+@pytest.mark.asyncio
 async def test_persona_naming_a_function_its_caller_lacks_never_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -310,7 +332,7 @@ async def test_native_team_member_authors_persona_for_itself(tmp_path: Path) -> 
         tool_args={"task": "Check", "system_prompt": "Member prompt"},
     )
 
-    target = await _resolve_delegation_target(
+    target = await resolve_delegation_target(
         tool,
         None,
         caller_identity=member_identity,
@@ -318,7 +340,7 @@ async def test_native_team_member_authors_persona_for_itself(tmp_path: Path) -> 
         runtime_paths=paths,
         depth=0,
     )
-    refused = await _resolve_delegation_target(
+    refused = await resolve_delegation_target(
         ToolExecution(
             tool_call_id="call-run_subagent",
             tool_name="run_subagent",
@@ -448,15 +470,7 @@ async def test_copy_at_max_depth_inherits_tools_without_delegate(
 ) -> None:
     """A copy started at the maximum depth inherits its parent's tools except delegate, which it cannot have."""
     harness = _Harness(tmp_path, monkeypatch, _config(tools=("file", "calculator")))
-    harness.toolkit = DelegateTools(
-        "leader",
-        ["leader", "child"],
-        harness.paths,
-        harness.config,
-        execution_identity=harness.identity,
-        workspace_root=_workspace(harness.paths.storage_root),
-        delegation_depth=MAX_DELEGATION_DEPTH - 2,
-    )
+    harness.toolkit = harness.tools(["leader", "child"], delegation_depth=MAX_DELEGATION_DEPTH - 2)
     harness.model.turns = [
         calls(tool_call("run_subagent", "n1", task="Read.", system_prompt="Q")),
         answer("Grandchild answer."),
@@ -490,7 +504,7 @@ async def test_native_copy_at_max_depth_inherits_tools_without_delegate(tmp_path
     )
 
     with tool_runtime_context(context):
-        target = await _resolve_delegation_target(
+        target = await resolve_delegation_target(
             ToolExecution(
                 tool_call_id="call-run_subagent",
                 tool_name="run_subagent",
@@ -529,7 +543,7 @@ async def test_native_authoring_after_the_caller_is_removed_is_refused(
     without_caller = config.model_copy(update={"agents": {"child": config.agents["child"]}})
 
     with tool_runtime_context(_delegate_runtime_context(without_caller, paths, execution_identity=identity)):
-        result = await _resolve_delegation_target(
+        result = await resolve_delegation_target(
             ToolExecution(
                 tool_call_id="call-run_subagent",
                 tool_name="run_subagent",
@@ -576,7 +590,7 @@ async def test_native_follow_up_checks_the_current_config(tmp_path: Path) -> Non
     )
 
     with tool_runtime_context(_delegate_runtime_context(without_file, paths, execution_identity=identity)):
-        result = await _resolve_delegation_target(
+        result = await resolve_delegation_target(
             follow_up,
             None,
             caller_identity=identity,
@@ -662,8 +676,7 @@ async def test_plain_delegation_never_lists_caller_tools(tmp_path: Path, monkeyp
         msg = "caller tools must not be listed for a plain delegation"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("mindroom.custom_tools.delegate.caller_toolkit_names", unavailable)
-    monkeypatch.setattr("mindroom.delegation.execution.caller_toolkit_names", unavailable)
+    monkeypatch.setattr("mindroom.delegation.targets.caller_toolkit_names", unavailable)
 
     result = await harness.run(harness.toolkit.run_subagent(task="Summarize.", agent_name="child"))
 
@@ -704,15 +717,15 @@ def _knowledge_config() -> Config:
 def _native_resolver(
     tmp_path: Path,
     config: Config,
-) -> tuple[ToolRuntimeContext, Callable[..., Awaitable[_DelegationTarget | str]]]:
+) -> tuple[ToolRuntimeContext, Callable[..., Awaitable[DelegationTarget | str]]]:
     """Return the caller's tool context and a resolver for its native run_subagent calls with system_prompt Q."""
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     identity = _identity()
 
-    async def resolve(context: ToolRuntimeContext, **arguments: object) -> _DelegationTarget | str:
+    async def resolve(context: ToolRuntimeContext, **arguments: object) -> DelegationTarget | str:
         with tool_runtime_context(context):
-            return await _resolve_delegation_target(
+            return await resolve_delegation_target(
                 ToolExecution(
                     tool_call_id="call-run_subagent",
                     tool_name="run_subagent",

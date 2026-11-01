@@ -606,22 +606,61 @@ def test_skill_listings_include_the_plugins_skills_labeled_plugin(
     assert (listing.description, listing.origin) == ("From a plugin", "plugin")
 
 
-def test_operator_skill_listings_parse_yaml_aliases_like_agent_loading(
+@pytest.mark.parametrize(
+    ("frontmatter", "description"),
+    [
+        ("description: Aliased skill\nmetadata:\n  defaults: &d {os: [linux]}\n  openclaw: *d\n", "Aliased skill"),
+        # Not YAML: an unquoted value holding ": " is read as ``key: value`` lines.
+        ("description: Use when: the build fails\n", "Use when: the build fails"),
+    ],
+    ids=["yaml-aliases", "not-yaml"],
+)
+def test_operator_skill_listings_read_frontmatter_like_agent_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    frontmatter: str,
+    description: str,
+) -> None:
+    """An operator-root skill an agent loads is listed as the agent sees it, though workspace skills would refuse it."""
+    skill_dir = tmp_path / "operator"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(f"---\nname: operator\n{frontmatter}---\n", encoding="utf-8")
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
+
+    loaded = [(skill.name, skill.description) for skill in skills_module._load_root_skills(tmp_path)]
+    listed = [(listing.name, listing.description) for listing in skills_module.list_skill_listings(())]
+
+    assert loaded == listed == [("operator", description)]
+    assert skills_module.resolve_skill_listing("operator", ()) is not None
+
+
+def test_operator_skill_frontmatter_that_is_not_yaml_warns_with_its_file_and_line(tmp_path: Path) -> None:
+    """The warning for an operator skill read as ``key: value`` lines names its SKILL.md and the line YAML refused."""
+    skill_file = tmp_path.resolve() / "operator" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text("---\nname: operator\ndescription: Use when: X\n---\n", encoding="utf-8")
+
+    with capture_logs() as logs:
+        skills = skills_module._load_root_skills(tmp_path)
+
+    assert [(skill.name, skill.description) for skill in skills] == [("operator", "Use when: X")]
+    [warning] = [entry for entry in logs if entry["event"] == "Error parsing skill frontmatter as YAML"]
+    assert warning["path"] == str(skill_file)
+    assert "line 3, column" in warning["error"]
+
+
+def test_operator_skill_listings_skip_a_skill_with_a_blank_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Operator-root skills that agents load with aliased frontmatter stay listed, unlike workspace skills."""
-    skill_dir = tmp_path / "aliased"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: aliased\ndescription: Aliased skill\nmetadata:\n  defaults: &d {os: [linux]}\n  openclaw: *d\n---\n",
-        encoding="utf-8",
-    )
+    """A skill whose frontmatter name is blank is not listed, and the skills beside it still are."""
+    _write_skill(tmp_path, "valid", "Valid skill")
+    nameless_dir = tmp_path / "nameless"
+    nameless_dir.mkdir()
+    (nameless_dir / "SKILL.md").write_text('---\nname: ""\ndescription: No name\n---\n', encoding="utf-8")
     monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
 
-    assert [listing.name for listing in skills_module.list_skill_listings(())] == ["aliased"]
-    assert skills_module.resolve_skill_listing("aliased", ()) is not None
-    assert [skill.name for skill in skills_module._load_root_skills(tmp_path)] == ["aliased"]
+    assert [listing.name for listing in skills_module.list_skill_listings(())] == ["valid"]
 
 
 def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(
@@ -753,6 +792,103 @@ def test_skill_root_loads_are_cached_until_a_skill_file_changes(tmp_path: Path) 
         assert refreshed[0].description == "Alpha v2"
     finally:
         skills_module.clear_skill_cache()
+
+
+def test_operator_skill_support_files_refresh_the_cached_skill(tmp_path: Path) -> None:
+    """Adding a script or removing a reference is offered on the next load though SKILL.md is unchanged."""
+    skill_dir = _write_skill(tmp_path, "alpha", "Alpha").parent
+    (skill_dir / "references").mkdir()
+    (skill_dir / "references" / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    config = _base_config(["alpha"])
+    try:
+        before = _build_skills("code", config, _runtime_paths(tmp_path), roots=[tmp_path])
+        assert before is not None
+        assert (_skill(before, "alpha").scripts, _skill(before, "alpha").references) == ((), ("guide.md",))
+
+        _write_skill_script(skill_dir, "check.sh", "echo ok\n")
+        with_script = _build_skills("code", config, _runtime_paths(tmp_path), roots=[tmp_path])
+
+        assert with_script is not None
+        assert (_skill(with_script, "alpha").scripts, _skill(with_script, "alpha").references) == (
+            ("check.sh",),
+            ("guide.md",),
+        )
+        assert "<scripts>check.sh</scripts>" in with_script.prompt_block()
+        assert _call(with_script, "get_skill_script", "alpha", "check.sh")["content"] == "echo ok\n"
+
+        (skill_dir / "references" / "guide.md").unlink()
+        without_reference = _build_skills("code", config, _runtime_paths(tmp_path), roots=[tmp_path])
+
+        assert without_reference is not None
+        assert _skill(without_reference, "alpha").references == ()
+    finally:
+        skills_module.clear_skill_cache()
+
+
+def test_a_skill_folder_linked_into_an_operator_root_is_listed_offered_and_refreshed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A skill folder symlinked into a root after a first load shows, and its edits and its removal show too."""
+    root = tmp_path / "skills"
+    _write_skill(root, "alpha", "Alpha")
+    linked_file = _write_skill(tmp_path / "elsewhere", "beta", "Beta v1")
+    config = _base_config(["alpha", "beta"])
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [root])
+
+    def listed() -> list[tuple[str, str]]:
+        return [(listing.name, listing.description) for listing in skills_module.list_skill_listings(())]
+
+    def offered() -> SkillsToolkit | None:
+        return _build_skills("code", config, _runtime_paths(tmp_path), roots=[root])
+
+    try:
+        assert listed() == [("alpha", "Alpha")]
+        assert _skill_names(offered()) == ["alpha"]
+
+        (root / "beta").symlink_to(linked_file.parent, target_is_directory=True)
+        assert listed() == [("alpha", "Alpha"), ("beta", "Beta v1")]
+        assert _skill_names(offered()) == ["alpha", "beta"]
+
+        old_mtime = linked_file.stat().st_mtime_ns
+        _write_skill(tmp_path / "elsewhere", "beta", "Beta v2")
+        os.utime(linked_file, ns=(old_mtime + 2_000_000_000, old_mtime + 2_000_000_000))
+        assert listed() == [("alpha", "Alpha"), ("beta", "Beta v2")]
+        skills = offered()
+        assert skills is not None
+        assert _skill(skills, "beta").description == "Beta v2"
+
+        (root / "beta").unlink()
+        assert listed() == [("alpha", "Alpha")]
+        assert _skill_names(offered()) == ["alpha"]
+    finally:
+        skills_module.clear_skill_cache()
+
+
+def test_an_operator_root_that_cannot_be_listed_hides_only_its_own_skills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A root whose directory cannot be listed loads nothing, while the other roots still load and list."""
+    unreadable = (tmp_path / "unreadable").resolve()
+    readable = tmp_path / "readable"
+    _write_skill(unreadable, "beta", "Beta")
+    _write_skill(readable, "alpha", "Alpha")
+    skill_folders = skills_module._skill_folders
+
+    def refuse_unreadable(root: Path) -> list[Path]:
+        if root == unreadable:
+            raise PermissionError(root)
+        return skill_folders(root)
+
+    monkeypatch.setattr(skills_module, "_skill_folders", refuse_unreadable)
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [unreadable, readable])
+
+    assert [listing.name for listing in skills_module.list_skill_listings(())] == ["alpha"]
+    config = _base_config(["alpha", "beta"])
+    assert _skill_names(_build_skills("code", config, _runtime_paths(tmp_path), roots=[unreadable, readable])) == [
+        "alpha",
+    ]
 
 
 def test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning(tmp_path: Path) -> None:

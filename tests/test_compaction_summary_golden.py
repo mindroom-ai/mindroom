@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.config.resolution import entity_model_name
 from mindroom.history.runtime import _compact_before_reply, resolve_entity_preparation_inputs
 from mindroom.history.storage import read_scope_state, with_force_compaction
 from mindroom.llm.messages import Message
@@ -73,10 +74,9 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
     inputs = resolve_entity_preparation_inputs(
         config=turn.config,
         runtime_paths=turn.runtime_paths,
-        entity_name=turn.agent_name,
         history_settings=turn.config.resolve_scope(turn.agent_name).history_settings,
         static_prompt_tokens=0,
-        active_model_name=None,
+        active_model_name=entity_model_name(turn.config, turn.agent_name),
         active_context_window=None,
     )
     recorder = Recorder(responder=scenario.responder)

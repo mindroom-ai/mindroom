@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import typer
 from rich.markup import escape
 
-from mindroom.constants import ensure_writable_config_path
+from mindroom.constants import RuntimeEnvFileError, ensure_writable_config_path, runtime_matrix_homeserver
 from mindroom.origins import with_api_port
 
 from .api import is_loopback_host
@@ -22,6 +22,7 @@ from .banner import make_banner
 from .config import (
     DEFAULT_API_HOST,
     DEFAULT_API_PORT,
+    PROVIDER_CHOICES,
     activate_cli_runtime,
     check_env_keys,
     config_app,
@@ -66,9 +67,7 @@ AI agents that live in Matrix and work everywhere via bridges.
   [cyan]mindroom run[/cyan]           Set up on first run, pair, and start
   [cyan]mindroom config init[/cyan]   Create a starter config without starting\
 """
-_CONFIG_INIT_PROVIDER_CHOICES = (
-    "{openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude,llama.cpp,vertexai_claude}"
-)
+_CONFIG_INIT_PROVIDER_CHOICES = "{" + ",".join(PROVIDER_CHOICES) + "}"
 # Exit code of `mindroom connect` when it declines to re-pair a connected machine (no terminal, no --force).
 # The macOS app matches it as `MindRoomCommand.alreadyConnectedExitCode`; change both together.
 _CONNECT_ALREADY_CONNECTED_EXIT_CODE = 3
@@ -368,16 +367,11 @@ async def _run(
         )
     except KeyboardInterrupt:
         console.print("\nStopped")
-    except ConnectionError as exc:
-        _print_connection_error(exc, runtime_paths)
-        raise typer.Exit(1) from None
     except (PermanentStartupError, EventJournalLostError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
     except OSError as exc:
-        if "connect" in str(exc).lower() or "refused" in str(exc).lower():
-            _print_connection_error(exc, runtime_paths)
-            raise typer.Exit(1) from None
+        _exit_if_connection_error(exc, runtime_paths)
         raise
 
 
@@ -441,13 +435,8 @@ def avatars_sync(
     except AvatarSyncError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
-    except ConnectionError as exc:
-        _print_connection_error(exc, runtime_paths)
-        raise typer.Exit(1) from None
     except OSError as exc:
-        if "connect" in str(exc).lower() or "refused" in str(exc).lower():
-            _print_connection_error(exc, runtime_paths)
-            raise typer.Exit(1) from None
+        _exit_if_connection_error(exc, runtime_paths)
         raise
 
 
@@ -625,21 +614,6 @@ def _print_thread_export_stats(stats: ThreadExportStats) -> None:
         console.print(f"[red]Failed:[/red] {failure.room_key} {target}: {failure.error}")
 
 
-def _handle_thread_export_error(exc: RuntimeError | OSError, runtime_paths: RuntimePaths, *, watch: bool) -> None:
-    """Print one top-level export error and exit unless watch mode can retry."""
-    if isinstance(exc, ConnectionError) or _is_connection_os_error(exc):
-        _print_connection_error(exc, runtime_paths)
-    else:
-        console.print(f"[red]Error:[/red] {exc}")
-    if not watch:
-        raise typer.Exit(1) from None
-
-
-def _is_connection_os_error(exc: BaseException) -> bool:
-    """Return whether an OS error looks like a Matrix connection failure."""
-    return isinstance(exc, OSError) and ("connect" in str(exc).lower() or "refused" in str(exc).lower())
-
-
 async def _threads_export(
     *,
     config_path: Path | None,
@@ -678,7 +652,9 @@ async def _threads_export(
             console.print(f"[red]Error:[/red] {exc}")
             raise typer.Exit(1) from None
         except (OSError, RuntimeError) as exc:
-            _handle_thread_export_error(exc, runtime_paths, watch=watch)
+            console.print(f"[red]Error:[/red] {exc}")
+            if not watch:
+                raise typer.Exit(1) from None
         else:
             _print_thread_export_stats(stats)
             if not watch:
@@ -895,18 +871,19 @@ def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 
 
-def _print_connection_error(exc: BaseException, runtime_paths: RuntimePaths) -> None:
-    from mindroom import constants  # noqa: PLC0415
-
+def _exit_if_connection_error(exc: OSError, runtime_paths: RuntimePaths) -> None:
+    """Explain an OS error that looks like a Matrix connection failure and exit; return for any other."""
+    if not (isinstance(exc, ConnectionError) or "connect" in str(exc).lower() or "refused" in str(exc).lower()):
+        return
     console.print("[red]Error:[/red] Could not connect to the Matrix homeserver.\n")
     console.print(f"  Details: {exc}\n")
     console.print("Check that:")
     console.print("  1. Your Matrix homeserver is running")
     console.print(
-        "  2. MATRIX_HOMESERVER is set correctly "
-        f"(current: {constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)})",
+        f"  2. MATRIX_HOMESERVER is set correctly (current: {runtime_matrix_homeserver(runtime_paths=runtime_paths)})",
     )
     console.print("  3. The server is reachable from this machine")
+    raise typer.Exit(1) from None
 
 
 def main() -> None:
@@ -914,7 +891,12 @@ def main() -> None:
     # Shell completion runs this program without arguments and evaluates what it prints.
     if "_MINDROOM_COMPLETE" not in os.environ:
         _prepare_help_output(sys.argv[1:])
-    app()
+    try:
+        app()
+    except RuntimeEnvFileError as exc:
+        # Commands that report runtime errors their own way catch it first; any other command names the file here.
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        sys.exit(1)
 
 
 def _prepare_help_output(args: list[str]) -> None:

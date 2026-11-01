@@ -185,6 +185,8 @@ Start the isolated backend on a non-default API port.
 uv run mindroom run --storage-path "$MINDROOM_STORAGE_PATH" --api-port 9876 --log-level INFO
 ```
 
+With the API enabled and no dashboard build present, `mindroom run` runs `bun install` and `bun run build` in the checkout's `frontend/`; set `MINDROOM_AUTO_BUILD_FRONTEND=0` when the run only needs the backend and `/api/*`, for example when the checkout is a review snapshot or another worktree you must not change.
+
 Health check:
 
 ```bash

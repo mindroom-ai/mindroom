@@ -15,6 +15,8 @@ export interface ToolFieldSchema {
   requiredWhenFieldChanges?: string | null;
   options?: Array<{ label: string; value: string }> | null;
   validation?: Record<string, unknown> | null;
+  /** False when a tool entry may not set the field, such as a password field, whose secret the Tools page saves. */
+  authored_override?: boolean;
 }
 
 export interface ToolInfo {
@@ -58,11 +60,10 @@ export function useTools(
   executionScope?: WorkerScope | null,
 ) {
   const fetcher = useMemo(
-    () => async () => {
-      return (await fetchJSON<ToolsResponse>(
+    () => async () =>
+      fetchJSON<ToolsResponse>(
         withAgentExecutionScope(API_ENDPOINTS.tools, agentName, executionScope),
-      )) as ToolsResponse;
-    },
+      ),
     [agentName, executionScope],
   );
   const { data: response, ...rest } = useFetchData(fetcher, DEFAULT_RESPONSE);
@@ -73,59 +74,30 @@ export function useTools(
   };
 }
 
-// Helper function to map backend tool to frontend integration format
+// Map a backend tool to the fields of its Integrations card
 export function mapToolToIntegration(tool: ToolInfo) {
-  // Map backend status to frontend status
-  let status: "connected" | "not_connected" | "available";
-  switch (tool.status) {
-    case "available":
-      // For tools that require configuration, 'available' means they are configured
-      if (
-        tool.setup_type === "api_key" ||
-        tool.setup_type === "oauth" ||
-        tool.setup_type === "special"
-      ) {
-        status = "connected";
-      } else {
-        status = "available";
-      }
-      break;
-    case "requires_config":
-      status = "not_connected";
-      break;
-    default:
-      status = "available";
-  }
-
-  // Map setup_type
-  let setup_type: "oauth" | "api_key" | "special" | "none";
-  switch (tool.setup_type) {
-    case "oauth":
-      setup_type = "oauth";
-      break;
-    case "api_key":
-      setup_type = "api_key";
-      break;
-    case "special":
-      setup_type = "special";
-      break;
-    case "none":
-    default:
-      setup_type = "none";
-      break;
-  }
+  const setup_type: "oauth" | "api_key" | "special" | "none" =
+    tool.setup_type === "oauth" ||
+    tool.setup_type === "api_key" ||
+    tool.setup_type === "special"
+      ? tool.setup_type
+      : "none";
+  // For tools that require configuration, "available" means they are configured.
+  const status: "connected" | "not_connected" | "available" =
+    tool.status === "requires_config"
+      ? "not_connected"
+      : tool.status === "available" && setup_type !== "none"
+        ? "connected"
+        : "available";
 
   return {
     id: tool.name,
     name: tool.display_name,
     description: tool.description,
     category: tool.category,
-    icon: tool.icon, // This will need to be mapped to React components
-    icon_color: tool.icon_color,
     status,
     setup_type,
     config_fields: tool.config_fields,
-    dependencies: tool.dependencies,
     docs_url: tool.docs_url,
     helper_text: tool.helper_text,
     oauth_fallback_fields: tool.oauth_fallback_fields,

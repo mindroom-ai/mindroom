@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -165,25 +164,10 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._journal_principal_id != matrix_id
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_accepts_passwordless_managed_account(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Appservice-managed accounts are prepared without a password."""
-        mock_agent_user.password = None
-        config = self.create_mock_config(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-
-        await bot.ensure_user_account()
-
-    @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_owned_session")
-    @patch("mindroom.bot.AgentBot.ensure_user_account")
     async def test_agent_bot_start(
         self,
-        mock_ensure_user: AsyncMock,
         mock_login: AsyncMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -197,9 +181,6 @@ class TestAgentBot(AgentBotTestBase):
         ingestion_session = AsyncMock()
         mock_login.return_value = owned_matrix_login(mock_client, ingestion_session)
 
-        # Mock ensure_user_account to not change the agent_user
-        mock_ensure_user.return_value = None
-
         config = self.create_mock_config(tmp_path)
 
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
@@ -208,8 +189,6 @@ class TestAgentBot(AgentBotTestBase):
         assert bot.running
         assert bot.client == mock_client
         assert bot._ingestion_session is ingestion_session
-        # The bot calls ensure_setup which calls ensure_user_account
-        # and then login with whatever user account was ensured
         assert mock_login.called
         login_kwargs = mock_login.await_args.kwargs
         assert login_kwargs["consumer_store"] == bot.journal_principal()
@@ -223,86 +202,14 @@ class TestAgentBot(AgentBotTestBase):
         # either of the superseded public sync/admission engines.
         mock_client.add_event_admission_callback.assert_not_called()
         mock_client.add_response_callback.assert_not_called()
-        registered_event_types = [call.args[1] for call in mock_client.add_event_callback.call_args_list]
-        assert registered_event_types == [nio.InviteEvent]
+        mock_client.add_event_callback.assert_called_once_with(bot._room_lifecycle.on_invite, nio.InviteEvent)
         assert bot._journal_dispatcher.callbacks.on_room_lifecycle == bot._on_room_member
-        invite_callback = next(
-            call.args[0] for call in mock_client.add_event_callback.call_args_list if call.args[1] is nio.InviteEvent
-        )
-        assert invite_callback == bot._on_invite_before_sync_certification
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_owned_session")
-    @patch("mindroom.bot.AgentBot.ensure_user_account")
-    async def test_agent_bot_start_rebuilds_identity_bound_runtime_after_login_user_id_change(
-        self,
-        mock_ensure_user: AsyncMock,
-        mock_login: AsyncMock,
-        tmp_path: Path,
-    ) -> None:
-        """Login may canonicalize the Matrix ID before sync callbacks are registered."""
-        stale_user_id = "@mindroom_general:localhost"
-        actual_user_id = "@actual_general:localhost"
-        config = _runtime_bound_config(
-            Config(
-                agents={"general": AgentConfig(display_name="GeneralAgent", model="default")},
-                models={"default": {"provider": "openai", "id": "test-model"}},
-            ),
-            tmp_path,
-        )
-        agent_user = AgentMatrixUser(
-            agent_name="general",
-            user_id=stale_user_id,
-            display_name="GeneralAgent",
-            password=TEST_PASSWORD,
-        )
-        mock_client = AsyncMock()
-        mock_client.user_id = actual_user_id
-        mock_client.add_event_callback = MagicMock()
-        mock_client.add_event_admission_callback = MagicMock()
-        mock_client.add_response_callback = MagicMock()
-        mock_ensure_user.return_value = None
-
-        async def _login_with_actual_identity(
-            _homeserver: str,
-            login_user: AgentMatrixUser,
-            *_args: object,
-            **_kwargs: object,
-        ) -> object:
-            login_user.user_id = actual_user_id
-            login_user.__dict__.pop("matrix_id", None)
-            return owned_matrix_login(mock_client)
-
-        mock_login.side_effect = _login_with_actual_identity
-
-        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        stale_resolver = bot._conversation_resolver
-
-        await bot.start()
-
-        assert bot.running is True
-        assert bot.matrix_id.full_id == actual_user_id
-        assert bot._conversation_resolver is not stale_resolver
-        assert bot._conversation_resolver.deps.matrix_id.full_id == actual_user_id
-        assert bot._tool_runtime_support.matrix_id.full_id == actual_user_id
-        assert bot._response_runner.deps.matrix_full_id == actual_user_id
-        assert bot._turn_policy.deps.matrix_id.full_id == actual_user_id
-        assert bot._turn_ingress.deps.matrix_id.full_id == actual_user_id
-        mock_client.add_event_callback.assert_called_once_with(
-            bot._on_invite_before_sync_certification,
-            nio.InviteEvent,
-        )
-        assert bot._journal_dispatcher.callbacks.on_room_lifecycle == bot._on_room_member
-        mock_client.add_event_admission_callback.assert_not_called()
-
-    @pytest.mark.asyncio
-    @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
-    @patch("mindroom.bot.login_agent_owned_session")
-    @patch("mindroom.bot.AgentBot.ensure_user_account")
     async def test_agent_bot_start_revalidates_identity_after_login(
         self,
-        mock_ensure_user: AsyncMock,
         mock_login: AsyncMock,
         tmp_path: Path,
     ) -> None:
@@ -336,7 +243,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_client = AsyncMock()
         mock_client.close = AsyncMock()
         mock_login.return_value = owned_matrix_login(mock_client)
-        mock_ensure_user.return_value = None
 
         async def _login_with_duplicate_identity(*_args: object, **_kwargs: object) -> object:
             state = MatrixState.load(runtime_paths=runtime_paths)
@@ -357,10 +263,8 @@ class TestAgentBot(AgentBotTestBase):
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_owned_session")
-    @patch("mindroom.bot.AgentBot.ensure_user_account")
     async def test_agent_bot_enters_sync_without_startup_cleanup(  # noqa: PLR0915
         self,
-        mock_ensure_user: AsyncMock,
         mock_login: AsyncMock,
         mock_agent_user: AgentMatrixUser,
         monkeypatch: pytest.MonkeyPatch,
@@ -388,7 +292,6 @@ class TestAgentBot(AgentBotTestBase):
             wait_for_work=wait_for_work,
         )
         mock_login.return_value = owned_matrix_login(mock_client, ingestion_session)
-        mock_ensure_user.return_value = None
 
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         await bot.start()
@@ -895,41 +798,6 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.close.assert_awaited_once()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("accept_invites", "expected_join_calls"), [(True, 1), (False, 0)])
-    async def test_agent_bot_on_invite(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        accept_invites: bool,
-        expected_join_calls: int,
-    ) -> None:
-        """Test handling room invitations."""
-        config = self._config_for_storage(tmp_path)
-        config.agents[mock_agent_user.agent_name].accept_invites = accept_invites
-
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
-
-        mock_event = MagicMock()
-        mock_event.sender = "@user:localhost"
-        mock_room = nio.MatrixInvitedRoom("!test:localhost", bot.agent_user.user_id)
-        mock_room.inviter = mock_event.sender
-        bot.client.invited_rooms = {mock_room.room_id: mock_room}
-
-        change_membership = AsyncMock(return_value=True)
-        bot._room_lifecycle.deps = replace(
-            bot._room_lifecycle.deps,
-            change_membership=change_membership,
-        )
-        with (
-            patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room", return_value=True),
-        ):
-            await bot._room_lifecycle.record_pending_room_invite(mock_room.room_id, mock_event.sender)
-            await bot._room_lifecycle.handle_recorded_invite(mock_room, mock_event.sender)
-
-        assert change_membership.await_count == expected_join_calls
-
-    @pytest.mark.asyncio
     async def test_agent_bot_on_message_ignore_own(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test that agent ignores its own messages."""
         config = self._config_for_storage(tmp_path)
@@ -985,7 +853,7 @@ class TestAgentBot(AgentBotTestBase):
         """Test agent bot responding to mentions; both delivery modes run the one agent turn stream."""
 
         # Mock streaming response - return an async generator
-        async def mock_streaming_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        async def mock_streaming_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str]:
             yield "Test"
             yield " response"
 
@@ -1433,7 +1301,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         # Mock streaming response - return an async generator
-        async def mock_streaming_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        async def mock_streaming_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str]:
             yield "Thread"
             yield " response"
 
@@ -1535,7 +1403,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         # Set up fresh async generator for the second call
-        async def mock_streaming_response2(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        async def mock_streaming_response2(*_args: object, **_kwargs: object) -> AsyncGenerator[str]:
             yield "Mentioned"
             yield " response"
 

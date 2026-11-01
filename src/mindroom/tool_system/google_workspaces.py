@@ -13,8 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.oauth.google import google_oauth_providers, with_google_account_picker
-from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.registry import builtin_tool_registry, register_tool
 
 __all__ = ["GoogleWorkspaceConfig", "google_workspace_oauth_providers", "register_google_workspace_tools"]
 
@@ -138,30 +137,16 @@ def register_google_workspace_tools(workspace: GoogleWorkspaceConfig) -> None:
     for service, provider in zip(workspace.services, google_workspace_oauth_providers(workspace), strict=True):
         base = builtins[service]
         assert provider.tool_config_service is not None
-        register_tool_with_metadata(
-            name=provider.tool_config_service,
-            display_name=provider.display_name,
-            description=f"{base.description} using the connected {workspace.display_name} account",
-            category=base.category,
-            status=base.status,
-            setup_type=base.setup_type,
-            default_execution_target=base.default_execution_target,
-            consumes_workspace_paths=base.consumes_workspace_paths,
-            file_access=base.file_access,
-            executes_code=base.executes_code,
-            requires_room_context=base.requires_room_context,
-            requires_primary_runtime=True,
-            icon=base.icon,
-            icon_color=base.icon_color,
-            config_fields=base.config_fields,
-            agent_override_fields=base.agent_override_fields,
-            authored_override_validator=base.authored_override_validator,
-            dependencies=base.dependencies,
-            auth_provider=provider.id,
-            oauth_fallback_fields=base.oauth_fallback_fields,
-            docs_url=base.docs_url,
-            helper_text=base.helper_text,
-            function_names=tuple(f"{workspace.name}_{name}" for name in base.function_names),
-            managed_init_args=base.managed_init_args,
-            supports_toolkit_filters=base.supports_toolkit_filters,
-        )(_workspace_tool_factory(base, provider, workspace.name))
+        register_tool(
+            replace(
+                base,
+                name=provider.tool_config_service,
+                display_name=provider.display_name,
+                description=f"{base.description} using the connected {workspace.display_name} account",
+                requires_primary_runtime=True,
+                dependency_extra=service,
+                auth_provider=provider.id,
+                function_names=tuple(f"{workspace.name}_{name}" for name in base.function_names),
+                factory=_workspace_tool_factory(base, provider, workspace.name),
+            ),
+        )

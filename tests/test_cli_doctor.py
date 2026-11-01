@@ -233,11 +233,35 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
         router=RouterConfig(model="default"),
     )
 
-    result = _check_single_provider("openai", config, runtime_paths)
+    result = _check_providers(config, runtime_paths)
 
     assert result == (0, 0, 1)
     assert validated == []
-    assert "openai: OPENAI_API_KEY not set" in capsys.readouterr().out
+    assert "openai: Set OPENAI_API_KEY (models: default)" in capsys.readouterr().out
+
+
+def test_doctor_warns_about_the_environment_a_model_reads_but_nothing_sets(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A missing Bedrock region and Azure endpoint are warnings, as `config validate` reports them."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"AZURE_OPENAI_API_KEY": "azure-key"},
+    )
+    config = Config(
+        models={
+            "default": ModelConfig(provider="bedrock_claude", id="anthropic.claude-opus-5"),
+            "azure": ModelConfig(provider="azure", id="gpt-6-astra"),
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    # The third warning is the Azure key's: Azure has no key check, so its key is never probed.
+    assert _check_providers(config, runtime_paths) == (0, 0, 3)
+    output = " ".join(capsys.readouterr().out.split())
+    assert "bedrock_claude: Set AWS_REGION (models: default)" in output
+    assert "azure: Set AZURE_OPENAI_ENDPOINT (models: azure)" in output
 
 
 @pytest.mark.parametrize(
@@ -319,7 +343,10 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Spellings config load accepts group under the runtime's route and get that route's checks."""
-    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"ANTHROPIC_VERTEX_PROJECT_ID": "project", "CLOUD_ML_REGION": "global"},
+    )
     probed = _ollama_servers(monkeypatch)
     vertex_models: list[str] = []
 
@@ -871,6 +898,26 @@ def test_doctor_checks_a_shared_key_at_the_provider_s_own_api_beside_a_custom_en
     assert "OPENAI_API_KEY not checked: models.gateway.extra_kwargs.client_params.base_url may send" in output
 
 
+def test_doctor_warns_once_per_model_when_no_model_reading_the_shared_key_is_checked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each model that reads the shared key and sets an endpoint gets its own warning, and the key is never sent."""
+    runtime_paths = _runtime_with_env(tmp_path, {"OPENAI_API_KEY": "shared"})
+    sent = _record_key_checks(monkeypatch)
+    gateway = {"client_params": {"base_url": _GATEWAY}}
+    config = Config(
+        models={
+            "first": ModelConfig(provider="openai", id="m", extra_kwargs=gateway),
+            "second": ModelConfig(provider="openai", id="m", extra_kwargs=gateway),
+        },
+        router=RouterConfig(model="first"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (0, 0, 2)
+    assert sent == []
+
+
 def test_doctor_names_a_setting_it_did_not_check_as_written(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1067,7 +1114,7 @@ def test_doctor_does_not_check_a_key_an_earlier_release_copied_from_a_variable_s
 
     assert _check_providers(config, runtime_paths) == (0, 0, 1)
     assert sent == []
-    assert "openai: OPENAI_API_KEY not set" in " ".join(capsys.readouterr().out.split())
+    assert "openai: Set OPENAI_API_KEY (models: default)" in " ".join(capsys.readouterr().out.split())
 
 
 @pytest.mark.parametrize(

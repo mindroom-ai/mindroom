@@ -30,24 +30,24 @@ _APPROVED_EGRESS_TOOL_NAME = "approved_egress"
 
 
 @dataclass(frozen=True)
-class AuthoredOptionalModel:
+class _AuthoredOptionalModel:
     """Static authored semantics for an optional model override field."""
 
     kind: Literal["unset", "clear", "value"]
     value: str | None = None
 
 
-def _authored_optional_model(model_name: str | None, *, field_is_set: bool) -> AuthoredOptionalModel:
+def _authored_optional_model(model_name: str | None, *, field_is_set: bool) -> _AuthoredOptionalModel:
     if not field_is_set:
-        return AuthoredOptionalModel(kind="unset")
+        return _AuthoredOptionalModel(kind="unset")
     if model_name is None:
-        return AuthoredOptionalModel(kind="clear")
-    return AuthoredOptionalModel(kind="value", value=model_name)
+        return _AuthoredOptionalModel(kind="clear")
+    return _AuthoredOptionalModel(kind="value", value=model_name)
 
 
 def authored_compaction_model_fields(
     compaction: CompactionConfig | CompactionOverrideConfig,
-) -> dict[str, AuthoredOptionalModel]:
+) -> dict[str, _AuthoredOptionalModel]:
     """Return authored tri-state semantics for every optional compaction model field."""
     return {
         "model": _authored_optional_model(compaction.model, field_is_set="model" in compaction.model_fields_set),
@@ -146,6 +146,14 @@ def show_tool_calls(config: Config, name: str | None) -> bool:
     if agent is not None and agent.show_tool_calls is not None:
         return agent.show_tool_calls
     return config.defaults.show_tool_calls
+
+
+def show_reasoning(config: Config, name: str | None) -> bool:
+    """Return whether an agent's streamed replies show its model's reasoning; a name no agent has uses the default."""
+    agent = config.agents.get(name) if name is not None else None
+    if agent is not None and agent.show_reasoning is not None:
+        return agent.show_reasoning
+    return config.defaults.show_reasoning
 
 
 def file_access(config: Config, name: str | None) -> FileAccess:

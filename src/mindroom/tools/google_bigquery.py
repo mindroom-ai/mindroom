@@ -104,7 +104,6 @@ if TYPE_CHECKING:
         "google-api-python-client",
         "google-auth",
         "google-auth-httplib2",
-        "google-auth-oauthlib",
     ],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#google_bigquery",
     helper_text="Connect Google Cloud, then set the project, dataset, and location. Queries run as the connected account with read-only access.",

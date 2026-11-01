@@ -369,33 +369,6 @@ class ConversationStore:
             ]
         return True
 
-    def rewrite_run_messages(
-        self,
-        session_id: str,
-        edit: Callable[[list[AnyRunRecord]], list[AnyRunRecord]],
-        *,
-        session: ConversationSession | None = None,
-    ) -> None:
-        """Apply ``edit`` to fresh copies of the runs a load returns, under the write lock, and store their messages.
-
-        ``edit`` returns the runs it changed and changes no other. Only messages store, under the save's message rules,
-        and only for runs the load returned, so no other writer's status, metadata, or messages are lost and no covered
-        run changes. Once it commits, ``session``, when given, holds what a load returns: the load ``edit`` was handed
-        when it stored nothing, which spares a second read.
-        """
-        with self.transaction(write=True) as connection:
-            loaded = self._read_load(connection, session_id)
-            runs = loaded.runs if loaded is not None else []
-            statuses = {run.run_id: run.status.value for run in runs}
-            stored = [(run, status) for run in edit(runs) if (status := statuses.get(run.run_id)) is not None]
-            for run, status in stored:
-                messages = [message.to_dict() for message in run.messages]
-                set_visible_messages(connection, self.names, run.run_id, messages, status)
-            if stored and session is not None:
-                loaded = self._read_load(connection, session_id)
-        if session is not None:
-            _adopt_log(session, loaded)
-
     def get_run(self, run_id: str) -> AnyRunRecord | None:
         """Return one stored run, in whatever session, in its replay view; a paused team run comes with its members."""
         with self.transaction(write=False) as connection:
@@ -974,16 +947,20 @@ def _read_runs(
 ) -> list[AnyRunRecord]:
     """Decode the runs whose rows meet ``condition``, in ``seq`` order, each in its replay view.
 
-    A paused team run's ``member_responses``, which its resume reads, are the member runs its requirements name, in
-    first-mention order, each decoded apart from the member's own record so the two share nothing.
+    A paused team run's ``member_responses``, whose calls it waits on and its resume continues, are its paused member
+    runs in ``seq`` order, the order their rows were first written, each decoded apart from the member's own record so
+    the two share nothing.
     """
     records = _decoded_runs(connection, names, f"{condition} ORDER BY run.seq", parameters)
     for record in records:
         if isinstance(record, TeamRunRecord) and record.status is RunStatus.paused:
-            named = list(dict.fromkeys(item.member_run_id for item in record.requirements or () if item.member_run_id))
-            members = _decoded_runs(connection, names, "run.parent_run_id = ?", (record.run_id,))
-            by_id = {member.run_id: cast("RunRecord", member) for member in members}
-            record.member_responses = [by_id[member_id] for member_id in named if member_id in by_id]
+            members = _decoded_runs(
+                connection,
+                names,
+                "run.parent_run_id = ? AND run.status = ? ORDER BY run.seq",
+                (record.run_id, RunStatus.paused.value),
+            )
+            record.member_responses = [cast("RunRecord", member) for member in members]
     return records
 
 
@@ -1125,7 +1102,7 @@ def store_fold(
     runs, now, seq = quote_identifier(names.log_runs), int(time()), _next_seq(connection, names)
     move = f"UPDATE {runs} SET seq = ? WHERE session_id = ? AND run_id = ?"  # noqa: S608
     if not connection.execute(move, (seq, session_id, run.run_id)).rowcount:
-        data = {**run.to_dict(), "status": RunStatus.cancelled.value, "tools": None, "requirements": None}
+        data = {**run.to_dict(), "status": RunStatus.cancelled.value, "tools": None}
         created_at, kind = run.created_at or now, run_kind(run)
         upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
     folded = [message.to_dict() for message in messages]

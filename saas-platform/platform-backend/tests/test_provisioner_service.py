@@ -1,12 +1,20 @@
 """Focused unit tests for the extracted provisioner service helpers."""
 
+import asyncio
 import base64
+import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 import yaml
 from backend.openrouter import CreatedOpenRouterKey
+from backend.routes.instances import _background_sync_instance_status
 from backend.services import provisioner_service
+
+from tests.fake_supabase import FakeSupabase
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
@@ -180,3 +188,275 @@ class TestOpenRouterMetadataRoundTrip:
         assert provisioner_service._stored_openrouter_key_hash({}) is None
         assert provisioner_service._stored_openrouter_key_hash({"openrouter_key_hash": "   "}) is None
         assert provisioner_service._stored_openrouter_key_hash({"openrouter_key_hash": " h1 "}) == "h1"
+
+
+def _fake_kubectl(deployments: dict[str, dict[str, Any]], *, unreachable: frozenset[str] = frozenset()):
+    """Return a `run_cmd` stand-in answering `kubectl get` for the given MindRoom deployments by instance ID.
+
+    Instances in `unreachable` get the failure kubectl reports when it cannot reach the API server.
+    """
+
+    async def run_cmd(cmd: list[str]) -> tuple[int, str, str]:
+        assert cmd[:2] == ["kubectl", "get"]
+        assert "-o=json" in cmd
+        assert "--ignore-not-found" in cmd
+        assert "--namespace=mindroom-instances" in cmd
+        instance_id = cmd[2].removeprefix("deployment/mindroom-")
+        if instance_id in unreachable:
+            return 1, "", "The connection to the server was refused - did you specify the right host or port?"
+        deployment = deployments.get(instance_id)
+        return 0, "" if deployment is None else json.dumps(deployment), ""
+
+    return run_cmd
+
+
+def _deployment(
+    *, desired: int, ready: int, available: int | None = None, updated: int | None = None
+) -> dict[str, Any]:
+    """Return deployment JSON as kubectl prints it, which omits replica counts that are zero."""
+    counts = {
+        "readyReplicas": ready,
+        "availableReplicas": ready if available is None else available,
+        "updatedReplicas": desired if updated is None else updated,
+    }
+    return {"spec": {"replicas": desired}, "status": {k: v for k, v in counts.items() if v}}
+
+
+class TestInstanceStatusSync:
+    """Kubernetes-to-database instance status reconciliation."""
+
+    def test_bulk_sync_keeps_an_unready_instance_provisioning(self):
+        """An instance whose deployment wants a pod that is not ready yet is not reported running."""
+        db = FakeSupabase({"instances": [{"id": "1", "instance_id": "7", "status": "provisioning"}]})
+
+        with patch("backend.k8s.run_cmd", _fake_kubectl({"7": _deployment(desired=1, ready=0)})):
+            result = asyncio.run(provisioner_service.sync_instances(db))
+
+        assert db.row("instances", instance_id="7")["status"] == "provisioning"
+        assert result == {"total": 1, "synced": 0, "errors": 0, "updates": []}
+
+    @pytest.mark.parametrize(
+        ("deployment", "expected"),
+        [
+            (_deployment(desired=0, ready=0), "stopped"),
+            (_deployment(desired=1, ready=1), "running"),
+            (_deployment(desired=2, ready=1), "provisioning"),
+            (_deployment(desired=1, ready=1, available=0), "provisioning"),
+            (_deployment(desired=1, ready=1, updated=0), "provisioning"),
+            ({"spec": {"replicas": 1}}, "provisioning"),
+        ],
+    )
+    def test_running_needs_every_desired_pod_ready_available_and_updated(
+        self, deployment: dict[str, Any], expected: str
+    ):
+        """A rollout whose ready pods are still the old ones, or not yet available, is not running."""
+        assert provisioner_service._deployment_status(deployment) == expected
+
+    @pytest.mark.parametrize(
+        ("stored", "deployment", "expected"),
+        [
+            ("stopped", _deployment(desired=1, ready=1), "running"),
+            ("error", _deployment(desired=1, ready=1), "running"),
+            ("running", _deployment(desired=1, ready=0), "provisioning"),
+            ("running", _deployment(desired=0, ready=0), "stopped"),
+            ("running", None, "error"),
+            ("stopped", None, "error"),
+            ("deprovisioned", None, "deprovisioned"),
+            ("provisioning", None, "provisioning"),
+        ],
+    )
+    def test_sync_records_the_status_kubernetes_shows(
+        self, stored: str, deployment: dict[str, Any] | None, expected: str
+    ):
+        """Each sync stamps the row with the status its deployment, or the lack of one, shows."""
+        db = FakeSupabase({"instances": [{"id": "1", "instance_id": "7", "status": stored}]})
+        deployments = {} if deployment is None else {"7": deployment}
+
+        with patch("backend.k8s.run_cmd", _fake_kubectl(deployments)):
+            asyncio.run(provisioner_service.sync_instance_status(db, "7", stored))
+
+        row = db.row("instances", instance_id="7")
+        assert row["status"] == expected
+        assert row["kubernetes_synced_at"]
+
+    @pytest.mark.parametrize("trigger", ["dashboard", "bulk"])
+    def test_kubectl_failure_leaves_the_row_for_the_next_sync(self, trigger: str):
+        """A failed observation changes nothing, and the unstamped row is checked again on the next dashboard poll."""
+        db = FakeSupabase({"instances": [{"id": "1", "instance_id": "7", "status": "running"}]})
+
+        with (
+            patch("backend.k8s.run_cmd", _fake_kubectl({}, unreachable=frozenset({"7"}))),
+            patch("backend.routes.instances.ensure_supabase", return_value=db),
+        ):
+            if trigger == "dashboard":
+                asyncio.run(_background_sync_instance_status("7"))
+            else:
+                result = asyncio.run(provisioner_service.sync_instances(db))
+                assert result == {"total": 1, "synced": 0, "errors": 1, "updates": []}
+
+        assert db.row("instances", instance_id="7") == {"id": "1", "instance_id": "7", "status": "running"}
+
+    @pytest.mark.parametrize(
+        ("stored", "deployment", "written_meanwhile"),
+        [
+            # A provision claims a torn-down instance.
+            ("deprovisioned", None, "provisioning"),
+            # The owner stops an instance whose first boot just finished.
+            ("provisioning", _deployment(desired=1, ready=1), "stopped"),
+        ],
+    )
+    @pytest.mark.parametrize("trigger", ["dashboard", "bulk"])
+    def test_status_written_during_the_kubernetes_check_is_kept(
+        self, trigger: str, stored: str, deployment: dict[str, Any] | None, written_meanwhile: str
+    ):
+        """A status another writer records while the sync waits on Kubernetes is neither undone nor reported."""
+        db = FakeSupabase({"instances": [{"id": "1", "instance_id": "7", "status": stored}]})
+        kubectl = _fake_kubectl({} if deployment is None else {"7": deployment})
+
+        async def write_during_check(cmd: list[str]) -> tuple[int, str, str]:
+            db.row("instances", instance_id="7")["status"] = written_meanwhile
+            return await kubectl(cmd)
+
+        with (
+            patch("backend.k8s.run_cmd", write_during_check),
+            patch("backend.routes.instances.ensure_supabase", return_value=db),
+        ):
+            if trigger == "dashboard":
+                asyncio.run(_background_sync_instance_status("7"))
+            else:
+                result = asyncio.run(provisioner_service.sync_instances(db))
+                assert result == {"total": 1, "synced": 0, "errors": 0, "updates": []}
+
+        assert db.row("instances", instance_id="7")["status"] == written_meanwhile
+
+    def test_bulk_sync_reports_each_recorded_change(self):
+        """The admin and system sync report the changes they recorded and count the instances they could not check."""
+        db = FakeSupabase(
+            {
+                "instances": [
+                    {"id": "1", "instance_id": 1, "status": "stopped"},
+                    {"id": "2", "instance_id": 2, "status": "running"},
+                    {"id": "3", "instance_id": 3, "status": "running"},
+                    {"id": "4", "instance_id": 4, "status": "running"},
+                ]
+            }
+        )
+        kubectl = _fake_kubectl(
+            {"1": _deployment(desired=1, ready=1), "2": _deployment(desired=1, ready=1)},
+            unreachable=frozenset({"4"}),
+        )
+
+        with patch("backend.k8s.run_cmd", kubectl):
+            result = asyncio.run(provisioner_service.sync_instances(db))
+
+        assert result == {
+            "total": 4,
+            "synced": 2,
+            "errors": 1,
+            "updates": [
+                {"instance_id": 1, "old_status": "stopped", "new_status": "running", "reason": "status_mismatch"},
+                {"instance_id": 3, "old_status": "running", "new_status": "error", "reason": "deployment_not_found"},
+            ],
+        }
+
+
+_ACCOUNT_ID = "00000000-0000-0000-0000-000000000001"
+_SUBSCRIPTION_ID = "11111111-1111-1111-1111-111111111111"
+
+
+class TestReadinessStatusWrites:
+    """Provisioning records running once the deployment is ready, but only over its own provisioning claim."""
+
+    @pytest.mark.parametrize(
+        ("written_meanwhile", "ready", "expected"),
+        [("provisioning", True, "running"), ("provisioning", False, "provisioning"), ("stopped", True, "stopped")],
+    )
+    def test_provision_records_running_only_over_its_own_claim(
+        self, written_meanwhile: str, ready: bool, expected: str
+    ):
+        """An admin's stop during the readiness wait stands, and the deployed tier is recorded either way."""
+        row = {
+            "instance_id": 7,
+            "subscription_id": _SUBSCRIPTION_ID,
+            "account_id": _ACCOUNT_ID,
+            "status": "running",
+            "tier": "hobby",
+            "openrouter_key_hash": None,
+            "lifecycle_stopped_at": None,
+        }
+        db = FakeSupabase({"instances": [row]})
+
+        async def ready_after_a_write(*_args: Any, **_kwargs: Any) -> bool:  # noqa: ANN401
+            db.row("instances", instance_id=7)["status"] = written_meanwhile
+            return ready
+
+        service = "backend.services.provisioner_service"
+        with (
+            patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+            patch(f"{service}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+            patch(f"{service}._apply_instance_secret", AsyncMock()),
+            patch(f"{service}.wait_for_deployment_ready", ready_after_a_write),
+            patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        ):
+            asyncio.run(
+                provisioner_service.provision_instance(
+                    db,
+                    data={
+                        "subscription_id": _SUBSCRIPTION_ID,
+                        "account_id": _ACCOUNT_ID,
+                        "tier": "byok",
+                        "instance_id": 7,
+                    },
+                    background_tasks=None,
+                )
+            )
+
+        assert (row["status"], row["tier"]) == (expected, "byok")
+
+    @pytest.mark.parametrize(
+        ("stored", "lifecycle_stopped_at", "ready", "expected"),
+        [
+            ("provisioning", None, True, "running"),
+            # An admin's stop recorded while the background wait ran.
+            ("stopped", None, True, "stopped"),
+            # A lifecycle hold that landed while the background wait ran.
+            ("provisioning", "2026-09-28T03:00:00+00:00", True, "provisioning"),
+            ("provisioning", None, False, "provisioning"),
+        ],
+    )
+    def test_background_readiness_records_running_only_over_the_claim(
+        self, stored: str, lifecycle_stopped_at: str | None, ready: bool, expected: str
+    ):
+        """The longer background wait records running only over its claim, and never over a stop or a hold."""
+        db = FakeSupabase(
+            {"instances": [{"instance_id": 7, "status": stored, "lifecycle_stopped_at": lifecycle_stopped_at}]}
+        )
+
+        with (
+            patch("backend.services.provisioner_service.ensure_supabase", return_value=db),
+            patch("backend.services.provisioner_service.wait_for_deployment_ready", AsyncMock(return_value=ready)),
+        ):
+            asyncio.run(provisioner_service._background_mark_running_when_ready("7"))
+
+        assert db.row("instances", instance_id=7)["status"] == expected
+
+    @pytest.mark.parametrize(
+        ("failing", "exceptions_and_warnings"), [("wait_for_deployment_ready", (1, 0)), ("_record_running", (0, 1))]
+    )
+    def test_background_readiness_logs_failures_instead_of_raising(
+        self, failing: str, exceptions_and_warnings: tuple[int, int]
+    ):
+        """A failed wait or a failed running write is logged; the background task never raises."""
+        db = FakeSupabase({"instances": [{"instance_id": 7, "status": "provisioning", "lifecycle_stopped_at": None}]})
+        service = "backend.services.provisioner_service"
+
+        with (
+            patch(f"{service}.ensure_supabase", return_value=db),
+            patch(f"{service}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+            patch(f"{service}.{failing}", side_effect=RuntimeError("failed")),
+            patch(f"{service}.logger") as logger,
+        ):
+            asyncio.run(provisioner_service._background_mark_running_when_ready("7"))
+
+        assert (logger.exception.call_count, logger.warning.call_count) == exceptions_and_warnings
+        assert db.row("instances", instance_id=7)["status"] == "provisioning"

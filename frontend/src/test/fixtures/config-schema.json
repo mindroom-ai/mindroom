@@ -407,6 +407,19 @@
           "description": "Whether to show tool call details inline in responses (per-agent override)",
           "title": "Show Tool Calls"
         },
+        "show_reasoning": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether streamed replies show the model's reasoning to the room (per-agent override)",
+          "title": "Show Reasoning"
+        },
         "worker_tools": {
           "anyOf": [
             {
@@ -1484,6 +1497,12 @@
           "title": "Show Tool Calls",
           "type": "boolean"
         },
+        "show_reasoning": {
+          "default": true,
+          "description": "Whether streamed replies show the model's reasoning to the room",
+          "title": "Show Reasoning",
+          "type": "boolean"
+        },
         "file_access": {
           "default": "workspace",
           "description": "Where in-process path-taking tools (file, coding, attachments, matrix_message, gmail, google_drive, browser) may read and write files: workspace confines them to the agent workspace and its attachments, unrestricted allows any path their process can reach. Code-execution tools such as shell and python are always unrestricted; isolate them with worker_tools",
@@ -1598,7 +1617,8 @@
             "update_interval": 5.0,
             "min_update_interval": 0.5,
             "interval_ramp_seconds": 15.0,
-            "max_idle": 2.0
+            "max_idle": 2.0,
+            "live_frames": true
           },
           "description": "Streaming response timing parameters"
         },
@@ -2401,7 +2421,10 @@
           ],
           "default": null,
           "description": "Model that writes a short context for each chunk of a multi-chunk file before it is indexed (contextual retrieval); costs one model call per chunk of each changed file",
-          "title": "Chunk Context Model"
+          "title": "Chunk Context Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "include_extensions": {
           "anyOf": [
@@ -2574,7 +2597,10 @@
           ],
           "default": null,
           "description": "Model alias that extracts entities and facts; required when any agent enables the graph",
-          "title": "Model"
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "extraction_instructions": {
           "default": "",
@@ -3909,7 +3935,7 @@
         },
         "agent": {
           "$ref": "#/$defs/AgentConfig",
-          "description": "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, {username}, and {user_display_name}. Only the owner and administrators may use each agent unless access admits others, and the owner is always added to access.users and credential_managers"
+          "description": "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, {username}, and {user_display_name}, and the template key in delegate_to names each user's own agent. Only the owner and administrators may use each agent unless access admits others, and the owner is always added to access.users and credential_managers"
         },
         "users": {
           "additionalProperties": {
@@ -4581,7 +4607,10 @@
           ],
           "default": null,
           "description": "Review model alias; defaults to the model of the reviewed response",
-          "title": "Model"
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "review_interval": {
           "default": 10,
@@ -4760,6 +4789,12 @@
           "exclusiveMinimum": 0,
           "title": "Max Idle",
           "type": "number"
+        },
+        "live_frames": {
+          "default": true,
+          "description": "Stream live updates as ephemeral frames when the homeserver relays them, editing the message only every update_interval",
+          "title": "Live Frames",
+          "type": "boolean"
         }
       },
       "title": "StreamingConfig",
@@ -5212,7 +5247,10 @@
           ],
           "default": null,
           "description": "Model config that runs extraction instead of the agent's own model",
-          "title": "Model"
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "no_reply_token": {
           "default": "NO_REPLY",
@@ -5490,6 +5528,7 @@
         "max_tool_calls_from_history": null,
         "max_tool_calls_per_turn": 1000,
         "show_tool_calls": true,
+        "show_reasoning": true,
         "file_access": "workspace",
         "worker_tools": null,
         "worker_scope": null,
@@ -5500,6 +5539,7 @@
         "tool_output_auto_save_threshold_bytes": 51200,
         "streaming": {
           "interval_ramp_seconds": 15.0,
+          "live_frames": true,
           "max_idle": 2.0,
           "min_update_interval": 0.5,
           "update_interval": 5.0

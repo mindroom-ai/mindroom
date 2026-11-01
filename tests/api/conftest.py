@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -22,7 +23,6 @@ from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.api.app_state import ensure_app_state
 from mindroom.config.commit import ConfigCommit
-from mindroom.config.load_attempt import ConfigLoadResult
 from mindroom.config.main import Config, load_config
 from tests.runtime_fakes import bind_test_embedded_runtime
 
@@ -34,6 +34,13 @@ if TYPE_CHECKING:
 def _single_line_execute_responses(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a quick /execute call to its one result line, however slowly a loaded machine runs it."""
     monkeypatch.setattr("mindroom.api.sandbox_runner.EXECUTE_KEEPALIVE_SECONDS", 3600.0)
+
+
+def fake_local_worker_venv_create(venv_dir: Path) -> None:
+    """Create the minimal worker venv layout that local worker preparation checks, linked to this interpreter."""
+    bin_dir = venv_dir / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "python").symlink_to(Path(sys.executable))
 
 
 _TRUSTED_UPSTREAM_AUDIENCE = "mindroom-dashboard"
@@ -250,7 +257,7 @@ def publish_api_config(api_app: FastAPI, config: Config) -> None:
     """Serve `config` as the app's committed config without loading or committing a file."""
     snapshot = api_snapshot(api_app)
     snapshot.runtime_config = config
-    snapshot.config_load_result = ConfigLoadResult(success=True)
+    snapshot.load_error = None
 
 
 def save_config(request: Request, payload: dict[str, Any], *, expected_generation: int | None = None) -> int:
@@ -289,6 +296,13 @@ def commit_tool_change(
     commit = ConfigCommit.from_payload(payload, runtime_paths)
     config_lifecycle.commit_config(runtime_paths, commit, loaded=loaded)
     return commit.config
+
+
+def login_with_api_key(client: TestClient) -> None:
+    """Sign `client` in with the `test-key` session cookie and send its origin, as a browser does."""
+    client.headers["Origin"] = str(client.base_url).rstrip("/")
+    response = client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert response.status_code == 200
 
 
 PLATFORM_SSO_SECRET = "instance-platform-sso-secret-for-tests-0001"  # noqa: S105

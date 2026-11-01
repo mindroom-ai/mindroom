@@ -30,6 +30,7 @@ from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionOverrideConfig, ModelConfig
+from mindroom.config.resolution import entity_model_name
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.custom_tools import claude_agent
 from mindroom.custom_tools.dynamic_workflow import _run_room_agent_turn
@@ -62,7 +63,7 @@ from mindroom.voice import handler as voice_handler
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.history_helpers import _forced_compaction_context, _make_config, _reported, _session
-from tests.identity_helpers import persist_actual_entity_accounts, persist_entity_accounts
+from tests.identity_helpers import persist_actual_entity_accounts
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -114,15 +115,13 @@ def _usage_rows(storage_root: Path) -> list[list[str]]:
 
 
 def _system_config(paths: RuntimePaths) -> Config:
-    config = bind_runtime_paths(
+    return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", role="Help")},
             models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         paths,
     )
-    persist_entity_accounts(config, paths)
-    return config
 
 
 def _scripted(monkeypatch: pytest.MonkeyPatch, text: str, *, sums_attempts: bool = False) -> None:
@@ -361,10 +360,9 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     inputs = resolve_entity_preparation_inputs(
         config=config,
         runtime_paths=paths,
-        entity_name="test_agent",
         history_settings=config.resolve_scope("test_agent").history_settings,
         static_prompt_tokens=0,
-        active_model_name=None,
+        active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
     )
     outcome = await _compact_before_reply(

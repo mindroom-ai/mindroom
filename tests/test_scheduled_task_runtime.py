@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -21,6 +22,7 @@ from mindroom.scheduling.tasks import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
     _save_pending_scheduled_task,
+    cancel_all_scheduled_tasks,
     cancel_scheduled_task,
     get_scheduled_task,
     save_edited_scheduled_task,
@@ -36,7 +38,7 @@ from tests.scheduling_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -53,17 +55,12 @@ def _fast_owner_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(scheduling_runtime, "_OWNER_POLL_INTERVAL_SECONDS", 0)
 
 
-def _config_and_ids(tmp_path: Path) -> tuple[Config, RuntimePaths, dict[str, str]]:
-    config = Config(agents={"general": AgentConfig(display_name="General")})
+def _config_and_ids(tmp_path: Path, *names: str) -> tuple[Config, RuntimePaths, dict[str, str]]:
+    """Return a config with the named agents (default ``general``), its runtime paths, and every entity's Matrix id."""
+    config = Config(agents={name: AgentConfig(display_name=name.title()) for name in names or ("general",)})
     runtime_paths = orchestrator_runtime_paths(tmp_path)
     ids = {name: matrix_id.full_id for name, matrix_id in entity_ids(config, runtime_paths).items()}
     return config, runtime_paths, ids
-
-
-def _client(user_id: str) -> AsyncMock:
-    client = make_matrix_client_mock(user_id=user_id)
-    client.homeserver = "https://localhost"
-    return client
 
 
 def _workflow(*, due: bool = True) -> ScheduledWorkflow:
@@ -82,14 +79,42 @@ def _record(workflow: ScheduledWorkflow) -> ScheduledTaskRecord:
     return ScheduledTaskRecord(TASK_ID, ROOM_ID, "pending", None, workflow)
 
 
-class _Bots(dict[str, "AgentBot"]):
-    """The fleet's live bots, which a test replaces the way a restart does."""
-
-
-def _runtime(runtime_paths: RuntimePaths, config: Config, bots: _Bots) -> ScheduledTaskRuntime:
+def _runtime(runtime_paths: RuntimePaths, config: Config, bots: dict[str, AgentBot]) -> ScheduledTaskRuntime:
+    """Return a runtime whose fleet is ``bots``, which a test mutates the way a restart replaces a bot."""
     runtime = scheduled_task_runtime(runtime_paths, config=config)
     runtime.bots = lambda: bots
     return runtime
+
+
+async def _save_task(runtime: ScheduledTaskRuntime, client: nio.AsyncClient, workflow: ScheduledWorkflow) -> None:
+    """Save a pending task as a scheduling command does, without starting its runner."""
+    await _save_pending_scheduled_task(
+        client,
+        ROOM_ID,
+        TASK_ID,
+        workflow,
+        runtime.config_provider(),
+        runtime.runtime_paths,
+        task_runtime=runtime,
+    )
+
+
+async def _wait_forever(*_args: object, **_kwargs: object) -> None:
+    await asyncio.Event().wait()
+
+
+@contextmanager
+def _owner_polls(runtime: ScheduledTaskRuntime) -> Iterator[asyncio.Event]:
+    """Yield an event that is set each time a runner looks for its owner's live bot."""
+    polled = asyncio.Event()
+    ready_bot = runtime._ready_bot
+
+    def observed_ready_bot(entity_name: str) -> AgentBot | None:
+        polled.set()
+        return ready_bot(entity_name)
+
+    with patch.object(runtime, "_ready_bot", side_effect=observed_ready_bot):
+        yield polled
 
 
 def _stopped(bot: AgentBot) -> AgentBot:
@@ -102,19 +127,13 @@ def _stopped(bot: AgentBot) -> AgentBot:
 async def test_runner_waits_through_its_owners_restart_and_fires_once_on_the_new_client(tmp_path: Path) -> None:
     """A DM reminder whose agent restarts fires once, through the replacement's client, never the closed one."""
     config, runtime_paths, _ids = _config_and_ids(tmp_path)
-    old_bot = _stopped(scheduling_bot(_client("@general:localhost"), agent_name="general"))
-    bots = _Bots(general=old_bot)
+    old_bot = _stopped(scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general"))
+    bots = {"general": old_bot}
     runtime = _runtime(runtime_paths, config, bots)
     workflow = _workflow()
-    owner_polled = asyncio.Event()
-    real_ready_bot = runtime._ready_bot
-
-    def ready_bot(entity_name: str) -> AgentBot | None:
-        owner_polled.set()
-        return real_ready_bot(entity_name)
 
     with (
-        patch.object(runtime, "_ready_bot", side_effect=ready_bot),
+        _owner_polls(runtime) as owner_polled,
         patch("mindroom.scheduling.runtime._get_pending_task_record", new=AsyncMock(return_value=_record(workflow))),
         patch("mindroom.scheduling.runtime._scheduled_task_creator_is_joined", new=AsyncMock(return_value=True)),
         patch(
@@ -127,7 +146,7 @@ async def test_runner_waits_through_its_owners_restart_and_fires_once_on_the_new
         _runner, task = runtime._runners[TASK_ID]
         await owner_polled.wait()
         execute.assert_not_awaited()
-        new_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+        new_bot = scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general")
         bots["general"] = new_bot
         await task
 
@@ -145,19 +164,13 @@ async def test_overdue_task_waits_until_its_owner_runs_and_finished_its_first_sy
 ) -> None:
     """A task restored before its owner synced, or while it is not running, fires only once both hold."""
     config, runtime_paths, _ids = _config_and_ids(tmp_path)
-    bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    bot = scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general")
     setattr(bot, missing, False)
-    runtime = _runtime(runtime_paths, config, _Bots(general=bot))
+    runtime = _runtime(runtime_paths, config, {"general": bot})
     workflow = _workflow()
-    owner_polled = asyncio.Event()
-    real_ready_bot = runtime._ready_bot
-
-    def ready_bot(entity_name: str) -> AgentBot | None:
-        owner_polled.set()
-        return real_ready_bot(entity_name)
 
     with (
-        patch.object(runtime, "_ready_bot", side_effect=ready_bot),
+        _owner_polls(runtime) as owner_polled,
         patch("mindroom.scheduling.runtime._get_pending_task_record", new=AsyncMock(return_value=_record(workflow))),
         patch("mindroom.scheduling.runtime._scheduled_task_creator_is_joined", new=AsyncMock(return_value=True)),
         patch(
@@ -180,8 +193,8 @@ async def test_overdue_task_waits_until_its_owner_runs_and_finished_its_first_sy
 async def test_release_fences_the_owner_then_waits_for_its_in_flight_operation(tmp_path: Path) -> None:
     """A stopping owner admits no new operation, and its stop waits until the operation in flight ends."""
     config, runtime_paths, _ids = _config_and_ids(tmp_path)
-    bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
-    runtime = _runtime(runtime_paths, config, _Bots(general=bot))
+    bot = scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general")
+    runtime = _runtime(runtime_paths, config, {"general": bot})
     operation_started = asyncio.Event()
     finish_operation = asyncio.Event()
 
@@ -208,8 +221,8 @@ async def test_release_stops_waiting_at_its_bound(tmp_path: Path, monkeypatch: p
     """An operation that outlives the stop budget does not hold the owner's stop."""
     config, runtime_paths, _ids = _config_and_ids(tmp_path)
     monkeypatch.setattr(scheduling_runtime, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
-    bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
-    runtime = _runtime(runtime_paths, config, _Bots(general=bot))
+    bot = scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general")
+    runtime = _runtime(runtime_paths, config, {"general": bot})
     operation_started = asyncio.Event()
     finish_operation = asyncio.Event()
 
@@ -236,8 +249,8 @@ async def test_one_time_send_cut_off_by_its_owners_stop_is_failed_and_never_rese
     """A one-time trigger whose client closed under it is marked failed once the owner runs again."""
     config, runtime_paths, _ids = _config_and_ids(tmp_path)
     monkeypatch.setattr(scheduling_runtime, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
-    old_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
-    bots = _Bots(general=old_bot)
+    old_bot = scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general")
+    bots = {"general": old_bot}
     runtime = _runtime(runtime_paths, config, bots)
     workflow = _workflow()
     send_started = asyncio.Event()
@@ -261,7 +274,10 @@ async def test_one_time_send_cut_off_by_its_owners_stop_is_failed_and_never_rese
         _runner, task = runtime._runners[TASK_ID]
         await send_started.wait()
         await runtime.release({"general"})
-        bots["general"] = new_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+        bots["general"] = new_bot = scheduling_bot(
+            make_matrix_client_mock(user_id="@general:localhost"),
+            agent_name="general",
+        )
         client_closed.set()
         await task
 
@@ -275,10 +291,10 @@ async def test_one_time_send_cut_off_by_its_owners_stop_is_failed_and_never_rese
 async def test_status_write_cut_off_by_its_owners_stop_is_written_again_by_the_replacement(tmp_path: Path) -> None:
     """After a send, only the status write repeats when the owner's stop closed its client under it."""
     config, runtime_paths, _ids = _config_and_ids(tmp_path)
-    old_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
-    bots = _Bots(general=old_bot)
+    old_bot = scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general")
+    bots = {"general": old_bot}
     runtime = _runtime(runtime_paths, config, bots)
-    new_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    new_bot = scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general")
     writers: list[object] = []
 
     async def write_status(client: object, *_args: object, **_kwargs: object) -> None:
@@ -309,15 +325,12 @@ def _pending_record(workflow: ScheduledWorkflow) -> Callable[..., Awaitable[Sche
 async def test_removed_agent_fails_each_task_it_runs_and_says_so_where_it_posts(tmp_path: Path) -> None:
     """A removed agent's tasks are never handed to another bot; each one it runs is failed with a notice."""
     config, runtime_paths, ids = _config_and_ids(tmp_path)
-    removed_bot = scheduling_bot(_client(ids["general"]), agent_name="general")
-    router_bot = scheduling_bot(_client(ids["router"]))
-    runtime = _runtime(runtime_paths, config, _Bots(general=removed_bot, router=router_bot))
+    removed_bot = scheduling_bot(make_matrix_client_mock(user_id=ids["general"]), agent_name="general")
+    router_bot = scheduling_bot(make_matrix_client_mock(user_id=ids["router"]))
+    runtime = _runtime(runtime_paths, config, {"general": removed_bot, "router": router_bot})
     workflow = _workflow(due=False)
 
-    async def wait_forever(*_args: object) -> None:
-        await asyncio.Event().wait()
-
-    with patch.object(scheduling_runtime._TaskRunner, "run_once", wait_forever):
+    with patch.object(scheduling_runtime._TaskRunner, "run_once", _wait_forever):
         assert runtime._start_runner("general", TASK_ID, workflow)
         assert runtime._start_runner("router", "router_task", workflow)
     _runner, removed_task = runtime._runners[TASK_ID]
@@ -346,16 +359,13 @@ async def test_removed_agent_fails_each_task_it_runs_and_says_so_where_it_posts(
 async def test_removal_settles_every_task_within_one_bound_however_many_the_agent_runs(tmp_path: Path) -> None:
     """Ordinary homeserver latency per task must not leave a removed agent's later tasks pending without a notice."""
     config, runtime_paths, ids = _config_and_ids(tmp_path)
-    removed_bot = scheduling_bot(_client(ids["general"]), agent_name="general")
-    runtime = _runtime(runtime_paths, config, _Bots(general=removed_bot))
+    removed_bot = scheduling_bot(make_matrix_client_mock(user_id=ids["general"]), agent_name="general")
+    runtime = _runtime(runtime_paths, config, {"general": removed_bot})
     workflow = _workflow(due=False)
     task_ids = [f"task_{index}" for index in range(4)]
     read = _pending_record(workflow)
 
-    async def wait_forever(*_args: object) -> None:
-        await asyncio.Event().wait()
-
-    with patch.object(scheduling_runtime._TaskRunner, "run_once", wait_forever):
+    with patch.object(scheduling_runtime._TaskRunner, "run_once", _wait_forever):
         for task_id in task_ids:
             assert runtime._start_runner("general", task_id, workflow)
 
@@ -381,19 +391,16 @@ async def test_removal_settles_every_task_within_one_bound_however_many_the_agen
 async def test_removal_stops_waiting_for_a_stalled_homeserver_and_leaves_the_task_pending(tmp_path: Path) -> None:
     """A removal that cannot settle its tasks in time lets the reload go on and leaves the task pending."""
     config, runtime_paths, _ids = _config_and_ids(tmp_path)
-    removed_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
-    runtime = _runtime(runtime_paths, config, _Bots(general=removed_bot))
+    removed_bot = scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general")
+    runtime = _runtime(runtime_paths, config, {"general": removed_bot})
     workflow = _workflow(due=False)
 
-    async def wait_forever(*_args: object, **_kwargs: object) -> None:
-        await asyncio.Event().wait()
-
-    with patch.object(scheduling_runtime._TaskRunner, "run_once", wait_forever):
+    with patch.object(scheduling_runtime._TaskRunner, "run_once", _wait_forever):
         assert runtime._start_runner("general", TASK_ID, workflow)
 
     with (
         patch.object(scheduling_runtime, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.05),
-        patch("mindroom.scheduling.runtime._get_pending_task_record", new=wait_forever),
+        patch("mindroom.scheduling.runtime._get_pending_task_record", new=_wait_forever),
         patch("mindroom.scheduling.executor.send_scheduled_failure_notice", new=AsyncMock()) as notice,
     ):
         await asyncio.wait_for(runtime.fail_removed({"general"}), timeout=5)
@@ -407,9 +414,9 @@ async def test_removal_stops_waiting_for_a_stalled_homeserver_and_leaves_the_tas
 async def test_restore_names_a_room_whose_state_it_cannot_read(tmp_path: Path) -> None:
     """A room whose state a joining bot cannot read starts no runner, and the log says which room."""
     config, runtime_paths, ids = _config_and_ids(tmp_path)
-    bot = scheduling_bot(_client(ids["general"]), agent_name="general")
+    bot = scheduling_bot(make_matrix_client_mock(user_id=ids["general"]), agent_name="general")
     bot.client.room_get_state = AsyncMock(return_value=nio.RoomGetStateError("unavailable", "M_UNKNOWN"))
-    runtime = _runtime(runtime_paths, config, _Bots(general=bot))
+    runtime = _runtime(runtime_paths, config, {"general": bot})
 
     with capture_logs() as logs:
         restored = await runtime.restore_room(bot, ROOM_ID)
@@ -452,7 +459,7 @@ async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_d
     persist_schedule_writer(runtime_paths, retired_id, entity_name="retired")
     workflow = _workflow(due=False)
     content = {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending"}
-    client = _client(ids["general"])
+    client = make_matrix_client_mock(user_id=ids["general"])
     client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(
         _room_state(retired_id, ids["general"], content, agent_level=100 if agent_may_write else 0),
         room_id=ROOM_ID,
@@ -465,7 +472,7 @@ async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_d
     client.room_put_state.return_value = nio.RoomPutStateResponse("$failed", ROOM_ID)
     serve_task_state_events(client, sender=retired_id)
     bot = scheduling_bot(client, agent_name="general")
-    runtime = _runtime(runtime_paths, config, _Bots(general=bot))
+    runtime = _runtime(runtime_paths, config, {"general": bot})
 
     with patch("mindroom.scheduling.executor.send_scheduled_failure_notice", new=AsyncMock()) as notice:
         restored = await runtime.restore_room(bot, ROOM_ID)
@@ -490,13 +497,13 @@ async def test_restore_by_a_bot_that_does_not_own_the_task_starts_no_runner(tmp_
     content = {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending"}
     # The router is not joined, so the agent that wrote the task owns it.
     state = _room_state(ids["general"], ids["general"], content, agent_level=100)
-    router_client = _client(ids["router"])
+    router_client = make_matrix_client_mock(user_id=ids["router"])
     router_client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(state, room_id=ROOM_ID)
-    agent_client = _client(ids["general"])
+    agent_client = make_matrix_client_mock(user_id=ids["general"])
     agent_client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(state, room_id=ROOM_ID)
     router = scheduling_bot(router_client)
     agent = scheduling_bot(agent_client, agent_name="general")
-    runtime = _runtime(runtime_paths, config, _Bots(router=router, general=agent))
+    runtime = _runtime(runtime_paths, config, {"router": router, "general": agent})
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
         assert await runtime.restore_room(router, ROOM_ID) == 0
@@ -530,7 +537,7 @@ class _SharedRoom:
 
     def client(self, user_id: str) -> AsyncMock:
         """Return a client whose synced view of the room has no members, as a lazy-loading sync leaves it."""
-        client = _client(user_id)
+        client = make_matrix_client_mock(user_id=user_id)
         client.rooms = {ROOM_ID: nio.MatrixRoom(ROOM_ID, user_id)}
 
         async def get_state(room_id: str) -> nio.RoomGetStateResponse:
@@ -557,31 +564,18 @@ class _SharedRoom:
         return client
 
 
-def _two_agents(tmp_path: Path) -> tuple[Config, RuntimePaths, dict[str, str]]:
-    config = Config(
-        agents={"general": AgentConfig(display_name="General"), "helper": AgentConfig(display_name="Helper")},
-    )
-    runtime_paths = orchestrator_runtime_paths(tmp_path)
-    ids = {name: matrix_id.full_id for name, matrix_id in entity_ids(config, runtime_paths).items()}
-    return config, runtime_paths, ids
-
-
-async def _wait_forever(*_args: object) -> None:
-    await asyncio.Event().wait()
-
-
 @pytest.mark.asyncio
 async def test_creation_and_restore_pick_the_router_from_full_state_that_a_synced_view_lacks(tmp_path: Path) -> None:
     """A lazy-loaded synced view without the router cannot make creation and restore disagree on the owner."""
-    config, runtime_paths, ids = _two_agents(tmp_path)
+    config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
     room = _SharedRoom({ids["router"]: 100, ids["general"]: 100})
     router = scheduling_bot(room.client(ids["router"]))
     agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
-    runtime = _runtime(runtime_paths, config, _Bots(router=router, general=agent))
+    runtime = _runtime(runtime_paths, config, {"router": router, "general": agent})
     workflow = _workflow(due=False)
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
-        await _save_pending_scheduled_task(
+        owner_id = await _save_pending_scheduled_task(
             agent.client,
             ROOM_ID,
             TASK_ID,
@@ -590,6 +584,7 @@ async def test_creation_and_restore_pick_the_router_from_full_state_that_a_synce
             runtime_paths,
             task_runtime=runtime,
         )
+        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
         restored_by_agent = await runtime.restore_room(agent, ROOM_ID)
         restored_by_router = await runtime.restore_room(router, ROOM_ID)
 
@@ -602,15 +597,15 @@ async def test_creation_and_restore_pick_the_router_from_full_state_that_a_synce
 @pytest.mark.asyncio
 async def test_an_edit_by_another_agent_keeps_the_owner_its_runner_and_who_fails_with_removal(tmp_path: Path) -> None:
     """Editing never moves a task: removing the editor leaves it running, and removing its owner fails it."""
-    config, runtime_paths, ids = _two_agents(tmp_path)
+    config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
     room = _SharedRoom({ids["general"]: 100, ids["helper"]: 100})
     owner = scheduling_bot(room.client(ids["general"]), agent_name="general")
     editor = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
-    runtime = _runtime(runtime_paths, config, _Bots(general=owner, helper=editor))
+    runtime = _runtime(runtime_paths, config, {"general": owner, "helper": editor})
     workflow = _workflow(due=False)
 
     with patch.object(scheduling_runtime._TaskRunner, "run_once", _wait_forever):
-        await _save_pending_scheduled_task(
+        owner_id = await _save_pending_scheduled_task(
             owner.client,
             ROOM_ID,
             TASK_ID,
@@ -619,16 +614,15 @@ async def test_an_edit_by_another_agent_keeps_the_owner_its_runner_and_who_fails
             runtime_paths,
             task_runtime=runtime,
         )
+        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
         existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
         assert existing is not None
         await save_edited_scheduled_task(
             editor.client,
-            ROOM_ID,
-            TASK_ID,
             workflow.model_copy(update={"message": "Water the plants twice"}),
             existing,
             runtime_paths,
-            timezone="UTC",
+            config=config,
             writers=runtime,
         )
         assert await runtime.restore_room(editor, ROOM_ID) == 0
@@ -655,21 +649,12 @@ async def test_an_edit_by_another_agent_keeps_the_owner_its_runner_and_who_fails
 @pytest.mark.asyncio
 async def test_cancelling_a_task_through_another_agent_keeps_its_stored_owner(tmp_path: Path) -> None:
     """Every rewrite of a task keeps the owner it was saved with, whichever bot writes it."""
-    config, runtime_paths, ids = _two_agents(tmp_path)
+    config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
     room = _SharedRoom({ids["general"]: 100, ids["helper"]: 100})
     owner = scheduling_bot(room.client(ids["general"]), agent_name="general")
     other = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
-    runtime = _runtime(runtime_paths, config, _Bots(general=owner, helper=other))
-    with patch.object(runtime, "_start_runner", return_value=True):
-        await _save_pending_scheduled_task(
-            owner.client,
-            ROOM_ID,
-            TASK_ID,
-            _workflow(due=False),
-            config,
-            runtime_paths,
-            task_runtime=runtime,
-        )
+    runtime = _runtime(runtime_paths, config, {"general": owner, "helper": other})
+    await _save_task(runtime, owner.client, _workflow(due=False))
 
     result = await cancel_scheduled_task(other.client, ROOM_ID, TASK_ID, runtime_paths, task_runtime=runtime)
 
@@ -680,24 +665,123 @@ async def test_cancelling_a_task_through_another_agent_keeps_its_stored_owner(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_all", [False, True])
+async def test_a_cancel_during_an_edit_leaves_the_task_cancelled(tmp_path: Path, cancel_all: bool) -> None:
+    """A cancellation waits for an edit that is still writing, so the edit's write cannot bring the task back."""
+    config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
+    room = _SharedRoom({ids["general"]: 100, ids["helper"]: 100})
+    owner = scheduling_bot(room.client(ids["general"]), agent_name="general")
+    editor = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
+    runtime = _runtime(runtime_paths, config, {"general": owner, "helper": editor})
+    workflow = _workflow(due=False)
+    await _save_task(runtime, owner.client, workflow)
+    existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
+    assert existing is not None
+    edit_writing = asyncio.Event()
+    finish_edit = asyncio.Event()
+    cancel_started = asyncio.Event()
+    write_state = editor.client.room_put_state.side_effect
+
+    async def slow_edit_write(**kwargs: Any) -> object:  # noqa: ANN401
+        edit_writing.set()
+        await finish_edit.wait()
+        return await write_state(**kwargs)
+
+    editor.client.room_put_state.side_effect = slow_edit_write
+
+    async def cancel() -> str:
+        cancel_started.set()
+        if cancel_all:
+            return await cancel_all_scheduled_tasks(owner.client, ROOM_ID, runtime_paths, task_runtime=runtime)
+        return await cancel_scheduled_task(owner.client, ROOM_ID, TASK_ID, runtime_paths, task_runtime=runtime)
+
+    async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
+        tasks.create_task(
+            save_edited_scheduled_task(
+                editor.client,
+                workflow.model_copy(update={"message": "Water the plants twice"}),
+                existing,
+                runtime_paths,
+                config=config,
+                writers=runtime,
+            ),
+        )
+        await edit_writing.wait()
+        cancelled = tasks.create_task(cancel())
+        await cancel_started.wait()
+        finish_edit.set()
+
+    assert cancelled.result().startswith("✅ Cancelled")
+    assert room.task()["content"]["status"] == "cancelled"
+    assert ScheduledWorkflow.model_validate_json(room.task()["content"]["workflow"]).message == "Water the plants twice"
+
+
+@pytest.mark.asyncio
+async def test_restore_waits_for_an_edit_still_rescheduling_an_overdue_task(tmp_path: Path) -> None:
+    """Restore fails an overdue task only under its lock, so an edit still writing a reschedule wins and gets a runner."""
+    config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
+    room = _SharedRoom({ids["general"]: 100, ids["helper"]: 100})
+    agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
+    editor = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
+    runtime = _runtime(runtime_paths, config, {"general": agent, "helper": editor})
+    overdue = _workflow(due=False).model_copy(update={"execute_at": datetime.now(UTC) - timedelta(days=30)})
+    await _save_task(runtime, agent.client, overdue)
+    existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
+    assert existing is not None
+    edit_writing = asyncio.Event()
+    finish_edit = asyncio.Event()
+    write_state = editor.client.room_put_state.side_effect
+
+    async def slow_edit_write(**kwargs: Any) -> object:  # noqa: ANN401
+        edit_writing.set()
+        await finish_edit.wait()
+        return await write_state(**kwargs)
+
+    editor.client.room_put_state.side_effect = slow_edit_write
+    restore_waiting = asyncio.Event()
+    lock = scheduling_runtime.scheduled_task_state_lock
+
+    def observed_lock(client: object, room_id: str, task_id: str) -> asyncio.Lock:
+        restore_waiting.set()
+        return lock(client, room_id, task_id)
+
+    with (
+        patch.object(scheduling_runtime, "scheduled_task_state_lock", observed_lock),
+        patch.object(runtime, "_start_runner", return_value=True) as start_runner,
+    ):
+        async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
+            tasks.create_task(
+                save_edited_scheduled_task(
+                    editor.client,
+                    overdue.model_copy(update={"execute_at": datetime.now(UTC) + timedelta(hours=1)}),
+                    existing,
+                    runtime_paths,
+                    config=config,
+                    writers=runtime,
+                ),
+            )
+            await edit_writing.wait()
+            restoring = tasks.create_task(runtime.restore_room(agent, ROOM_ID))
+            waiting = tasks.create_task(restore_waiting.wait())
+            await asyncio.wait({restoring, waiting}, return_when=asyncio.FIRST_COMPLETED)
+            waiting.cancel()
+            finish_edit.set()
+
+    assert restoring.result() == 1
+    start_runner.assert_called_once()
+    assert room.task()["content"]["status"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_restore_keeps_the_stored_owner_when_the_room_would_now_pick_another(tmp_path: Path) -> None:
     """A task's owner is decided once: a router that joins and gains power later does not take it over."""
-    config, runtime_paths, ids = _two_agents(tmp_path)
+    config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
     room = _SharedRoom({ids["router"]: 0, ids["general"]: 100})
     router = scheduling_bot(room.client(ids["router"]))
     agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
-    runtime = _runtime(runtime_paths, config, _Bots(router=router, general=agent))
+    runtime = _runtime(runtime_paths, config, {"router": router, "general": agent})
     workflow = _workflow(due=False)
-    with patch.object(runtime, "_start_runner", return_value=True):
-        await _save_pending_scheduled_task(
-            agent.client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            config,
-            runtime_paths,
-            task_runtime=runtime,
-        )
+    await _save_task(runtime, agent.client, workflow)
     room.events["m.room.power_levels", ""]["content"]["users"][ids["router"]] = 100
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
@@ -716,7 +800,7 @@ async def test_task_saved_without_an_owner_restores_under_the_rule_over_its_writ
     owner: str,
 ) -> None:
     """A task saved before owners were stored runs under the router where it can serve the room, else its writer."""
-    config, runtime_paths, ids = _two_agents(tmp_path)
+    config, runtime_paths, ids = _config_and_ids(tmp_path, "general", "helper")
     room = _SharedRoom({ids["router"]: router_level, ids["general"]: 100})
     workflow = _workflow(due=False)
     room._put(
@@ -727,7 +811,7 @@ async def test_task_saved_without_an_owner_restores_under_the_rule_over_its_writ
     )
     router = scheduling_bot(room.client(ids["router"]))
     agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
-    runtime = _runtime(runtime_paths, config, _Bots(router=router, general=agent))
+    runtime = _runtime(runtime_paths, config, {"router": router, "general": agent})
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
         restored = {bot.agent_name: await runtime.restore_room(bot, ROOM_ID) for bot in (router, agent)}
@@ -735,12 +819,10 @@ async def test_task_saved_without_an_owner_restores_under_the_rule_over_its_writ
         assert existing is not None
         await save_edited_scheduled_task(
             agent.client,
-            ROOM_ID,
-            TASK_ID,
             workflow,
             existing,
             runtime_paths,
-            timezone="UTC",
+            config=config,
         )
 
     assert restored == {"router": int(owner == "router"), "general": int(owner == "general")}
@@ -756,7 +838,7 @@ async def test_orchestrator_fences_changing_entities_and_fails_removed_entities_
         runtime_paths=orchestrator_runtime_paths(tmp_path),
         config=Config(agents={"general": AgentConfig(display_name="General")}),
     )
-    bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    bot = scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general")
     install_bots(orchestrator, {"general": bot})
     order: list[str] = []
 

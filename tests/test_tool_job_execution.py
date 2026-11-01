@@ -18,6 +18,7 @@ from agno.media import Image as AgnoImage
 from agno.run import RunContext  # noqa: TC002 - Agno resolves tool parameter annotations at runtime.
 from agno.tools.function import ToolResult
 
+from mindroom.ai_runtime import queued_message_signal_context, queued_notice_after_tool_batch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
@@ -25,6 +26,7 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus
+from mindroom.mid_turn import QueuedMessage
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs import execution, results
@@ -66,7 +68,7 @@ from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
+from mindroom.tool_system.tool_function import ToolGate, ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import detached_policy
@@ -108,6 +110,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.messages import Message
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution import JobActor
@@ -142,6 +145,26 @@ async def _managed_context(tmp_path: Path, config: Config | None = None) -> tupl
 
 def _job_controls(context: ToolRuntimeContext) -> JobTools:
     return JobTools(context.runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_a_delegation_call_runs_in_place_instead_of_as_a_job(tmp_path: Path) -> None:
+    """A delegation answers its own call where it is made, so it never becomes a managed job."""
+
+    def hand_off() -> str:
+        return "handed off"
+
+    context, runtime = await _managed_context(tmp_path)
+    plain = job_tool(hand_off)
+    actor = job_actor(replace(plain, function=replace(plain.function, gate=ToolGate.DELEGATION)))
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                outcome = await call_job_tool(actor, "hand_off")
+        assert (outcome.content, outcome.is_error) == ("handed off", False)
+        assert await runtime.list_jobs(owner=context.execution_identity, depth=0) == []
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -630,6 +653,41 @@ async def test_human_followup_releases_original_call_once(tmp_path: Path) -> Non
                     await parent
     finally:
         await runtime.shutdown()
+
+
+class _NewerMessageWaits:
+    """The reply's queue, which holds a newer human message."""
+
+    def has_pending_human_messages(self) -> bool:
+        return True
+
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return (QueuedMessage("$newer", None),)
+
+
+@pytest.mark.asyncio
+async def test_a_run_a_job_makes_is_told_of_no_newer_message(tmp_path: Path) -> None:
+    """A newer message tells the reply that waits for a job to pause, never a run the job makes."""
+    appended: list[int] = []
+
+    async def runs_a_batch() -> str:
+        """Run one tool batch of a run, as a job that runs an agent does."""
+        messages: list[Message] = []
+        await queued_notice_after_tool_batch("Pause for the newer message.")(messages, ())
+        appended.append(len(messages))
+        return "ran"
+
+    context, runtime = await _managed_context(tmp_path)
+    actor = job_actor(job_tool(runs_a_batch))
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context), queued_message_signal_context(_NewerMessageWaits()):
+                outcome = await call_job_tool(actor, "runs_a_batch", call_id="once", run_id="once-run")
+    finally:
+        await runtime.shutdown()
+
+    assert outcome.content == "ran"
+    assert appended == [0]
 
 
 @pytest.mark.asyncio
@@ -1500,8 +1558,7 @@ async def test_a_call_whose_access_resolves_during_its_wait_returns_its_handle(t
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     runtime = await tool_job_runtime(
         tmp_path,
-        authorize=lambda _job: grant["access"] == "allowed",
-        denied=lambda _job: False,
+        grant=lambda _job: grant["access"],
     )
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -1542,7 +1599,7 @@ async def test_a_refused_job_fails_its_call_not_the_reply(
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: refusal != "start")
+    runtime = await tool_job_runtime(tmp_path, grant=lambda _job: "denied" if refusal == "start" else "allowed")
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     if refusal == "authority":

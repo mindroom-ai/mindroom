@@ -47,6 +47,7 @@ from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.agent_tool_helpers import UnansweredCallTools
 from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation, decided_calls
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -198,10 +199,6 @@ def offered_tools(model: ScriptedModel) -> list[list[str]]:
     return [sorted(tool.name for tool in request.tools) for request in model.requests]
 
 
-def _call(name: str, call_id: str, **arguments: object) -> dict[str, object]:
-    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
-
-
 def _deferred_call(call_id: str, function_name: str, **arguments: object) -> dict[str, object]:
     """Call a deferred function through the call_tool wrapper a model without native tool search sees."""
     wrapped = json.dumps({"name": function_name, "arguments": arguments})
@@ -243,10 +240,10 @@ def approval_calls_for(
     agent = paused.approval_agent_name or default_agent
     return tuple(
         ApprovalCall(
-            tool_call_id=str(tool.tool_call_id),
-            tool_name=str(tool.tool_name),
+            tool_call_id=tool.tool_call_id,
+            tool_name=tool.tool_name,
             invoking_agent=agent,
-            toolkit_name=toolkit_names[str(tool.tool_name)],
+            toolkit_name=toolkit_names[tool.tool_name],
             expires_at_ns=2**62,
             arguments_digest=approval_arguments_digest(tool.tool_args),
         )
@@ -582,20 +579,17 @@ class MetadataProbeTools(Toolkit):
         return "report written"
 
 
-class HandOffTools(Toolkit):
-    """The gated ``write_report`` of the ``report`` toolkit, and ``hand_off``, a call executed outside the agent loop.
+class HandOffTools(UnansweredCallTools):
+    """The gated ``write_report`` of the ``report`` toolkit, and ``hand_off``, which pauses for an answer from outside.
 
     Nothing in MindRoom answers ``hand_off``: a run that calls it pauses with no approval to ask for.
     """
 
+    unanswered = frozenset({"hand_off"})
     handed_off: ClassVar[list[str]] = []
 
     def __init__(self) -> None:
-        super().__init__(
-            name="report",
-            tools=[self.write_report, self.hand_off],
-            external_execution_required_tools=["hand_off"],
-        )
+        super().__init__(name="report", tools=[self.write_report, self.hand_off])
 
     async def write_report(self) -> str:
         """Write the report."""

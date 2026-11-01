@@ -53,9 +53,6 @@ class _ApprovalTransportBot(Protocol):
     @property
     def approval_room_ids(self) -> frozenset[str]: ...
 
-    @property
-    def approval_store(self) -> ApprovalDeliveryView: ...
-
     async def latest_thread_event_id_if_needed(
         self,
         room_id: str,
@@ -131,7 +128,7 @@ class ApprovalMatrixTransport:
         client = bot.client
         if not can_send_to_encrypted_room(client, continuation.room_id, operation="send_approval_notice"):
             return None
-        store = bot.approval_store
+        store = bot.journal_principal()
         content = build_message_content(
             reason,
             thread_event_id=continuation.thread_id,

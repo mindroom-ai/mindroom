@@ -89,8 +89,9 @@ def _time_module(determinism: Determinism) -> SimpleNamespace:
     return SimpleNamespace(**{**{name: getattr(real_time, name) for name in dir(real_time)}, "time": determinism.time})
 
 
-# Modules that call ``uuid4`` by that name, each with its own counter.
-_UUID_MODULES: tuple[ModuleType, ...] = (messages, runs, agent_storage, preflight)
+# Modules that call ``uuid4`` by that name, each with its own counter, by tag. Tag 2 counted the requirement ids
+# ``mindroom.llm.runs`` minted, which are no longer stored; the other tags keep the ids the recordings hold.
+_UUID_MODULES: dict[int, ModuleType] = {1: messages, 3: agent_storage, 4: preflight}
 # Modules that call ``time()`` imported from ``time``.
 _TIME_FUNCTION_MODULES: tuple[ModuleType, ...] = (messages, runs, store, summary_rows, types)
 # Modules that call ``time.time()`` on the imported module.
@@ -119,7 +120,7 @@ def deterministic(*, time_modules: Sequence[ModuleType] = ()) -> Iterator[Determ
     fixed_datetime = _datetime_class(determinism)
     time_module = _time_module(determinism)
     with ExitStack() as stack:
-        for tag, module in enumerate(_UUID_MODULES, start=1):
+        for tag, module in _UUID_MODULES.items():
             stack.enter_context(patch.object(module, "uuid4", lambda tag=tag: determinism.uuid4(tag)))
         for module in _TIME_FUNCTION_MODULES:
             stack.enter_context(patch.object(module, "time", determinism.time))

@@ -34,6 +34,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
+from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
@@ -48,7 +49,6 @@ from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
 )
 from tests.access_schema_support import with_current_room_member_access
-from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
     ignore_final_delivery_handoff,
     make_conversation_reader_mock,
@@ -56,7 +56,6 @@ from tests.conftest import (
     make_relation_lookup,
     request_envelope,
 )
-from tests.identity_helpers import persist_entity_accounts
 from tests.reply_turn_helpers import runner_for
 from tests.runtime_fakes import ready_runtime
 
@@ -71,13 +70,6 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T")
-
-
-def bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:
-    """Bind test runtime paths and persist managed account identities."""
-    bound = _bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound, runtime_paths)
-    return bound
 
 
 def _set_gateway_method(gateway: DeliveryGateway, name: str, value: T) -> T:
@@ -102,17 +94,9 @@ def _config() -> Config:
 
 
 def _config_with_matrix_message() -> Config:
-    return with_current_room_member_access(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    tools=["matrix_message"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-        ),
-    )
+    config = _config()
+    config.agents["general"].tools = ["matrix_message"]
+    return config
 
 
 def _config_with_team() -> Config:
@@ -133,25 +117,9 @@ def _config_with_team() -> Config:
 
 
 def _config_with_team_matrix_message() -> Config:
-    return with_current_room_member_access(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    tools=["matrix_message"],
-                ),
-            },
-            teams={
-                "ultimate": TeamConfig(
-                    display_name="Ultimate",
-                    role="Coordinate the team",
-                    agents=["general"],
-                    mode="coordinate",
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-        ),
-    )
+    config = _config_with_team()
+    config.agents["general"].tools = ["matrix_message"]
+    return config
 
 
 def _metadata_config(provider: str, model_id: str) -> Config:
@@ -216,9 +184,11 @@ def team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleName
         config=config,
         runtime_paths=runtime_paths,
         knowledge_refresh_scheduler=knowledge_refresh_scheduler,
-        hook_matrix_admin=lambda: matrix_admin,
-        hook_room_state_querier=lambda: None,
-        hook_room_state_putter=lambda: None,
+        # A router without a client whose admin the team's hooks receive.
+        router_hook_context=lambda: SimpleNamespace(
+            runtime=SimpleNamespace(client=None),
+            matrix_admin=lambda: matrix_admin,
+        ),
         budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
         running_entity_names=lambda: frozenset({*config.agents, *config.teams}),
         response_admission_gate=ResponseAdmissionGate(),
@@ -313,7 +283,8 @@ def _build_response_runner(
         runtime_paths=runtime_paths,
         agent_name=bot.agent_name,
         hook_registry_state=HookRegistryState(hook_registry or HookRegistry.empty()),
-        hook_send_message=AsyncMock(),
+        conversation_reader=bot.conversation_reader,
+        logger=get_logger("tests.hooks"),
     )
     response_hook_service = ResponseHookService(hook_context=hook_context)
     response_hook_service._emit_cancelled_response = AsyncMock(wraps=response_hook_service._emit_cancelled_response)
@@ -327,7 +298,6 @@ def _build_response_runner(
             runtime_paths=runtime_paths,
             agent_name=bot.agent_name,
             logger=bot.logger,
-            redact_message_event=AsyncMock(return_value=True),
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
             outbox=principal,

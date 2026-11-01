@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "renderer": "mindroom.matrix.message_builder.markdown_to_html",
+  "cases": [
+    {
+      "name": "paragraph with soft breaks",
+      "md": "First line\nsecond line\n\nNew paragraph",
+      "html": "<p>First line<br>\nsecond line</p>\n<p>New paragraph</p>\n"
+    },
+    {
+      "name": "emphasis, code, link, strike",
+      "md": "**bold** *it* `code` [site](https://example.org) ~~gone~~",
+      "html": "<p><strong>bold</strong> <em>it</em> <code>code</code> <a href=\"https://example.org\">site</a> <s>gone</s></p>\n"
+    },
+    {
+      "name": "heading and list",
+      "md": "## Plan\n\n- one\n- two\n  - nested\n\n1. first\n2. second",
+      "html": "<h2>Plan</h2>\n<ul>\n<li>one</li>\n<li>two\n<ul>\n<li>nested</li>\n</ul>\n</li>\n</ul>\n<ol>\n<li>first</li>\n<li>second</li>\n</ol>\n"
+    },
+    {
+      "name": "table without blank line before",
+      "md": "Results:\n| a | b |\n|---|---|\n| 1 | 2 |",
+      "html": "<p>Results:</p>\n<table>\n<thead>\n<tr>\n<th>a</th>\n<th>b</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>1</td>\n<td>2</td>\n</tr>\n</tbody>\n</table>\n"
+    },
+    {
+      "name": "blockquote",
+      "md": "> quoted\n> more",
+      "html": "<blockquote>\n<p>quoted<br>\nmore</p>\n</blockquote>\n"
+    },
+    {
+      "name": "fenced code without language",
+      "md": "```\nprint(1)\n```",
+      "html": "<pre><code>print(1)\n</code></pre>\n"
+    },
+    {
+      "name": "unfinished fence while streaming",
+      "md": "Here:\n\n```\nprint(1",
+      "html": "<p>Here:</p>\n<pre><code>print(1</code></pre>\n"
+    },
+    {
+      "name": "inline and block math preserved",
+      "md": "Euler $e^{i\\pi}+1=0$ and\n\n$$\nx^2\n$$",
+      "html": "<p>Euler $e^{i\\pi}+1=0$ and</p>\n<div>$$\nx^2\n$$</div>\n"
+    },
+    {
+      "name": "tool marker lines",
+      "md": "Intro\n\n🔧 `web_search` [1] ⏳\n\n🔧 `read_file` [2]\n\nDone",
+      "html": "<p>Intro</p>\n<p>🔧 <code>web_search</code> [1] ⏳</p>\n<p>🔧 <code>read_file</code> [2]</p>\n<p>Done</p>\n"
+    },
+    {
+      "name": "mention link",
+      "md": "Ask [@Helper](https://matrix.to/#/@mindroom_helper:example.org) please",
+      "html": "<p>Ask <a href=\"https://matrix.to/#/@mindroom_helper:example.org\">@Helper</a> please</p>\n"
+    },
+    {
+      "name": "allowed and disallowed raw html",
+      "md": "<details><summary>More</summary>\n\nhidden\n\n</details>\n\n<script>alert(1)</script>",
+      "html": "<details><summary>More</summary>\n<p>hidden</p>\n</details>\n<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>\n"
+    },
+    {
+      "name": "html comment opener escaped",
+      "md": "<!-- note -->\ntext",
+      "html": "<p>&lt;!-- note --&gt;<br>\ntext</p>\n"
+    },
+    {
+      "name": "unfinished bold while streaming",
+      "md": "This is **almost bold",
+      "html": "<p>This is **almost bold</p>\n"
+    },
+    {
+      "name": "horizontal rule and setext",
+      "md": "Title\n===\n\n---\n\nafter",
+      "html": "<h1>Title</h1>\n<hr>\n<p>after</p>\n"
+    }
+  ]
+}

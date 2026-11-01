@@ -68,14 +68,18 @@ from mindroom.matrix.client_delivery import (
     send_message_outcome,
     send_room_event_result,
 )
-from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
+from mindroom.matrix.large_messages import (
+    MatrixEventTooLargeError,
+    fit_reasoning_to_ordinary_event,
+    prepare_large_message,
+)
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, build_reaction_content
 from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
     missing_outbox_delivery_copy_indices_via_room_messages,
 )
-from mindroom.matrix.segmented_messages import segment_matrix_content
+from mindroom.matrix.segmented_messages import first_segment_target_bytes, segment_matrix_content
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import Outcome as ReplyOutcome
 from mindroom.reply_lifecycle import ProgressConfirmation as ReplyProgressConfirmation
@@ -491,7 +495,6 @@ class DeliveryGatewayDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     logger: structlog.stdlib.BoundLogger
-    redact_message_event: Callable[..., Awaitable[bool]]
     resolver: ConversationResolver
     response_hooks: ResponseHookService
     outbox: MatrixDeliveryView
@@ -1463,25 +1466,32 @@ class DeliveryGateway:
             reply = await self.deps.outbox.replies.load(reply_id)
             if reply is None:
                 return
-            if reply.redaction_pending:
-                done = [
-                    event_id for event_id in reply.redaction_pending if await self._redact_owed(reply.room_id, event_id)
-                ]
-                if done:
-                    await self.deps.outbox.replies.update(
-                        reply_id,
-                        lambda current: rl.redactions_done(current, tuple(done), now_ns=time.time_ns()),
-                    )
+            done = [
+                event_id for event_id in reply.redaction_pending if await self._redact_owed(reply.room_id, event_id)
+            ]
+            if done:
+                await self.deps.outbox.replies.update(
+                    reply_id,
+                    lambda current: rl.redactions_done(current, tuple(done), now_ns=time.time_ns()),
+                )
             if reply.owed_write is not None:
                 await self._flush_owed_write(reply_id)
 
     async def _redact_owed(self, room_id: str, event_id: str) -> bool:
         """Redact one event a reply owes removed; a failed attempt stays owed for the next settlement."""
+        client = self.deps.runtime.client
+        if client is None:
+            return False
         try:
-            return await self.deps.redact_message_event(room_id=room_id, event_id=event_id, reason="Reply removed")
+            response = await client.room_redact(room_id, event_id, reason="Reply removed")
         except Exception as error:
             self.deps.logger.warning("Owed reply redaction failed", event_id=event_id, error=str(error))
             return False
+        if isinstance(response, nio.RoomRedactError) and response.status_code != "M_NOT_FOUND":
+            self.deps.logger.error("Failed to redact message", event_id=event_id, error=str(response))
+            return False
+        # Gone already, with `M_NOT_FOUND`, is what the redaction was for.
+        return True
 
     async def _flush_owed_write(self, reply_id: str) -> None:
         """Render and send the note a reply-authored transition owed."""
@@ -2224,11 +2234,16 @@ class DeliveryGateway:
         )
         if isinstance(encryption_outcome, MatrixDeliveryFailure):
             return encryption_outcome
-        wire_content = matrix_delivery_payload(
-            self.deps.outbox.principal_id,
-            turn_id,
-            stage,
-            content,
+        split = self.deps.runtime.config.defaults.large_message_strategy == "split"
+        payload = matrix_delivery_payload(self.deps.outbox.principal_id, turn_id, stage, content)
+        # Reasoning is fitted against what would otherwise segment the reply or move it to a sidecar; durable rows
+        # are sized for encrypted delivery, as prepare_large_message sizes them below.
+        wire_content = fit_reasoning_to_ordinary_event(
+            client,
+            room_id,
+            payload,
+            room_encrypted=True,
+            size_limit=first_segment_target_bytes(payload, room_encrypted=encryption_outcome) if split else None,
         )
         segmented = (
             segment_matrix_content(
@@ -2237,7 +2252,7 @@ class DeliveryGateway:
                 continuation_thread_id=continuation_thread_id,
                 continuation_reply_to_event_id=continuation_reply_to_event_id,
             )
-            if self.deps.runtime.config.defaults.large_message_strategy == "split"
+            if split
             else None
         )
         if segmented is not None:

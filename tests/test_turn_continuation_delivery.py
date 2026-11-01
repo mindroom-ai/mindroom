@@ -1,7 +1,7 @@
 """Characterization pins: same-turn continuations deliver the final body exactly once.
 
-A two-attempt continuation turn (the first attempt ends with a next-turn
-``switch_thread_model`` call, the second completes) is driven through the real
+A two-attempt continuation turn (the first attempt ends with a
+``switch_thread_model`` call for the current response, the second completes) is driven through the real
 response-turn driver (``stream_response_turn``, which the runner collects for
 non-streaming delivery) through ``ResponseRunner.generate_response``, with a spying DeliveryGateway. The pins:
 
@@ -57,13 +57,13 @@ if TYPE_CHECKING:
 
 
 def _continuing_tool_execution() -> ToolExecution:
-    """Return a next-turn model switch, which forces one more attempt."""
+    """Return a model switch for the current response, which forces one more attempt."""
     return ToolExecution(
-        tool_call_id="call-switch-next-turn",
+        tool_call_id="call-switch-after-toolcall",
         tool_name="switch_thread_model",
-        tool_args={"model_name": "large", "when": "next-turn"},
+        tool_args={"model_name": "large", "when": "after-toolcall"},
         result=json.dumps(
-            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
+            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "after-toolcall"},
         ),
         stop_after_call=True,
     )
@@ -85,7 +85,7 @@ def _stream_turn(
     sinks: TurnSinks,
     run_attempt: Callable[
         [TurnRunState, TurnContinuationRunState],
-        AsyncGenerator[str | AttemptResolved, None],
+        AsyncGenerator[str | AttemptResolved],
     ],
 ) -> AsyncIterator[str]:
     """Drive the turn as ``ai.stream_agent_response`` does, from the plain request prompt."""
@@ -97,7 +97,6 @@ def _stream_turn(
             make_text_chunk=lambda text: text,
             user_message=ctx.prompt,
             unexpected_error_text=str,
-            entity_name=ctx.entity_label,
         ),
         sinks,
         continuation=TurnContinuationRunState.initial(
@@ -129,7 +128,7 @@ async def test_non_streaming_continuation_delivers_final_exactly_once_after_last
     async def run_attempt(
         _run: TurnRunState,
         continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         attempts.append(continuation.active_prompt)
         events.append(f"attempt:{len(attempts)}")
         # No final delivery may happen before the last attempt settles.
@@ -212,7 +211,7 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
     async def run_attempt(
         _run: TurnRunState,
         continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         attempts.append(continuation.active_prompt)
         events.append(f"attempt:{len(attempts)}")
         # No stream finalization may happen between attempts.

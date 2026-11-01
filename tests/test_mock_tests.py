@@ -38,7 +38,7 @@ class TestMockingStrategy:
     """Verify our mocking strategy actually intercepts HTTP calls."""
 
     @pytest_asyncio.fixture
-    async def client(self) -> AsyncGenerator[nio.AsyncClient, None]:
+    async def client(self) -> AsyncGenerator[nio.AsyncClient]:
         """Create an nio.AsyncClient for testing and ensure cleanup."""
         homeserver = "https://matrix.example.org"
         user_id = "@test:example.org"
@@ -324,7 +324,7 @@ class TestMockingStrategyExtended:
     """Additional mocking tests for Matrix client methods."""
 
     @pytest_asyncio.fixture
-    async def client(self) -> AsyncGenerator[nio.AsyncClient, None]:
+    async def client(self) -> AsyncGenerator[nio.AsyncClient]:
         """Create an nio.AsyncClient for testing and ensure cleanup."""
         homeserver = "https://matrix.example.org"
         user_id = "@test:example.org"

@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     requires_room_context=True,
     icon="MessageSquare",
     icon_color="text-emerald-500",
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_api",
     helper_text=(
         "Search uses action='search' with required `search_term`. "

@@ -391,7 +391,7 @@ def with_pending_work(transaction: Transaction, principal_id: str) -> tuple[Repl
 
 
 def for_sources(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> Reply | None:
-    """Return the most recently created reply a span of which answers any of these sources."""
+    """Return the most recently created reply whose last span answers any of these sources."""
     reply_id = reply_spans.newest_reply_id_for_sources(transaction, principal_id, event_ids)
     return None if reply_id is None else load(transaction, principal_id, reply_id)
 

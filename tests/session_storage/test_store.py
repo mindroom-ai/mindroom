@@ -19,7 +19,7 @@ import pytest
 
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import TOKEN_FIELDS, HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.schema import LOG_VERSION
@@ -110,13 +110,8 @@ def _team_run(run_id: str, status: RunStatus = RunStatus.completed, **fields: An
     )
 
 
-def _member_requirement(member_run_id: str, call_id: str) -> RunRequirement:
-    return RunRequirement(
-        ToolExecution(tool_call_id=call_id, tool_name="shell", requires_confirmation=True),
-        id=f"req-{call_id}",
-        member_agent_id="helper",
-        member_run_id=member_run_id,
-    )
+def _waiting(call_id: str) -> ToolExecution:
+    return ToolExecution(tool_call_id=call_id, tool_name="shell", requires_confirmation=True)
 
 
 def _save(
@@ -733,98 +728,6 @@ def test_a_metadata_patch_replaces_the_sessions_copy_in_a_new_list(store: Conver
     assert _as_stored(session.runs) == _as_stored(_loaded(store).runs)
 
 
-# --- P3 ---------------------------------------------------------------------------------------------------------
-
-
-def test_a_message_rewrite_edits_only_the_runs_a_load_returns_and_stores_only_their_messages(
-    store: ConversationStore,
-) -> None:
-    """A covered run is never handed to the edit; status, metadata, and content changes are not stored."""
-    _save(store, _run("covered"), _run("r1", metadata={"k": "v"}))
-    _summary(store, 1)
-    session = _loaded(store)
-    handed: list[str] = []
-
-    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-        handed.extend(run.run_id for run in runs)
-        [run] = runs
-        assert run is not session.runs[0]
-        run.messages[0].content = "finalized"
-        run.status, run.metadata, run.content = RunStatus.error, {"k": "lost"}, "lost"
-        return [*runs, _run("covered", messages=[Message(role="user", content="no", id="covered-user")])]
-
-    store.rewrite_run_messages("s1", edit, session=session)
-
-    assert handed == ["r1"]
-    stored = store.get_run("r1")
-    assert stored is not None
-    assert (stored.status, stored.metadata, stored.content) == (RunStatus.completed, {"k": "v"}, None)
-    assert [message.content for message in stored.messages] == ["finalized"]
-    assert [row[3]["content"] for row in _message_rows(store, "covered")] == ["covered"]
-    assert _as_stored(session.runs) == _as_stored(_loaded(store).runs)
-
-
-def test_a_message_rewrite_never_unfolds_a_message(store: ConversationStore) -> None:
-    """An edit that lists a folded message again leaves it folded and out of the replay view."""
-    messages = [Message(role="user", content=f"m{index}", id=f"m{index}", created_at=1) for index in range(2)]
-    _save(store, _run("r1", RunStatus.paused, messages=messages))
-    summary_id = _fold(store, _run("r1", RunStatus.running), messages[:1])
-
-    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-        runs[0].messages = [*copy.deepcopy(messages)]
-        return runs
-
-    store.rewrite_run_messages("s1", edit)
-
-    assert [(row[0], row[2]) for row in _message_rows(store, "r1")] == [("m0", summary_id), ("m1", None)]
-
-
-def test_a_message_rewrite_keeps_a_paused_runs_system_message(store: ConversationStore) -> None:
-    """The stored status decides, not what the edit did to its copy: a paused run's prompt stays for its continuation."""
-    _save(store, _run("r1", RunStatus.paused))
-
-    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-        runs[0].status = RunStatus.completed
-        return runs
-
-    store.rewrite_run_messages("s1", edit)
-
-    assert [row[0] for row in _message_rows(store, "r1")] == ["r1-system", "r1-user"]
-
-
-def test_a_message_rewrite_holds_the_write_lock_while_it_edits(store: ConversationStore) -> None:
-    """No other writer lands between the read the edit sees and the write it makes."""
-    _save(store, _run("r1"))
-    errors: list[str] = []
-
-    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-        _write_now(store, "UPDATE code_sessions_log_runs SET status = 'ERROR'", errors)
-        return runs
-
-    store.rewrite_run_messages("s1", edit)
-
-    assert errors == ["database is locked"]
-
-
-def test_a_message_rewrite_that_stores_no_run_leaves_the_session_the_load_its_edit_was_handed(
-    store: ConversationStore,
-) -> None:
-    """Nothing changed, so the load the edit saw is what a load returns, without a second read."""
-    _save(store, _run("r1"), _run("r2"))
-    session = _loaded(store)
-    handed: list[AnyRunRecord] = []
-
-    def edit(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-        handed.extend(runs)
-        return [_run("unknown")]
-
-    store.rewrite_run_messages("s1", edit, session=session)
-
-    assert [id(run) for run in session.runs] == [id(run) for run in handed]
-    assert _as_stored(session.runs) == _as_stored(_loaded(store).runs)
-    assert _row(store, "unknown") is None
-
-
 # --- deletes ----------------------------------------------------------------------------------------------------
 
 
@@ -933,29 +836,31 @@ def test_a_new_database_reads_as_empty(store: ConversationStore) -> None:
     assert store.list_updated_sessions(since=0) == []
 
 
-def test_get_run_returns_a_paused_team_run_with_the_members_its_requirements_name(
-    team_store: ConversationStore,
-) -> None:
-    """The members come in first-mention order, each a copy of its own; a run another team run owns is no member."""
+def test_get_run_returns_a_paused_team_run_with_its_paused_member_runs(team_store: ConversationStore) -> None:
+    """The members are the team run's paused member rows in log order, each a copy of its own row.
+
+    A member that finished and a paused run another team run owns are no member, and the team waits on its members'
+    paused calls.
+    """
     team = _team()
     replying = Message(role="assistant", content="ok", id="m1-reply", provider_data={"k": ["v"]}, created_at=1)
-    m1 = _member("m1", "t0", RunStatus.paused)
+    m2 = _member("m2", "t0", RunStatus.paused, tools=[_waiting("c1"), _waiting("c3")])
+    m1 = _member("m1", "t0", RunStatus.paused, tools=[_waiting("c2")])
     m1.messages.append(replying)
-    _save(team_store, m1, _member("m2", "t0", RunStatus.paused), session=team)
+    _save(team_store, m2, _member("done", "t0"), m1, session=team)
     _save(team_store, _member("other", "t9", RunStatus.paused), _team_run("t9", RunStatus.paused), session=team)
-    requirements = [
-        _member_requirement("m2", "c1"),
-        _member_requirement("m1", "c2"),
-        _member_requirement("m2", "c3"),
-        _member_requirement("other", "c4"),
-    ]
-    _save(team_store, _team_run("t0", RunStatus.paused, requirements=requirements), session=team)
+    _save(team_store, _team_run("t0", RunStatus.paused), session=team)
 
     paused = team_store.get_run("t0")
 
     assert isinstance(paused, TeamRunRecord)
     assert [member.run_id for member in paused.member_responses] == ["m2", "m1"]
     assert [message.id for message in paused.member_responses[0].messages] == ["m2-system", "m2-user"]
+    assert [(item.member_run_id, item.tool_execution.tool_call_id) for item in paused.requirements] == [
+        ("m2", "c1"),
+        ("m2", "c3"),
+        ("m1", "c2"),
+    ]
     loaded = {run.run_id: run for run in _loaded(team_store).runs}
     loaded_team = loaded["t0"]
     assert isinstance(loaded_team, TeamRunRecord)
@@ -965,10 +870,10 @@ def test_get_run_returns_a_paused_team_run_with_the_members_its_requirements_nam
 
 
 def test_a_team_run_that_is_not_paused_reads_without_members(team_store: ConversationStore) -> None:
-    """Only a paused team run's resume reads its members from the team run."""
+    """Only a paused team run's resume reads its members from the team run, even a member that stayed paused."""
     team = _team()
-    _save(team_store, _member("m1", "t0"), session=team)
-    _save(team_store, _team_run("t0", requirements=[_member_requirement("m1", "c1")]), session=team)
+    _save(team_store, _member("m1", "t0", RunStatus.paused, tools=[_waiting("c1")]), session=team)
+    _save(team_store, _team_run("t0"), session=team)
 
     finished = team_store.get_run("t0")
 
@@ -1261,10 +1166,9 @@ def test_a_fold_moves_its_stored_run_after_its_summary_and_flags_what_it_took(st
 def test_a_fold_of_a_run_without_a_row_stores_it_cancelled_with_its_live_scalars_and_metadata(
     store: ConversationStore,
 ) -> None:
-    """A crash after the fold leaves a run that does not replay; its tools and requirements wait for its own save."""
+    """A crash after the fold leaves a run that does not replay; its tools wait for its own save."""
     live = _run("r0", RunStatus.running, content="so far", metadata={"matrix_event_id": "$asked"})
-    live.tools = [ToolExecution(tool_call_id="c1", tool_name="shell")]
-    live.requirements = [_member_requirement("m0", "c1")]
+    live.tools = [_waiting("c1")]
     folded = [Message(role="user", content="question", id="q", created_at=1)]
     seed_session_row(store, _session())
 
@@ -1277,7 +1181,7 @@ def test_a_fold_of_a_run_without_a_row_stores_it_cancelled_with_its_live_scalars
         "so far",
         {"matrix_event_id": "$asked"},
     )
-    assert (stored.tools, stored.requirements, stored.messages) == (None, None, [])
+    assert (stored.tools, stored.messages) == (None, [])
     assert [(row[0], row[2]) for row in _message_rows(store, "r0")] == [("q", summary_id)]
     assert _seqs(store) == {"r0": 1}
     assert _loaded_ids(store) == ["r0"]
@@ -1795,7 +1699,6 @@ def test_news_in_the_log_moves_the_sessions_update_time_and_rewrites_do_not(stor
     _execute(store, "UPDATE code_sessions SET updated_at = 5")
     _save(store, _run("r1", RunStatus.paused))
     store.patch_run_metadata("s1", "r1", {"matrix_response_event_id": "$reply"})
-    store.rewrite_run_messages("s1", lambda runs: runs)
     assert updated_at() == 5
 
     _save(store, _run("r1"))

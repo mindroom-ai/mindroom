@@ -228,6 +228,16 @@ If an existing instance still has plaintext credential files, enabling credentia
 Clear or replace stale plaintext credential files before enabling the flag.
 If an already-encrypted instance has lost its instance Secret, pass `"enable_credentials_encryption": true` during reprovisioning so Helm receives the stable derived key again.
 
+### Instance Status Sync
+
+`/system/sync-instances`, the admin dashboard's "Refresh All", and the customer dashboard record the status Kubernetes shows: `running` once every desired pod is ready, `stopped` when scaled to zero, and `provisioning` otherwise.
+A crash-looping instance therefore shows `provisioning`, and the admin dashboard still offers Stop and Restart for it.
+A Stop pressed while a provision is still deploying the instance can be undone by that deploy; stop it again once the provision finishes.
+An instance without a deployment becomes `error`, except a `provisioning` or `deprovisioned` one, which keeps its status.
+When kubectl cannot reach the cluster, the sync leaves each instance unchanged; `/system/sync-instances` and "Refresh All" count it under `errors`.
+A `provisioning` instance whose deployment never appears belongs to a provision that stopped before Helm ran, such as one interrupted by a backend restart or a failed step before the deployment; the platform backend logs show which, and that no provision of it is still running.
+To retry it, set its `status` to `error` in Supabase and provision it again from the admin dashboard; do not uninstall it, because uninstalling deletes its volumes.
+
 ## Subscription Lifecycle
 
 Hosted instances follow their subscription.
@@ -248,6 +258,17 @@ Changing a plan's `included_ai_budget_usd` redeploys every running instance of t
 Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
 If an instance's OpenRouter key was deleted in OpenRouter or is missing from its instance Secret, re-provisioning replaces it.
 Each subscription has at most one instance, so a concurrent second provision request for it gets `409`.
+
+### Changing a Plan Price
+
+Plan prices are the `price_monthly` and `price_yearly` amounts, in US cents, in `saas-platform/pricing-config.yaml`.
+Keep each `price_yearly` at twelve monthly payments less `discounts.annual_percentage`, because the upgrade page advertises that percentage as the yearly saving of every plan.
+To change a price, edit the amount and run `cluster/scripts/sync-stripe-prices.py` with a test-mode `STRIPE_SECRET_KEY` exported in your shell, which overrides the key in `saas-platform/.env`; it finds or creates a test-mode price for each amount and writes its ID to `stripe_price_id_monthly` or `stripe_price_id_yearly`.
+The script refuses a live key, so create the live price by hand on the MindRoom product with the new amount, the test-mode price's billing interval, and `tier` and `billing_cycle` metadata (for example `byok` and `monthly`), then set its ID in `stripe_price_id_monthly_live` or `stripe_price_id_yearly_live`.
+Existing subscribers keep the price they bought, which maps to their plan only through its `tier` and `billing_cycle` metadata once its ID leaves the YAML, so add that metadata to the old live price before deploying if it lacks it.
+Subscribers switch plans in the Stripe customer portal, so if it offers plan switching, replace the old price with the new one in its product list in both modes.
+The public landing page lists the monthly prices separately in `saas-platform/platform-frontend/src/app/page.tsx`, so update them there too.
+Checkout, the upgrade page, and the landing page use the new prices once a release with these changes is deployed (see [Release Deployment](#release-deployment)).
 
 ### Account Deletion
 

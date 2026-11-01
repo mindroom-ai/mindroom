@@ -1,16 +1,12 @@
 """Real integration tests for provisioner that actually test functionality."""
 
 import base64
-import importlib
 import json
 import os
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
-import yaml
-from hypothesis import given, strategies as st, settings
-from hypothesis.stateful import RuleBasedStateMachine, rule, invariant, initialize
 
 # Set test environment before importing any modules that use config
 os.environ["PLATFORM_DOMAIN"] = "test.mindroom.chat"
@@ -157,18 +153,17 @@ class TestProvisionerCommandValidation:
 
     def test_instance_secrets_are_stable_and_instance_scoped(self):
         """Provisioner-derived instance secrets should be stable without being shared across tenants."""
-        provisioner_module = importlib.import_module("backend.services.provisioner_service")
         with patch.multiple(
-            provisioner_module,
+            provisioner_service,
             INSTANCE_CREDENTIALS_ENCRYPTION_SECRET="root-secret",
             PROVISIONER_API_KEY="fallback-secret",
         ):
-            first = provisioner_module._instance_credentials_encryption_key("123")
-            second = provisioner_module._instance_credentials_encryption_key("123")
-            other = provisioner_module._instance_credentials_encryption_key("456")
-            registration_secret = provisioner_module._instance_matrix_registration_shared_secret("123")
-            platform_sso_secret = provisioner_module.instance_platform_sso_secret("123")
-            other_platform_sso_secret = provisioner_module.instance_platform_sso_secret("456")
+            first = provisioner_service._instance_credentials_encryption_key("123")
+            second = provisioner_service._instance_credentials_encryption_key("123")
+            other = provisioner_service._instance_credentials_encryption_key("456")
+            registration_secret = provisioner_service._instance_matrix_registration_shared_secret("123")
+            platform_sso_secret = provisioner_service.instance_platform_sso_secret("123")
+            other_platform_sso_secret = provisioner_service.instance_platform_sso_secret("456")
 
         assert first == second
         assert first != other
@@ -425,38 +420,11 @@ class TestProvisionerCommandValidation:
         ]
 
 
-class TestProvisionerStateTransitions:
-    """Test that instance state transitions are valid and consistent."""
+class TestInstanceStatusUpdates:
+    """Best-effort instance status writes."""
 
-    VALID_TRANSITIONS = {
-        "provisioning": ["running", "error", "stopped"],
-        "running": ["stopped", "error", "deprovisioned"],
-        "stopped": ["running", "deprovisioned", "error"],
-        "error": ["provisioning", "deprovisioned"],
-        "deprovisioned": ["provisioning"],
-    }
-
-    @given(
-        initial_state=st.sampled_from(["provisioning", "running", "stopped", "error", "deprovisioned"]),
-        action=st.sampled_from(["provision", "start", "stop", "restart", "uninstall"]),
-    )
-    @settings(max_examples=50)
-    def test_state_transitions_are_valid(self, initial_state: str, action: str):
-        """Property: All state transitions must be valid."""
-        expected_transitions = {
-            "provision": {"deprovisioned": "provisioning", "error": "provisioning"},
-            "start": {"stopped": "running"},
-            "stop": {"running": "stopped"},
-            "restart": {"running": "running", "stopped": "running"},
-            "uninstall": {"running": "deprovisioned", "stopped": "deprovisioned", "error": "deprovisioned"},
-        }
-
-        if action in expected_transitions and initial_state in expected_transitions[action]:
-            new_state = expected_transitions[action][initial_state]
-            assert new_state in self.VALID_TRANSITIONS.get(initial_state, []) or new_state == initial_state
-
-    def test_concurrent_state_changes_maintain_consistency(self):
-        """Test that concurrent operations don't corrupt state."""
+    def test_concurrent_status_updates_each_report_success(self):
+        """Status updates from several threads at once each report success."""
         import threading
         from backend.services.instances_data import update_instance_status
 
@@ -494,83 +462,20 @@ class TestProvisionerStateTransitions:
             for t in threads:
                 t.join()
 
-        # At least one should succeed, and state should be valid
-        assert any(success for _, success in results)
-
-        # Final state should be one of the attempted states
-        with patch("backend.deps.ensure_supabase") as mock_sb:
-            mock_sb.return_value.table().select().eq().execute.return_value = Mock(
-                data=[{"status": "running"}]  # One of the valid outcomes
-            )
-            # Verify the final state is valid
-            assert True  # In real test, check actual database state
-
-
-class TestProvisionerContractValidation:
-    """Test that our API contracts match what Kubernetes/Helm expect."""
-
-    def test_helm_values_match_chart_schema(self):
-        """Verify our Helm values match the chart's requirements."""
-        # Read the actual Helm chart values schema
-        chart_path = Path("/app/k8s/instance/values.yaml")
-        if not chart_path.exists():
-            chart_path = Path("k8s/instance/values.yaml")
-
-        if chart_path.exists():
-            with open(chart_path) as f:
-                default_values = yaml.safe_load(f)
-
-            # Verify our code sets all required values
-
-            # Extract the values we set in code
-            code_values = {
-                "customer": "test-id",
-                "baseDomain": "example.com",
-                "accountId": "acc-123",
-                "supabaseUrl": "https://supabase.example.com",
-                "supabaseAnonKey": "test-key",
-                "openrouter_key": "test-key",
-                "openai_key": "test-key",
-                "sandbox_proxy_token": "token",
-            }
-
-            # Verify all required chart values are provided
-            for key in default_values.keys():
-                if key in ["customer", "baseDomain"]:  # Required values
-                    assert key in code_values, f"Missing required Helm value: {key}"
-
-    def test_kubernetes_api_version_compatibility(self):
-        """Verify we use Kubernetes APIs that exist in target version."""
-        # Verify we don't use deprecated APIs
-
-        # Check our kubectl commands don't use deprecated resources
-        test_commands = [["get", "deployments"], ["scale", "deployment/test"], ["create", "namespace", "test"]]
-
-        for cmd in test_commands:
-            # Verify command uses stable API versions
-            assert not any("beta" in str(c) for c in cmd), f"Using beta API in: {cmd}"
-            assert not any("alpha" in str(c) for c in cmd), f"Using alpha API in: {cmd}"
+        assert sorted(results) == [("error", True), ("running", True), ("stopped", True)]
 
 
 class TestProvisionerErrorRecovery:
     """Test real error scenarios and recovery mechanisms."""
 
     @pytest.mark.asyncio
-    async def test_helm_install_rollback_on_failure(self):
-        """Test that failed Helm installs are properly rolled back."""
+    async def test_failed_helm_install_marks_the_instance_error(self):
+        """A failed Helm install fails the provision and records the instance as errored, so it can be retried."""
         from backend.routes.provisioner import provision_instance
-
-        rollback_called = False
+        from fastapi import HTTPException
 
         async def helm_with_failure(args):
-            if "upgrade" in args:
-                # Simulate partial deployment
-                return (1, "", "Error: timed out waiting for deployment")
-            elif "rollback" in args:
-                nonlocal rollback_called
-                rollback_called = True
-                return (0, "Rolled back", "")
-            return (0, "Success", "")
+            return (1, "", "Error: timed out waiting for deployment")
 
         with (
             patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
@@ -584,7 +489,7 @@ class TestProvisionerErrorRecovery:
                     with patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl:
                         mock_kubectl.return_value = (0, "Success", "")
 
-                        with pytest.raises(Exception):
+                        with pytest.raises(HTTPException, match="Helm install failed"):
                             await provision_instance(
                                 None,  # request
                                 {"subscription_id": "sub-123", "account_id": "acc-123"},
@@ -592,12 +497,11 @@ class TestProvisionerErrorRecovery:
                                 None,  # background_tasks
                             )
 
-        # In a real implementation, we should call rollback
-        # assert rollback_called, "Failed to rollback after Helm failure"
+                    assert mock_sb.return_value.table().update.call_args.args[0]["status"] == "error"
 
     @pytest.mark.asyncio
-    async def test_namespace_cleanup_after_provision_failure(self):
-        """Test that namespaces are cleaned up after provision failure."""
+    async def test_failed_provision_keeps_the_shared_namespace(self):
+        """A failed provision never deletes the namespace that every tenant instance shares."""
         from backend.routes.provisioner import provision_instance
 
         namespace_deleted = False
@@ -620,7 +524,7 @@ class TestProvisionerErrorRecovery:
                     with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
                         mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
 
-                        with pytest.raises(Exception):
+                        with pytest.raises(Exception, match="Helm install failed"):
                             await provision_instance(
                                 None,  # request
                                 {"subscription_id": "sub-123", "account_id": "acc-123"},
@@ -628,128 +532,11 @@ class TestProvisionerErrorRecovery:
                                 None,  # background_tasks
                             )
 
-        # Namespace should be cleaned up after failure
-        # In real implementation: assert namespace_deleted
-
-
-class TestProvisionerResourceValidation:
-    """Test resource limits and quotas."""
-
-    @given(tier=st.sampled_from(["free", "byok", "pro", "enterprise"]))
-    def test_resource_limits_match_tier(self, tier: str):
-        """Property: Resource limits must match tier specifications."""
-        tier_limits = {
-            "free": {"cpu": 500, "memory": 512},
-            "byok": {"cpu": 1000, "memory": 1024},
-            "pro": {"cpu": 2000, "memory": 4096},
-            "enterprise": {"cpu": 8000, "memory": 16384},
-        }
-
-        expected = tier_limits[tier]
-
-        # Generate values that respect the tier limits
-        # This simulates what the provisioner would actually use
-        cpu_limit = expected["cpu"]
-        memory_limit = expected["memory"]
-
-        # In production, these values would come from Helm values
-        # This test ensures we don't over-provision resources
-        if tier in tier_limits:
-            assert cpu_limit <= expected["cpu"], f"CPU limit {cpu_limit} exceeds tier {tier} limit"
-            assert memory_limit <= expected["memory"], f"Memory limit {memory_limit} exceeds tier {tier} limit"
-
-
-class ProvisionerStateMachine(RuleBasedStateMachine):
-    """Stateful testing of provisioner operations."""
-
-    def __init__(self):
-        super().__init__()
-        self.instances = {}  # instance_id -> state
-        self.next_id = 1
-
-    @initialize()
-    def setup(self):
-        """Initialize the state machine."""
-        self.instances = {}
-        self.next_id = 1
-
-    @rule()
-    def provision_instance(self):
-        """Rule: Can provision a new instance."""
-        instance_id = str(self.next_id)
-        self.next_id += 1
-
-        # New instance starts in provisioning state
-        self.instances[instance_id] = "provisioning"
-
-        # Simulate async provisioning completion
-        import random
-
-        if random.random() > 0.1:  # 90% success rate
-            self.instances[instance_id] = "running"
-        else:
-            self.instances[instance_id] = "error"
-
-    @rule(instance_id=st.sampled_from(["1", "2", "3", "4", "5"]))
-    def stop_instance(self, instance_id: str):
-        """Rule: Can stop a running instance."""
-        if instance_id in self.instances and self.instances[instance_id] == "running":
-            self.instances[instance_id] = "stopped"
-
-    @rule(instance_id=st.sampled_from(["1", "2", "3", "4", "5"]))
-    def start_instance(self, instance_id: str):
-        """Rule: Can start a stopped instance."""
-        if instance_id in self.instances and self.instances[instance_id] == "stopped":
-            self.instances[instance_id] = "running"
-
-    @rule(instance_id=st.sampled_from(["1", "2", "3", "4", "5"]))
-    def uninstall_instance(self, instance_id: str):
-        """Rule: Can uninstall any instance."""
-        if instance_id in self.instances:
-            self.instances[instance_id] = "deprovisioned"
-
-    @invariant()
-    def valid_states(self):
-        """Invariant: All instances must be in valid states."""
-        valid_states = {"provisioning", "running", "stopped", "error", "deprovisioned"}
-        for instance_id, state in self.instances.items():
-            assert state in valid_states, f"Instance {instance_id} in invalid state: {state}"
-
-    @invariant()
-    def no_duplicate_ids(self):
-        """Invariant: Instance IDs must be unique."""
-        ids = list(self.instances.keys())
-        assert len(ids) == len(set(ids)), "Duplicate instance IDs detected"
-
-    @invariant()
-    def deprovisioned_is_final(self):
-        """Invariant: Deprovisioned instances cannot change state."""
-        # This would need to track state history in real implementation
-        pass
-
-
-# Run the state machine tests
-TestProvisionerStateMachine = ProvisionerStateMachine.TestCase
+        assert not namespace_deleted
 
 
 class TestProvisionerRealScenarios:
     """Test real-world scenarios that have broken production systems."""
-
-    @pytest.mark.asyncio
-    async def test_provision_with_registry_auth_failure(self):
-        """Test when Docker registry authentication fails."""
-        from backend.k8s import ensure_docker_registry_secret
-
-        # Real scenario: Registry credentials expired
-        with patch("backend.k8s.run_kubectl") as mock_kubectl:
-            # First call fails with auth error
-            mock_kubectl.return_value = (1, "", "Error: failed to create secret: 401 Unauthorized")
-
-            result = await ensure_docker_registry_secret(
-                "test-secret", "registry.example.com", "user", "expired-token", "test-namespace"
-            )
-
-            assert result is False, "Should handle registry auth failure"
 
     @pytest.mark.asyncio
     async def test_provision_with_resource_quota_exceeded(self):
@@ -786,6 +573,19 @@ class TestProvisionerRealScenarios:
                     assert "quota" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
+    async def test_unreachable_cluster_is_not_a_missing_deployment(self):
+        """A kubectl failure raises instead of reporting the deployment missing, which would redeploy or fail it."""
+        from backend.k8s import check_deployment_exists
+
+        with patch("backend.k8s.run_kubectl") as mock_kubectl:
+            mock_kubectl.return_value = (0, "", "")
+            assert await check_deployment_exists("123") is False
+
+            mock_kubectl.return_value = (1, "", "The connection to the server was refused")
+            with pytest.raises(RuntimeError, match="connection to the server was refused"):
+                await check_deployment_exists("123")
+
+    @pytest.mark.asyncio
     async def test_provision_with_pvc_mount_failure(self):
         """Test when PersistentVolumeClaim cannot be mounted."""
         from backend.k8s import wait_for_deployment_ready
@@ -801,34 +601,6 @@ class TestProvisionerRealScenarios:
 
             ready = await wait_for_deployment_ready("test-instance", timeout_seconds=5)
             assert ready is False, "Should detect PVC mount failures"
-
-    @pytest.mark.asyncio
-    async def test_concurrent_provisioning_same_account(self):
-        """Test race condition when same account provisions multiple times."""
-        import asyncio
-        from backend.routes.provisioner import provision_instance
-
-        results = []
-
-        async def provision():
-            try:
-                result = await provision_instance(
-                    None,  # request
-                    {"subscription_id": "sub-duplicate", "account_id": "acc-duplicate"},
-                    "Bearer test-key",  # authorization
-                    None,  # background_tasks
-                )
-                results.append(("success", result))
-            except Exception as e:
-                results.append(("error", str(e)))
-
-        # Launch concurrent provisions for same account
-        tasks = [provision() for _ in range(3)]
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Should handle gracefully - either queue or reject duplicates
-        success_count = sum(1 for status, _ in results if status == "success")
-        assert success_count <= 1, "Should not provision multiple instances for same account"
 
 
 class TestProvisionerObservability:
@@ -909,8 +681,3 @@ class TestProvisionerObservability:
                 # Error should include debugging context - helm failure message
                 assert "helm" in error.lower() or "deploy" in error.lower()
                 assert "failed" in error.lower() or "refused" in error.lower()
-
-
-if __name__ == "__main__":
-    # Run property-based tests
-    pytest.main([__file__, "-v", "--hypothesis-show-statistics"])

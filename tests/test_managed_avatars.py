@@ -14,16 +14,13 @@ import pytest
 from PIL import Image
 from structlog.testing import capture_logs
 
-from mindroom import bot as bot_module
 from mindroom import constants as constants_mod
 from mindroom import managed_avatars
 from mindroom.access_policy import resolve_room_policy
 from mindroom.bounded_bytes import ByteLimitExceededError
 from mindroom.config.main import Config
+from mindroom.logging_config import get_logger
 from mindroom.matrix import rooms as matrix_rooms
-from mindroom.matrix.users import AgentMatrixUser
-from tests.bot_helpers import make_test_agent_bot
-from tests.conftest import TEST_PASSWORD
 
 _PINNED_COMMIT = "f685f674404ebb9709d707f49298450211a7d603"
 # The suite-wide fixture in conftest.py disables stock downloads; keep the real one to test it directly.
@@ -131,7 +128,7 @@ async def test_bundled_avatar_is_used_without_download(
     bundled.parent.mkdir(parents=True)
     bundled.write_bytes(_image_bytes())
 
-    assert await managed_avatars.entity_avatar_path("agents", "code", runtime_paths) == bundled
+    assert await managed_avatars._entity_avatar_path("agents", "code", runtime_paths) == bundled
     assert downloads.urls == []
 
 
@@ -141,8 +138,8 @@ async def test_agent_named_after_stock_avatar_downloads_it_once(
     downloads: _FakeDownloads,
 ) -> None:
     """An agent named like a stock picture receives it, and later calls reuse the cached file."""
-    first = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
-    second = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+    first = await managed_avatars._entity_avatar_path("agents", "code", runtime_paths)
+    second = await managed_avatars._entity_avatar_path("agents", "code", runtime_paths)
 
     assert first == second == _cache_path(runtime_paths, "code")
     assert first.is_file()
@@ -157,7 +154,7 @@ async def test_downloaded_avatar_is_reencoded_as_256px_png(
     """Whatever the server sends, Matrix receives a clean 256x256 PNG."""
     downloads.payload = _image_bytes("JPEG", (640, 480))
 
-    path = await managed_avatars.entity_avatar_path("agents", "mind", runtime_paths)
+    path = await managed_avatars._entity_avatar_path("agents", "mind", runtime_paths)
 
     assert path is not None
     with Image.open(path) as image:
@@ -172,10 +169,10 @@ async def test_unknown_entities_get_stable_non_identity_picks(
     downloads: _FakeDownloads,
 ) -> None:
     """Every other entity gets a stable stock picture, never the Mind or Router identity."""
-    first = await managed_avatars.entity_avatar_path("agents", "tax_helper", runtime_paths)
-    second = await managed_avatars.entity_avatar_path("agents", "tax_helper", runtime_paths)
+    first = await managed_avatars._entity_avatar_path("agents", "tax_helper", runtime_paths)
+    second = await managed_avatars._entity_avatar_path("agents", "tax_helper", runtime_paths)
     for index in range(200):
-        await managed_avatars.entity_avatar_path("teams", f"team_{index}", runtime_paths)
+        await managed_avatars._entity_avatar_path("teams", f"team_{index}", runtime_paths)
 
     assert first == second
     assert first is not None
@@ -194,7 +191,7 @@ async def test_workspace_avatar_wins_without_network(
     override.parent.mkdir(parents=True)
     override.write_bytes(b"png")
 
-    assert await managed_avatars.entity_avatar_path("agents", "mind", runtime_paths) == override
+    assert await managed_avatars._entity_avatar_path("agents", "mind", runtime_paths) == override
     assert downloads.urls == []
 
 
@@ -227,7 +224,7 @@ async def test_room_served_by_one_team_uses_that_teams_avatar(
     path = await managed_avatars.room_avatar_path("war_room", config, runtime_paths)
 
     assert path is not None
-    assert path == await managed_avatars.entity_avatar_path("teams", "ops", runtime_paths)
+    assert path == await managed_avatars._entity_avatar_path("teams", "ops", runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -287,7 +284,7 @@ async def test_unavailable_stock_avatar_returns_none_and_warns(
     downloads.payload = payload
 
     with capture_logs() as logs:
-        path = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+        path = await managed_avatars._entity_avatar_path("agents", "code", runtime_paths)
 
     assert path is None
     assert not _cache_path(runtime_paths, "code").exists()
@@ -307,7 +304,7 @@ async def test_unwritable_cache_returns_none_and_warns(
     blocker.write_bytes(b"not a directory")
 
     with capture_logs() as logs:
-        path = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+        path = await managed_avatars._entity_avatar_path("agents", "code", runtime_paths)
 
     assert path is None
     assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["stock_avatar_unavailable"]
@@ -356,93 +353,109 @@ async def test_downloader_rejects_bad_responses(
         await _real_download_stock_avatar(managed_avatars._stock_avatar_url("code"))
 
 
-def _code_bot(runtime_paths: constants_mod.RuntimePaths, *, avatar_url: str | None) -> bot_module.AgentBot:
-    """Build the `code` agent bot whose Matrix profile reports the given avatar."""
-    config = _config(runtime_paths, agents={"code": {"display_name": "Code"}})
-    bot = make_test_agent_bot(
-        agent_user=AgentMatrixUser(
-            agent_name="code",
-            user_id="@mindroom_code:localhost",
-            display_name="Code",
-            password=TEST_PASSWORD,
-        ),
-        config=config,
-        runtime_paths=runtime_paths,
-        rooms=[],
-    )
+def _profile_client(*, avatar_url: str | None) -> AsyncMock:
+    """Return the `code` agent's Matrix client, whose profile reports the given avatar."""
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = "@mindroom_code:localhost"
     client.get_profile.return_value = nio.ProfileGetResponse(displayname="Code", avatar_url=avatar_url)
-    bot.client = client
-    return bot
+    return client
+
+
+async def _ensure_code_avatar(runtime_paths: constants_mod.RuntimePaths, client: AsyncMock) -> None:
+    config = _config(runtime_paths, agents={"code": {"display_name": "Code"}})
+    await managed_avatars.ensure_entity_avatar(client, "code", config, runtime_paths, logger=get_logger("tests.avatar"))
 
 
 @pytest.fixture
 def set_user_avatar(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """Capture profile avatar uploads instead of talking to Matrix."""
     set_avatar = AsyncMock(return_value=True)
-    monkeypatch.setattr(bot_module, "set_user_avatar_from_file", set_avatar)
+    monkeypatch.setattr(managed_avatars, "set_user_avatar_from_file", set_avatar)
     return set_avatar
 
 
 @pytest.mark.asyncio
-async def test_bot_sets_resolved_avatar_when_profile_has_none(
+async def test_an_entity_without_a_profile_avatar_gets_its_resolved_avatar(
     runtime_paths: constants_mod.RuntimePaths,
     downloads: _FakeDownloads,
     set_user_avatar: AsyncMock,
 ) -> None:
     """An agent without a profile picture receives its stock avatar."""
-    bot = _code_bot(runtime_paths, avatar_url=None)
+    client = _profile_client(avatar_url=None)
 
-    await bot._set_avatar_if_available()
+    await _ensure_code_avatar(runtime_paths, client)
 
-    set_user_avatar.assert_awaited_once_with(bot.client, _cache_path(runtime_paths, "code"))
+    set_user_avatar.assert_awaited_once_with(client, _cache_path(runtime_paths, "code"))
     assert downloads.names == ["code"]
 
 
 @pytest.mark.asyncio
-async def test_bot_keeps_existing_profile_avatar_without_downloading(
+async def test_an_existing_profile_avatar_is_kept_without_downloading(
     runtime_paths: constants_mod.RuntimePaths,
     downloads: _FakeDownloads,
     set_user_avatar: AsyncMock,
 ) -> None:
     """A profile that already has a picture never triggers a stock download."""
-    bot = _code_bot(runtime_paths, avatar_url="mxc://localhost/custom")
-
-    await bot._set_avatar_if_available()
+    await _ensure_code_avatar(runtime_paths, _profile_client(avatar_url="mxc://localhost/custom"))
 
     assert downloads.urls == []
     set_user_avatar.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_bot_skips_avatar_when_none_is_available(
+async def test_no_avatar_is_set_when_none_is_available(
     runtime_paths: constants_mod.RuntimePaths,
     downloads: _FakeDownloads,
     set_user_avatar: AsyncMock,
 ) -> None:
     """An offline machine leaves the profile without a picture."""
     downloads.payload = httpx.ConnectError("offline")
-    bot = _code_bot(runtime_paths, avatar_url=None)
 
-    await bot._set_avatar_if_available()
+    await _ensure_code_avatar(runtime_paths, _profile_client(avatar_url=None))
 
     set_user_avatar.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_bot_avatar_resolution_errors_never_escape(
+async def test_a_team_gets_its_avatar_from_the_teams_avatars(
     runtime_paths: constants_mod.RuntimePaths,
-    monkeypatch: pytest.MonkeyPatch,
+    downloads: _FakeDownloads,
+    set_user_avatar: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """A team's profile receives the team's own avatar file, looked up among team avatars."""
+    team_avatar = tmp_path / "avatars" / "teams" / "ops.png"
+    team_avatar.parent.mkdir(parents=True)
+    team_avatar.write_bytes(b"png")
+    config = _config(
+        runtime_paths,
+        agents={"code": {"display_name": "Code"}},
+        teams={"ops": {"display_name": "Ops", "role": "Operations", "agents": ["code"]}},
+    )
+    client = _profile_client(avatar_url=None)
+
+    await managed_avatars.ensure_entity_avatar(client, "ops", config, runtime_paths, logger=get_logger("tests.avatar"))
+
+    set_user_avatar.assert_awaited_once_with(client, team_avatar)
+    assert downloads.urls == []
+
+
+@pytest.mark.asyncio
+async def test_avatar_resolution_errors_never_escape(
+    runtime_paths: constants_mod.RuntimePaths,
     set_user_avatar: AsyncMock,
 ) -> None:
-    """Avatars are cosmetic, so an unexpected resolver error cannot fail startup."""
-    monkeypatch.setattr(bot_module, "entity_avatar_path", AsyncMock(side_effect=RuntimeError("boom")))
-    bot = _code_bot(runtime_paths, avatar_url=None)
+    """Avatars are cosmetic, so an unexpected error while setting one cannot fail startup."""
+    client = _profile_client(avatar_url=None)
+    client.get_profile.side_effect = RuntimeError("boom")
 
-    await bot._set_avatar_if_available()
+    with capture_logs() as logs:
+        await _ensure_code_avatar(runtime_paths, client)
 
     set_user_avatar.assert_not_awaited()
+    assert [(log["event"], log["error"]) for log in logs if log["event"] == "avatar_set_failed"] == [
+        ("avatar_set_failed", "boom"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -548,7 +561,7 @@ async def test_failed_download_creates_failure_marker(
     downloads.payload = httpx.ConnectError("offline")
 
     with capture_logs() as logs:
-        path = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+        path = await managed_avatars._entity_avatar_path("agents", "code", runtime_paths)
 
     assert path is None
     assert _failure_marker(runtime_paths, "code").is_file()
@@ -564,8 +577,8 @@ async def test_recent_failure_skips_download_quietly(
     _record_failure(runtime_paths, "code")
 
     with capture_logs() as logs:
-        first = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
-        second = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+        first = await managed_avatars._entity_avatar_path("agents", "code", runtime_paths)
+        second = await managed_avatars._entity_avatar_path("agents", "code", runtime_paths)
 
     assert first is None
     assert second is None
@@ -584,8 +597,8 @@ async def test_expired_failure_retries_the_download(
     downloads.payload = httpx.ConnectError("still offline")
 
     with capture_logs() as logs:
-        assert await managed_avatars.entity_avatar_path("agents", "code", runtime_paths) is None
-        assert await managed_avatars.entity_avatar_path("agents", "code", runtime_paths) is None
+        assert await managed_avatars._entity_avatar_path("agents", "code", runtime_paths) is None
+        assert await managed_avatars._entity_avatar_path("agents", "code", runtime_paths) is None
 
     assert downloads.names == ["code"]
     assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["stock_avatar_unavailable"]
@@ -594,7 +607,7 @@ async def test_expired_failure_retries_the_download(
     os.utime(marker, (marker.stat().st_mtime - 25 * 60 * 60,) * 2)
     downloads.payload = _image_bytes()
 
-    path = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+    path = await managed_avatars._entity_avatar_path("agents", "code", runtime_paths)
 
     assert path == _cache_path(runtime_paths, "code")
 
@@ -609,7 +622,7 @@ async def test_clearing_failures_retries_the_download_immediately(
 
     managed_avatars.clear_failed_stock_downloads(runtime_paths)
 
-    path = await managed_avatars.entity_avatar_path("agents", "code", runtime_paths)
+    path = await managed_avatars._entity_avatar_path("agents", "code", runtime_paths)
 
     assert path == _cache_path(runtime_paths, "code")
     assert downloads.names == ["code"]

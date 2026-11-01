@@ -22,6 +22,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.browser_lifecycle_helpers import UNCOMPARED_LAUNCH_SETTINGS
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
@@ -58,9 +59,10 @@ def _upload_tool(
     state = _BrowserProfileState(
         playwright=SimpleNamespace(stop=AsyncMock()),
         context=SimpleNamespace(close=AsyncMock()),
+        launch_settings=UNCOMPARED_LAUNCH_SETTINGS,
         tabs={"tab-1": tab},
     )
-    tool._profiles["mindroom"] = state
+    tool._session.profiles["mindroom"] = state
     monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=state))
     monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
     return tool, consumer, root
@@ -228,12 +230,12 @@ async def test_upload_rejects_workspace_root_replaced_before_construction(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
-async def test_upload_removes_staging_after_browser_failure(
+async def test_failed_upload_keeps_the_files_the_page_may_have_selected_until_its_tab_closes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: type[BaseException],
 ) -> None:
-    """Failure and cancellation remove every private staged upload."""
+    """A selection that fails or is stopped may already hold the staged files, which a later submit reads."""
     tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
     source = root / "upload.txt"
     source.write_bytes(b"authorized bytes")
@@ -242,15 +244,44 @@ async def test_upload_removes_staging_after_browser_failure(
     async def fail(paths: list[str], *, timeout: int) -> None:  # noqa: ASYNC109
         assert timeout == 1234
         staging.extend(Path(path) for path in paths)
-        assert staging[0].read_bytes() == b"authorized bytes"
         raise failure
 
     consumer.side_effect = fail
     with pytest.raises(failure):
         await _upload(tool, [source])
-    assert staging
+    assert staging[0].read_bytes() == b"authorized bytes"
+
+    await tool._close_tab("mindroom", "tab-1")
+
     assert not staging[0].exists()
     assert source.read_bytes() == b"authorized bytes"
+
+
+@pytest.mark.asyncio
+async def test_upload_to_a_tab_that_closes_during_selection_removes_its_staged_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tab that closes while its selection runs has already released its uploads, so these go too."""
+    tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
+    source = root / "upload.txt"
+    source.write_bytes(b"authorized bytes")
+    tab = tool._session.profiles["mindroom"].tabs["tab-1"]
+    staging: list[Path] = []
+
+    async def close_during_selection(paths: list[str], *, timeout: int) -> None:  # noqa: ASYNC109
+        assert timeout == 1234
+        staging.extend(Path(path) for path in paths)
+        tab.page.is_closed = lambda: True
+        msg = "Target page, context or browser has been closed"
+        raise RuntimeError(msg)
+
+    consumer.side_effect = close_during_selection
+    with pytest.raises(RuntimeError, match="has been closed"):
+        await _upload(tool, [source])
+
+    assert not staging[0].exists()
+    assert (tab.upload_staging, tab.upload_staged_bytes) == ([], 0)
 
 
 @pytest.mark.asyncio
@@ -305,7 +336,7 @@ async def test_upload_snapshots_stay_within_one_budget_until_their_tabs_close(
     sparse = root / "sparse.bin"
     with sparse.open("wb") as output:
         output.truncate(8 * 1024 * 1024)
-    tab = tool._profiles["mindroom"].tabs["tab-1"]
+    tab = tool._session.profiles["mindroom"].tabs["tab-1"]
 
     await _upload(tool, [source])
     for paths in ([source], [sparse]):
@@ -320,18 +351,25 @@ async def test_upload_snapshots_stay_within_one_budget_until_their_tabs_close(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("second_uploader", ["same toolkit", "toolkit sharing its browser"])
 async def test_parallel_uploads_cannot_each_spend_the_whole_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    second_uploader: str,
 ) -> None:
-    """Uploads running at once share one budget instead of each seeing all of it."""
+    """Uploads running at once share one budget instead of each seeing all of it, whichever reply's toolkit runs them."""
     monkeypatch.setattr("mindroom.custom_tools.browser._MAX_STAGED_UPLOAD_BYTES", 10)
     tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
+    other = tool
+    if second_uploader == "toolkit sharing its browser":
+        other = BrowserTools(tool._runtime_paths)
+        monkeypatch.setattr(other, "_ensure_profile", tool._ensure_profile)
+        monkeypatch.setattr(other, "_resolve_tab", tool._resolve_tab)
     source = root / "upload.bin"
     source.write_bytes(b"123456")
-    tab = tool._profiles["mindroom"].tabs["tab-1"]
+    tab = tool._session.profiles["mindroom"].tabs["tab-1"]
 
-    results = await asyncio.gather(_upload(tool, [source]), _upload(tool, [source]), return_exceptions=True)
+    results = await asyncio.gather(_upload(tool, [source]), _upload(other, [source]), return_exceptions=True)
 
     assert [type(result) for result in results] == [dict, ValueError]
     consumer.assert_awaited_once()
@@ -642,7 +680,7 @@ async def test_upload_profile_teardown_cleans_snapshots_when_close_fails(
     consumer.side_effect = consume
     await _upload(tool, [source])
     assert staging[0].read_bytes() == b"authorized bytes"
-    tool._profiles["mindroom"].context.close.side_effect = failure
+    tool._session.profiles["mindroom"].context.close.side_effect = failure
 
     if failure is None:
         await tool._stop_profile("mindroom")
@@ -655,7 +693,11 @@ async def test_upload_profile_teardown_cleans_snapshots_when_close_fails(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [20, 51 * 1024 * 1024])
-async def test_upload_bytes_survive_tool_return_in_real_browser(tmp_path: Path, size: int) -> None:
+async def test_upload_bytes_survive_tool_return_in_real_browser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    size: int,
+) -> None:
     """Chromium reads both small and large selected files after the upload tool returns."""
     executable = shutil.which("chromium")
     if executable is None:
@@ -679,8 +721,9 @@ async def test_upload_bytes_survive_tool_return_in_real_browser(tmp_path: Path, 
         context = await browser.new_context()
         page = await context.new_page()
         await page.set_content('<input type="file">')
-        state = _BrowserProfileState(playwright=playwright, context=context)
-        tool._profiles["mindroom"] = state
+        state = _BrowserProfileState(playwright=playwright, context=context, launch_settings=UNCOMPARED_LAUNCH_SETTINGS)
+        tool._session.profiles["mindroom"] = state
+        monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=state))
         target_id = tool._register_tab(state, page)
         state.tabs[target_id].refs["e1"] = "input[type=file]"
         state.active_target_id = target_id

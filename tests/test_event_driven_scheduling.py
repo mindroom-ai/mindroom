@@ -9,8 +9,10 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.llm.errors import ProviderError
 from mindroom.matrix.identity import MatrixID
-from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule, _WorkflowParseError
+from mindroom.scheduling.errors import SchedulingError
+from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import install_model_providers
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
@@ -56,6 +58,17 @@ def mock_config(runtime_paths: RuntimePaths) -> Config:
     return config
 
 
+def _polling_workflow(minute: str, message: str, description: str) -> ScheduledWorkflow:
+    """Return the conditional polling workflow a parser would write for an event-driven request."""
+    return ScheduledWorkflow(
+        schedule_type="cron",
+        is_conditional=True,
+        cron_schedule=CronSchedule(minute=minute, hour="*", day="*", month="*", weekday="*"),
+        message=message,
+        description=description,
+    )
+
+
 @pytest.mark.asyncio
 class TestEventDrivenScheduling:
     """Test event-driven scheduling conversions."""
@@ -67,19 +80,15 @@ class TestEventDrivenScheduling:
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting 'if email urgent' to polling schedule."""
-        # Create expected workflow response
-        expected_workflow = ScheduledWorkflow(
-            schedule_type="cron",
-            is_conditional=True,
-            cron_schedule=CronSchedule(minute="*/2", hour="*", day="*", month="*", weekday="*"),
-            message="@email_assistant Check for emails containing 'urgent' in subject or body. If found, @phone_agent please call the user immediately about the urgent email.",
-            description="Monitor for urgent emails and alert",
+        expected_workflow = _polling_workflow(
+            "*/2",
+            "@email_assistant Check for emails containing 'urgent' in subject or body. If found, @phone_agent please call the user immediately about the urgent email.",
+            "Monitor for urgent emails and alert",
         )
 
         model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
         install_model_providers(monkeypatch, {"default": model})
 
-        # Execute
         result = await _parse_workflow_schedule(
             "If I get an email about 'urgent', call me",
             mock_config,
@@ -88,169 +97,91 @@ class TestEventDrivenScheduling:
             timezone="UTC",
         )
 
-        # Verify the result is a workflow (not an error)
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-        # Verify the parser model was asked once, with the event guidance in its prompt
         [request] = model.requests
         call_args = request.messages[-1].get_content_string()
         assert "event-based" in call_args.lower()
         assert "if" in call_args.lower()
         assert "polling" in call_args.lower()
 
-    async def test_bitcoin_price_event(
+    @pytest.mark.parametrize(
+        ("request_text", "workflow", "responders"),
+        [
+            pytest.param(
+                "When Bitcoin drops below $40k, notify me",
+                _polling_workflow(
+                    "*/5",
+                    "@crypto_agent Check Bitcoin price. If below $40,000, @notification_agent alert the user about the price drop.",
+                    "Monitor Bitcoin price threshold",
+                ),
+                ("crypto_agent", "notification_agent"),
+                id="bitcoin_price",
+            ),
+            pytest.param(
+                "If server CPU goes above 80%, scale up",
+                _polling_workflow(
+                    "*",
+                    "@monitoring_agent Check server CPU usage. If above 80%, @ops_agent scale up the servers immediately.",
+                    "Monitor CPU and auto-scale",
+                ),
+                ("monitoring_agent", "ops_agent"),
+                id="server_monitoring",
+            ),
+            pytest.param(
+                "When the build fails, create a ticket",
+                _polling_workflow(
+                    "*/5",
+                    "@ci_agent Check the latest build status. If failed, @ticket_agent create a high-priority ticket with the failure details.",
+                    "Monitor builds and create failure tickets",
+                ),
+                ("ci_agent", "ticket_agent"),
+                id="build_failure",
+            ),
+            pytest.param(
+                "When someone mentions our product on Reddit, analyze it",
+                _polling_workflow(
+                    "*/10",
+                    "@reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points of the discussions.",
+                    "Monitor Reddit mentions and analyze",
+                ),
+                ("reddit_agent", "analyst"),
+                id="reddit_mention",
+            ),
+            pytest.param(
+                "Whenever I get an email from my boss, notify me immediately",
+                _polling_workflow(
+                    "*",
+                    "@email_assistant Check for new emails from boss. If any found, @notification_agent alert the user immediately.",
+                    "Monitor for boss emails",
+                ),
+                ("email_assistant", "notification_agent"),
+                id="boss_email",
+            ),
+        ],
+    )
+    async def test_event_request_parses_to_polling_schedule(
         self,
         monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
         runtime_paths: RuntimePaths,
+        request_text: str,
+        workflow: ScheduledWorkflow,
+        responders: tuple[str, ...],
     ) -> None:
-        """Test converting Bitcoin price condition to polling schedule."""
-        expected_workflow = ScheduledWorkflow(
-            schedule_type="cron",
-            is_conditional=True,
-            cron_schedule=CronSchedule(minute="*/5", hour="*", day="*", month="*", weekday="*"),
-            message="@crypto_agent Check Bitcoin price. If below $40,000, @notification_agent alert the user about the price drop.",
-            description="Monitor Bitcoin price threshold",
-        )
-
-        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        """An event-driven request round-trips through the parser as a recurring polling schedule."""
+        model = ScriptedModel([answer(workflow.model_dump_json(exclude_unset=True))])
         install_model_providers(monkeypatch, {"default": model})
 
-        # Execute
         result = await _parse_workflow_schedule(
-            "When Bitcoin drops below $40k, notify me",
+            request_text,
             mock_config,
             runtime_paths,
-            available_responders=[_mid("crypto_agent"), _mid("notification_agent")],
+            available_responders=[_mid(name) for name in responders],
             timezone="UTC",
         )
 
-        # Verify
-        assert isinstance(result, ScheduledWorkflow)
-        assert result.schedule_type == "cron"
-
-    async def test_server_monitoring_event(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        mock_config: Config,
-        runtime_paths: RuntimePaths,
-    ) -> None:
-        """Test converting server monitoring condition to polling schedule."""
-        expected_workflow = ScheduledWorkflow(
-            schedule_type="cron",
-            is_conditional=True,
-            cron_schedule=CronSchedule(minute="*", hour="*", day="*", month="*", weekday="*"),
-            message="@monitoring_agent Check server CPU usage. If above 80%, @ops_agent scale up the servers immediately.",
-            description="Monitor CPU and auto-scale",
-        )
-
-        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
-        install_model_providers(monkeypatch, {"default": model})
-
-        # Execute
-        result = await _parse_workflow_schedule(
-            "If server CPU goes above 80%, scale up",
-            mock_config,
-            runtime_paths,
-            available_responders=[_mid("monitoring_agent"), _mid("ops_agent")],
-            timezone="UTC",
-        )
-
-        # Verify
-        assert isinstance(result, ScheduledWorkflow)
-        assert result.schedule_type == "cron"
-
-    async def test_build_failure_event(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        mock_config: Config,
-        runtime_paths: RuntimePaths,
-    ) -> None:
-        """Test converting build failure event to polling schedule."""
-        expected_workflow = ScheduledWorkflow(
-            schedule_type="cron",
-            is_conditional=True,
-            cron_schedule=CronSchedule(minute="*/5", hour="*", day="*", month="*", weekday="*"),
-            message="@ci_agent Check the latest build status. If failed, @ticket_agent create a high-priority ticket with the failure details.",
-            description="Monitor builds and create failure tickets",
-        )
-
-        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
-        install_model_providers(monkeypatch, {"default": model})
-
-        # Execute
-        result = await _parse_workflow_schedule(
-            "When the build fails, create a ticket",
-            mock_config,
-            runtime_paths,
-            available_responders=[_mid("ci_agent"), _mid("ticket_agent")],
-            timezone="UTC",
-        )
-
-        # Verify
-        assert isinstance(result, ScheduledWorkflow)
-        assert result.schedule_type == "cron"
-
-    async def test_reddit_mention_event(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        mock_config: Config,
-        runtime_paths: RuntimePaths,
-    ) -> None:
-        """Test converting Reddit mention event to polling schedule."""
-        expected_workflow = ScheduledWorkflow(
-            schedule_type="cron",
-            is_conditional=True,
-            cron_schedule=CronSchedule(minute="*/10", hour="*", day="*", month="*", weekday="*"),
-            message="@reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points of the discussions.",
-            description="Monitor Reddit mentions and analyze",
-        )
-
-        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
-        install_model_providers(monkeypatch, {"default": model})
-
-        # Execute
-        result = await _parse_workflow_schedule(
-            "When someone mentions our product on Reddit, analyze it",
-            mock_config,
-            runtime_paths,
-            available_responders=[_mid("reddit_agent"), _mid("analyst")],
-            timezone="UTC",
-        )
-
-        # Verify
-        assert isinstance(result, ScheduledWorkflow)
-        assert result.schedule_type == "cron"
-
-    async def test_boss_email_immediate_event(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        mock_config: Config,
-        runtime_paths: RuntimePaths,
-    ) -> None:
-        """Test converting boss email event with immediate urgency."""
-        expected_workflow = ScheduledWorkflow(
-            schedule_type="cron",
-            is_conditional=True,
-            cron_schedule=CronSchedule(minute="*", hour="*", day="*", month="*", weekday="*"),
-            message="@email_assistant Check for new emails from boss. If any found, @notification_agent alert the user immediately.",
-            description="Monitor for boss emails",
-        )
-
-        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
-        install_model_providers(monkeypatch, {"default": model})
-
-        # Execute
-        result = await _parse_workflow_schedule(
-            "Whenever I get an email from my boss, notify me immediately",
-            mock_config,
-            runtime_paths,
-            available_responders=[_mid("email_assistant"), _mid("notification_agent")],
-            timezone="UTC",
-        )
-
-        # Verify
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
@@ -272,7 +203,6 @@ class TestEventDrivenScheduling:
         model = ScriptedModel([answer(simple_workflow.model_dump_json(exclude_unset=True))])
         install_model_providers(monkeypatch, {"default": model})
 
-        # Execute
         await _parse_workflow_schedule(
             "Test request",
             mock_config,
@@ -281,7 +211,6 @@ class TestEventDrivenScheduling:
             timezone="UTC",
         )
 
-        # Verify the prompt contains generic event-driven guidance
         [request] = model.requests
         call_args = request.messages[-1].get_content_string()
 
@@ -303,8 +232,12 @@ class TestEventDrivenScheduling:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "text"),
-    [(RuntimeError("parser unavailable"), "parser unavailable"), (TimeoutError(), "TimeoutError")],
-    ids=["with_text", "without_text"],
+    [
+        (RuntimeError("parser unavailable"), "parser unavailable"),
+        (TimeoutError(), "TimeoutError"),
+        (ProviderError("AI service error", provider="Synthetic"), "AI service error"),
+    ],
+    ids=["with_text", "without_text", "provider_error_is_not_a_refusal"],
 )
 async def test_a_parser_call_that_raises_reports_why(
     monkeypatch: pytest.MonkeyPatch,
@@ -320,13 +253,15 @@ async def test_a_parser_call_that_raises_reports_why(
 
     install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(fail)]])})
 
-    result = await _parse_workflow_schedule(
-        "Every morning, check the queue",
-        mock_config,
-        runtime_paths,
-        available_responders=[_mid("ops_agent")],
-        timezone="UTC",
-    )
+    with pytest.raises(SchedulingError) as exc_info:
+        await _parse_workflow_schedule(
+            "Every morning, check the queue",
+            mock_config,
+            runtime_paths,
+            available_responders=[_mid("ops_agent")],
+            timezone="UTC",
+        )
 
-    assert isinstance(result, _WorkflowParseError)
-    assert result.error == f"Error parsing schedule: {text}"
+    assert str(exc_info.value) == (
+        f"Error parsing schedule: {text}\n\n💡 Try a simpler format like 'Daily at 9am, check my email'"
+    )

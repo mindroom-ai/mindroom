@@ -19,7 +19,7 @@ from mindroom.approval.response import continuation_response_kind, continuation_
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.resolution import cheap_model as agent_cheap_model
-from mindroom.config.resolution import entity_timezone, show_tool_calls
+from mindroom.config.resolution import entity_timezone, show_reasoning, show_tool_calls
 from mindroom.constants import (
     HOOK_SOURCE_RUN_METADATA_KEY,
     STREAM_STATUS_KEY,
@@ -363,9 +363,6 @@ def _requested_by_a_person(origin: TurnOrigin) -> bool:
     )
 
 
-# TODO(simplify): bot.py, turns/dispatch.py, edit_regenerator.py, and turns/interactive_selection.py reach
-# InboxResponses through ResponseRunner; inject it into them with the refactors that own that wiring.
-# Contributors only; no behavior change (#3075).
 @dataclass
 class ResponseRunner:
     """Prepare, generate, and deliver an agent or team turn under its conversation's lock.
@@ -953,6 +950,7 @@ class ResponseRunner:
             thread_history=thread_history,
             media=media,
             show_tool_calls=runtime.show_tool_calls,
+            show_reasoning=show_reasoning(self.deps.runtime.config, self.deps.agent_name),
             execution_identity=runtime.tool_context.execution_identity,
             pipeline_timing=request.pipeline_timing,
         )
@@ -1487,7 +1485,6 @@ class ResponseRunner:
         reason: str,
     ) -> None:
         """Answer a team turn with why it cannot run, as one final delivery."""
-        response_identity = self.locked.response_identity(request, response_kind="team")
         lifecycle = self.locked.build_lifecycle(request, response_kind="team")
         progress = TurnProgress()
 
@@ -1497,7 +1494,7 @@ class ResponseRunner:
                     target=resolved_target,
                     existing_event_id=message_id,
                     response_text=reason,
-                    identity=response_identity,
+                    identity=lifecycle.identity,
                     tool_trace=None,
                     extra_content=None,
                 ),
@@ -1662,7 +1659,6 @@ class ResponseRunner:
         # The turn driver writes the turn's record; this runner reads how it ended.
         recorder = TurnRecorder()
         progress = TurnProgress()
-        response_identity = self.locked.response_identity(request, response_kind=turn.response_kind)
         lifecycle = self.locked.build_lifecycle(request, response_kind=turn.response_kind)
 
         # Set once the turn's generation returned a delivery; a turn cut short later, such as by a Stop during
@@ -1687,7 +1683,7 @@ class ResponseRunner:
                     dispatched,
                     use_streaming=use_streaming,
                     recorder=recorder,
-                    response_identity=response_identity,
+                    response_identity=lifecycle.identity,
                     progress=progress,
                 )
                 participation = dispatched.runtime.participation
@@ -1699,7 +1695,7 @@ class ResponseRunner:
                     and delivery.ending == DECLINED.ending
                 ):
                     await self.deps.delivery_gateway.send_judgment_reaction(
-                        turn_id=response_identity.response_envelope.source_event_id,
+                        turn_id=request.response_envelope.source_event_id,
                         room_id=request.room_id,
                         event_id=request.sources.logical_source_event_ids[-1],
                         key=request.participation.decline_reaction,

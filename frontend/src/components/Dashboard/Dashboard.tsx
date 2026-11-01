@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EntityAvatar } from "@/components/shared/EntityAvatar";
+import { pluralize } from "@/lib/utils";
 import { useConfigStore } from "@/store/configStore";
 import type { Room } from "@/types/config";
 import type { ScheduleTask } from "@/types/schedule";
@@ -169,6 +170,7 @@ function ComingUp({
 }) {
   const data = !schedules.isError ? schedules.data : undefined;
   const tasks = data ? upcomingSchedules(data.tasks) : [];
+  const unreadableRoomCount = data?.unreadableRoomCount ?? 0;
   return (
     <section className="home-upcoming" aria-labelledby="upcoming-heading">
       <div>
@@ -184,7 +186,7 @@ function ComingUp({
           <p className="home-section-empty" role="status">
             Loading schedules…
           </p>
-        ) : tasks.length === 0 ? (
+        ) : tasks.length === 0 && unreadableRoomCount === 0 ? (
           <p className="home-section-empty">Nothing scheduled</p>
         ) : (
           tasks.map(({ task, at }) => {
@@ -219,6 +221,12 @@ function ComingUp({
               </div>
             );
           })
+        )}
+        {unreadableRoomCount > 0 && (
+          <p className="home-section-empty" role="status">
+            Schedules in {pluralize(unreadableRoomCount, "room")} could not be
+            read
+          </p>
         )}
       </div>
       <SectionLink to="/schedules">All schedules</SectionLink>

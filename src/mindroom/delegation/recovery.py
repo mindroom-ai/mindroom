@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 _RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
 
 
-async def resolve_subagent(
+async def load_settled_subagent(
     subagent_id: str,
     *,
     owner: ToolExecutionIdentity,
@@ -45,7 +45,7 @@ async def resolve_subagent(
     runtime_paths: RuntimePaths,
     depth: int,
 ) -> DelegationChild:
-    """Resolve a scoped handle and reconcile an abandoned attempt under its recovery lock."""
+    """Load a scoped handle, first settling an abandoned attempt under its recovery lock, so this writes state."""
     load = partial(load_subagent, subagent_id, owner=owner, config=config, runtime_paths=runtime_paths, depth=depth)
     child = await load()
     if child.status == "running":
@@ -152,7 +152,6 @@ async def interrupt_child(
         # The run keeps what the child wrote; why it stopped is its error, which is what it hands over.
         response.status = RunStatus.cancelled if status == "cancelled" else RunStatus.error
         response.error = reason
-        response.requirements = []
         for tool in response.tools or ():
             if tool.is_paused:
                 tool.result = reason
@@ -185,8 +184,8 @@ async def _cancel_delegations(
                 # The job runtime owns this child and its approvals; its own cancellation settles it.
                 continue
             await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason=reason)
-    for requirement_id, hook_state in state.hooks.items():
-        child = next((item for item in state.children if item.parent_requirement_id == requirement_id), None)
+    for pause_id, hook_state in state.hooks.items():
+        child = next((item for item in state.children if item.parent_requirement_id == pause_id), None)
         await after_delegation(
             hook_state,
             config=config,

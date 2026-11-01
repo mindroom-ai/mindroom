@@ -12,7 +12,7 @@ from operator import attrgetter
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
+from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.receipt_readers import without_approval_receipt
 from mindroom.background_tasks import (
     run_blocking_until_complete,
@@ -64,6 +64,8 @@ type EncodedResultPayload = dict[str, Any]
 # An accepted job's execution, and the adapter cleanup that settles it after cancellation or interruption.
 type _Operation = Callable[[], Awaitable[BackgroundOutcome]]
 type _Cleanup = Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]]
+# A job's current access: proven allowed, proven denied, or still resolving, such as while room membership loads.
+type JobGrant = Literal["allowed", "denied", "pending"]
 
 
 class JobAccessError(ValueError):
@@ -168,9 +170,8 @@ def job_summary(job: BackgroundJob) -> dict[str, Any]:
         "summary": job.result,
         "summary_truncated": job.summary_truncated,
     }
-    subagent_id = job.adapter.get("child", {}).get("subagent_id") if job.kind == "delegation" else None
-    if subagent_id:
-        summary["subagent_id"] = subagent_id
+    if job.kind == "delegation":
+        summary["subagent_id"] = job.adapter["child"]["subagent_id"]
     if job.progress is not None and job.status not in TERMINAL_STATUSES:
         summary["progress"] = job.progress
     return summary
@@ -312,16 +313,13 @@ class ToolJobRuntime:
         self,
         store: ToolJobStore,
         *,
-        authorize: Callable[[BackgroundJob], bool],
+        grant: Callable[[BackgroundJob], JobGrant],
         authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None],
         cancel: _Cleanup,
-        denied: Callable[[BackgroundJob], bool],
     ) -> None:
         # Saves land only while this runtime's generation owns the jobs, which its creator takes before recovery.
         self._store = store
-        self._authorize = authorize
-        # Access proven gone, as opposed to access merely unresolved, such as while room membership resolves.
-        self._denied = denied
+        self._grant = grant
         # Rechecks a retained function's current authority immediately before application entry; raises if revoked.
         self.authorize_execution = authorize_execution
         self._cancel = cancel
@@ -382,7 +380,7 @@ class ToolJobRuntime:
 
     def _visible(self, entry: _Entry, owner: ToolExecutionIdentity, depth: int) -> bool:
         """Whether a caller owns a job it may still access."""
-        return self._owns(entry.job, owner, depth) and self._authorize(entry.job)
+        return self._owns(entry.job, owner, depth) and self._grant(entry.job) == "allowed"
 
     def _entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry:
         self._ensure_open()
@@ -400,9 +398,12 @@ class ToolJobRuntime:
         """
         self._ensure_open()
         entry = self._entries.get(job_id)
-        if entry is None or not self._owns(entry.job, owner, depth) or self._denied(entry.job):
+        if entry is None or not self._owns(entry.job, owner, depth):
             raise JobUnavailableError(_UNAVAILABLE)
-        return entry, self._authorize(entry.job)
+        grant = self._grant(entry.job)
+        if grant == "denied":
+            raise JobUnavailableError(_UNAVAILABLE)
+        return entry, grant == "allowed"
 
     async def _publish(
         self,
@@ -536,7 +537,7 @@ class ToolJobRuntime:
                 if job_id in self._entries:
                     msg = "Tool job already exists."
                     raise ValueError(msg)
-                if not owner.session_id or depth < 0 or not self._authorize(job):
+                if not owner.session_id or depth < 0 or self._grant(job) != "allowed":
                     raise JobAccessError(_UNAVAILABLE)
                 entry = _Entry(job, cancel=cancel)
                 await run_coroutine_until_complete(self._admit(entry, job, operation))
@@ -587,14 +588,14 @@ class ToolJobRuntime:
                     # The reply span that started the job may end first; the job owns its calls' outcome.
                     recording_tool_calls(None),
                     job_control_context(entry.control),
-                    queued_message_signal_context(None) as notice,
+                    # A run the job makes is told of no newer message: the reply that waits for the job is.
+                    queued_message_signal_context(None),
                 ):
                     try:
                         async with execution_resources():
                             outcome = await operation()
                     finally:
                         returned = True
-                        await finalize_queued_notice_response_turn_async(notice)
             except Exception as error:
                 outcome = BackgroundOutcome("failed", failure_text(error))
             except asyncio.CancelledError:
@@ -760,14 +761,14 @@ class ToolJobRuntime:
             await self._request_cancel(entry)
             return await self._snapshot(entry)
 
-    async def cancel_revoked(self, *, denied: Callable[[BackgroundJob], bool]) -> None:
+    async def cancel_revoked(self) -> None:
         """Withdraw execution whose grant is proven revoked, retaining owned cleanup; a failed job retries next pass."""
         async with self._lock:
             self._ensure_open(accepting=True)
             revoked = [
                 entry
                 for entry in self._entries.values()
-                if entry.job.status not in TERMINAL_STATUSES and denied(entry.job)
+                if entry.job.status not in TERMINAL_STATUSES and self._grant(entry.job) == "denied"
             ]
             for entry in revoked:
                 # One failed job must not block the rest; it retries on the next pass.
@@ -863,7 +864,7 @@ class ToolJobRuntime:
                 and not entry.job.consumed
                 and entry.claim is None
                 and (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == key.silent
-                and self._authorize(entry.job)
+                and self._grant(entry.job) == "allowed"
             ]
         return tuple(sorted(ended, key=lambda job: (job.created_at, job.job_id)))
 

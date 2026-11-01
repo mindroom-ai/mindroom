@@ -53,7 +53,7 @@ _BROKER_ON = {"MINDROOM_EGRESS_BROKER_PORT": "8768"}
 
 
 @pytest.fixture
-def egress_config_file(tmp_path: Path) -> Generator[Path, None, None]:
+def egress_config_file(tmp_path: Path) -> Generator[Path]:
     """Create a config file with egress broker services."""
     config_dir = tmp_path / "egress-test"
     config_dir.mkdir()

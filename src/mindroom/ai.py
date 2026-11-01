@@ -9,7 +9,6 @@ from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from mindroom import ai_runtime
 from mindroom.agent_cli.cli_shell_agent import bind_standard_cli
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_calls
@@ -38,6 +37,7 @@ from mindroom.delegation.lifecycle import (
 from mindroom.delegation.state import child_execution_identity
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
+from mindroom.history.interrupted_replay import TurnInput, stored_turn_input
 from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.native import with_native_history
 from mindroom.history.replay import compaction_marker
@@ -51,7 +51,7 @@ from mindroom.hooks import (
     render_transient_context,
 )
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
-from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -146,7 +146,7 @@ __all__ = [
     "run_delegated_child_response",
     "stream_agent_response",
 ]
-AIStreamChunk = TextDelta | ToolStarted | ToolCompleted | RunFinished | FailedReply
+AIStreamChunk = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RunFinished | FailedReply
 
 
 def _compose_current_turn_prompt(
@@ -239,13 +239,18 @@ class _AgentAttempt:
     metadata: dict[str, Any] | None
 
     def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return what an interruption records of this attempt: its partial output, and its run id."""
+        """Return what an interruption records of this attempt: its partial output, its run id, and its run's input.
+
+        The input is the one the run stored, once it stored a record.
+        """
         state = self.stream_state
+        record = state.terminal.record
         return TurnPartialSnapshot(
             assistant_text=state.assistant_text,
             completed_tools=tuple(state.completed_tools),
             interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
             attempt_run_id=self.run_id,
+            turn_input=stored_turn_input(record.messages) if record is not None else None,
         )
 
 
@@ -298,20 +303,12 @@ def _agent_turn_adapter(
             execution_identity=execution_identity,
         )
 
-    def _on_scope_loaded(scope_context: ScopeSessionContext | None) -> None:
-        ai_runtime.scrub_queued_notice_session_context(
-            scope_context=scope_context,
-            entity_name=agent_name,
-        )
-
     return TurnAdapter[AIStreamChunk](
         load_scope=_load_scope,
         run_attempt=run_attempt,
-        on_scope_loaded=_on_scope_loaded,
         make_text_chunk=TextDelta,
         user_message=user_message,
         unexpected_error_text=error_text,
-        entity_name=agent_name,
     )
 
 
@@ -465,6 +462,7 @@ def _begin_attempt(
     """Record one prepared attempt on the turn's run state, and return where it is stored and its request."""
     prepared_run = run_context.prepared_run
     run.run_metadata = run_context.metadata
+    run.turn_input = TurnInput(context=prepared_run.turn.context)
     storage = bind_turn_session(
         run,
         replays=lambda record: replays_as_turn(
@@ -1140,18 +1138,23 @@ async def ai_response(
 
 
 @timed("model_request_to_completion")
-async def _process_stream_events(  # noqa: C901
+async def _process_stream_events(  # noqa: C901, PLR0912
     events: AsyncIterator[RunEvent],
     *,
     state: _StreamingAttemptState,
     show_tool_calls: bool,
+    show_reasoning: bool,
     agent_name: str,
     pipeline_timing: DispatchPipelineTiming | None = None,
-) -> AsyncGenerator[AIStreamChunk, None]:
+) -> AsyncGenerator[AIStreamChunk]:
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
     try:
         async for event in events:
             await observe_child_event(event)
+            if isinstance(event, ReasoningDelta):
+                if show_reasoning and event.text:
+                    yield event
+                continue
             if isinstance(event, TextDelta):
                 if not event.text:
                     continue
@@ -1211,7 +1214,7 @@ async def _stream_agent_attempt_chunks(
     storage: RunStorage,
     state: _StreamingAttemptState,
     on_attempt_start: Callable[[str, str], None] | None,
-) -> AsyncGenerator[AIStreamChunk, None]:
+) -> AsyncGenerator[AIStreamChunk]:
     """Start and consume one streaming agent attempt."""
     show_tool_calls = run_context.turn.show_tool_calls
     pipeline_timing = run_context.turn.pipeline_timing
@@ -1228,6 +1231,7 @@ async def _stream_agent_attempt_chunks(
             events,
             state=state,
             show_tool_calls=show_tool_calls,
+            show_reasoning=run_context.turn.show_reasoning,
             agent_name=run_context.agent_name,
             pipeline_timing=pipeline_timing,
         )
@@ -1274,7 +1278,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     async def _run_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
-    ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
+    ) -> AsyncGenerator[AIStreamChunk | AttemptResolved]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
         try:
             run_context = await _prepare_agent_run_context(
@@ -1368,7 +1372,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 is_empty=_is_empty_reply(state, record),
                 run_id=record.run_id,
                 attempt_run_id=attempt.run_id,
-                runtime_model_name=prepared_run.runtime_model_name,
                 usage=record.metrics,
                 tool_executions=tuple(record.tools or ()),
                 control_calls=cli_control_calls(attempt.run_id),

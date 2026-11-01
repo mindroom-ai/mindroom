@@ -170,7 +170,7 @@ def test_unrestricted_mode_opens_from_the_filesystem_anchor(tmp_path: Path) -> N
 
 @pytest.mark.parametrize("mode", ["workspace", "unrestricted"])
 def test_symlink_loops_are_reported_as_value_errors(tmp_path: Path, mode: FileAccess) -> None:
-    """Symlink loops raise RuntimeError on Python 3.12 and OSError on 3.13; both become ValueError."""
+    """Symlink loops become ValueError."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / "loop").symlink_to(workspace / "loop")

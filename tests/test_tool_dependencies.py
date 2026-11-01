@@ -12,11 +12,15 @@ import textwrap
 import threading
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system import dependencies
@@ -36,8 +40,9 @@ from mindroom.tool_system.dependencies import (
     install_command_for_current_python,
     optional_dependency_environment,
 )
+from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, register_google_workspace_tools
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.registry import builtin_tool_registry, compose_tool_registry, plugin_module_registrations
 from mindroom.tools.openbb import openbb_tools
 from tests.conftest import register_test_tool
 
@@ -54,13 +59,7 @@ TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"))
 def _base_dependency_names() -> set[str]:
     """Return normalized base dependency names declared in pyproject.toml."""
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-    dependency_names: set[str] = set()
-    for dependency in pyproject["project"]["dependencies"]:
-        name = dependency.split(";", 1)[0].strip()
-        for separator in ("[", " ", "<", ">", "=", "!", "~"):
-            name = name.split(separator, 1)[0]
-        dependency_names.add(name.lower().replace("_", "-"))
-    return dependency_names
+    return {canonicalize_name(Requirement(dependency).name) for dependency in pyproject["project"]["dependencies"]}
 
 
 @pytest.mark.parametrize("existing_value", [None, "true"])
@@ -197,17 +196,6 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
     class DummyToolkit(Toolkit):
         name = "dummy"
 
-    class DummyCredentialsManager:
-        def __init__(self) -> None:
-            self.base_path = Path("/var/empty/mindroom-dummy-credentials")
-            self.shared_base_path = self.base_path
-
-        def load_credentials(self, _tool_name: str) -> dict[str, str]:
-            return {}
-
-        def shared_manager(self) -> DummyCredentialsManager:
-            return self
-
     def flaky_factory() -> type[DummyToolkit]:
         calls["count"] += 1
         if calls["count"] == 1:
@@ -240,20 +228,48 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
     assert calls["count"] == 2
 
 
+def test_workspace_tool_installs_the_extra_of_the_builtin_it_copies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workspace copy of a built-in Google tool installs the built-in's extra, before and after a failed import."""
+    workspace = GoogleWorkspaceConfig(
+        name="secondary",
+        display_name="Secondary",
+        client_config_service="secondary_google_oauth_client",
+        allowed_hosted_domains=("secondary.example",),
+        services=("gmail",),
+    )
+    with plugin_module_registrations("test_workspace_plugin") as registrations:
+        register_google_workspace_tools(workspace)
+    metadata = registrations["secondary_gmail"]
+    assert metadata.factory is not None
+    workspace_factory = metadata.factory
+    imports = {"count": 0}
+
+    def flaky_factory() -> type:
+        imports["count"] += 1
+        if imports["count"] == 1:
+            msg = "missing dependency"
+            raise ImportError(msg)
+        return workspace_factory()
+
+    tools = compose_tool_registry({metadata.name: replace(metadata, factory=flaky_factory)}, {})
+    requested: list[str] = []
+
+    def install(extra_name: str, _runtime_paths: object) -> bool:
+        requested.append(extra_name)
+        return True
+
+    monkeypatch.setattr(dependencies, "check_deps_installed", lambda _dependencies: False)
+    monkeypatch.setattr(dependencies, "_auto_install_optional_extra", install)
+
+    tool = get_tool_by_name("secondary_gmail", TEST_RUNTIME_PATHS, worker_target=None, tools=tools)
+
+    assert "secondary_get_latest_emails" in tool.functions
+    assert requested == ["gmail", "gmail"]
+
+
 def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tool loading should raise ImportError when auto-install cannot help."""
     tool_name = "test_auto_install_failure_tool"
-
-    class DummyCredentialsManager:
-        def __init__(self) -> None:
-            self.base_path = Path("/var/empty/mindroom-dummy-credentials")
-            self.shared_base_path = self.base_path
-
-        def load_credentials(self, _tool_name: str) -> dict[str, str]:
-            return {}
-
-        def shared_manager(self) -> DummyCredentialsManager:
-            return self
 
     def failing_factory() -> type:
         msg = "dependency missing forever"
@@ -321,6 +337,30 @@ def test_auto_install_optional_extra_for_import_retry_skips_cache_invalidation_w
 
     assert not auto_install_optional_extra_for_import_retry("supabase", TEST_RUNTIME_PATHS)
     assert invalidated == []
+
+
+def test_every_builtin_tool_dependency_resolves_to_its_own_installed_module() -> None:
+    """With every extra installed, each declared dependency this platform installs passes the construction pre-check, on a module of that package."""
+    base_dependencies = _base_dependency_names()
+    module_packages = importlib_metadata.packages_distributions()
+    wrong: dict[str, list[str]] = {}
+    for name, metadata in _BUILTINS.entries.items():
+        installed_here = base_dependencies | {
+            canonicalize_name(requirement.name) for requirement in dependencies._extra_requirements(name)
+        }
+        declared = [dep for dep in metadata.dependencies or [] if canonicalize_name(dep) in installed_here]
+        foreign = [
+            dep
+            for dep in declared
+            if canonicalize_name(dep)
+            not in {
+                canonicalize_name(package)
+                for package in module_packages.get(_pip_name_to_import(dep).split(".")[0], [])
+            }
+        ]
+        if foreign or not check_deps_installed(declared):
+            wrong[name] = declared
+    assert wrong == {}
 
 
 def test_check_deps_installed_positive_and_negative() -> None:
@@ -408,7 +448,7 @@ def test_install_via_uv_sync_targets_active_virtualenv(monkeypatch: pytest.Monke
     monkeypatch.setattr("mindroom.tool_system.dependencies._in_virtualenv", lambda: True)
     monkeypatch.setattr("mindroom.tool_system.dependencies.subprocess.run", fake_run)
 
-    assert _install_via_uv_sync(["wikipedia"], quiet=True)
+    assert _install_via_uv_sync(["wikipedia"])
     assert captured["cmd"] == [
         "uv",
         "sync",
@@ -442,7 +482,7 @@ def test_install_via_uv_tool_extends_running_environment_in_place(monkeypatch: p
     monkeypatch.setattr("mindroom.tool_system.dependencies.subprocess.run", fake_run)
     monkeypatch.setattr(sys, "_base_executable", "/managed/cpython-3.13-macos-aarch64-none/bin/python3.13")
 
-    assert _install_via_uv_tool(["browser", "duckduckgo"], quiet=True)
+    assert _install_via_uv_tool(["browser", "duckduckgo"])
     # `--force` or a bare `--python 3.13` (which may pick another patch or arch) makes uv delete and
     # recreate the environment before building, so a build failure leaves the running install gone.
     assert captured["cmd"] == [
@@ -469,14 +509,13 @@ def test_install_optional_extras_keeps_receipt_extras_for_uv_tool(
     monkeypatch.setattr(sys, "prefix", str(tmp_path))
     requested: list[list[str]] = []
 
-    def fake_install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
-        assert quiet is True
+    def fake_install_via_uv_tool(extras: list[str]) -> bool:
         requested.append(extras)
         return True
 
     monkeypatch.setattr("mindroom.tool_system.dependencies._install_via_uv_tool", fake_install_via_uv_tool)
 
-    assert _install_optional_extras(["browser", "duck-duck-go"], quiet=True)
+    assert _install_optional_extras(["browser", "duck-duck-go"])
     assert requested == [["browser", "duck-duck-go", "website"]]
 
 
@@ -542,33 +581,20 @@ def test_install_command_for_current_python_uses_pip_user_outside_virtualenv(
     ]
 
 
-def test_auto_install_optional_extra_supports_non_tool_groups(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Non-tool optional extras should use the same runtime install path."""
-    monkeypatch.setattr("mindroom.tool_system.dependencies.auto_install_enabled", lambda _runtime_paths: True)
-    monkeypatch.setattr(
-        "mindroom.tool_system.dependencies._available_optional_extras",
-        lambda: {"sentence_transformers"},
-    )
-    monkeypatch.setattr(
-        "mindroom.tool_system.dependencies._install_optional_extras",
-        lambda extras, *, quiet=False: extras == ["sentence_transformers"] and quiet,
-    )
-
-    assert _auto_install_optional_extra("sentence_transformers", TEST_RUNTIME_PATHS)
-
-
-def test_auto_install_optional_extra_matches_installed_metadata_names(
+@pytest.mark.parametrize("available_name", ["sentence_transformers", "sentence-transformers"])
+def test_auto_install_optional_extra_resolves_non_tool_groups_by_normalized_name(
     monkeypatch: pytest.MonkeyPatch,
+    available_name: str,
 ) -> None:
-    """Normalized extra names should resolve when installed metadata uses hyphens."""
+    """A non-tool extra installs through the runtime path, also when installed metadata spells it with hyphens."""
     monkeypatch.setattr("mindroom.tool_system.dependencies.auto_install_enabled", lambda _runtime_paths: True)
     monkeypatch.setattr(
         "mindroom.tool_system.dependencies._available_optional_extras",
-        lambda: {"sentence-transformers"},
+        lambda: {available_name},
     )
     monkeypatch.setattr(
         "mindroom.tool_system.dependencies._install_optional_extras",
-        lambda extras, *, quiet=False: extras == ["sentence-transformers"] and quiet,
+        lambda extras: extras == [available_name],
     )
 
     assert _auto_install_optional_extra("sentence_transformers", TEST_RUNTIME_PATHS)
@@ -619,9 +645,9 @@ def test_an_installed_version_the_extra_does_not_allow_installs_the_extra(
     """An importable Mem0 older than the extra's floor counts as missing, so the extra installs."""
     installs: list[list[str]] = []
 
-    def install(extras: list[str], *, quiet: bool = False) -> bool:
+    def install(extras: list[str]) -> bool:
         installs.append(extras)
-        return quiet
+        return True
 
     monkeypatch.setattr("mindroom.tool_system.dependencies._install_optional_extras", install)
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
@@ -686,11 +712,11 @@ def test_install_optional_extras_skips_uv_sync_outside_virtualenv(monkeypatch: p
     """Outside virtualenvs, optional extras should install via pip/uv pip instead of uv sync."""
     calls = {"sync": 0, "env": 0}
 
-    def fake_install_via_uv_sync(_extras: list[str], *, quiet: bool) -> bool:  # noqa: ARG001
+    def fake_install_via_uv_sync(_extras: list[str]) -> bool:
         calls["sync"] += 1
         return True
 
-    def fake_install_in_environment(_extras: list[str], *, quiet: bool) -> bool:  # noqa: ARG001
+    def fake_install_in_environment(_extras: list[str]) -> bool:
         calls["env"] += 1
         return True
 
@@ -701,7 +727,7 @@ def test_install_optional_extras_skips_uv_sync_outside_virtualenv(monkeypatch: p
     monkeypatch.setattr("mindroom.tool_system.dependencies._install_via_uv_sync", fake_install_via_uv_sync)
     monkeypatch.setattr("mindroom.tool_system.dependencies._install_in_environment", fake_install_in_environment)
 
-    assert _install_optional_extras(["wikipedia"], quiet=True)
+    assert _install_optional_extras(["wikipedia"])
     assert calls["sync"] == 0
     assert calls["env"] == 1
 
@@ -723,7 +749,7 @@ receipt = root / 'uv-receipt.toml'
 info = root / 'transient_embedding-1.dist-info'
 
 
-def install(extras, *, quiet):
+def install(extras):
     if mode == 'writer':
         info.mkdir()
         (info / 'top_level.txt').write_text('transient_embedding\\n')
@@ -793,7 +819,7 @@ elif mode == 'mem0_reader':
 else:
     if mode != 'writer':
         print('ready', flush=True)
-    assert dependencies._install_optional_extras(['duckduckgo' if mode == 'writer' else 'browser'], quiet=True)
+    assert dependencies._install_optional_extras(['duckduckgo' if mode == 'writer' else 'browser'])
     print('installed', flush=True)
 """
 

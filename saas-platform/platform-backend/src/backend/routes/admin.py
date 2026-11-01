@@ -369,7 +369,6 @@ async def get_dashboard_metrics(
             .neq("tier", "free")
             .execute()
         )
-        _ = sb.table("instances").select("*", count="exact", head=True).eq("status", "running").execute()
 
         subs_data = sb.table("subscriptions").select("tier").eq("status", "active").neq("tier", "free").execute()
         tier_prices = _monthly_plan_prices_usd()

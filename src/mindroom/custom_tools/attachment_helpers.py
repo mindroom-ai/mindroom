@@ -15,21 +15,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def normalize_str_list(values: list[str] | None, *, field_name: str) -> tuple[list[str], str | None]:
-    """Validate and strip a list of string values, returning normalized list and optional error."""
-    if values is None:
-        return [], None
-
-    normalized: list[str] = []
-    for raw_value in values:
-        if not isinstance(raw_value, str):
-            return [], f"{field_name} entries must be strings."
-        value = raw_value.strip()
-        if value:
-            normalized.append(value)
-    return normalized, None
-
-
 async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str) -> bool:
     """Return whether the requester currently belongs to one requested room.
 
@@ -56,7 +41,7 @@ async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str
 
 async def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
     """Return whether the requester may act in the given room."""
-    if not isinstance(room_id, str) or not room_id:
+    if not room_id:
         return False
     if room_id == context.room_id:
         return True
@@ -72,13 +57,11 @@ async def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool
 
 def resolve_requested_room_id(
     context: ToolRuntimeContext,
-    room_id: object,
+    room_id: str | None,
 ) -> tuple[str | None, str | None]:
     """Resolve the requested room target or return a validation error."""
     if room_id is None:
         return context.room_id, None
-    if not isinstance(room_id, str):
-        return None, "room_id must be a non-empty string."
     normalized_room_id = room_id.strip()
     if not normalized_room_id:
         return None, "room_id must be a non-empty string."
@@ -169,6 +152,23 @@ async def resolve_canonical_tool_thread_target(
         requested_thread_id=requested_thread_id,
         canonical_thread_id=canonical_thread_id,
     )
+
+
+async def explicit_thread_root(context: ToolRuntimeContext, *, room_id: str, thread_id: str) -> str:
+    """Return the root of the thread an explicit thread ID belongs to, or the ID itself.
+
+    Matrix rejects a reply as a thread root, so a reply event ID resolves to its
+    thread's root. Unlike the thread tools, an ID whose thread cannot be proven is
+    not refused but kept as given: a room-level message no thread contains yet
+    can start one, and the homeserver answers for an ID it cannot use.
+    """
+    target = await resolve_canonical_tool_thread_target(
+        context,
+        room_id=room_id,
+        thread_id=thread_id,
+        fail_closed_on_normalization_error=True,
+    )
+    return target.canonical_thread_id or thread_id
 
 
 async def resolve_current_room_thread_root(

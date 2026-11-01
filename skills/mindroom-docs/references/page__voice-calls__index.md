@@ -244,7 +244,7 @@ Tools that need confirmation, user input, external execution, or [`tool_approval
 With `cascaded` and `live`, the agent tells the caller to use text chat for them.
 [Deferred tools](https://docs.mindroom.chat/tools/dynamic-tools/) are available from the start of a call in every backend, with no search or loading step.
 
-The agent leaves the call when the caller leaves, a second Matrix user joins, the voice session ends, or MindRoom shuts down.
+The agent leaves the call when the caller leaves, the caller loses access to the agent (for example by leaving a `members_of_rooms` grant room), a second Matrix user joins, the voice session ends, or MindRoom shuts down.
 A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change limited to the `knowledge_graph` section.
 
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.

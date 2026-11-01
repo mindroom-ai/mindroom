@@ -54,6 +54,7 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
           "large_message_strategy",
           "show_stop_button",
           "show_tool_calls",
+          "show_reasoning",
           "coalescing",
         ],
       },

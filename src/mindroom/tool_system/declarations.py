@@ -10,8 +10,16 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 
-MATRIX_ROOM_RUNTIME_APPROVAL_TYPE = "mindroom_matrix_room_runtime"
 MATRIX_ROOM_RUNTIME_TOOL_NAMES = ("invite_router",)
+
+
+def is_matrix_room_runtime_function(registered_toolkit: str | None, function_name: str) -> bool:
+    """Return whether a function is a Matrix room recovery action, which no approval rule gates.
+
+    It is one of the reserved functions, offered by the registered tool of its own name; no plugin or MCP tool may
+    register that name, and no other tool may offer a function of it.
+    """
+    return function_name in MATRIX_ROOM_RUNTIME_TOOL_NAMES and registered_toolkit == function_name
 
 
 @runtime_checkable
@@ -106,9 +114,14 @@ class ConfigField:
     options: list[dict[str, str]] | None = None
     validation: dict[str, Any] | None = None
     authored_override: bool = True
-    # Variables the field falls back to, in order, when no saved, inline, or runtime value sets it:
-    # the process environment first, then the `.env` beside `config.yaml`.
+    # Variables the field falls back to, in order, when no saved, inline, or runtime value sets it, read as
+    # `RuntimePaths.first_env_value` reads them: the process environment, the `.env`, then each `<NAME>_FILE`.
     env: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Keep a password field out of tool entries: only saved settings or the environment may set a secret."""
+        if self.type == "password":
+            self.authored_override = False
 
 
 @dataclass(frozen=True)
@@ -161,6 +174,8 @@ class ToolMetadata:
     agent_override_fields: list[ConfigField] | None = None
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
     dependencies: list[str] | None = None
+    # Optional extra that installs this tool's dependencies; None means the extra named like the tool.
+    dependency_extra: str | None = None
     auth_provider: str | None = None
     oauth_fallback_fields: tuple[str, ...] = ()
     docs_url: str | None = None

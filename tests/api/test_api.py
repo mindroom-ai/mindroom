@@ -60,6 +60,7 @@ from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import (
     PLATFORM_SSO_SECRET,
+    login_with_api_key,
     publish_api_config,
     set_platform_auth,
     trusted_upstream_env,
@@ -181,12 +182,12 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
         process_env={},
     )
     runtime_config = Config.validate_with_runtime(_authored_config_payload("old"), first_runtime)
-    load_result = config_lifecycle.ConfigLoadResult(success=True)
+    load_error = ValueError("broken source")
     snapshot = config_lifecycle.ApiSnapshot(
         generation=7,
         runtime_paths=first_runtime,
         runtime_config=runtime_config,
-        config_load_result=load_result,
+        load_error=load_error,
         source_fingerprint="old-source",
     )
 
@@ -195,21 +196,21 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     assert preserved.generation == 7
     assert preserved.runtime_paths == first_runtime
     assert preserved.runtime_config is runtime_config
-    assert preserved.config_load_result is load_result
+    assert preserved.load_error is load_error
     assert preserved.source_fingerprint == "old-source"
 
     cleared = config_lifecycle._published_snapshot(
         snapshot,
         runtime_paths=second_runtime,
         runtime_config=None,
-        config_load_result=None,
+        load_error=None,
         source_fingerprint=None,
     )
 
     assert cleared.generation == 8
     assert cleared.runtime_paths == second_runtime
     assert cleared.runtime_config is None
-    assert cleared.config_load_result is None
+    assert cleared.load_error is None
     assert cleared.source_fingerprint is None
 
 
@@ -634,14 +635,10 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
             started.set()
             allow_finish.wait()
             return ConfigLoad(
-                result=config_lifecycle.ConfigLoadResult(
-                    success=False,
-                    error_status_code=422,
-                    error_detail="invalid old config",
-                ),
                 config=None,
                 source_fingerprint="stale-old-source",
                 source_files=frozenset({first_runtime.config_path}),
+                uses_includes=False,
                 error=ValueError("invalid old config"),
             )
         return original_load_attempt(runtime_paths)
@@ -665,7 +662,7 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
 
     context = main._app_context(fresh_app)
     assert context.runtime_paths == second_runtime
-    assert context.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
+    assert context.load_error is None
     assert set(context.runtime_config.authored_model_dump()["agents"]) == {"second"}
 
 
@@ -711,7 +708,7 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
 
     assert not config_lifecycle.load_config_into_app(first_runtime, fresh_app).loaded
     assert set(main._app_context(fresh_app).runtime_config.authored_model_dump()["agents"]) == {"second"}
-    assert main._app_context(fresh_app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
+    assert main._app_context(fresh_app).load_error is None
 
 
 @pytest.mark.asyncio
@@ -2203,44 +2200,80 @@ def test_get_tools_uses_one_runtime_snapshot(
     assert captured_runtime_paths == [first_runtime, first_runtime]
 
 
-def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
-    """Home Assistant connect should use state instead of encoding agent_name in the callback URL."""
-    config = _config_with_worker_scope("shared")
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    _publish_committed_runtime_config(
-        api_key_client.app,
-        main._app_runtime_paths(api_key_client.app),
-        config.model_dump(),
-    )
-    response = api_key_client.post(
-        "/api/homeassistant/connect/oauth?agent_name=general",
-        json={
-            "instance_url": "127.0.0.1:8123",
-            "client_id": "client-id",
-            "allow_private_url": True,
-        },
+def _sign_in_with_shared_scope_config(client: TestClient) -> constants.RuntimePaths:
+    """Sign `client` in with the API key and publish a config whose `general` agent uses the shared worker scope."""
+    runtime_paths = main._app_runtime_paths(client.app)
+    login_with_api_key(client)
+    _publish_committed_runtime_config(client.app, runtime_paths, _config_with_worker_scope("shared").model_dump())
+    return runtime_paths
+
+
+def _connect_homeassistant_oauth_behind_proxy(
+    tmp_path: Path,
+    env: dict[str, str],
+    *,
+    host: str = "mindroom.example.com",
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """Start Home Assistant OAuth through a TLS-terminating proxy, which forwards plain HTTP with the browser's Host."""
+    main.initialize_api_app(main.app, _runtime_paths(tmp_path, process_env=env))
+    bind_test_embedded_runtime(main.app)
+    return TestClient(main.app, base_url=f"http://{host}").post(
+        "/api/homeassistant/connect/oauth",
+        headers=headers or {"Authorization": "Bearer test-key"},
+        json={"instance_url": "127.0.0.1:8123", "allow_private_url": True},
     )
 
-    assert response.status_code == 200
-    auth_url = response.json()["auth_url"]
-    parsed = urlparse(auth_url)
-    params = parse_qs(parsed.query)
-    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "http://127.0.0.1:8123/auth/authorize"
-    assert params["state"][0]
-    assert params["state"][0] != "general"
-    assert "agent_name=general" not in params["redirect_uri"][0]
+
+def test_homeassistant_connect_oauth_identifies_mindroom_by_its_public_origin(tmp_path: Path) -> None:
+    """Behind a proxy that terminates TLS, the Client ID and redirect URI share the public origin, not the request's."""
+    response = _connect_homeassistant_oauth_behind_proxy(
+        tmp_path,
+        {"MINDROOM_API_KEY": "test-key", "MINDROOM_PUBLIC_URL": "https://mindroom.example.com/"},
+    )
+
+    assert response.status_code == 200, response.text
+    params = parse_qs(urlparse(response.json()["auth_url"]).query)
+    assert params["client_id"] == ["https://mindroom.example.com"]
+    assert params["redirect_uri"] == ["https://mindroom.example.com/api/homeassistant/callback"]
+
+
+def test_homeassistant_connect_oauth_refuses_an_invalid_public_url(tmp_path: Path) -> None:
+    """A `MINDROOM_PUBLIC_URL` without an origin gives Home Assistant no Client ID to accept."""
+    response = _connect_homeassistant_oauth_behind_proxy(
+        tmp_path,
+        {"MINDROOM_API_KEY": "test-key", "MINDROOM_PUBLIC_URL": "mindroom.example.com"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "MINDROOM_PUBLIC_URL is not a valid URL"
+
+
+def test_homeassistant_connect_oauth_from_the_dashboard_host_returns_there(tmp_path: Path) -> None:
+    """A dashboard on its own host gets the callback there, because the public host may send the path to another app."""
+    env = {
+        **trusted_upstream_env(),
+        "MINDROOM_PUBLIC_URL": "https://chat.example.org",
+        "MINDROOM_DASHBOARD_URL": "https://admin.example.org",
+    }
+    response = _connect_homeassistant_oauth_behind_proxy(
+        tmp_path,
+        env,
+        host="admin.example.org",
+        headers={**trusted_upstream_headers(), "Origin": "https://admin.example.org"},
+    )
+
+    assert response.status_code == 200, response.text
+    params = parse_qs(urlparse(response.json()["auth_url"]).query)
+    assert params["client_id"] == ["https://admin.example.org"]
+    assert params["redirect_uri"] == ["https://admin.example.org/api/homeassistant/callback"]
 
 
 def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
     api_key_client: TestClient,
 ) -> None:
-    """Home Assistant OAuth should save only the final token payload, not temp callback state."""
-    config = _config_with_worker_scope("shared")
-    runtime_paths = main._app_runtime_paths(api_key_client.app)
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-
+    """Home Assistant OAuth carries its settings in pending state, not the callback URL, and saves only the token payload."""
+    runtime_paths = _sign_in_with_shared_scope_config(api_key_client)
     token_response = MagicMock()
     token_response.status_code = 200
     token_response.json.return_value = {
@@ -2250,42 +2283,43 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
     }
     async_client = MagicMock()
     async_client.__aenter__.return_value.post.return_value = token_response
-    _publish_committed_runtime_config(
-        api_key_client.app,
-        main._app_runtime_paths(api_key_client.app),
-        config.model_dump(),
-    )
 
     with patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client):
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general",
             json={
                 "instance_url": "127.0.0.1:8123",
-                "client_id": "client-id",
                 "allow_private_url": True,
             },
         )
         assert connect_response.status_code == 200
-        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+        auth_url = urlparse(connect_response.json()["auth_url"])
+        params = parse_qs(auth_url.query)
 
         callback_response = api_key_client.get(
-            f"/api/homeassistant/callback?code=test-code&state={state}",
+            f"/api/homeassistant/callback?code=test-code&state={params['state'][0]}",
             follow_redirects=False,
         )
 
+    assert f"{auth_url.scheme}://{auth_url.netloc}{auth_url.path}" == "http://127.0.0.1:8123/auth/authorize"
+    assert params["state"][0] != "general"
+    assert params["client_id"] == ["http://localhost"]
+    assert params["redirect_uri"] == ["http://localhost/api/homeassistant/callback"]
     assert callback_response.status_code in {302, 307}
+    # Relative, so the browser stays on the origin Home Assistant returned it to.
+    assert callback_response.headers["location"] == "/?homeassistant=connected"
     async_client.__aenter__.return_value.post.assert_called_once_with(
         "http://127.0.0.1:8123/auth/token",
         data={
             "grant_type": "authorization_code",
             "code": "test-code",
-            "client_id": "client-id",
+            "client_id": "http://localhost",
         },
         timeout=10.0,
     )
     assert get_runtime_credentials_manager(runtime_paths).shared_manager().load_credentials("homeassistant") == {
         "instance_url": "http://127.0.0.1:8123",
-        "client_id": "client-id",
+        "client_id": "http://localhost",
         "access_token": "ha-access",
         "refresh_token": "ha-refresh",
         "expires_in": 3600,
@@ -2297,11 +2331,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
 
 def test_homeassistant_shared_scope_token_connect_uses_store_the_toolkit_reads(api_key_client: TestClient) -> None:
     """Shared-scope Home Assistant tokens must stay out of the worker store, where only worker code would see them."""
-    config = _config_with_worker_scope("shared")
-    runtime_paths = main._app_runtime_paths(api_key_client.app)
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
+    runtime_paths = _sign_in_with_shared_scope_config(api_key_client)
     toolkit = HomeAssistantTools(
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=resolve_worker_target("shared", "general", execution_identity=None),
@@ -2335,10 +2365,7 @@ def test_homeassistant_shared_scope_token_connect_uses_store_the_toolkit_reads(a
 
 def test_homeassistant_status_reports_stored_settings_without_a_token(api_key_client: TestClient) -> None:
     """Stored settings without a token read as not connected, naming what is missing, without calling the instance."""
-    config = _config_with_worker_scope("shared")
-    runtime_paths = main._app_runtime_paths(api_key_client.app)
-    assert api_key_client.post("/api/auth/session", json={"api_key": "test-key"}).status_code == 200
-    _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
+    runtime_paths = _sign_in_with_shared_scope_config(api_key_client)
     save_scoped_credentials(
         "homeassistant",
         {"instance_url": "http://93.184.216.34:8123", "_source": "ui"},
@@ -2359,11 +2386,7 @@ def test_homeassistant_status_reports_stored_settings_without_a_token(api_key_cl
 
 def test_homeassistant_status_renews_an_expired_oauth_token(api_key_client: TestClient) -> None:
     """The status probe renews a rejected OAuth access token, saves it, and reports the connection."""
-    config = _config_with_worker_scope("shared")
-    runtime_paths = main._app_runtime_paths(api_key_client.app)
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
+    runtime_paths = _sign_in_with_shared_scope_config(api_key_client)
     shared_manager = get_runtime_credentials_manager(runtime_paths).shared_manager()
     oauth_config = {
         "instance_url": "http://93.184.216.34:8123",
@@ -2401,14 +2424,7 @@ def test_homeassistant_status_renews_an_expired_oauth_token(api_key_client: Test
 
 def test_homeassistant_token_connect_rejects_private_url_without_opt_in(api_key_client: TestClient) -> None:
     """Home Assistant token setup should not probe private URLs unless the user opts in."""
-    config = _config_with_worker_scope("shared")
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    _publish_committed_runtime_config(
-        api_key_client.app,
-        main._app_runtime_paths(api_key_client.app),
-        config.model_dump(),
-    )
+    _sign_in_with_shared_scope_config(api_key_client)
 
     with patch(
         "mindroom.api.homeassistant_integration._test_connection",
@@ -2441,14 +2457,7 @@ def test_homeassistant_url_validation_maps_malformed_hosts_to_http_error() -> No
 
 def test_homeassistant_token_connect_allows_private_url_with_opt_in(api_key_client: TestClient) -> None:
     """Home Assistant token setup can deliberately allow a self-hosted private URL."""
-    config = _config_with_worker_scope("shared")
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    _publish_committed_runtime_config(
-        api_key_client.app,
-        main._app_runtime_paths(api_key_client.app),
-        config.model_dump(),
-    )
+    _sign_in_with_shared_scope_config(api_key_client)
 
     with patch(
         "mindroom.api.homeassistant_integration._test_connection",
@@ -2499,20 +2508,15 @@ def test_homeassistant_connect_rejects_draft_execution_scope_override(
     api_key_client: TestClient,
 ) -> None:
     """Home Assistant connect must reject draft-only execution-scope overrides."""
-    api_key_client.headers["Origin"] = "http://localhost"
     config = _config_with_worker_scope("user")
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
+    login_with_api_key(api_key_client)
     with patch(
         "mindroom.api.config_lifecycle.read_committed_runtime_config",
         return_value=(config, main._app_runtime_paths(api_key_client.app)),
     ):
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general&execution_scope=shared",
-            json={
-                "instance_url": "http://93.184.216.34:8123",
-                "client_id": "client-id",
-            },
+            json={"instance_url": "http://93.184.216.34:8123"},
         )
     assert connect_response.status_code == 409
     assert "Save the configuration before managing credentials" in connect_response.json()["detail"]
@@ -2818,7 +2822,7 @@ def test_save_config_can_recover_from_invalid_reload(
     saved_config = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
     assert saved_config["agents"]["recovered_agent"]["display_name"] == "Recovered Agent"
     assert "plugins" not in saved_config
-    assert main._app_context(main.app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
+    assert main._app_context(main.app).load_error is None
 
 
 def test_get_raw_config_source_returns_current_invalid_file(
@@ -2893,7 +2897,7 @@ def test_save_raw_config_source_can_recover_from_invalid_reload(
 
     assert response.status_code == 200
     assert temp_config_file.read_text(encoding="utf-8") == valid_source
-    assert main._app_context(main.app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
+    assert main._app_context(main.app).load_error is None
 
     load_response = test_client.post("/api/config/load")
     assert load_response.status_code == 200
@@ -3624,8 +3628,7 @@ def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClien
 @pytest.mark.usefixtures("frontend_dist")
 def test_frontend_serves_after_api_key_login(api_key_client: TestClient) -> None:
     """Authenticated standalone users should receive the bundled dashboard."""
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
+    login_with_api_key(api_key_client)
 
     response = api_key_client.get("/")
     assert response.status_code == 200
@@ -3750,20 +3753,10 @@ def api_key_client(temp_config_file: Path) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=temp_config_file,
-        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org", "MINDROOM_API_KEY": "test-key"},
     )
     main.initialize_api_app(main.app, runtime_paths)
     bind_test_embedded_runtime(main.app)
-    config_lifecycle.app_state(main.app).api_auth_state = auth.ApiAuthState(
-        runtime_paths=runtime_paths,
-        settings=auth._ApiAuthSettings(
-            supabase_url=None,
-            supabase_anon_key=None,
-            account_id=None,
-            mindroom_api_key="test-key",
-        ),
-        supabase_auth=None,
-    )
     config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
     return TestClient(main.app, base_url="http://localhost")
 
@@ -3928,6 +3921,15 @@ def test_api_key_missing_header_rejects(api_key_client: TestClient) -> None:
     """Missing Authorization header should return 401 when API key is set."""
     response = api_key_client.post("/api/config/load")
     assert response.status_code == 401
+
+
+def test_api_key_still_required_after_config_publish(api_key_client: TestClient) -> None:
+    """The API key lives in the fixture's runtime, so it survives the publish helper clearing the cached auth state."""
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    _publish_committed_runtime_config(api_key_client.app, runtime_paths, _authored_config_payload("general"))
+
+    assert api_key_client.post("/api/config/load").status_code == 401
+    assert api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"}).status_code == 200
 
 
 def test_api_key_wrong_key_rejects(api_key_client: TestClient) -> None:
@@ -4329,8 +4331,7 @@ def test_api_key_login_reaches_oauth_callback_state_checks(
     path: str,
 ) -> None:
     """A logged-in browser reaches each callback's own state check, which refuses a state it never issued."""
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
+    login_with_api_key(api_key_client)
 
     response = api_key_client.get(path)
     assert response.status_code == 400

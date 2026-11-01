@@ -59,7 +59,7 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, spec, toolkit
@@ -595,7 +595,7 @@ async def test_a_childs_gated_call_skips_its_card_only_inside_the_requesters_aut
     model = ScriptedModel([calls(tool_call("write_report", "w"))])
     _, response = await collect(
         run_agent(
-            spec(model, toolkit(write_report, name="file", requires_confirmation=True)),
+            spec(model, toolkit(write_report, name="file", gate=ToolGate.CONFIRM)),
             [Message(role="user", content="Report")],
             ctx=RunContext(run_id=child.run_id, session=UnstoredSession(child.session_id)),
             persist=None,
@@ -1060,14 +1060,14 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(
     The call answers as failed, as an ordinary job's call does when its wait is refused, and the reply records it so.
     """
     allowed = True
-    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
+    runtime = await tool_job_runtime(tmp_path, grant=lambda _job: "allowed" if allowed else "denied")
     child = _BlockingChild()
 
     async def revoke() -> None:
         nonlocal allowed
         await child.running()
         allowed = False
-        await runtime.cancel_revoked(denied=lambda _job: True)
+        await runtime.cancel_revoked()
 
     recorder = SpanRecorder(stopped=False)
     response = await _drive_background_child(
@@ -1158,7 +1158,7 @@ async def test_rejected_background_start_settles_the_child_as_failed(
     response = await _drive_background_child(
         tmp_path,
         monkeypatch,
-        await tool_job_runtime(tmp_path, authorize=lambda _job: False),
+        await tool_job_runtime(tmp_path, grant=lambda _job: "denied"),
         run_child,
         recorder=recorder,
     )
@@ -1551,7 +1551,6 @@ async def test_only_a_top_level_delegate_offers_background_waits(tmp_path: Path,
     try:
         delegate = DelegateTools(
             "leader",
-            ["code"],
             paths,
             config,
             agent_workspace_root_path(paths.storage_root, "leader"),

@@ -71,7 +71,7 @@ _PLATFORM_SSO_CLOCK_SKEW_SECONDS = 10
 _used_platform_sso_ticket_ids: dict[str, int] = {}
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 # Set only by server code; ASGI scope keys cannot come from the client.
-_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY = "mindroom.connections_session_callback"
+_CONNECTIONS_SESSION_FLOW_SCOPE_KEY = "mindroom.connections_session_flow"
 # Each Connections page names the account it shows, so a stale tab cannot act as the browser's new account.
 _CONNECTIONS_USER_HEADER = "X-MindRoom-Connections-User"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
@@ -786,24 +786,29 @@ def _is_oauth_popup_path(path: str, actions: frozenset[str]) -> bool:
     return len(parts) == 5 and parts[1:3] == ["api", "oauth"] and bool(parts[3]) and parts[4] in actions
 
 
-def allow_connections_session_for_oauth_callback(request: Request) -> None:
-    """Let this OAuth callback authenticate with the Connections session, because a session started its flow."""
-    request.scope[_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY] = True
+def allow_connections_session_for_oauth_flow(request: Request) -> None:
+    """Let this OAuth route authenticate with the Connections session.
+
+    Callers grant it on a callback whose flow a session started, and on a connect or reset link whose token names
+    the one requester the session must then be.
+    """
+    request.scope[_CONNECTIONS_SESSION_FLOW_SCOPE_KEY] = True
 
 
 def _connections_session_path_honored(request: Request) -> bool:
-    """Honor sessions on portal paths and OAuth success pages, and on callbacks only for session-started flows."""
+    """Honor sessions on portal paths and OAuth success pages, and on other OAuth browser routes only when granted."""
     path = request.scope["path"]
-    if _is_oauth_popup_path(path, frozenset({"callback"})):
-        return request.scope.get(_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY) is True
+    if _is_oauth_popup_path(path, frozenset({"authorize", "callback", "reset"})):
+        return request.scope.get(_CONNECTIONS_SESSION_FLOW_SCOPE_KEY) is True
     return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"}))
 
 
 def _connections_session_auth_user(request: Request) -> SignedMatrixUser | None:
     """Return the Connections session identity.
 
-    It is honored on portal paths, and on dashboard routes for an administrator whose sign-in the homeserver bound
-    to this deployment, outside hosted platform mode and never on OAuth callbacks.
+    It is honored on portal paths, on OAuth routes whose handler granted it (`allow_connections_session_for_oauth_flow`),
+    and on dashboard routes for an administrator whose sign-in the homeserver bound to this deployment, outside hosted
+    platform mode and never on OAuth callbacks without that grant.
     """
     auth_state = _request_auth_state(request)
     cookie = connections_session_cookie(deployment_origin(auth_state.settings.public_url, str(request.base_url)))
@@ -997,6 +1002,14 @@ def _reached_dashboard_host(request: Request, settings: _ApiAuthSettings) -> boo
     return dashboard is not None and request.url.netloc.lower() == urlsplit(dashboard).netloc
 
 
+def browser_origin(request: Request) -> str | None:
+    """Return the origin the browser opened MindRoom at: the dashboard's own host, else the deployment origin."""
+    settings = _request_auth_state(request).settings
+    if _reached_dashboard_host(request, settings):
+        return settings.dashboard_origin
+    return deployment_origin(settings.public_url, str(request.base_url))
+
+
 def dashboard_host_public_origin(request: Request) -> str | None:
     """Return the public origin when this request reached the dashboard's own host from `MINDROOM_DASHBOARD_URL`."""
     settings = _request_auth_state(request).settings
@@ -1026,22 +1039,15 @@ def require_same_origin(
         raise HTTPException(403, detail, headers=headers)
 
 
-def _require_browser_mutation_origin(
-    request: Request,
-    settings: _ApiAuthSettings,
-    validated_authorization: str | None = None,
-) -> None:
+def _require_browser_mutation_origin(request: Request, validated_authorization: str | None = None) -> None:
     if (
         request.method in {"GET", "HEAD", "OPTIONS", "TRACE"}
         or _extract_bearer_token(validated_authorization) is not None
     ):
         return
-    origin = deployment_origin(settings.public_url, str(request.base_url))
+    origin = browser_origin(request)
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
-    # A dashboard on its own host sends that host's origin there.
-    if settings.dashboard_origin is not None and _reached_dashboard_host(request, settings):
-        origin = settings.dashboard_origin
     require_same_origin(request, origin)
 
 
@@ -1050,7 +1056,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
     auth_state = _request_auth_state(request)
     session_user = _connections_session_auth_user(request)
     if session_user is not None:
-        _require_browser_mutation_origin(request, auth_state.settings)
+        _require_browser_mutation_origin(request)
         return bind_request_auth_user(request, session_user)
 
     trusted_auth_user = await _trusted_upstream_auth_user(
@@ -1059,7 +1065,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
         auth_state.trusted_upstream_jwt_client,
     )
     if trusted_auth_user is not None:
-        _require_browser_mutation_origin(request, auth_state.settings)
+        _require_browser_mutation_origin(request)
         return bind_request_auth_user(request, trusted_auth_user)
 
     if auth_state.supabase_auth is None:
@@ -1070,7 +1076,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
                 raise HTTPException(status_code=401, detail="Missing or invalid credentials")
             if not secrets.compare_digest(token, mindroom_api_key):
                 raise HTTPException(status_code=401, detail="Invalid API key")
-            _require_browser_mutation_origin(request, auth_state.settings, authorization)
+            _require_browser_mutation_origin(request, authorization)
         else:
             # Without a credential, only where the request comes from authorizes it.
             rejection = open_access_rejection(request.headers, request.method, auth_state.runtime_paths)
@@ -1085,7 +1091,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
     if auth_state.settings.account_id and user_id != auth_state.settings.account_id:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    _require_browser_mutation_origin(request, auth_state.settings, authorization)
+    _require_browser_mutation_origin(request, authorization)
     return bind_request_auth_user(request, AuthUser(user_id=user_id, email=email, source=AuthSource.PLATFORM))
 
 

@@ -12,7 +12,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.delegation.lifecycle import reserve_child_turn
-from mindroom.delegation.recovery import resolve_subagent
+from mindroom.delegation.recovery import load_settled_subagent
 from mindroom.delegation.sessions import (
     SubagentSessionError,
     load_subagent,
@@ -123,7 +123,7 @@ async def test_liveness_distinguishes_active_from_abandoned_turn(tmp_path: Path)
     before = handle_path.read_bytes()
     assert (await load_subagent(subagent_id, **options)).status == "running"
     assert handle_path.read_bytes() == before
-    recovered = await resolve_subagent(subagent_id, **options)
+    recovered = await load_settled_subagent(subagent_id, **options)
     assert recovered.status == "failed"
     assert not recovered.record_locator
     assert (await load_subagent(subagent_id, **options)).status == "failed"

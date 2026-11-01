@@ -1,17 +1,17 @@
-"""What minimal Bash uses of the agent's own shell: its canonical functions and the response's CLI environment."""
+"""What minimal Bash uses of the agent's own shell: its canonical function and the response's CLI environment."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-_ShellOperationName = Literal["run_shell_command"]
-SHELL_OPERATION_NAMES: tuple[_ShellOperationName, ...] = get_args(_ShellOperationName)
+# The shell tool's command function; minimal Bash and the native shell window run commands through it.
+SHELL_FUNCTION = "run_shell_command"
 AGENT_CLI_URL_ENV = "MINDROOM_AGENT_CLI_URL"
 AGENT_CLI_TOKEN_ENV = "MINDROOM_AGENT_CLI_TOKEN"  # noqa: S105 - environment variable name
 AGENT_CLI_WINDOW_ENV = "MINDROOM_AGENT_CLI_WINDOW"

@@ -7,14 +7,13 @@ import contextlib
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import httpx
 import pytest
 from fastapi import FastAPI
 
-from mindroom.api.sandbox_runner_scripts import _script_namespace
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.config.main import Config
@@ -32,18 +31,15 @@ from mindroom.script_runs.models import (
 )
 from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
-from mindroom.script_runs.worker_client import WorkerScriptCancel, WorkerScriptStatus
-from mindroom.shell.supervisor import (
-    _ShellSupervisorManager,
-    check_command_via_supervisor,
-    kill_command_via_supervisor,
-    parse_shell_supervisor_status,
-    run_command_via_supervisor,
-)
+from mindroom.script_runs.supervised import signal_supervised_script, supervised_script_status, worker_script_namespace
+from mindroom.shell.supervisor import _ShellSupervisorManager, run_command_via_supervisor
 from mindroom.workers.models import WorkerHandle, WorkerSpec
+from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.script_runs.wire import WorkerScriptCancel, WorkerScriptStatus
 
 _RUN_ID = f"script-{'a' * 32}"
 _GATEWAY_URL = "http://primary.test/api/script-gateway"
@@ -53,10 +49,9 @@ _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
 @dataclass
 class _Lease:
     manager: _RecoveringWorkerBackend
-    released: bool = False
 
     def release(self) -> None:
-        self.released = True
+        pass
 
 
 @dataclass
@@ -70,7 +65,6 @@ class _RecoveringWorkerBackend:
     backend_name: str = "kubernetes"
     idle_timeout_seconds: float = 3600
     ensure_calls: int = 0
-    touched_worker_keys: list[str] = field(default_factory=list)
 
     def script_recovery_signature(self) -> str:
         return "stable-worker-authority"
@@ -96,29 +90,22 @@ class _RecoveringWorkerBackend:
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         del now
-        self.touched_worker_keys.append(worker_key)
         return self.handle if worker_key == self.handle.worker_key else None
 
     def retire_worker(self, worker_key: str) -> None:
         assert worker_key == self.handle.worker_key
 
 
-@dataclass
 class _AuthorizedResolver:
-    settled_runs: list[str] = field(default_factory=list)
-    settled_calls: list[str] = field(default_factory=list)
-
     def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool:
         del run, config
         return True
 
     async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
-        del reason
-        self.settled_runs.append(run_id)
+        del run_id, reason
 
     async def settle_approval(self, origin: object, *, reason: str) -> None:
-        del reason
-        self.settled_calls.append(str(origin))
+        del origin, reason
 
     async def prune_approvals(self, run_id: str) -> bool:
         del run_id
@@ -127,23 +114,18 @@ class _AuthorizedResolver:
 
 @dataclass
 class _SupervisorWorkerClient:
+    """Reach the worker's real supervisor through the same adapter the worker routes use."""
+
     socket_path: str
     worker_key: str
 
     async def status(self, worker: WorkerHandle, *, run_id: str) -> WorkerScriptStatus:
         assert worker.worker_key == self.worker_key
-        message = await asyncio.to_thread(
-            check_command_via_supervisor,
+        return await supervised_script_status(
             self.socket_path,
-            namespace=_script_namespace(self.worker_key, run_id),
-            handle=supervisor_handle_for_run(run_id),
+            namespace=worker_script_namespace(self.worker_key, run_id),
+            run_id=run_id,
         )
-        parsed = parse_shell_supervisor_status(message)
-        if parsed.state == "running":
-            return WorkerScriptStatus(state="running", output=parsed.output)
-        if parsed.state == "exited":
-            return WorkerScriptStatus(state="exited", output=parsed.output, exit_code=parsed.exit_code)
-        return WorkerScriptStatus(state="unknown", output=parsed.output)
 
     async def cancel(
         self,
@@ -153,17 +135,11 @@ class _SupervisorWorkerClient:
         force: bool = False,
     ) -> WorkerScriptCancel:
         assert worker.worker_key == self.worker_key
-        message = await asyncio.to_thread(
-            kill_command_via_supervisor,
+        return await signal_supervised_script(
             self.socket_path,
-            namespace=_script_namespace(self.worker_key, run_id),
-            handle=supervisor_handle_for_run(run_id),
+            namespace=worker_script_namespace(self.worker_key, run_id),
+            run_id=run_id,
             force=force,
-        )
-        return WorkerScriptCancel(
-            cancel_requested=message.startswith(("Terminated process", "Force-killed process")),
-            already_finished=message.startswith("Process already finished"),
-            unknown_handle=message.startswith("Error: Unknown handle"),
         )
 
 
@@ -226,29 +202,17 @@ async def _read_progress(path: Path, *, greater_than: int = -1) -> int:
     raise AssertionError(message)
 
 
-async def _wait_for_finished(socket_path: str, *, worker_key: str) -> str:
+async def _wait_for_finished(socket_path: str, *, worker_key: str) -> WorkerScriptStatus:
     for _ in range(120):
-        message = await asyncio.to_thread(
-            check_command_via_supervisor,
+        status = await supervised_script_status(
             socket_path,
-            namespace=_script_namespace(worker_key, _RUN_ID),
-            handle=supervisor_handle_for_run(_RUN_ID),
+            namespace=worker_script_namespace(worker_key, _RUN_ID),
+            run_id=_RUN_ID,
         )
-        if "Status: FINISHED" in message:
-            return message
+        if status.state == "exited":
+            return status
         await asyncio.sleep(0.05)
-    error = f"Script process did not reach its supervisor deadline: {message}"
-    raise AssertionError(error)
-
-
-async def _wait_for_pid_exit(process_id: int) -> None:
-    for _ in range(100):
-        try:
-            os.kill(process_id, 0)
-        except ProcessLookupError:
-            return
-        await asyncio.sleep(0.05)
-    error = f"Script PID {process_id} survived its supervisor deadline."
+    error = f"Script process did not reach its supervisor deadline: {status}"
     raise AssertionError(error)
 
 
@@ -326,7 +290,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
     try:
         launch = await run_command_via_supervisor(
             socket_path,
-            namespace=_script_namespace(worker_key, _RUN_ID),
+            namespace=worker_script_namespace(worker_key, _RUN_ID),
             argv=[sys.executable, "-c", script, str(pid_path), str(progress_path)],
             env=_MINIMAL_ENV,
             cwd=None,
@@ -377,7 +341,8 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         )
         await second_lifecycle.start()
 
-        recovered = reopened_store.require_active_capability(_RUN_ID, token)
+        recovered = reopened_store.get_run(_RUN_ID)
+        assert recovered.accepts_calls
         assert recovered.state is ScriptRunState.RUNNING
         assert recovered.worker_id == worker.worker_id
         assert recovered.recovery_signature == recovery_signature
@@ -406,8 +371,8 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         assert response.json()["state"] == ScriptCallState.INDETERMINATE
 
         finished = await _wait_for_finished(socket_path, worker_key=worker_key)
-        assert "exit code -9" in finished
-        await _wait_for_pid_exit(script_pid)
+        assert finished.exit_code == -9
+        await assert_linux_pid_not_running(script_pid)
         terminal = await second_lifecycle.manager.reconcile_durable(run_id=_RUN_ID)
         assert terminal.state is ScriptRunState.INTERRUPTED
         await second_lifecycle.shutdown()
@@ -420,11 +385,10 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             with contextlib.suppress(Exception):
                 await first_lifecycle.shutdown(timeout_seconds=1)
         with contextlib.suppress(Exception):
-            await asyncio.to_thread(
-                kill_command_via_supervisor,
+            await signal_supervised_script(
                 socket_path,
-                namespace=_script_namespace(worker_key, _RUN_ID),
-                handle=supervisor_handle_for_run(_RUN_ID),
+                namespace=worker_script_namespace(worker_key, _RUN_ID),
+                run_id=_RUN_ID,
                 force=True,
             )
         supervisor.shutdown()

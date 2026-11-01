@@ -7,12 +7,14 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import nio
 import pytest
 from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling.errors import ScheduledTaskNotFoundError, ScheduledTaskStateReadError
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock
 from tests.scheduling_helpers import (
@@ -169,11 +171,12 @@ async def test_human_written_task_is_hidden_from_list_and_cancel(tmp_path: Path)
     client = _room_with_task(_pending_content(_workflow(created_by="@victim:server")), sender=HUMAN_ID)
 
     listed = await scheduling.list_scheduled_tasks(client, ROOM_ID, runtime_paths, config=Config())
-    cancelled = await scheduling.cancel_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
+    with pytest.raises(ScheduledTaskNotFoundError) as exc_info:
+        await scheduling.cancel_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
     cancelled_all = await scheduling.cancel_all_scheduled_tasks(client, ROOM_ID, runtime_paths)
 
     assert listed == "No scheduled tasks found."
-    assert cancelled == f"❌ Task `{TASK_ID}` not found."
+    assert str(exc_info.value) == f"Task `{TASK_ID}` not found."
     assert cancelled_all == "No scheduled tasks to cancel."
     client.room_put_state.assert_not_awaited()
 
@@ -245,8 +248,30 @@ async def test_non_event_task_state_response_is_a_read_error(
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     client._send.return_value = nio.RoomGetStateEventResponse(body, "com.mindroom.scheduled.task", TASK_ID, ROOM_ID)
 
-    with pytest.raises(RuntimeError, match=rf"was not returned as a full state event \({detail}\)"):
+    with pytest.raises(ScheduledTaskStateReadError, match=rf"was not returned as a full state event \({detail}\)"):
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_task_read_whose_create_event_check_raises_names_the_error(tmp_path: Path) -> None:
+    """A task read whose homeserver check on the room's create event raises reports the error's type and text."""
+    client = _room_with_task(_pending_content(_workflow(created_by="@alice:server")), sender=SCHEDULE_WRITER_ID)
+    serve_task = client._send.side_effect
+    broken_response = aiohttp.ClientPayloadError("Response payload is not completed")
+
+    async def create_read_breaks(response_class: type, method: str, path: str, **kwargs: object) -> object:
+        if path.startswith(CREATE_STATE_PATH):
+            raise broken_response
+        return await serve_task(response_class, method, path, **kwargs)
+
+    client._send.side_effect = create_read_breaks
+
+    with pytest.raises(ScheduledTaskStateReadError) as exc_info:
+        await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, schedule_runtime_paths(tmp_path))
+
+    assert str(exc_info.value) == (
+        f"Failed to read the create event of room `{ROOM_ID}`: ClientPayloadError: Response payload is not completed"
+    )
 
 
 @pytest.mark.asyncio
@@ -278,7 +303,7 @@ async def test_superseded_bot_task_named_by_state_content_never_fires(tmp_path: 
         ROOM_ID,
     )
 
-    with pytest.raises(RuntimeError, match="ignores format=event"):
+    with pytest.raises(ScheduledTaskStateReadError, match="ignores format=event"):
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
     # The runner keeps retrying the refused read; stop it at its first retry wait.
     with (

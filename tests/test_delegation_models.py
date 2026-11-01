@@ -103,7 +103,6 @@ async def test_subagent_model_selection(
         else:
             toolkit = DelegateTools(
                 "leader",
-                ["leader", "worker"],
                 paths,
                 config,
                 agent_workspace_root_path(paths.storage_root, "leader"),

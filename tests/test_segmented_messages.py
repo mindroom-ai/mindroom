@@ -171,6 +171,25 @@ def test_large_tool_trace_does_not_disable_visible_markdown() -> None:
     assert first["formatted_body"]
 
 
+def test_split_reply_keeps_no_reasoning() -> None:
+    """Reasoning would repeat on every segment and shrink each one's budget, so a split reply carries none."""
+    body = _body()
+    content = build_matrix_edit_content(
+        event_id="$placeholder",
+        new_content=build_message_content(
+            body,
+            extra_content={"io.mindroom.reasoning": {"text": "r" * 20_000, "duration_ms": 4200}},
+        ),
+    )
+
+    segmented = segment_matrix_content(content, room_encrypted=True, continuation_thread_id="$thread")
+
+    assert segmented is not None
+    parts = [segmented.first, segmented.first["m.new_content"], *segmented.continuations]
+    assert all("io.mindroom.reasoning" not in part for part in parts)
+    assert "".join(part["body"] for part in [segmented.first["m.new_content"], *segmented.continuations]) == body
+
+
 def _fence_balance(text: str) -> int:
     """Return the net number of unclosed fence openers in one chunk."""
     return sum(1 for line in text.splitlines() if line.lstrip().startswith(("```", "~~~"))) % 2

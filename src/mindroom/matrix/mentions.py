@@ -448,6 +448,15 @@ def _is_wrapped_in_single_backticks(text: str, start: int, end: int) -> bool:
     return start > 0 and end < len(text) and text[start - 1] == "`" and text[end] == "`"
 
 
+def _parse_visible_mentions(text: str, config: Config, runtime_paths: RuntimePaths) -> tuple[str, list[str], str]:
+    return parse_mentions_in_text(ensure_visible_tool_marker_spacing(text), config, runtime_paths)
+
+
+def visible_markdown(config: Config, runtime_paths: RuntimePaths, text: str) -> str:
+    """Return the Markdown a message's ``formatted_body`` is rendered from: tool markers spaced, mentions as links."""
+    return _parse_visible_mentions(text, config, runtime_paths)[2]
+
+
 def format_message_with_mentions(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -479,12 +488,7 @@ def format_message_with_mentions(
         Properly formatted content dict for room_send
 
     """
-    spaced_text = ensure_visible_tool_marker_spacing(text)
-    plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(
-        spaced_text,
-        config,
-        runtime_paths,
-    )
+    plain_text, mentioned_user_ids, markdown_text = _parse_visible_mentions(text, config, runtime_paths)
 
     # Convert markdown (with links) to HTML
     # The markdown converter will properly handle the [@DisplayName](url) format

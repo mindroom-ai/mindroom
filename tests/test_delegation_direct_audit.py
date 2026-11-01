@@ -73,7 +73,6 @@ def _tools(tmp_path: Path) -> tuple[DelegateTools, object, object]:
     return (
         DelegateTools(
             "leader",
-            ["child"],
             runtime_paths,
             config,
             agent_workspace_root_path(runtime_paths.storage_root, "leader"),

@@ -98,6 +98,11 @@ class NativeDesktopConfig:
     files: NativeFilesConfig = field(default_factory=NativeFilesConfig)
     shell: NativeShellConfig = field(default_factory=NativeShellConfig)
 
+    @property
+    def has_local_capability(self) -> bool:
+        """Whether apps, folders, or shell access are allowed; browser control needs an allowed app, so a browser is not enough."""
+        return bool(self.allowed_app_ids or self.files.roots or self.shell.enabled)
+
     @classmethod
     def from_payload(cls, raw: object, *, validate_browser_paths: bool = True) -> NativeDesktopConfig:
         """Parse a strict version-one configuration without checking saved root availability."""
@@ -191,7 +196,7 @@ class NativeDesktopConfig:
                 continue
             try:
                 canonical: Path | None = root.resolve(strict=True)
-            except (OSError, RuntimeError):
+            except OSError:
                 canonical = None
             if canonical is None or not canonical.is_dir():
                 raise NativeConfigError("invalid_request", "Native desktop root must be an existing directory.")

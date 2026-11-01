@@ -14,6 +14,11 @@ RUN node node_modules/playwright/cli.js install chromium --no-shell \
 COPY src/mindroom/worker_computer/browser_guard.cjs ./browser_guard.cjs
 COPY src/mindroom/worker_computer/browser_mcp_config.json ./browser_mcp_config.json
 
+# SQLite library the final stage links instead of Debian's (see build-sqlite.sh)
+FROM mirror.gcr.io/library/python:3.13-slim AS sqlite
+COPY local/instances/deploy/build-sqlite.sh /tmp/build-sqlite.sh
+RUN sh /tmp/build-sqlite.sh
+
 # Builder stage with uv for dependencies
 FROM mirror.gcr.io/library/python:3.13-slim AS builder
 # Copy uv from the uv image
@@ -81,6 +86,10 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends bash bzip2 chromium curl ffmpeg fonts-liberation git git-lfs jq nano nodejs openssh-client procps ripgrep tini tmux unzip tigervnc-standalone-server openbox x11-utils \
     && printf 'set-option -g exit-empty off\n' > /etc/tmux.conf \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Debian's SQLite deletes files that journals planted beside a database name; 3.53.3 and later do not.
+COPY --from=sqlite /sqlite/ /
+RUN ldconfig && python3 -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 53, 3), sqlite3.sqlite_version"
 
 # Root-owned MCP package and init hook stay outside agent-writable workspaces.
 COPY --from=browser-mcp /opt/mindroom-browser-mcp /opt/mindroom-browser-mcp

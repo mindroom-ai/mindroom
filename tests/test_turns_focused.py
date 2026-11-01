@@ -400,12 +400,6 @@ class _SpyTurnPolicy:
         return await self.inner.plan_turn(*args, **kwargs)
 
 
-async def _unused_hook_send_message(*_args: object, **_kwargs: object) -> str | None:
-    """Hook message sending must not happen in these tests (the hook registry is empty)."""
-    msg = "hook_send_message must not be called in focused turn tests"
-    raise AssertionError(msg)
-
-
 async def _claim_semantic_consumer(_consumer: SemanticConsumer) -> bool:
     """Record nothing: these turns run outside a journal callback, as a fresh event's would before its claim."""
     return True
@@ -509,7 +503,7 @@ def _conversation_reader(thread_history: ThreadHistoryResult | None = None) -> C
     )
 
 
-_VOICE_READINESS_CHANGES = {"normalizer": "normalizer", "turn_store": "turn_store", "logger": "logger"}
+_VOICE_READINESS_FIELDS = frozenset({"normalizer", "turn_store", "logger"})
 
 
 def _observe_admission_wait(harness: _Harness, monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
@@ -531,14 +525,14 @@ def _replace_harness_deps(harness: _Harness, **changes: object) -> None:
     In place, because the gate keeps the owners it was built with.
     """
     owners = (harness.ingress, harness.dispatcher, harness.selections, harness.voice)
-    known = set(_VOICE_READINESS_CHANGES).union(*(owner.deps.__dataclass_fields__ for owner in owners))
+    known = _VOICE_READINESS_FIELDS.union(*(owner.deps.__dataclass_fields__ for owner in owners))
     unknown = set(changes) - known
     assert not unknown, f"not a turn owner collaborator: {sorted(unknown)}"
     for owner in owners:
         owner_changes = {name: value for name, value in changes.items() if name in owner.deps.__dataclass_fields__}
         if owner_changes:
             owner.deps = replace(owner.deps, **owner_changes)
-    readiness_changes = {field: changes[name] for name, field in _VOICE_READINESS_CHANGES.items() if name in changes}
+    readiness_changes = {name: value for name, value in changes.items() if name in _VOICE_READINESS_FIELDS}
     if readiness_changes:
         harness.voice.deps = replace(
             harness.voice.deps,
@@ -564,6 +558,7 @@ def _build_harness(
         client=make_matrix_client_mock(user_id=matrix_id.full_id),
     )
 
+    conversation_reader = _conversation_reader(thread_history)
     resolver = ConversationResolver(
         ConversationResolverDeps(
             runtime=runtime,
@@ -572,7 +567,7 @@ def _build_harness(
             agent_name=agent_name,
             matrix_id=matrix_id,
             relations=make_relation_lookup(),
-            conversation_reader=_conversation_reader(thread_history),
+            conversation_reader=conversation_reader,
         ),
     )
     normalizer = InboundTurnNormalizer(
@@ -596,7 +591,8 @@ def _build_harness(
         runtime_paths=runtime_paths,
         agent_name=agent_name,
         hook_registry_state=HookRegistryState(HookRegistry.empty()),
-        hook_send_message=_unused_hook_send_message,
+        conversation_reader=conversation_reader,
+        logger=get_logger("tests.hooks"),
     )
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
@@ -2476,8 +2472,8 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
 
     # Payload data crosses the seam as values, not closures: the request has no
     # prepare-after-lock callback and nothing callable rides inside the
-    # preparation value. The only callback on the request is the inbox handoff
-    # signal, fired by the runner when it takes the lifecycle lock.
+    # preparation value. The request does carry the inbox handoff signal, which
+    # the runner fires when it takes the lifecycle lock.
     request_field_names = {request_field.name for request_field in fields(ResponseRequest)}
     assert "prepare_after_lock" not in request_field_names
     assert request.on_lifecycle_lock_acquired is not None

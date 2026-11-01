@@ -14,14 +14,19 @@ from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.matrix.state import get_room_alias_from_id, resolve_room_aliases, resolve_room_id
 from mindroom.matrix.users import create_agent_http_client
+from mindroom.scheduling.errors import (
+    ScheduledTaskNotFoundError,
+    ScheduledTaskStateReadError,
+    ScheduledTaskStorageError,
+    SchedulingError,
+)
 from mindroom.scheduling.tasks import (
     ScheduledTaskReadModel,
-    ScheduledTaskRecord,
     build_edited_scheduled_workflow,
     build_scheduled_task_read_model,
     cancel_scheduled_task,
-    get_scheduled_task,
     get_scheduled_tasks_for_room,
+    require_scheduled_task,
     save_edited_scheduled_task,
     scheduled_task_read_sort_key,
     scheduled_task_timezone,
@@ -31,7 +36,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
-_SCHEDULER_ERROR_PREFIX = "❌ "
 
 
 class ScheduledTaskResponse(BaseModel):
@@ -56,11 +60,20 @@ class ScheduledTaskResponse(BaseModel):
     created_at: datetime | None = None
 
 
+class UnreadableScheduleRoom(BaseModel):
+    """A room whose scheduled tasks could not be read, so the listing leaves them out."""
+
+    room_id: str
+    room_alias: str | None = None
+    error: str
+
+
 class ListSchedulesResponse(BaseModel):
     """Response for listing schedules."""
 
     timezone: str
     tasks: list[ScheduledTaskResponse]
+    unreadable_rooms: list[UnreadableScheduleRoom]
 
 
 class UpdateScheduleRequest(BaseModel):
@@ -95,23 +108,22 @@ def _configured_room_ids(runtime_config: Config, runtime_paths: RuntimePaths) ->
     return list(dict.fromkeys(resolved_rooms))
 
 
+def _http_error(error: SchedulingError) -> HTTPException:
+    """Answer a missing task with 404, failed task storage with 500, and any other refused request with 400."""
+    if isinstance(error, ScheduledTaskNotFoundError):
+        status_code = 404
+    elif isinstance(error, ScheduledTaskStorageError):
+        status_code = 500
+    else:
+        status_code = 400
+    return HTTPException(status_code=status_code, detail=str(error))
+
+
 def _to_response_task(task: ScheduledTaskReadModel, runtime_paths: RuntimePaths) -> ScheduledTaskResponse:
     return ScheduledTaskResponse(
         room_alias=get_room_alias_from_id(task.room_id, runtime_paths=runtime_paths),
         **asdict(task),
     )
-
-
-def _scheduler_error_detail(result: str) -> str:
-    """Convert chat-formatted scheduler errors into API response details."""
-    return result.removeprefix(_SCHEDULER_ERROR_PREFIX).strip()
-
-
-def _cancel_error_status_code(detail: str) -> int:
-    """Return the HTTP status for one scheduler cancel failure detail."""
-    if detail.startswith("Task `") and detail.endswith("` not found."):
-        return 404
-    return 500
 
 
 @router.get("", response_model=ListSchedulesResponse)
@@ -129,22 +141,37 @@ async def list_schedules(
     )
 
     if not room_ids:
-        return ListSchedulesResponse(timezone=runtime_config.timezone, tasks=[])
+        return ListSchedulesResponse(timezone=runtime_config.timezone, tasks=[], unreadable_rooms=[])
 
     client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
+    tasks: list[ScheduledTaskReadModel] = []
+    # A room that stays unreadable must neither look empty nor hide every other room's tasks.
+    unreadable_rooms: list[UnreadableScheduleRoom] = []
     try:
-        tasks: list[ScheduledTaskReadModel] = []
         for resolved_room_id in room_ids:
-            room_tasks: list[ScheduledTaskRecord] = await get_scheduled_tasks_for_room(
-                client=client,
-                room_id=resolved_room_id,
-                runtime_paths=runtime_paths,
-                include_non_pending=include_cancelled,
-            )
-            tasks.extend(
-                build_scheduled_task_read_model(task, timezone=scheduled_task_timezone(task.workflow, runtime_config))
-                for task in room_tasks
-            )
+            try:
+                room_tasks = await get_scheduled_tasks_for_room(
+                    client=client,
+                    room_id=resolved_room_id,
+                    runtime_paths=runtime_paths,
+                    include_non_pending=include_cancelled,
+                )
+            except ScheduledTaskStateReadError as e:
+                unreadable_rooms.append(
+                    UnreadableScheduleRoom(
+                        room_id=resolved_room_id,
+                        room_alias=get_room_alias_from_id(resolved_room_id, runtime_paths=runtime_paths),
+                        error=str(e),
+                    ),
+                )
+            else:
+                tasks.extend(
+                    build_scheduled_task_read_model(
+                        task,
+                        timezone=scheduled_task_timezone(task.workflow, runtime_config),
+                    )
+                    for task in room_tasks
+                )
     finally:
         await client.close()
 
@@ -152,6 +179,7 @@ async def list_schedules(
     return ListSchedulesResponse(
         timezone=runtime_config.timezone,
         tasks=[_to_response_task(task, runtime_paths) for task in tasks],
+        unreadable_rooms=unreadable_rooms,
     )
 
 
@@ -167,48 +195,37 @@ async def update_schedule(
 
     client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     try:
-        existing_task = await get_scheduled_task(
-            client=client,
+        existing_task = await require_scheduled_task(client, resolved_room_id, task_id, runtime_paths)
+        updated_workflow = build_edited_scheduled_workflow(
+            existing_task.workflow,
             room_id=resolved_room_id,
-            task_id=task_id,
+            message=request.message,
+            description=request.description,
+            schedule_type=request.schedule_type,
+            execute_at=request.execute_at,
+            cron_expression=request.cron_expression,
+            silent=request.silent,
+        )
+        updated_task = await save_edited_scheduled_task(
+            client=client,
+            workflow=updated_workflow,
+            existing_task=existing_task,
             runtime_paths=runtime_paths,
+            config=runtime_config,
+            writers=config_lifecycle.app_state(api_request.app).runtime.scheduled_tasks,
         )
-        if not existing_task:
-            raise HTTPException(status_code=404, detail=f"Task `{task_id}` not found")
-
-        try:
-            updated_workflow = build_edited_scheduled_workflow(
-                existing_task.workflow,
-                room_id=resolved_room_id,
-                message=request.message,
-                description=request.description,
-                schedule_type=request.schedule_type,
-                execute_at=request.execute_at,
-                cron_expression=request.cron_expression,
-                silent=request.silent,
-            )
-            updated_task = await save_edited_scheduled_task(
-                client=client,
-                room_id=resolved_room_id,
-                task_id=task_id,
-                workflow=updated_workflow,
-                existing_task=existing_task,
-                runtime_paths=runtime_paths,
-                timezone=scheduled_task_timezone(updated_workflow, runtime_config),
-                writers=config_lifecycle.app_state(api_request.app).runtime.scheduled_tasks,
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=f"{e!s}") from e
-
-        return _to_response_task(
-            build_scheduled_task_read_model(
-                updated_task,
-                timezone=scheduled_task_timezone(updated_task.workflow, runtime_config),
-            ),
-            runtime_paths,
-        )
+    except SchedulingError as e:
+        raise _http_error(e) from e
     finally:
         await client.close()
+
+    return _to_response_task(
+        build_scheduled_task_read_model(
+            updated_task,
+            timezone=scheduled_task_timezone(updated_task.workflow, runtime_config),
+        ),
+        runtime_paths,
+    )
 
 
 @router.delete("/{task_id}", response_model=CancelScheduleResponse)
@@ -223,25 +240,15 @@ async def cancel_schedule(
 
     client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     try:
-        existing = await get_scheduled_task(
-            client=client,
-            room_id=resolved_room_id,
-            task_id=task_id,
-            runtime_paths=runtime_paths,
-        )
-        if not existing:
-            raise HTTPException(status_code=404, detail=f"Task `{task_id}` not found")
-
-        result = await cancel_scheduled_task(
+        await cancel_scheduled_task(
             client=client,
             room_id=resolved_room_id,
             task_id=task_id,
             runtime_paths=runtime_paths,
             task_runtime=config_lifecycle.app_state(request.app).runtime.scheduled_tasks,
         )
-        if result.startswith("❌"):
-            detail = _scheduler_error_detail(result)
-            raise HTTPException(status_code=_cancel_error_status_code(detail), detail=detail)
+    except SchedulingError as e:
+        raise _http_error(e) from e
     finally:
         await client.close()
 

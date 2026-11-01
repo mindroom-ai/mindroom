@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import ToolExecution
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.invocation import (
     MISSING_TOOL_ERROR_TEXT,
     ToolArgumentError,
@@ -18,12 +19,12 @@ from mindroom.tool_system.invocation import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 
     from mindroom.agent_loop.spec import RunContext
     from mindroom.llm.provider import ToolSpec
     from mindroom.tool_system.invocation import ToolMiddleware
-    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolOutcome, ToolValue
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue
 
 logger = get_logger(__name__)
 
@@ -142,8 +143,8 @@ def plan_tool_batch(
 
     A call naming no offered function, or whose arguments cannot be decoded, is refused with an error answer, logged
     for ``entity`` without its arguments, and never counts toward the limit. Of the rest, each call past
-    ``max_tool_calls_per_turn`` is refused with a limit error instead of running. An admitted call whose function
-    requires confirmation or external execution is planned paused, with the flags its stored execution carries.
+    ``max_tool_calls_per_turn`` is refused with a limit error instead of running. An admitted call whose function's
+    gate pauses its run is planned paused, with the flags its stored execution carries.
     """
     calls: list[PlannedCall | RefusedCall] = []
     count = calls_so_far
@@ -232,36 +233,46 @@ async def dispatch_tool_calls(
     *,
     run: RunContext,
     middleware: Sequence[ToolMiddleware],
-) -> list[Message]:
-    """Run the batch's unpaused calls concurrently and return their result messages in call order.
+) -> AsyncIterator[tuple[PlannedCall, Message]]:
+    """Run the batch's unpaused calls concurrently and yield each with its result message as soon as it finishes.
 
-    Each call's execution is filled in place with its result, error flag, and stop flag. A tool's exception
-    is its error text; only cancellation propagates, and no call of the batch is still running when it does: a
-    cancelled dispatcher cancels every call and waits for it, and a call cancelled on its own lets its siblings
-    finish first, so nothing a call does lands after the run stores its terminal record.
+    A call's execution is filled in place with its result, error flag, and stop flag as soon as that call finishes,
+    whatever its siblings are doing, so a batch cut short leaves every call that finished recorded as finished. A
+    tool's exception is its error text; only cancellation propagates, and no call of the batch is still running when
+    it does: a cancelled or closed dispatcher cancels every call and waits for it, and a call cancelled on its own
+    lets its siblings finish first, so nothing a call does lands after the run stores its terminal record.
     """
     runnable = [call for call in calls if not call.execution.is_paused]
-    async with asyncio.TaskGroup() as group:
-        tasks = [
-            group.create_task(
-                execute_tool_call(
-                    call.function,
-                    call.execution.tool_args,
-                    run.call_context(call.execution.tool_call_id),
-                    middleware=middleware,
-                ),
-            )
-            for call in runnable
-        ]
-    return [_complete_call(call, task.result()) for call, task in zip(runnable, tasks, strict=True)]
+
+    async def run_batch(emit: Callable[[object], None]) -> None:
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(_run_call(call, run, middleware, emit)) for call in runnable]
+        for task in tasks:
+            task.result()  # A call cancelled on its own cancels the batch once its siblings finished.
+
+    # The calls' group runs in a task of its own, so this generator never yields inside the group.
+    finished = callback_event_stream(run_batch)
+    async with closing_async_stream(finished):
+        async for item in finished:
+            # The batch's own result, None, comes last; everything before it is a finished call.
+            if item is not None:
+                yield cast("tuple[PlannedCall, Message]", item)
 
 
-def _complete_call(call: PlannedCall, outcome: ToolOutcome) -> Message:
+async def _run_call(
+    call: PlannedCall,
+    run: RunContext,
+    middleware: Sequence[ToolMiddleware],
+    emit: Callable[[object], None],
+) -> None:
+    """Run one call, record its outcome on its execution, and hand the call over with its result message."""
     execution = call.execution
+    context = run.call_context(execution.tool_call_id)
+    outcome = await execute_tool_call(call.function, execution.tool_args, context, middleware=middleware)
     execution.result = outcome.content
     execution.is_error = outcome.is_error
     execution.stop_after_call = outcome.stop_after_call
-    return tool_result_message(execution, media=outcome)
+    emit((call, tool_result_message(execution, media=outcome)))
 
 
 def tool_result_message(execution: ToolExecution, media: ToolValue | None = None) -> Message:

@@ -16,7 +16,6 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import _drive_delegations
 from mindroom.delegation.records import DelegationRecordOwner
 from mindroom.delegation.state import DelegationState, child_execution_identity
-from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
@@ -28,6 +27,7 @@ from tests.delegation_helpers import (
     _deferred_call,
     _delegate_runtime_context,
     _runtime_paths,
+    _saved_approval_calls,
     approval_executor,
     pause_parent,
     respond,
@@ -85,7 +85,6 @@ async def test_direct_subagent_success_keeps_real_terminal_outcome(
     identity = _identity()
     toolkit = DelegateTools(
         "leader",
-        ["child"],
         paths,
         config,
         agent_workspace_root_path(paths.storage_root, "leader"),
@@ -102,7 +101,10 @@ async def test_direct_subagent_success_keeps_real_terminal_outcome(
     assert run["error"] is None
     receipts = list(tmp_path.glob("agents/leader/workspace/.mindroom/delegation_receipts/*/*.json"))
     assert len(receipts) == 1
-    assert json.loads(receipts[0].read_text())["status"] == "completed"
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["status"] == "completed"
+    assert receipt["subagent_id"] == run["subagent_id"]
+    assert f"Subagent ID: {run['subagent_id']}" in result
 
 
 @pytest.mark.asyncio
@@ -167,7 +169,6 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
     else:
         toolkit = DelegateTools(
             "leader",
-            ["child"],
             paths,
             config,
             agent_workspace_root_path(paths.storage_root, "leader"),
@@ -224,7 +225,9 @@ def _continuation_turns(continuation: str) -> list[list[ScriptStep]]:
         turns.append(calls(_deferred_call("list-files", "list_files")))
     if continuation == "preparation_error":
         # The continuation after this switch rebuilds the child, whose model preparation then fails.
-        turns.append(calls(tool_call("switch_thread_model", "switch-model", model_name="default", when="next-turn")))
+        turns.append(
+            calls(tool_call("switch_thread_model", "switch-model", model_name="default", when="after-toolcall")),
+        )
     if continuation == "nested_subagent":
         turns.extend(
             [
@@ -315,17 +318,8 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
         assert isinstance(reply, PausedAttempt)
         assert paused.status is RunStatus.paused
         assert {source.toolkit_name for source in state.pending_tool_sources.values()} == {"calculator"}
-        approval_calls = tuple(
-            ApprovalCall(
-                tool_call_id=str(tool["tool_call_id"]),
-                tool_name=str(tool["tool_name"]),
-                invoking_agent="child",
-                toolkit_name="calculator",
-                expires_at_ns=2**62,
-                arguments_digest=approval_arguments_digest(tool["tool_args"]),
-            )
-            for tool in state.pending_tools
-        )
+        approval_calls = _saved_approval_calls(state)
+        assert {(call.invoking_agent, call.toolkit_name) for call in approval_calls} == {("child", "calculator")}
         result = await resume(
             approval_executor(config, paths),
             reply,
@@ -426,17 +420,8 @@ async def test_a_resumed_child_that_answered_after_a_refused_model_switch_is_not
     reply = await respond("leader", "Delegate", **options, run_id="parent-run")
     assert isinstance(reply, PausedAttempt)
     state = DelegationState.from_metadata(stored_run("leader", "parent-run", **options).metadata)
-    approval_calls = tuple(
-        ApprovalCall(
-            tool_call_id=str(tool["tool_call_id"]),
-            tool_name=str(tool["tool_name"]),
-            invoking_agent="child",
-            toolkit_name="calculator",
-            expires_at_ns=2**62,
-            arguments_digest=approval_arguments_digest(tool["tool_args"]),
-        )
-        for tool in state.pending_tools
-    )
+    approval_calls = _saved_approval_calls(state)
+    assert {(call.invoking_agent, call.toolkit_name) for call in approval_calls} == {("child", "calculator")}
 
     result = await resume(
         approval_executor(config, paths),

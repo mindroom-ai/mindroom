@@ -1,7 +1,7 @@
 """Native desktop host lifecycle tests."""
 
 # Compact fakes keep the wire-level lifecycle assertions readable.
-# ruff: noqa: C416, D101, D102, D103, EM101, S106, TRY003
+# ruff: noqa: D101, D102, D103, EM101, S106, TRY003
 
 from __future__ import annotations
 
@@ -15,12 +15,11 @@ import ssl
 import sys
 import time
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from itertools import count
 from pathlib import Path
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -30,7 +29,9 @@ import pytest
 from mcp.types import CallToolResult, TextContent
 from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 
-from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
+from mindroom.desktop.bridge import DesktopBridge
+from mindroom.desktop.bridge_session import DesktopBridgeSessionDeps
+from mindroom.desktop.cloudflare_access import CloudflareAccessHeaders
 from mindroom.desktop.command_journal import DesktopCommandJournal, DesktopCommandJournalError
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
 from mindroom.desktop.media import download_encrypted_media
@@ -45,10 +46,8 @@ from mindroom.desktop.native_host import (
     NativeDesktopHost,
     NativeHostDependencies,
     serve_native_stream,
-    supervise_native_tasks,
 )
 from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest, parse_native_request
-from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
 from mindroom.desktop.protocol import (
     DESKTOP_COMMAND_EVENT_TYPE,
     DesktopCommand,
@@ -56,15 +55,28 @@ from mindroom.desktop.protocol import (
     EncryptedDesktopMedia,
 )
 from mindroom.desktop.session import DesktopMatrixSession, load_desktop_session, save_desktop_session
-from mindroom.desktop.shell import DesktopShell, DesktopShellRequest
+from mindroom.desktop.shell import DesktopShell, DesktopShellError
 from mindroom.file_locks import advisory_file_lock, file_lock_is_held
 from mindroom.matrix.olm_to_device import OlmToDeviceError
 from mindroom.shell import execution as shell_execution
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.desktop_helpers import (
+    FailingSource,
+    FakeMatrixOwner,
+    ManualBridge,
+    fake_cloudflare_access,
+    offline_session_deps,
+    runtime_paths,
+)
+from tests.desktop_helpers import empty_selected_root as empty_selected_root  # noqa: PLC0414
+from tests.desktop_helpers import login_environment as login_environment  # noqa: PLC0414
 from tests.test_desktop_bridge import _wait_until_gone
 
 if TYPE_CHECKING:
     from collections.abc import Buffer
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
 
 
 def _config_payload() -> dict[str, object]:
@@ -171,11 +183,28 @@ def _local_access_request(revision: int, roots: list[str], *, enabled: bool) -> 
     return request
 
 
+def _host(tmp_path: Path, runtime: FakeRuntime | None = None, **dependencies: Any) -> NativeDesktopHost:  # noqa: ANN401
+    if runtime is not None:
+        dependencies["runtime_factory"] = lambda *_: runtime
+    return NativeDesktopHost(
+        runtime_paths(tmp_path),
+        helper_version="1",
+        dependencies=NativeHostDependencies(**dependencies),
+    )
+
+
+def test_hello_and_status_advertise_the_same_capabilities(tmp_path: Path) -> None:
+    host = _host(tmp_path)
+    capabilities = ["observe", "control", "browser", "files", "shell"]
+    assert host.hello()["capabilities"] == capabilities
+    assert host.status()["capabilities"] == capabilities
+
+
 def test_status_restores_saved_identity_without_exposing_or_changing_session(tmp_path: Path) -> None:
     path = tmp_path / "desktop_bridge" / "matrix_session.json"
     save_desktop_session(path, DesktopMatrixSession("https://example.org", "@me:example.org", "LOCAL", "secret-token"))
     original = path.read_bytes()
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+    host = _host(tmp_path)
 
     status = host.status()
 
@@ -193,7 +222,7 @@ def test_status_restores_saved_identity_without_exposing_or_changing_session(tmp
 
 
 def test_status_detects_session_created_and_removed_while_helper_runs(tmp_path: Path) -> None:
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+    host = _host(tmp_path)
     path = tmp_path / "desktop_bridge" / "matrix_session.json"
     assert host.status()["pairing"]["session_state"] == "missing"
 
@@ -216,7 +245,7 @@ def test_status_keeps_invalid_saved_session_recoverable_without_trusting_identit
     else:
         path.unlink()
         path.mkdir()
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+    host = _host(tmp_path)
 
     status = host.status()
 
@@ -240,7 +269,7 @@ def test_status_does_not_open_a_fifo_session(tmp_path: Path, monkeypatch: pytest
         return open_file(file, flags)
 
     monkeypatch.setattr(os, "open", guarded_open)
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+    host = _host(tmp_path)
 
     assert host.status()["pairing"]["session_state"] == "invalid"
 
@@ -253,7 +282,7 @@ def test_replacing_directory_session_rejects_before_authentication(
     path.mkdir(parents=True)
     sentinel = path / "keep.txt"
     sentinel.write_text("keep")
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+    host = _host(tmp_path)
 
     async def unexpected_authentication(*_args: object, **_kwargs: object) -> None:
         pytest.fail("Authentication must not start for an unreplaceable session path")
@@ -268,12 +297,7 @@ def test_replacing_directory_session_rejects_before_authentication(
 
 def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:
     runtime = FakeRuntime()
-    dependencies = NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime)
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1.2.3",
-        dependencies=dependencies,
-    )
+    host = _host(tmp_path, runtime)
 
     configured = asyncio.run(
         host.handle(_request("configure", expected_revision=0, config=_config_payload())),
@@ -321,11 +345,7 @@ def test_start_failure_preserves_transport_cause_and_saved_setup(
                     "Matrix device-key query failed: durable HTTP connection retries exhausted",
                 ) from exc
 
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="test",
-        dependencies=NativeHostDependencies(runtime_factory=lambda *_: FailingRuntime()),
-    )
+    host = _host(tmp_path, FailingRuntime())
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
     path = native_config_path(tmp_path)
     original = path.read_bytes()
@@ -343,11 +363,7 @@ def test_start_failure_preserves_transport_cause_and_saved_setup(
 @pytest.mark.asyncio
 async def test_external_setup_does_not_change_running_authority(tmp_path: Path) -> None:
     runtime = FakeRuntime()
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None),
-        helper_version="test",
-        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
-    )
+    host = _host(tmp_path, runtime)
     await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
     await host.handle(_request("start"))
     path = native_config_path(tmp_path)
@@ -370,11 +386,7 @@ def test_host_status_returns_persisted_browser_settings(tmp_path: Path) -> None:
         "user_data_dir": str(profile),
         "timeout_seconds": 90,
     }
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1",
-        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: FakeRuntime()),
-    )
+    host = _host(tmp_path, FakeRuntime())
 
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
 
@@ -395,10 +407,7 @@ def test_configure_rejects_controller_changes_without_altering_owned_work(
     field: str,
     value: str,
 ) -> None:
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1",
-    )
+    host = _host(tmp_path)
     config_path = tmp_path / "desktop_bridge" / "native_config.json"
     if existing_config:
         asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
@@ -428,10 +437,7 @@ def test_configure_rejects_controller_changes_without_altering_owned_work(
 
 
 def test_configure_same_controller_preserves_journal_and_saves_app_changes(tmp_path: Path) -> None:
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1",
-    )
+    host = _host(tmp_path)
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
     journal_path = tmp_path / "desktop_bridge" / "commands.sqlite3"
     journal = DesktopCommandJournal.load(
@@ -451,7 +457,7 @@ def test_configure_same_controller_preserves_journal_and_saves_app_changes(tmp_p
 
 
 def test_set_allowed_apps_preserves_connection_and_other_settings(tmp_path: Path) -> None:
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    host = _host(tmp_path)
     payload = _config_payload()
     payload["capture"] = {"max_screenshot_width": 1200, "jpeg_quality": 65}
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
@@ -469,14 +475,12 @@ def test_set_allowed_apps_preserves_connection_and_other_settings(tmp_path: Path
     assert load_native_config(native_config_path(tmp_path)).to_payload() == saved
 
 
-def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path) -> None:
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
-    root = tmp_path / "selected"
-    root.mkdir()
+def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path, empty_selected_root: Path) -> None:
+    host = _host(tmp_path)
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
     before = load_native_config(native_config_path(tmp_path)).to_payload()
-    response = asyncio.run(host.handle(_local_access_request(1, [str(root)], enabled=True)))
-    assert response["status"]["config"]["file_roots"] == [str(root.resolve())]
+    response = asyncio.run(host.handle(_local_access_request(1, [str(empty_selected_root)], enabled=True)))
+    assert response["status"]["config"]["file_roots"] == [str(empty_selected_root.resolve())]
     assert response["status"]["config"]["shell_enabled"] is True
     assert response["status"]["shell"] == {
         "enabled": True,
@@ -489,11 +493,11 @@ def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path)
     assert type(response["status"]["shell"]["auto_approve_remaining_seconds"]) is int
     assert load_native_config(native_config_path(tmp_path)).to_payload() == before | {
         "revision": 2,
-        "files": {"roots": [str(root.resolve())]},
+        "files": {"roots": [str(empty_selected_root.resolve())]},
         "shell": {"enabled": True},
     }
     # A disappeared saved root must not block unrelated edits.
-    root.rmdir()
+    empty_selected_root.rmdir()
     asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=2, allowed_app_ids=[])))
     browser = {"enabled": False, "executable_path": None, "user_data_dir": None}
     asyncio.run(host.handle(_request("set_browser_config", expected_revision=3, browser=browser)))
@@ -501,7 +505,7 @@ def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path)
     old_payload["revision"] = 4
     asyncio.run(host.handle(_request("configure", expected_revision=4, config=old_payload)))
     saved = load_native_config(native_config_path(tmp_path))
-    assert saved.files.roots == (root.resolve(),)
+    assert saved.files.roots == (empty_selected_root.resolve(),)
     assert saved.shell.enabled is True
     unchanged = native_config_path(tmp_path).read_bytes()
     with pytest.raises(NativeProtocolError) as caught:
@@ -510,15 +514,18 @@ def test_local_access_save_is_scoped_and_other_saves_preserve_it(tmp_path: Path)
     assert native_config_path(tmp_path).read_bytes() == unchanged
 
 
-def test_changed_local_root_must_exist_and_new_controller_gets_no_local_access(tmp_path: Path) -> None:
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
-    root = tmp_path / "selected"
-    root.mkdir()
+def test_changed_local_root_must_exist_and_new_controller_gets_no_local_access(
+    tmp_path: Path,
+    empty_selected_root: Path,
+) -> None:
+    host = _host(tmp_path)
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
-    asyncio.run(host.handle(_local_access_request(1, [str(root)], enabled=True)))
+    asyncio.run(host.handle(_local_access_request(1, [str(empty_selected_root)], enabled=True)))
     unchanged = native_config_path(tmp_path).read_bytes()
     with pytest.raises(NativeProtocolError) as caught:
-        asyncio.run(host.handle(_local_access_request(2, [str(root), str(tmp_path / "missing")], enabled=True)))
+        asyncio.run(
+            host.handle(_local_access_request(2, [str(empty_selected_root), str(tmp_path / "missing")], enabled=True)),
+        )
     assert caught.value.code == "invalid_request"
     assert native_config_path(tmp_path).read_bytes() == unchanged
     payload = _config_payload()
@@ -531,14 +538,17 @@ def test_changed_local_root_must_exist_and_new_controller_gets_no_local_access(t
 
 
 def test_configure_with_local_access_validates_only_new_roots(tmp_path: Path) -> None:
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+    host = _host(tmp_path)
     saved_root = tmp_path / "saved"
     saved_root.mkdir()
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
     asyncio.run(host.handle(_local_access_request(1, [str(saved_root)], enabled=False)))
     saved_root.rmdir()
-    payload = _config_payload() | {"revision": 2, "files": {"roots": [str(saved_root.resolve())]}}
-    payload["shell"] = {"enabled": True}
+    payload = _config_payload() | {
+        "revision": 2,
+        "files": {"roots": [str(saved_root.resolve())]},
+        "shell": {"enabled": True},
+    }
     asyncio.run(host.handle(_request("configure", expected_revision=2, config=payload)))
     assert load_native_config(native_config_path(tmp_path)).shell.enabled is True
     payload = payload | {"revision": 3, "files": {"roots": [str(tmp_path / "missing")]}}
@@ -547,7 +557,7 @@ def test_configure_with_local_access_validates_only_new_roots(tmp_path: Path) ->
 
 
 def test_set_local_access_requires_saved_config_stopped_bridge_and_exact_fields(tmp_path: Path) -> None:
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+    host = _host(tmp_path)
     with pytest.raises(NativeProtocolError) as caught:
         asyncio.run(host.handle(_local_access_request(0, [], enabled=True)))
     assert caught.value.code == "configuration_missing"
@@ -572,18 +582,14 @@ def test_set_local_access_requires_saved_config_stopped_bridge_and_exact_fields(
     assert native_config_path(tmp_path).read_bytes() == unchanged
 
 
-def test_folder_only_config_starts_without_app_selection(tmp_path: Path) -> None:
+def test_folder_only_config_starts_without_app_selection(tmp_path: Path, empty_selected_root: Path) -> None:
     runtime = FakeRuntime()
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None),
-        helper_version="1",
-        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
+    host = _host(tmp_path, runtime)
+    asyncio.run(
+        host.handle(
+            _request("configure", expected_revision=0, config=_folder_config(empty_selected_root).to_payload()),
+        ),
     )
-    root = tmp_path / "selected"
-    root.mkdir()
-    payload = _config_payload() | {"allowed_app_ids": [], "files": {"roots": [str(root)]}}
-    payload["shell"] = {"enabled": False}
-    asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
     assert asyncio.run(host.handle(_request("start")))["status"]["bridge"]["state"] == "observe_only"
 
 
@@ -597,34 +603,63 @@ def bridge_transport(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     return send
 
 
-async def _shell_host(tmp_path: Path) -> NativeDesktopHost:
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
-    payload = _config_payload() | {"allowed_app_ids": [], "files": {"roots": []}}
-    payload["shell"] = {"enabled": True}
+@dataclass
+class _OfflineMatrix:
+    """The fake owner every offline run opens, and the session deps that open it."""
+
+    owner: FakeMatrixOwner
+    deps: DesktopBridgeSessionDeps
+
+    def runtime(self, runtime_paths: RuntimePaths, config: NativeDesktopConfig) -> NativeBridgeRuntime:
+        return NativeBridgeRuntime(runtime_paths, config, self.deps)
+
+    def bridge(self) -> DesktopBridge:
+        """Return the started bridge from its one registered admission callback."""
+        [admit] = self.owner.client.to_device_callbacks
+        return admit.func.__self__
+
+
+@pytest.fixture
+def offline_runtime_session(
+    monkeypatch: pytest.MonkeyPatch,
+    login_environment: AsyncMock,  # noqa: ARG001 - its capture replaces the login shell for every offline run
+) -> _OfflineMatrix:
+    """Start the native runtime without Matrix, and fail if it builds the GUI provider."""
+    owner = FakeMatrixOwner()
+
+    def forbidden_gui_provider(**_kwargs: object) -> None:
+        pytest.fail("GUI provider constructed without application access")
+
+    session = DesktopMatrixSession("https://example.org", "@desktop:example.org", "LOCAL", "secret-token")
+    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: session)
+    monkeypatch.setattr("mindroom.desktop.bridge_session.PyAutoGuiDesktopProvider", forbidden_gui_provider)
+    return _OfflineMatrix(owner, offline_session_deps(owner))
+
+
+def _offline_host(tmp_path: Path, offline: _OfflineMatrix) -> NativeDesktopHost:
+    return _host(tmp_path, runtime_factory=offline.runtime)
+
+
+async def _shell_host(
+    tmp_path: Path,
+    offline: _OfflineMatrix,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    browser: bool = False,
+) -> tuple[NativeDesktopHost, DesktopBridge]:
+    """Configure and start a real shell session, returning the host and its hand-driven bridge."""
+    monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", ManualBridge)
+    host = _offline_host(tmp_path, offline)
+    payload = _config_payload() | {"allowed_app_ids": [], "files": {"roots": []}, "shell": {"enabled": True}}
+    cast("dict[str, object]", payload["browser"])["enabled"] = browser
     await host.handle(_request("configure", expected_revision=0, config=payload))
-    return host
+    return host, await _start_shell_bridge(host, offline)
 
 
-def _attach_shell_runtime(host: NativeDesktopHost, tmp_path: Path) -> NativeBridgeRuntime:
-    """Attach a real shell-only bridge to the native channel without opening Matrix."""
-    config = load_native_config(native_config_path(tmp_path))
-    runtime = NativeBridgeRuntime(SimpleNamespace(storage_root=tmp_path), config)
-    runtime._shell = DesktopShell(environment={"PATH": os.environ["PATH"]})
-    runtime._bridge = DesktopBridge(
-        client=object(),
-        provider=None,
-        policy=DesktopBridgePolicy(
-            controller=config.controller,
-            allowed_requester_ids=frozenset(config.allowed_requester_ids),
-            allowed_agent_names=frozenset(config.allowed_agent_names),
-            allowed_app_ids=frozenset(),
-            shell_enabled=True,
-        ),
-        shell=runtime._shell,
-        journal_path=tmp_path / "desktop_bridge" / "commands.sqlite3",
-    )
-    host._runtime = runtime
-    return runtime
+async def _start_shell_bridge(host: NativeDesktopHost, offline: _OfflineMatrix) -> DesktopBridge:
+    """Start the configured shell session through the native channel and return its hand-driven bridge."""
+    await host.handle(_request("start"))
+    return offline.bridge()
 
 
 def _bridge_event(
@@ -683,10 +718,11 @@ async def _wait_for_native_pending(host: NativeDesktopHost) -> dict[str, object]
 @pytest.mark.asyncio
 async def test_native_decision_runs_exact_pending_shell_command_once(
     bridge_transport: AsyncMock,
+    offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    host = await _shell_host(tmp_path)
-    bridge = _attach_shell_runtime(host, tmp_path)._bridge
+    host, bridge = await _shell_host(tmp_path, offline_runtime_session, monkeypatch)
     event = _shell_event("printf ran >> marker", tmp_path)
     await bridge.on_to_device_event(event)
     execution = asyncio.create_task(bridge.execute_pending(shell_starts=True))
@@ -742,7 +778,7 @@ async def test_native_decision_runs_exact_pending_shell_command_once(
         await host.handle(_request("decide_shell", command_id="shell-1", approved=True, auto_approve_seconds=0))
     assert caught.value.code == "not_running"
 
-    restarted = _attach_shell_runtime(host, tmp_path)._bridge
+    restarted = await _start_shell_bridge(host, offline_runtime_session)
     await restarted.on_to_device_event(event)
     await restarted.execute_pending(shell_starts=True)
     await restarted.deliver_pending()
@@ -752,9 +788,13 @@ async def test_native_decision_runs_exact_pending_shell_command_once(
 
 
 @pytest.mark.asyncio
-async def test_native_shell_grant_is_local_bounded_and_revocable(bridge_transport: AsyncMock, tmp_path: Path) -> None:
-    host = await _shell_host(tmp_path)
-    bridge = _attach_shell_runtime(host, tmp_path)._bridge
+async def test_native_shell_grant_is_local_bounded_and_revocable(
+    bridge_transport: AsyncMock,
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host, bridge = await _shell_host(tmp_path, offline_runtime_session, monkeypatch)
     for parameters in (
         {"duration_seconds": 59},
         {"duration_seconds": 3601},
@@ -798,9 +838,13 @@ async def test_native_shell_grant_is_local_bounded_and_revocable(bridge_transpor
 
 
 @pytest.mark.asyncio
-async def test_native_status_lists_handles_and_can_kill_one(bridge_transport: AsyncMock, tmp_path: Path) -> None:
-    host = await _shell_host(tmp_path)
-    bridge = _attach_shell_runtime(host, tmp_path)._bridge
+async def test_native_status_lists_handles_and_can_kill_one(
+    bridge_transport: AsyncMock,
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host, bridge = await _shell_host(tmp_path, offline_runtime_session, monkeypatch)
     await host.handle(_request("grant_shell", duration_seconds=60))
     pid_file = tmp_path / "leader.pid"
     command = f"echo $$ > {pid_file}; sleep 30"
@@ -866,23 +910,22 @@ class _LiveExtensionSession:
 
 @pytest.mark.asyncio
 async def test_native_status_reports_a_remotely_started_browser_session_as_connected(
+    offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Status follows the provider's live session, not only the local connect and disconnect buttons."""
-    host = await _shell_host(tmp_path)
-    runtime = _attach_shell_runtime(host, tmp_path)
-    browser = PlaywrightMCPBrowserProvider(output_dir=tmp_path / "desktop-browser")
+    host, bridge = await _shell_host(tmp_path, offline_runtime_session, monkeypatch, browser=True)
+    browser = cast("PlaywrightMCPBrowserProvider", bridge.browser_provider)
     monkeypatch.setattr(browser, "_new_session", _LiveExtensionSession)
-    runtime._browser = browser
-    assert runtime.status()["browser_connected"] is False
+    assert host.status()["browser"]["extension"] == "disconnected"
 
-    # A lease holder's remote browser start reaches the provider through the bridge, not through connect_browser.
+    # A lease holder's remote browser start runs on the bridge's provider, not through connect_browser.
     await browser.execute("start", {})
-    assert runtime.status()["browser_connected"] is True
+    assert host.status()["browser"]["extension"] == "connected"
 
     await browser.execute("stop", {})
-    assert runtime.status()["browser_connected"] is False
+    assert host.status()["browser"]["extension"] == "disconnected"
     await host.shutdown()
 
 
@@ -908,12 +951,12 @@ class _RecordingOutput(io.BytesIO):
 @pytest.mark.asyncio
 async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
     bridge_transport: AsyncMock,
+    offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    host = await _shell_host(tmp_path)
-    runtime = _attach_shell_runtime(host, tmp_path)
-    shell, bridge = runtime._shell, runtime._bridge
+    host, bridge = await _shell_host(tmp_path, offline_runtime_session, monkeypatch)
+    shell = cast("DesktopShell", bridge.shell)
     await host.handle(_request("grant_shell", duration_seconds=60))
     script = (
         "import os, pathlib, signal, time; "
@@ -944,10 +987,7 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
             while not (pid_file.exists() and pid_file.read_text()):  # noqa: ASYNC110 - a real child writes it
                 await asyncio.sleep(0.005)
         child = int(pid_file.read_text())
-        records = b"".join(
-            json.dumps({"v": 1, "request_id": str(uuid4()), "action": action, "parameters": {}}).encode() + b"\n"
-            for action in ("revoke_shell", "status", "stop")
-        )
+        records = b"".join(_wire_record(action) for action in ("revoke_shell", "status", "stop"))
         await asyncio.wait_for(
             serve_native_stream(host, input_stream=io.BytesIO(records), output_stream=output),
             timeout=SETTLE_TIMEOUT_SECONDS,
@@ -960,7 +1000,7 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
         assert status["result"]["status"]["shell"]["auto_approve_remaining_seconds"] == 0
         assert stopped["ok"] is True
         assert stopped["result"]["status"]["bridge"]["state"] == "stopped"
-        restarted = _attach_shell_runtime(host, tmp_path)._bridge
+        restarted = await _start_shell_bridge(host, offline_runtime_session)
         await restarted.on_to_device_event(event)
         await restarted.deliver_pending()
         assert "was stopped" in bridge_transport.await_args.kwargs["content"]["error"]
@@ -1004,11 +1044,7 @@ def test_shell_controls_bypass_lifecycle_lock_and_require_running_bridge(
 ) -> None:
     async def scenario() -> list[tuple[str, dict[str, object]]]:
         runtime = FakeRuntime()
-        host = NativeDesktopHost(
-            SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-            helper_version="1",
-            dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
-        )
+        host = _host(tmp_path, runtime)
         await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
         with pytest.raises(NativeProtocolError) as caught:
             await host.handle(_request(action, **parameters))
@@ -1025,126 +1061,116 @@ def test_shell_controls_bypass_lifecycle_lock_and_require_running_bridge(
     assert asyncio.run(scenario()) == [(action, call)]
 
 
-class _FakeOwner:
-    """Owned Matrix session stand-in that records callback registration and closing."""
-
-    def __init__(self) -> None:
-        self.client = SimpleNamespace(to_device_callbacks=[], add_to_device_callback=self._register)
-        self.source = object()
-        self.closed = False
-
-    def _register(self, callback: object, event_type: object) -> None:
-        self.client.to_device_callbacks.append((callback, event_type))
-
-    async def close(self) -> None:
-        self.closed = True
-
-
-class _IdleTransport:
-    def __init__(self, _source: object, *, wait_for_capacity: object) -> None:
-        del wait_for_capacity
-
-    async def run(self) -> None:
-        await asyncio.Event().wait()
-
-
-@pytest.fixture
-def offline_runtime_session(monkeypatch: pytest.MonkeyPatch) -> _FakeOwner:
-    """Start the native runtime without Matrix, and fail if it builds the GUI provider."""
-    owner = _FakeOwner()
-
-    async def open_client(*_args: object, **_kwargs: object) -> _FakeOwner:
-        return owner
-
-    def forbidden_gui_provider(**_kwargs: object) -> None:
-        pytest.fail("GUI provider constructed without application access")
-
-    session = SimpleNamespace(cloudflare_access=False, homeserver="https://example.org")
-    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: session)
-    monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", open_client)
-    monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", AsyncMock())
-    monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", AsyncMock())
-    monkeypatch.setattr("mindroom.desktop.transport.DesktopTransport", _IdleTransport)
-    monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", forbidden_gui_provider)
-    monkeypatch.setattr(
-        "mindroom.desktop.login_environment.capture_login_environment",
-        AsyncMock(return_value={"PATH": os.environ["PATH"], "MINDROOM_CAPTURED": "from-login-shell"}),
-    )
-    return owner
-
-
-def _folder_and_shell_config(root: Path) -> NativeDesktopConfig:
-    payload = _config_payload() | {"allowed_app_ids": [], "files": {"roots": [str(root)]}}
-    payload["shell"] = {"enabled": True}
+def _folder_config(root: Path, *, shell_enabled: bool = False) -> NativeDesktopConfig:
+    payload = _config_payload() | {
+        "allowed_app_ids": [],
+        "files": {"roots": [str(root)]},
+        "shell": {"enabled": shell_enabled},
+    }
     return NativeDesktopConfig.from_payload(payload)
 
 
 @pytest.mark.asyncio
 async def test_runtime_starts_folder_and_shell_access_without_gui_provider(
-    offline_runtime_session: _FakeOwner,
+    offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
+    empty_selected_root: Path,
 ) -> None:
-    root = (tmp_path / "selected").resolve()
-    root.mkdir()
-    runtime = NativeBridgeRuntime(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None),
-        _folder_and_shell_config(root),
-    )
+    config = _folder_config(empty_selected_root, shell_enabled=True)
+    runtime = offline_runtime_session.runtime(runtime_paths(tmp_path), config)
     await runtime.start()
-    filesystem = runtime._filesystem
     status = runtime.status()
     assert status["gui_available"] is False
-    assert [folder["path"] for folder in status["file_roots"]] == [str(root)]
+    assert [folder["path"] for folder in status["file_roots"]] == [str(empty_selected_root)]
     assert status["shell"]["enabled"] is True
-    # The shell runtime runs commands with the environment captured from the login shell at start.
-    runtime.grant_shell(60)
-    request = DesktopShellRequest(
-        "captured",
-        "@person:example.org",
-        "assistant",
-        'printf "$MINDROOM_CAPTURED"',
-        str(tmp_path),
-        round(time.time() * 1000) + 60_000,
-    )
-    result = await runtime._shell.execute(request)
-    assert result.output.read() == b"from-login-shell"
-    result.output.release()
     await runtime.stop()
-    assert offline_runtime_session.closed is True
-    assert offline_runtime_session.client.to_device_callbacks == []
-    with pytest.raises(DesktopFilesystemError, match="closed"):
-        filesystem.list_folders()
+    assert offline_runtime_session.owner.closes == 1
     assert runtime.status()["gui_mode"] == "stopped"
 
 
 @pytest.mark.asyncio
-async def test_runtime_start_failure_releases_pinned_folders(
-    offline_runtime_session: _FakeOwner,
+async def test_runtime_start_failure_releases_the_matrix_owner(
+    offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    empty_selected_root: Path,
 ) -> None:
-    root = (tmp_path / "selected").resolve()
-    root.mkdir()
-    opened: list[DesktopFilesystem] = []
-
-    class RecordingFilesystem(DesktopFilesystem):
-        def __init__(self, roots: tuple[Path, ...]) -> None:
-            super().__init__(roots)
-            opened.append(self)
-
-    monkeypatch.setattr("mindroom.desktop.bridge_components.DesktopFilesystem", RecordingFilesystem)
     (tmp_path / "desktop_bridge" / "commands.sqlite3").mkdir(parents=True)
-    runtime = NativeBridgeRuntime(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None),
-        _folder_and_shell_config(root),
-    )
+    config = _folder_config(empty_selected_root, shell_enabled=True)
+    runtime = offline_runtime_session.runtime(runtime_paths(tmp_path), config)
     with pytest.raises(DesktopCommandJournalError):
         await runtime.start()
-    assert len(opened) == 1
-    with pytest.raises(DesktopFilesystemError, match="closed"):
-        opened[0].list_folders()
-    assert offline_runtime_session.closed is True
+    assert offline_runtime_session.owner.closes == 1
     assert runtime.status()["gui_mode"] == "stopped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access", [False, True])
+async def test_runtime_start_uses_the_saved_cloudflare_access_choice(
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    empty_selected_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    access: bool,
+) -> None:
+    """A bridge started from the app authenticates through Access only when the saved login chose it."""
+    session = DesktopMatrixSession("https://example.org", "@desktop:example.org", "LOCAL", "secret-token", access)
+    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: session)
+    applications = fake_cloudflare_access(monkeypatch)
+    open_client = AsyncMock(return_value=offline_runtime_session.owner)
+    deps = DesktopBridgeSessionDeps(open_client=open_client, prepare_client=AsyncMock())
+    runtime = NativeBridgeRuntime(runtime_paths(tmp_path), _folder_config(empty_selected_root), deps)
+    await runtime.start()
+    try:
+        [(_, _, headers)] = [call.args for call in open_client.await_args_list]
+        if access:
+            assert isinstance(headers, CloudflareAccessHeaders)
+            assert applications == ["https://example.org"]
+        else:
+            assert headers is None
+            assert applications == []
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_faults_the_runtime_and_releases_its_session(
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    empty_selected_root: Path,
+) -> None:
+    """A failed worker leaves a faulted status for the app and releases Matrix, folders, and the shell."""
+    owner = offline_runtime_session.owner
+    owner.source = source = FailingSource()
+    config = _folder_config(empty_selected_root, shell_enabled=True)
+    runtime = offline_runtime_session.runtime(runtime_paths(tmp_path), config)
+    await runtime.start()
+    bridge = offline_runtime_session.bridge()
+    source.fail.set()
+    await asyncio.wait_for(owner.closed.wait(), SETTLE_TIMEOUT_SECONDS)
+
+    status = runtime.status()
+    assert status["gui_mode"] == "faulted"
+    assert status["last_error"] == {
+        "code": "internal_error",
+        "message": "transport failed",
+        "recovery": "Stop and restart the desktop bridge.",
+        "retryable": True,
+    }
+    assert owner.client.to_device_callbacks == []
+    with pytest.raises(DesktopFilesystemError, match="closed"):
+        cast("DesktopFilesystem", bridge.filesystem).list_folders()
+    with pytest.raises(DesktopShellError, match="closed"):
+        cast("DesktopShell", bridge.shell).grant(60)
+    with pytest.raises(ValueError, match="not running"):
+        runtime.grant_shell(60)
+    await runtime.stop()
+    assert runtime.status()["gui_mode"] == "faulted"
+
+
+def _wire_record(action: str, parameters: dict[str, object] | None = None, *, request_id: str | None = None) -> bytes:
+    """Encode one native request record as the app writes it to the helper's private channel."""
+    record = {"v": 1, "request_id": request_id or str(uuid4()), "action": action, "parameters": parameters or {}}
+    return json.dumps(record).encode() + b"\n"
 
 
 async def _native(
@@ -1153,20 +1179,25 @@ async def _native(
     parameters: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Send one request through the helper's wire parser, as the app does over its private channel."""
-    record = {"v": 1, "request_id": str(uuid4()), "action": action, "parameters": parameters or {}}
-    return await host.handle(parse_native_request(json.dumps(record).encode()))
+    return await host.handle(parse_native_request(_wire_record(action, parameters)))
+
+
+def _reply_content(send: AsyncMock, request_id: str) -> dict[str, object] | None:
+    for call in send.await_args_list:
+        if call.kwargs["content"]["request_id"] == request_id:
+            return call.kwargs["content"]
+    return None
 
 
 def _replied(send: AsyncMock, request_id: str) -> bool:
-    return any(call.kwargs["content"]["request_id"] == request_id for call in send.await_args_list)
+    return _reply_content(send, request_id) is not None
 
 
 async def _reply(send: AsyncMock, request_id: str) -> DesktopResponse:
     """Wait for the bridge's encrypted reply to one request."""
     for _ in range(1000):
-        for call in send.await_args_list:
-            if call.kwargs["content"]["request_id"] == request_id:
-                return DesktopResponse.from_content(call.kwargs["content"])
+        if (content := _reply_content(send, request_id)) is not None:
+            return DesktopResponse.from_content(content)
         await asyncio.sleep(0.01)
     pytest.fail(f"the bridge never answered {request_id}")
 
@@ -1174,12 +1205,12 @@ async def _reply(send: AsyncMock, request_id: str) -> DesktopResponse:
 @pytest.mark.asyncio
 async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_runtime(  # noqa: PLR0915
     bridge_transport: AsyncMock,
-    offline_runtime_session: _FakeOwner,
+    offline_runtime_session: _OfflineMatrix,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Saved access drives the real helper runtime, providers, journal, and shell engine; only Matrix is faked."""
-    # A real private session file and loader; only opening Matrix and the transport stay fake.
+    # A real private session file and loader; only opening Matrix and its sync source stay fake.
     save_desktop_session(
         tmp_path / "desktop_bridge" / "matrix_session.json",
         DesktopMatrixSession("https://example.org", "@desktop:example.org", "LOCAL", "secret-token"),
@@ -1187,7 +1218,7 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
     monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", load_desktop_session)
     monotonic = [1_000.0]
     monkeypatch.setattr(
-        "mindroom.desktop.bridge_components.DesktopShell",
+        "mindroom.desktop.bridge_session.DesktopShell",
         partial(DesktopShell, monotonic_clock=lambda: monotonic[0]),
     )
     uploaded: list[bytes] = []
@@ -1206,14 +1237,15 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
     work = tmp_path / "work"
     work.mkdir()
     marker, pids = work / "marker", work / "pids"
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+    host = _offline_host(tmp_path, offline_runtime_session)
     sequences = count(1)
 
     async def send(action: str, **parameters: object) -> str:
         sequence = next(sequences)
         request_id = f"{action}-{sequence}"
-        [(deliver, _)] = offline_runtime_session.client.to_device_callbacks
-        await deliver(_bridge_event(action, parameters, request_id=request_id, sequence=sequence))
+        await offline_runtime_session.bridge().on_to_device_event(
+            _bridge_event(action, parameters, request_id=request_id, sequence=sequence),
+        )
         return request_id
 
     async def call(action: str, **parameters: object) -> DesktopResponse:
@@ -1321,7 +1353,7 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
         )
         assert background.result["state"] == "running"
         assert [entry["handle"] for entry in host.status()["shell"]["handles"]] == [background.result["handle"]]
-        spool = Path(cast("NativeBridgeRuntime", host._runtime)._shell._directory)
+        spool = Path(cast("DesktopShell", offline_runtime_session.bridge().shell)._directory)
         assert spool.is_dir()
         stopped = await _native(host, "stop")
         assert stopped["status"]["bridge"]["state"] == "stopped"
@@ -1342,13 +1374,211 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
                         os.kill(int(pid), signal.SIGKILL)
 
 
+@pytest.mark.asyncio
+async def test_stop_fences_a_command_admitted_just_before_it(
+    bridge_transport: AsyncMock,
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    empty_selected_root: Path,
+) -> None:
+    """A command admitted in the same step as stop is never executed or answered."""
+    runtime = offline_runtime_session.runtime(runtime_paths(tmp_path), _folder_config(empty_selected_root))
+    await runtime.start()
+    bridge = offline_runtime_session.bridge()
+    # An answered first command proves the real workers are running and waiting for more.
+    await bridge.on_to_device_event(_bridge_event("list_folders", {}, request_id="early", sequence=1))
+    assert (await _reply(bridge_transport, "early")).ok
+
+    await bridge.on_to_device_event(_bridge_event("list_folders", {}, request_id="late", sequence=2))
+    await runtime.stop()
+
+    assert not _replied(bridge_transport, "late")
+    assert runtime.status()["gui_mode"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_stop_ends_shell_access_before_a_verified_auto_approved_command_can_start(
+    bridge_transport: AsyncMock,
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shell command whose controller check finishes in the same step as stop is refused, even when auto-approved."""
+    verifying, verified = asyncio.Event(), asyncio.Event()
+
+    async def held_controller_check(*_args: object) -> None:
+        verifying.set()
+        await verified.wait()
+
+    monkeypatch.setattr("mindroom.desktop.bridge.resolve_pinned_device", held_controller_check)
+    runtime = offline_runtime_session.runtime(runtime_paths(tmp_path), _folder_config(tmp_path, shell_enabled=True))
+    await runtime.start()
+    runtime.grant_shell(600)
+    marker = tmp_path / "marker"
+    await offline_runtime_session.bridge().on_to_device_event(_shell_event(f"printf ran > {marker}", tmp_path))
+    await asyncio.wait_for(verifying.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    # The check completes and stop starts before the shell lane resumes.
+    verified.set()
+    await runtime.stop()
+
+    assert (await _reply(bridge_transport, "shell-1")).error == "Local shell is closed."
+    assert not marker.exists()
+    assert runtime.status()["gui_mode"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_fault_status_reports_the_draining_action_until_the_bridge_has_stopped(
+    bridge_transport: AsyncMock,
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    empty_selected_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a transport failure, the app sees the action still finishing, then the fault once it has drained."""
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class HeldActionBridge(DesktopBridge):
+        async def _process(self, command: DesktopCommand, command_fingerprint: str) -> DesktopResponse:
+            entered.set()
+            await release.wait()
+            return await super()._process(command, command_fingerprint)
+
+    monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", HeldActionBridge)
+    owner = offline_runtime_session.owner
+    owner.source = source = FailingSource()
+    runtime = offline_runtime_session.runtime(runtime_paths(tmp_path), _folder_config(empty_selected_root))
+    await runtime.start()
+    await offline_runtime_session.bridge().on_to_device_event(
+        _bridge_event("list_folders", {}, request_id="held", sequence=1),
+    )
+    await asyncio.wait_for(entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    source.fail.set()
+    for _ in range(500):
+        if runtime.status()["gui_mode"] != "observe_only":
+            break
+        await asyncio.sleep(0.01)
+    status = runtime.status()
+    assert (status["gui_mode"], status["active_action"]) == ("stopped", "list_folders")
+    assert owner.closes == 0
+
+    release.set()
+    await asyncio.wait_for(owner.closed.wait(), SETTLE_TIMEOUT_SECONDS)
+    status = runtime.status()
+    assert (status["gui_mode"], status["active_action"]) == ("faulted", None)
+    assert status["last_error"]["message"] == "transport failed"
+    assert (await _reply(bridge_transport, "held")).ok
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_during_a_fault_close_waits_for_that_close(
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    empty_selected_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A requested stop that arrives while a failed session is closing returns only after that one close."""
+    stop_entered, release_stop = asyncio.Event(), asyncio.Event()
+
+    class HeldStopBridge(DesktopBridge):
+        async def stop(self) -> None:
+            stop_entered.set()
+            await release_stop.wait()
+            await super().stop()
+
+    monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", HeldStopBridge)
+    owner = offline_runtime_session.owner
+    owner.source = source = FailingSource()
+    runtime = offline_runtime_session.runtime(runtime_paths(tmp_path), _folder_config(empty_selected_root))
+    await runtime.start()
+    source.fail.set()
+    await asyncio.wait_for(stop_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    stopping = asyncio.create_task(runtime.stop())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not stopping.done()
+    assert owner.closes == 0
+
+    release_stop.set()
+    await asyncio.wait_for(stopping, timeout=SETTLE_TIMEOUT_SECONDS)
+    assert owner.closes == 1
+    status = runtime.status()
+    assert status["gui_mode"] == "faulted"
+    assert status["last_error"]["message"] == "transport failed"
+
+
+@pytest.mark.asyncio
+async def test_host_stop_during_real_startup_releases_the_session(
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    empty_selected_root: Path,
+) -> None:
+    """Stopping while the controller is being verified rolls the half-started session back and allows a new start."""
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def held_prepare(*_args: object) -> None:
+        entered.set()
+        await release.wait()
+
+    owner = offline_runtime_session.owner
+    offline_runtime_session.deps = offline_session_deps(owner, held_prepare)
+    host = _offline_host(tmp_path, offline_runtime_session)
+    await host.handle(
+        _request("configure", expected_revision=0, config=_folder_config(empty_selected_root).to_payload()),
+    )
+    starting = asyncio.create_task(host.handle(_request("start")))
+    await asyncio.wait_for(entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    stopped = await host.handle(_request("stop"))
+
+    with pytest.raises(NativeProtocolError) as caught:
+        await starting
+    assert caught.value.code == "not_running"
+    assert owner.closes == 1
+    assert owner.client.to_device_callbacks == []
+    assert stopped["status"]["bridge"]["state"] == "stopped"
+    assert host.status()["bridge"]["state"] == "stopped"
+
+    release.set()
+    assert (await host.handle(_request("start")))["status"]["bridge"]["state"] == "observe_only"
+    await host.shutdown()
+    assert owner.closes == 2
+
+
+@pytest.mark.asyncio
+async def test_host_stop_reports_a_failed_release_and_still_retires_the_runtime(
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    empty_selected_root: Path,
+) -> None:
+    """A release failure is the stop's error, yet the bridge counts as stopped and can start again."""
+    owner = offline_runtime_session.owner
+    host = _offline_host(tmp_path, offline_runtime_session)
+    await host.handle(
+        _request("configure", expected_revision=0, config=_folder_config(empty_selected_root).to_payload()),
+    )
+    await host.handle(_request("start"))
+    owner.close_error = RuntimeError("lease release failed")
+
+    with pytest.raises(NativeProtocolError) as caught:
+        await host.handle(_request("stop"))
+
+    assert caught.value.code == "internal_error"
+    assert "lease release failed" in str(caught.value)
+    status = host.status()
+    assert (status["bridge"]["state"], status["helper"]["state"]) == ("stopped", "running")
+    assert status["bridge"]["last_error"] == caught.value.to_payload()
+    owner.close_error = None
+    assert (await host.handle(_request("start")))["status"]["bridge"]["state"] == "observe_only"
+    await host.shutdown()
+
+
 def test_set_allowed_apps_requires_saved_configuration_and_stopped_access(tmp_path: Path) -> None:
     runtime = FakeRuntime()
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1",
-        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
-    )
+    host = _host(tmp_path, runtime)
     with pytest.raises(NativeProtocolError, match="setup"):
         asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=0, allowed_app_ids=[])))
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
@@ -1363,6 +1593,21 @@ def test_set_allowed_apps_requires_saved_configuration_and_stopped_access(tmp_pa
         asyncio.run(host.handle(_request("start")))
 
 
+def test_start_refuses_a_saved_browser_without_apps_folders_or_shell(tmp_path: Path) -> None:
+    """Browser control needs a saved app, so a browser alone is not a capability the helper starts with."""
+    runtime = FakeRuntime()
+    host = _host(tmp_path, runtime)
+    payload = _config_payload()
+    payload.update(allowed_app_ids=[], browser={**cast("dict[str, object]", payload["browser"]), "enabled": True})
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
+
+    with pytest.raises(NativeProtocolError, match="at least one local capability") as caught:
+        asyncio.run(host.handle(_request("start")))
+
+    assert caught.value.code == "configuration_missing"
+    assert not runtime.running
+
+
 @pytest.mark.parametrize(
     "app_ids",
     [
@@ -1374,7 +1619,7 @@ def test_set_allowed_apps_requires_saved_configuration_and_stopped_access(tmp_pa
     ],
 )
 def test_set_allowed_apps_validates_app_ids(tmp_path: Path, app_ids: object) -> None:
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    host = _host(tmp_path)
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
     with pytest.raises(NativeProtocolError):
         asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=app_ids)))
@@ -1382,7 +1627,7 @@ def test_set_allowed_apps_validates_app_ids(tmp_path: Path, app_ids: object) -> 
 
 
 def test_app_only_save_preserves_browser_config_when_paths_disappear(tmp_path: Path) -> None:
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    host = _host(tmp_path)
     executable = tmp_path / "browser"
     executable.touch()
     profile = tmp_path / "profile"
@@ -1423,7 +1668,7 @@ def _setup_edit_host(tmp_path: Path) -> NativeDesktopHost:
         tmp_path / "desktop_bridge" / "matrix_session.json",
         DesktopMatrixSession("https://example.org", "@me:example.org", "LOCAL", "secret-token"),
     )
-    return NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    return _host(tmp_path)
 
 
 def _setup_edit_parameters(action: str) -> dict[str, object]:
@@ -1464,18 +1709,7 @@ def test_finish_setup_enables_only_reviewed_config_under_session_lock(
         return saved
 
     monkeypatch.setattr("mindroom.desktop.native_host.save_native_config", save_with_session_lock)
-    request = parse_native_request(
-        json.dumps(
-            {
-                "v": 1,
-                "request_id": str(uuid4()),
-                "action": "finish_setup",
-                "parameters": _setup_edit_parameters("finish_setup"),
-            },
-        ).encode(),
-    )
-
-    result = asyncio.run(host.handle(request))
+    result = asyncio.run(_native(host, "finish_setup", _setup_edit_parameters("finish_setup")))
 
     assert published
     assert load_native_config(path).to_payload() == original | {"revision": 2, "enabled": True}
@@ -1616,18 +1850,7 @@ def test_browser_save_preserves_disabled_setup_and_all_unedited_settings(tmp_pat
     profile = tmp_path / "profile"
     profile.mkdir()
     browser = {"enabled": True, "executable_path": str(executable), "user_data_dir": str(profile)}
-    request = parse_native_request(
-        json.dumps(
-            {
-                "v": 1,
-                "request_id": str(uuid4()),
-                "action": "set_browser_config",
-                "parameters": {"expected_revision": 1, "browser": browser},
-            },
-        ).encode(),
-    )
-
-    result = asyncio.run(host.handle(request))
+    result = asyncio.run(_native(host, "set_browser_config", {"expected_revision": 1, "browser": browser}))
 
     assert load_native_config(path).to_payload() == original | {
         "revision": 2,
@@ -1676,7 +1899,7 @@ def test_browser_save_validates_changed_paths(tmp_path: Path, field: str, invali
 
 @pytest.mark.parametrize("action", ["finish_setup", "set_browser_config"])
 def test_setup_edits_require_saved_configuration_and_stopped_runtime(tmp_path: Path, action: str) -> None:
-    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    host = _host(tmp_path)
     with pytest.raises(NativeProtocolError) as caught:
         asyncio.run(host.handle(_request(action, **_setup_edit_parameters(action))))
     assert caught.value.code == "configuration_missing"
@@ -1702,10 +1925,7 @@ def test_configure_rejects_unreadable_journal_without_creating_configuration(tmp
     else:
         journal_path.write_bytes(b"broken journal")
         journal_path.chmod(0o600)
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1",
-    )
+    host = _host(tmp_path)
 
     with pytest.raises(NativeProtocolError) as caught:
         asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
@@ -1728,10 +1948,7 @@ def test_configure_repairs_supported_files_using_reported_revision(tmp_path: Pat
     payload["revision"] = revision
     path.write_text(json.dumps(payload) if kind == "exposed" else "{broken json")
     path.chmod(0o644 if kind == "exposed" else 0o600)
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1",
-    )
+    host = _host(tmp_path)
     status = host.status()
     assert status["config"]["state"] == "invalid"
     assert status["config"]["revision"] == revision
@@ -1744,26 +1961,18 @@ def test_configure_repairs_supported_files_using_reported_revision(tmp_path: Pat
 
 
 def test_host_login_and_pair_never_echo_secrets(tmp_path: Path) -> None:
-    calls: list[tuple[str, dict[str, object]]] = []
+    calls: list[str] = []
 
-    async def login(_paths: object, parameters: dict[str, object]) -> dict[str, object]:
-        calls.append(("login", parameters))
+    async def login(_paths: object, _parameters: dict[str, object]) -> dict[str, object]:
+        calls.append("login")
         return {"homeserver": "https://example.org", "user_id": "@me:example.org", "device_id": "LOCAL"}
 
-    async def pair(_paths: object, config: NativeDesktopConfig, parameters: dict[str, object]) -> dict[str, object]:
-        calls.append(("pair", parameters))
+    async def pair(_paths: object, config: NativeDesktopConfig, _parameters: dict[str, object]) -> dict[str, object]:
+        calls.append("pair")
         assert config.controller.device_id == "DEVICE"
         return {"verification": "ABCD-EFGH", "confirmation_command": "!desktop confirm code ABCD-EFGH"}
 
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1",
-        dependencies=NativeHostDependencies(
-            runtime_factory=lambda _paths, _config: FakeRuntime(),
-            login=login,
-            pair=pair,
-        ),
-    )
+    host = _host(tmp_path, FakeRuntime(), login=login, pair=pair)
     asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
     login_result = asyncio.run(
         host.handle(
@@ -1780,15 +1989,11 @@ def test_host_login_and_pair_never_echo_secrets(tmp_path: Path) -> None:
     rendered = repr((login_result, pair_result, host.status()))
     assert "secret-value" not in rendered
     assert pair_result["confirmation_command"].startswith("!desktop confirm")
-    assert [name for name, _ in calls] == ["login", "pair"]
+    assert calls == ["login", "pair"]
 
 
 def test_import_setup_validates_and_keeps_pairing_code_transient(tmp_path: Path) -> None:
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1",
-        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: FakeRuntime()),
-    )
+    host = _host(tmp_path, FakeRuntime())
     descriptor = {
         "v": 1,
         "kind": "mindroom_desktop_setup",
@@ -1810,35 +2015,19 @@ def test_import_setup_validates_and_keeps_pairing_code_transient(tmp_path: Path)
 
 def test_stream_emits_correlated_error_and_stops_on_eof(tmp_path: Path) -> None:
     runtime = FakeRuntime()
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1",
-        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
-    )
-    input_stream = io.BytesIO(
-        ('{"v":1,"request_id":"' + str(uuid4()) + '","action":"start","parameters":{}}\n').encode(),
-    )
+    host = _host(tmp_path, runtime)
     output_stream = io.BytesIO()
-    asyncio.run(serve_native_stream(host, input_stream=input_stream, output_stream=output_stream))
-    messages = [line for line in output_stream.getvalue().decode().splitlines()]
+    asyncio.run(serve_native_stream(host, input_stream=io.BytesIO(_wire_record("start")), output_stream=output_stream))
+    messages = output_stream.getvalue().decode().splitlines()
     assert '"type":"hello"' in messages[0]
     assert any('"code":"configuration_missing"' in line for line in messages)
     assert host.status()["authority"]["control_available"] is False
 
 
 def test_stream_drains_one_oversized_record_before_next_request(tmp_path: Path) -> None:
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1",
-        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: FakeRuntime()),
-    )
+    host = _host(tmp_path, FakeRuntime())
     request_id = str(uuid4())
-    input_stream = io.BytesIO(
-        b"{"
-        + b"x" * 70_000
-        + b"}\n"
-        + ('{"v":1,"request_id":"' + request_id + '","action":"status","parameters":{}}\n').encode(),
-    )
+    input_stream = io.BytesIO(b"{" + b"x" * 70_000 + b"}\n" + _wire_record("status", request_id=request_id))
     output_stream = io.BytesIO()
     asyncio.run(serve_native_stream(host, input_stream=input_stream, output_stream=output_stream))
     output = output_stream.getvalue().decode()
@@ -1877,18 +2066,22 @@ def test_stream_caps_regular_requests_and_preserves_revoke_lane(immediate_action
         async def shutdown(self) -> None:
             self.release.set()
 
-    def record(action: str) -> bytes:
-        return json.dumps({"v": 1, "request_id": str(uuid4()), "action": action, "parameters": {}}).encode() + b"\n"
-
     host = SaturatedHost()
-    input_stream = io.BytesIO(b"".join([record("login") for _ in range(5)] + [record(immediate_action)]))
+    login_ids = [str(uuid4()) for _ in range(5)]
+    records = [_wire_record("login", request_id=request_id) for request_id in login_ids]
+    input_stream = io.BytesIO(b"".join([*records, b"not json\n", _wire_record(immediate_action)]))
     output_stream = io.BytesIO()
     asyncio.run(serve_native_stream(host, input_stream=input_stream, output_stream=output_stream))  # type: ignore[arg-type]
     messages = [json.loads(line) for line in output_stream.getvalue().splitlines()]
 
     assert host.maximum_active == 4
     assert host.revoked is True
-    assert sum(message.get("error", {}).get("code") == "busy" for message in messages) == 1
+    errors = [
+        (message["v"], message["request_id"], message["ok"], message["error"]["code"])
+        for message in messages
+        if "error" in message
+    ]
+    assert errors == [(1, login_ids[4], False, "busy"), (1, None, False, "invalid_json")]
 
 
 def test_eof_waits_for_inflight_stop_and_retains_runtime_ownership(tmp_path: Path) -> None:
@@ -1912,16 +2105,10 @@ def test_eof_waits_for_inflight_stop_and_retains_runtime_ownership(tmp_path: Pat
 
     async def scenario() -> tuple[bool, bool, bool, bool, str]:
         runtime = SlowStopRuntime()
-        host = NativeDesktopHost(
-            SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-            helper_version="1",
-            dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
-        )
+        host = _host(tmp_path, runtime)
         await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
         await host.handle(_request("start"))
-        input_stream = io.BytesIO(
-            json.dumps({"v": 1, "request_id": str(uuid4()), "action": "stop", "parameters": {}}).encode() + b"\n",
-        )
+        input_stream = io.BytesIO(_wire_record("stop"))
         stream = asyncio.create_task(serve_native_stream(host, input_stream=input_stream, output_stream=io.BytesIO()))
         await runtime.stop_started.wait()
         await asyncio.sleep(0)
@@ -1935,46 +2122,10 @@ def test_eof_waits_for_inflight_stop_and_retains_runtime_ownership(tmp_path: Pat
     assert asyncio.run(scenario()) == (True, True, False, True, "stopping")
 
 
-def test_transport_failure_fences_queued_control_before_worker_is_cancelled() -> None:
-    transport_failed = asyncio.Event()
-    worker_released = asyncio.Event()
-    accepting = True
-    executed = False
-
-    async def transport() -> None:
-        await transport_failed.wait()
-        raise RuntimeError("transport failed")
-
-    async def worker() -> None:
-        nonlocal executed
-        await worker_released.wait()
-        if accepting:
-            executed = True
-
-    async def fence() -> None:
-        nonlocal accepting
-        accepting = False
-        worker_released.set()
-        await asyncio.sleep(0)
-
-    async def scenario() -> BaseException:
-        tasks = {asyncio.create_task(worker()), asyncio.create_task(transport())}
-        transport_failed.set()
-        return await supervise_native_tasks(tasks, fence)
-
-    failure = asyncio.run(scenario())
-    assert str(failure) == "transport failed"
-    assert executed is False
-
-
 def test_revoke_bypasses_slow_lifecycle_operation(tmp_path: Path) -> None:
     async def scenario() -> int:
         runtime = FakeRuntime()
-        host = NativeDesktopHost(
-            SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-            helper_version="1",
-            dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
-        )
+        host = _host(tmp_path, runtime)
         await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
         await host.handle(_request("start"))
         await host._lock.acquire()
@@ -1991,13 +2142,15 @@ def test_revoke_bypasses_slow_lifecycle_operation(tmp_path: Path) -> None:
 def test_host_remains_available_when_config_path_is_a_directory(tmp_path: Path) -> None:
     path = tmp_path / "desktop_bridge" / "native_config.json"
     path.mkdir(parents=True, mode=0o700)
-    host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-        helper_version="1",
-    )
+    host = _host(tmp_path)
     status = host.status()
     assert status["config"]["state"] == "invalid"
-    assert status["bridge"]["last_error"]["code"] == "invalid_request"
+    assert status["bridge"]["last_error"] == {
+        "code": "invalid_request",
+        "message": "Native desktop configuration must be a regular file owned by this user.",
+        "recovery": None,
+        "retryable": False,
+    }
 
 
 def test_stop_cancels_pending_start_before_it_can_publish_running(tmp_path: Path) -> None:
@@ -2014,11 +2167,7 @@ def test_stop_cancels_pending_start_before_it_can_publish_running(tmp_path: Path
 
     async def scenario() -> None:
         runtime = SlowStartRuntime()
-        host = NativeDesktopHost(
-            SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
-            helper_version="1",
-            dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
-        )
+        host = _host(tmp_path, runtime)
         await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
         starting = asyncio.create_task(host.handle(_request("start")))
         await runtime.entered.wait()

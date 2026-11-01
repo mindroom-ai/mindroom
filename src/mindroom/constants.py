@@ -172,13 +172,28 @@ class RuntimePaths:
             return self.env_file_values[name]
         return default
 
-    def first_env_value(self, names: Sequence[str]) -> str | None:
-        """Return the first non-blank value of ``names``, trying each in the process env before any in the `.env`.
+    def first_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
+        """Return the first usable value of ``names`` and the variable that supplied it.
 
-        A blank exported value does not hide a `.env` value, so settings with fallbacks treat it as unset.
+        Tries each name in the process env, then each in the `.env`, then the stripped contents of the file each
+        name's `<NAME>_FILE` names, so an earlier value never resolves a file path. A blank or unedited
+        starter-template placeholder value of a name counts as unset in all three, so an exported one does not hide
+        a `.env` value.
         """
-        candidates = (layer.get(name, "") for layer in (self.process_env, self.env_file_values) for name in names)
-        return next((candidate for candidate in candidates if candidate.strip()), None)
+        for layer in (self.process_env, self.env_file_values):
+            for name in names:
+                value = layer.get(name, "")
+                if not runtime_env_policy.is_unset_env_value(name, value):
+                    return value, name
+        for name in names:
+            path = runtime_env_path(self, f"{name}_FILE")
+            try:
+                value = "" if path is None else path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                value = ""
+            if not runtime_env_policy.is_unset_env_value(name, value):
+                return value, f"{name}_FILE"
+        return None
 
     def env_flag(self, name: str, *, default: bool = False) -> bool:
         """Resolve one boolean env value against this runtime context."""
@@ -233,11 +248,20 @@ def _copy_process_env(process_env: dict[str, str] | None = None) -> dict[str, st
     return dict(os.environ)
 
 
+class RuntimeEnvFileError(ValueError):
+    """The `.env` beside `config.yaml` cannot be read; its message names the file and the fix."""
+
+
 def _runtime_env_file_values_for_path(env_path: Path) -> dict[str, str]:
-    """Read string env values from one runtime-adjacent `.env` file."""
+    """Read string env values from one runtime-adjacent `.env` file, naming it when it is not UTF-8 text."""
     if not env_path.is_file():
         return {}
-    return {key: value for key, value in dotenv_values(env_path).items() if isinstance(value, str)}
+    try:
+        values = dotenv_values(env_path)
+    except UnicodeDecodeError as exc:
+        msg = f"{env_path} is not UTF-8 text ({exc.reason} at byte {exc.start}); save it as UTF-8."
+        raise RuntimeEnvFileError(msg) from exc
+    return {key: value for key, value in values.items() if isinstance(value, str)}
 
 
 def _resolve_runtime_relative_path(raw_value: str, *, base_dir: Path) -> Path:
@@ -256,9 +280,10 @@ def _configured_config_path(process_env: Mapping[str, str]) -> Path | None:
 
 
 def config_search_locations(process_env: Mapping[str, str]) -> list[Path]:
-    """Return the ordered list of locations where MindRoom looks for config.
+    """Return the resolved config locations in search order, without duplicates.
 
-    This is the single source of truth for config file discovery.
+    A set `MINDROOM_CONFIG_PATH` comes first.
+    This list owns the search order; `find_config_path` picks from it.
     """
     seen: set[Path] = set()
     locations: list[Path] = []
@@ -304,9 +329,7 @@ def resolve_runtime_paths(
     """
     resolved_config_arg = Path(config_path).expanduser().resolve() if config_path is not None else None
     resolved_process_env = _copy_process_env(process_env)
-    resolved_config_path = (
-        Path(resolved_config_arg or _find_config(process_env=resolved_process_env)).expanduser().resolve()
-    )
+    resolved_config_path = resolved_config_arg or find_config_path(process_env=resolved_process_env)
     config_dir = resolved_config_path.parent
     env_path = config_dir / ".env"
     env_file_values = _runtime_env_file_values_for_path(env_path)
@@ -992,18 +1015,16 @@ def resolve_avatar_path(
     return workspace_path
 
 
-def _find_config(*, process_env: Mapping[str, str]) -> Path:
-    """Find the first existing config file, or fall back to ~/.mindroom/config.yaml.
+def find_config_path(*, process_env: Mapping[str, str]) -> Path:
+    """Return the resolved config path without reading any `.env`.
 
-    Returns the original (possibly relative) path, not a resolved one,
-    so CLI-facing defaults still display cleanly.
+    A set `MINDROOM_CONFIG_PATH` wins even when the file is missing.
+    Otherwise the first existing search location wins, falling back to ~/.mindroom/config.yaml.
     """
-    if configured_path := _configured_config_path(process_env):
-        return configured_path
-    for path in _CONFIG_SEARCH_PATHS:
-        if path.exists():
-            return path
-    return _CONFIG_SEARCH_PATHS[-1]  # default to ~/.mindroom/config.yaml for creation
+    locations = config_search_locations(process_env)
+    if _configured_config_path(process_env) is not None:
+        return locations[0]
+    return next((path for path in locations if path.exists()), locations[-1])
 
 
 # Other constants
@@ -1041,13 +1062,15 @@ MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"
 MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY = "matrix_source_event_revisions"
-# Session metadata key holding the database owner's history state: its force-compaction flag and preserved seen ids.
+# Session metadata key holding the database owner's history state: its force-compaction flag.
 MINDROOM_HISTORY_METADATA_KEY = "mindroom_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
 UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
 THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
+# The model reasoning a streamed reply showed, with how long it was observed, on the reply's terminal update.
+REASONING_CONTENT_KEY = "io.mindroom.reasoning"
 STREAM_VISIBLE_BODY_KEY = "io.mindroom.visible_body"
 STREAM_WARMUP_SUFFIX_KEY = "io.mindroom.warmup_suffix"
 TOOL_TRACE_CONTENT_KEY = "io.mindroom.tool_trace"
@@ -1160,12 +1183,13 @@ def safe_replace(tmp_path: Path, target_path: Path) -> None:
 
     ``Path.replace`` performs an atomic rename which fails on some filesystems
     (e.g. Docker bind mounts) with ``OSError: [Errno 16] Device or resource
-    busy``.  When that happens we fall back to a non-atomic copy.
+    busy``.  When that happens we fall back to a non-atomic copy of the content
+    only, which keeps the target's owner and mode and needs no ownership of it.
     """
     try:
         tmp_path.replace(target_path)
     except OSError:
-        shutil.copy2(tmp_path, target_path)
+        shutil.copyfile(tmp_path, target_path)
         target_fd = os.open(target_path, os.O_RDONLY)
         try:
             os.fsync(target_fd)

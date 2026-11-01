@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -134,14 +134,12 @@ class PreparedScopeHistory:
 
     session: ConversationSession | None
     resolved_inputs: HistoryPreparationInputs
-    compaction_decision: CompactionDecision = field(
-        default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
-    )
-    compaction_reply_outcome: CompactionReplyOutcome = "none"
+    compaction_decision: CompactionDecision
     # The native settings the run's requests carry, when the provider route manages history of its own.
-    native_history: NativeHistory | None = None
+    native_history: NativeHistory | None
     # The route's own estimate of explicitly replayed history, which the final replay plan sizes with.
-    replay_estimator: PortableReplayEstimator | None = None
+    replay_estimator: PortableReplayEstimator | None
+    compaction_reply_outcome: CompactionReplyOutcome = "none"
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
@@ -537,12 +535,7 @@ async def _compact_before_reply(
         raise
     except Exception:
         # A failing manual compaction must not retry on every reply.
-        await clear_manual_compaction_request(
-            storage=storage,
-            session=session,
-            state=state,
-            keep_concurrent_request=False,
-        )
+        await clear_manual_compaction_request(storage=storage, session=session, state=state)
         raise
 
 
@@ -601,7 +594,7 @@ async def compact_scope_mid_turn(
             fold=fold,
             snapshots=snapshots,
             summarizer=load_summarizer(
-                resolved_inputs.execution_plan,
+                execution_plan,
                 resolved_inputs.history_settings,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -723,71 +716,26 @@ def finalize_history_preparation(
     )
 
 
-@timed("system_prompt_assembly.history_prepare.scope_history")
-async def prepare_bound_scope_history(
-    *,
-    model: ModelProvider,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    history_settings: ResolvedHistorySettings,
-    static_prompt_tokens: int,
-    non_prompt_tokens: int,
-    scope_context: ScopeSessionContext,
-    team_name: str | None,
-    active_model_name: str | None,
-    active_context_window: int | None,
-    compaction_lifecycle: CompactionLifecycle | None,
-    pipeline_timing: DispatchPipelineTiming | None,
-    allow_native_compaction: bool,
-) -> PreparedScopeHistory:
-    """Prepare one team-owned scope by compacting its persisted session before the run.
-
-    ``model`` is the leader's provider, whose native compaction the scope may use, and ``history_settings`` the built
-    team's, whose replay policy and compaction config the scope follows. ``team_name`` is the configured team, or None
-    for an ad hoc one.
-    """
-    resolved_inputs = resolve_entity_preparation_inputs(
-        config=config,
-        runtime_paths=runtime_paths,
-        entity_name=team_name,
-        history_settings=history_settings,
-        static_prompt_tokens=static_prompt_tokens,
-        active_model_name=active_model_name,
-        active_context_window=active_context_window,
-    )
-    return await prepare_scope_history(
-        model=model,
-        resolved_inputs=resolved_inputs,
-        runtime_paths=runtime_paths,
-        config=config,
-        scope_context=scope_context,
-        compaction_lifecycle=compaction_lifecycle,
-        pipeline_timing=pipeline_timing,
-        allow_native_compaction=allow_native_compaction,
-        non_prompt_tokens=non_prompt_tokens,
-    )
-
-
 def resolve_entity_preparation_inputs(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    entity_name: str | None,
     history_settings: ResolvedHistorySettings,
     static_prompt_tokens: int,
-    active_model_name: str | None,
+    active_model_name: str,
     active_context_window: int | None,
 ) -> HistoryPreparationInputs:
     """Resolve the runtime model and plan for one agent or team scope.
 
-    ``history_settings`` are the ones the entity's build resolved, whose replay policy and compaction config the
-    scope follows.
+    ``active_model_name`` is the model the turn resolved, which every scope prepares under, and
+    ``active_context_window`` its window when the turn set one. ``history_settings`` are the ones the entity's build
+    resolved, whose replay policy and compaction config the scope follows.
     """
     runtime_model = resolve_turn_model(
         config,
         runtime_paths,
         ModelScope(
-            entity=entity_name,
+            entity=None,
             explicit=active_model_name,
             explicit_context_window=active_context_window,
         ),
@@ -815,7 +763,8 @@ def _prepare_scope_state_for_run(
 ) -> HistoryScopeState:
     state = read_scope_state(session)
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
-        state = set_force_compaction(storage, session=session, forced=False)
+        set_force_compaction(storage, session=session, forced=False)
+        state = HistoryScopeState()
         logger.warning(
             "Forced compaction skipped because text compaction is unavailable",
             session_id=session.session_id,

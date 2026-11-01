@@ -12,7 +12,7 @@ from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
-from mindroom.history.run_visibility import replays_in_scope
+from mindroom.history.run_visibility import is_queued_notice_message, replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message, is_scope_summary, summary_follows
 
 if TYPE_CHECKING:
@@ -181,7 +181,9 @@ def build_resume_request(
     are reused, and the context the paused request sent without any history keeping it (``add_to_agent_memory=False``),
     such as memory results, stays where it was. So when the summary and history replay as they did for the paused
     request, this request repeats that one up to its last assistant turn: a signed reasoning block there stays valid
-    against an unchanged prefix, and the provider's prompt cache still matches.
+    against an unchanged prefix, and the provider's prompt cache still matches. A queued-message notice the paused run
+    holds is left out: it told the reply that paused about a newer message, and the resume's own hooks decide again
+    whether one waits.
     """
     # LEGACY_COMPAT: Paused runs stored without the context their paused request sent.
     # Legacy format: a paused run whose stored messages, an Agno-layout ``run_data`` row the storage v2 conversion
@@ -196,7 +198,7 @@ def build_resume_request(
     messages = [
         *(message for message in paused if message.role == "system"),
         *history,
-        *(message for message in paused if message.role != "system"),
+        *(message for message in paused if message.role != "system" and not is_queued_notice_message(message)),
     ]
     return _with_scope_summary(messages, summary)
 

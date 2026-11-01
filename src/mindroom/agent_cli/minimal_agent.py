@@ -14,7 +14,7 @@ from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner, tool_catalog
-from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.prompt import join_sections
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
@@ -25,7 +25,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.agent_loop.build import AgentBuild
@@ -36,8 +36,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.run_storage import RunStorage
-    from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, PreparedAgentToolCatalog
-    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
+    from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 
 __all__ = [
     "MinimalTurn",
@@ -137,23 +136,6 @@ def _raise_failure(build: AgentBuild, delegation_depth: int, exc: BaseException)
     raise MinimalModeUnavailableError(_failure(build, delegation_depth, failure_text(exc))) from exc
 
 
-def _check_handlers(functions: Iterable[tuple[str, ToolFunction]]) -> None:
-    """Refuse a function whose pause no CLI caller can continue: only delegations run outside their call."""
-    for toolkit, function in functions:
-        if function.external_execution and toolkit != "delegate":
-            msg = f"Configured function {function.name!r} has no supported response continuation handler"
-            raise RuntimeError(msg)
-
-
-def _checked(deferred: DeferredAgentToolkit) -> DeferredAgentToolkit:
-    async def materialize() -> AdaptedToolkit:
-        toolkit = await deferred.materialize()
-        _check_handlers((deferred.name, function) for function in toolkit.functions)
-        return toolkit
-
-    return replace(deferred, materialize=materialize)
-
-
 async def prepare_minimal_catalog(
     build: AgentBuild,
     *,
@@ -164,8 +146,8 @@ async def prepare_minimal_catalog(
 ) -> PreparedAgentToolCatalog:
     """Prepare the build's tools behind Bash, without starting a shell worker.
 
-    The effective surface is checked before a catalog is published or gains authority: every handler must be
-    supported and the agent's own shell must be offered.
+    The effective surface is checked before a catalog is published or gains authority: the agent's own shell must be
+    offered.
     """
     runtime = get_tool_runtime_context()
     if runtime is None or run.user_id != runtime.requester_id:
@@ -176,16 +158,14 @@ async def prepare_minimal_catalog(
     try:
         await catalog.prepare(build.spec.toolkits)
         await catalog.connect(build.spec.toolkits)
-        _check_handlers((binding.key.toolkit, binding.function) for binding in catalog.bindings())
         loaded = {item["toolkit"] for item in catalog.metadata()}
         for deferred in build.surface.deferred:
             if deferred.name not in loaded:
-                catalog.add_deferred(_checked(deferred))
+                catalog.add_deferred(deferred)
         try:
-            for name in SHELL_OPERATION_NAMES:
-                await catalog.bind(ToolKey("shell", name))
+            await catalog.bind(ToolKey("shell", SHELL_FUNCTION))
         except ValueError as exc:
-            msg = "Minimal mode requires the agent's `run_shell_command` shell permission."
+            msg = f"Minimal mode requires the agent's `{SHELL_FUNCTION}` shell permission."
             raise RuntimeError(msg) from exc
     except BaseException as exc:
         await catalog.close()

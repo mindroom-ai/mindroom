@@ -9,11 +9,12 @@ from typing import TYPE_CHECKING, Any
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner, tool_catalog
 from mindroom.agent_cli.shell_access import minimal_shell_problems
-from mindroom.approval.tool_approval import approval_gated
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.tool_function import CONFIRMATION_GATES
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -60,10 +61,10 @@ def wrap_native_shell_window(toolkits: Sequence[AdaptedToolkit]) -> tuple[Adapte
     """
     for index, toolkit in enumerate(toolkits):
         for position, function in enumerate(toolkit.functions):
-            if function.name != "run_shell_command":
+            if function.name != SHELL_FUNCTION:
                 continue
             # An approved command resumes in a later run without this response's CLI, like a minimal subagent's.
-            if function.registered_toolkit != "shell" or function.requires_confirmation:
+            if function.registered_toolkit != "shell" or function.gate in CONFIRMATION_GATES:
                 return None
             functions = list(toolkit.functions)
             functions[position] = replace(function, entrypoint=_windowed(function.entrypoint))
@@ -85,14 +86,12 @@ def _windowed(original: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def _cli_callable(function: ToolFunction) -> bool:
-    """Offer only calls that finish inside the shell command, without approval or run control.
+    """Offer only calls that finish inside the shell command, without a gate or run control.
 
     Approval-gated functions were removed already where approvals cannot pause. The job controls stay with the reply:
     a job read through the CLI is never saved as the reply's own call, so it would be reported again.
     """
-    return not (
-        approval_gated(function) or is_job_function(function) or function.external_execution or function.stop_after_call
-    )
+    return not (function.gate is not None or is_job_function(function) or function.controls_run)
 
 
 async def bind_standard_cli(

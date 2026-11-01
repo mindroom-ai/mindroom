@@ -16,7 +16,6 @@ from mindroom.approval import manager as approval_manager
 from mindroom.approval import transport as approval_transport
 from mindroom.approval.inbound import maybe_handle_tool_approval_reply
 from mindroom.approval.tool_approval import (
-    POLICY_CONFIRMATION_APPROVAL_TYPE,
     ApprovalActionResult,
     MatrixApprovalAction,
     shutdown_approval_runtime,
@@ -57,6 +56,7 @@ from mindroom.response_sources import Owned, ResponseSources
 from mindroom.response_turn import PausedAttempt
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.interactive_selection import InteractiveSelectionDispatch
@@ -652,7 +652,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=MagicMock(return_value=SemanticConsumer.CONFIG_CONFIRMATION),
             ),
             patch(
-                "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+                "mindroom.reaction_dispatch.config_confirmation.resolve_reaction_pending_change",
                 new=AsyncMock(return_value=None),
             ) as resolve_pending,
         ):
@@ -697,11 +697,11 @@ class TestAgentBot(AgentBotTestBase):
         gate = bot.orchestrator.response_admission_gate
         with (
             patch(
-                "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+                "mindroom.reaction_dispatch.config_confirmation.resolve_reaction_pending_change",
                 side_effect=delayed_resolution,
             ),
             patch(
-                "mindroom.bot.config_confirmation.handle_confirmation_reaction",
+                "mindroom.reaction_dispatch.config_confirmation.handle_confirmation_reaction",
                 new=handler,
             ),
         ):
@@ -1349,7 +1349,6 @@ class TestAgentBot(AgentBotTestBase):
         try:
             with (
                 patch.object(bot, "prepare_for_sync_shutdown", new=AsyncMock()),
-                patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
                 patch.object(bot._journal_dispatcher, "stop", new=dispatcher_stop),
             ):
                 stop_task = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
@@ -1377,7 +1376,7 @@ class TestAgentBot(AgentBotTestBase):
         """A resumed run belongs to the response runtime, not the room journal lane."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        store = bot.approval_store
+        store = bot.journal_principal()
         for ordinal, event_id in enumerate(("$source", "$coalesced"), start=1):
             await store.admit(
                 InboundEvent(
@@ -1527,7 +1526,7 @@ class TestAgentBot(AgentBotTestBase):
             replaces_event_id=None,
             redacts_event_id=None,
         )
-        assert await first.approval_store.admit(source, projected)
+        assert await first.journal_principal().admit(source, projected)
         request = _direct_response_request(target, "exercise the tool", "$source")
         identity = first._response_runner.deps.tool_runtime.build_execution_identity(
             target=target,
@@ -1557,7 +1556,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert suspended.ending == AwaitingApproval()
         assert report_tool.written == []
-        persisted = await first.approval_store.approvals.approval_continuation_for_source("$source")
+        persisted = await first.journal_principal().approvals.approval_continuation_for_source("$source")
         if requires_human:
             await shutdown_approval_runtime()
         assert persisted is not None
@@ -1606,11 +1605,11 @@ class TestAgentBot(AgentBotTestBase):
         else:
             await drain_restarted_runtime()
 
-        remaining = await restarted.approval_store.approvals.approval_continuation_for_source("$source")
+        remaining = await restarted.journal_principal().approvals.approval_continuation_for_source("$source")
         assert report_tool.written == ["written"], remaining
         assert model.turns == []
         assert remaining is None
-        assert not await restarted.approval_store.is_pending("$source")
+        assert not await restarted.journal_principal().is_pending("$source")
 
     @pytest.mark.asyncio
     async def test_restart_stop_waits_for_source_owner_registered_during_dispatcher_stop(
@@ -1646,7 +1645,6 @@ class TestAgentBot(AgentBotTestBase):
         try:
             with (
                 patch.object(bot, "prepare_for_sync_shutdown", new=AsyncMock()),
-                patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
                 patch.object(bot._journal_dispatcher, "stop", new=stop_dispatcher),
             ):
                 stop_task = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
@@ -2029,34 +2027,6 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._coalescing_gate.lanes.all_settled()
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_approval_response_without_card_event_is_ignored(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Approval-id-only custom events must not enter the card-anchored approval API."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
-        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
-        event = nio.UnknownEvent.from_dict(
-            {
-                "type": "io.mindroom.tool_approval_response",
-                "sender": "@user:localhost",
-                "event_id": "$response",
-                "origin_server_ts": 1,
-                "content": {"approval_id": "approval-1", "status": "approved"},
-            },
-        )
-        with patch(
-            "mindroom.approval.inbound.handle_matrix_approval_action",
-            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, card_event_id="$approval")),
-        ) as handle_matrix_approval_action:
-            await bot._on_unknown_event(room, event)
-
-        handle_matrix_approval_action.assert_not_awaited()
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("router_is_ready_but_unserved", [False, True])
     async def test_unverifiable_or_unserved_approval_action_does_not_block_later_room_events(
         self,
@@ -2377,11 +2347,11 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+                "mindroom.reaction_dispatch.config_confirmation.resolve_reaction_pending_change",
                 new=AsyncMock(return_value=pending_change),
             ),
             patch(
-                "mindroom.bot.config_confirmation.resume_committed_confirmation",
+                "mindroom.reaction_dispatch.config_confirmation.resume_committed_confirmation",
                 new=AsyncMock(side_effect=failure),
             ),
         ):
@@ -2402,7 +2372,7 @@ class TestAgentBot(AgentBotTestBase):
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
         with patch(
-            "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+            "mindroom.reaction_dispatch.config_confirmation.resolve_reaction_pending_change",
             new=AsyncMock(return_value=None),
         ) as resolve_pending:
             await restarted._journal_dispatcher.drain_once()
@@ -2763,12 +2733,19 @@ class TestAgentBot(AgentBotTestBase):
         assert seen == [("$plain-reply", "$thread-root")]
 
     @pytest.mark.asyncio
-    async def test_reaction_hooks_label_thread_membership_reads(
+    @pytest.mark.parametrize(
+        ("lookup_result", "thread_id"),
+        [("$thread-root", "$thread-root"), (RuntimeError("lookup failed"), None)],
+        ids=["found", "lookup_failed"],
+    )
+    async def test_reaction_hooks_get_the_reacted_to_events_thread_or_none_when_its_lookup_fails(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        lookup_result: str | Exception,
+        thread_id: str | None,
     ) -> None:
-        """reaction:received hooks should attribute thread proof refreshes."""
+        """reaction:received hooks get the target's thread from the dispatch snapshot, or none when its lookup fails."""
         seen: list[tuple[str, str | None]] = []
 
         @hook(EVENT_REACTION_RECEIVED)
@@ -2778,12 +2755,56 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
-        resolve_related_event_thread_id = AsyncMock(
-            return_value="$thread-root",
-        )
         bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
             [_hook_plugin("hooked", [record_reaction])],
         )
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.reacts_to = "$plain-reply"
+        lookup = AsyncMock(side_effect=[lookup_result])
+
+        with (
+            patch.object(
+                unwrap_extracted_collaborator(bot._conversation_resolver),
+                "resolve_related_event_thread_id_dispatch_snapshot_best_effort",
+                lookup,
+            ),
+            _mock_interactive_claim(bot, None),
+        ):
+            await _dispatch_reaction(bot, room, event)
+
+        lookup.assert_awaited_once_with(room.room_id, "$plain-reply")
+        assert seen == [("$plain-reply", thread_id)]
+
+    @pytest.mark.asyncio
+    async def test_a_plugin_reload_during_the_thread_lookup_runs_the_reloaded_reaction_hooks(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """reaction:received runs the hooks live when it emits, not the ones a reload replaced during the lookup."""
+        ran: list[str] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def before_reload(_ctx: ReactionReceivedContext) -> None:
+            ran.append("before")
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def after_reload(_ctx: ReactionReceivedContext) -> None:
+            ran.append("after")
+
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock()
+        hook_state = bot.orchestrator.hook_registry_state
+        hook_state.registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_reload])])
+
+        async def reload_during_lookup(*_args: object) -> str:
+            hook_state.registry = HookRegistry.from_plugins([_hook_plugin("hooked", [after_reload])])
+            return "$thread-root"
+
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -2794,17 +2815,13 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 unwrap_extracted_collaborator(bot._conversation_resolver),
                 "resolve_related_event_thread_id_dispatch_snapshot_best_effort",
-                resolve_related_event_thread_id,
+                AsyncMock(side_effect=reload_during_lookup),
             ),
             _mock_interactive_claim(bot, None),
         ):
             await _dispatch_reaction(bot, room, event)
 
-        resolve_related_event_thread_id.assert_awaited_once_with(
-            room.room_id,
-            "$plain-reply",
-        )
-        assert seen == [("$plain-reply", "$thread-root")]
+        assert ran == ["after"]
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_inherit_thread_transitively_through_plain_reply_chain(

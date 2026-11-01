@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -16,18 +16,14 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.history.prompt_tokens import build_static_token_estimator
-from mindroom.history.runtime import (
-    finalize_history_preparation,
-    prepare_bound_scope_history,
-)
+from mindroom.dispatch_source import ScheduledHistoryBudget
+from mindroom.execution_preparation import prepare_bound_team_run_context, render_prepared_messages_text
 from mindroom.history.session_context import (
     ScopeSessionContext,
     load_bound_scope_session,
     resolve_bound_team_scope,
 )
 from mindroom.history.types import (
-    HistoryScope,
     PreparedHistoryState,
 )
 from mindroom.llm.messages import Message, system_text
@@ -40,6 +36,7 @@ from mindroom.teams.members import (
 )
 from mindroom.teams.runtime import leader_tool_specs
 from mindroom.teams.spec import TeamMode
+from mindroom.timing import DispatchPipelineTiming
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -50,8 +47,8 @@ from tests.conftest import (
     seed_session,
     unstored_team_scope_context,
 )
-from tests.fakes.scripted_model import ScriptedModel, answer, calls, estimate_only_model, tool_call, usage
-from tests.history_helpers import _completed_team_run, _runtime_paths, _team_session
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.history_helpers import RecordingCompactionLifecycle, _completed_team_run, _runtime_paths, _team_session
 from tests.team_turn_helpers import (
     PROBE_TOOL,
     SESSION_ID,
@@ -127,81 +124,72 @@ def _build_pair(
     )
 
 
-def _expected_static_tokens(built: BuiltTeam, prompt: str) -> int:
-    """Return the estimate a request of ``prompt`` costs before its history: the prompt, the leader's prompt, its tools."""
+def _leader_non_prompt_tokens(built: BuiltTeam) -> int:
+    """Return the estimate a leader request costs besides its prompt text and history: the leader's prompt, its tools."""
     payloads = [
         {key: value for key, value in asdict(tool).items() if value is not None}
         for tool in leader_tool_specs(built.spec)
     ]
     system_content = system_text(built.spec.leader.system_messages)
-    return estimate_text_tokens(prompt) + estimate_text_tokens(system_content) + len(stable_serialize(payloads)) // 4
+    return estimate_text_tokens(system_content) + len(stable_serialize(payloads)) // 4
 
 
 @pytest.mark.asyncio
-async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
+@pytest.mark.parametrize("scheduled", [False, True])
+async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    scheduled: bool,
 ) -> None:
-    """The ad hoc team's scope is prepared once, sized by the leader's prompt."""
+    """The scope is prepared once on the leader's model and the turn's window, sized by the leader's prompt and tools.
+
+    A scheduled turn's history budget rules out native compaction.
+    """
     config, runtime_paths = _pair_config(tmp_path)
     built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
-    estimator = build_static_token_estimator(
-        built.spec.leader.system_messages,
-        leader_tool_specs(built.spec),
-        frozenset(),
+    scope_context = unstored_team_scope_context(config, ["zeta", "alpha"], team_name=None)
+    prepare = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare)
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=True, native_history=None),
     )
-    expected_static_prompt_tokens = _expected_static_tokens(built, "Current prompt")
+    lifecycle = RecordingCompactionLifecycle()
+    timing = DispatchPipelineTiming(source_event_id="$current", room_id="!room:localhost")
+    budget = ScheduledHistoryBudget(limit=5, source_event_id="$current") if scheduled else None
 
-    scope_context = load_bound_scope_session(
-        member_names=["zeta", "alpha"],
-        team_name=None,
-        session_id="session-1",
+    prepared = await prepare_bound_team_run_context(
+        make_turn_context("team_alpha+zeta", session_id="session-1", scheduled_history_budget=budget),
+        scope_context=scope_context,
+        leader_system_messages=built.spec.leader.system_messages,
+        leader_tools=leader_tool_specs(built.spec),
+        model=built.spec.leader.model,
+        prompt="Current prompt",
+        thread_history=None,
         runtime_paths=runtime_paths,
         config=config,
-        execution_identity=None,
+        timezone="UTC",
+        history_settings=built.history_settings,
+        active_model_name="default",
+        active_context_window=1_500,
+        compaction_lifecycle=lifecycle,
+        pipeline_timing=timing,
     )
-    with (
-        patch(
-            "mindroom.history.runtime.prepare_scope_history",
-            new=AsyncMock(return_value=MagicMock()),
-        ) as mock_prepare,
-        patch(
-            "tests.test_history_team_scope.finalize_history_preparation",
-            return_value=PreparedHistoryState(replays_persisted_history=True, native_history=None),
-        ) as mock_finalize,
-    ):
-        prepared_scope_history = await prepare_bound_scope_history(
-            model=built.spec.leader.model,
-            runtime_paths=runtime_paths,
-            config=config,
-            history_settings=built.history_settings,
-            static_prompt_tokens=estimator.estimate("Current prompt"),
-            non_prompt_tokens=estimator.non_prompt_tokens(),
-            scope_context=scope_context,
-            team_name=None,
-            active_model_name=None,
-            active_context_window=None,
-            compaction_lifecycle=None,
-            pipeline_timing=None,
-            allow_native_compaction=True,
-        )
-        prepared = finalize_history_preparation(
-            prepared_scope_history=prepared_scope_history,
-            config=config,
-            static_prompt_tokens=expected_static_prompt_tokens,
-            pipeline_timing=None,
-        )
 
-    assert prepared.replays_persisted_history is True
-    assert mock_finalize.call_count == 1
-    assert mock_prepare.await_count == 1
-    assert mock_prepare.await_args.kwargs["scope_context"].scope == HistoryScope("team", "team_alpha+zeta")
-    assert mock_prepare.await_args.kwargs["model"] is built.spec.leader.model
-    assert estimator.estimate("Current prompt") == expected_static_prompt_tokens
-    assert (
-        mock_prepare.await_args.kwargs["resolved_inputs"].execution_plan.static_prompt_tokens
-        == expected_static_prompt_tokens
-    )
+    assert prepare.await_count == 1
+    kwargs = prepare.await_args.kwargs
+    assert kwargs["scope_context"] is scope_context
+    assert kwargs["model"] is built.spec.leader.model
+    assert (kwargs["compaction_lifecycle"], kwargs["pipeline_timing"]) == (lifecycle, timing)
+    assert kwargs["allow_native_compaction"] is not scheduled
+    resolved_inputs = kwargs["resolved_inputs"]
+    assert resolved_inputs.history_settings is built.history_settings
+    assert (resolved_inputs.active_model_name, resolved_inputs.active_context_window) == ("default", 1_500)
+    non_prompt_tokens = _leader_non_prompt_tokens(built)
+    assert kwargs["non_prompt_tokens"] == non_prompt_tokens
+    sent_prompt = render_prepared_messages_text(prepared.turn.in_request_order())
+    assert resolved_inputs.execution_plan.static_prompt_tokens == estimate_text_tokens(sent_prompt) + non_prompt_tokens
 
 
 @pytest.mark.asyncio
@@ -245,7 +233,6 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
         runtime_model=turn_model(config, runtime_paths, "pair", "default"),
         response_sender_id=None,
         current_sender_id=None,
-        configured_team_name="pair",
     )
     events = start_team(
         built.spec,
@@ -487,40 +474,3 @@ def test_private_ad_hoc_bound_team_scope_requires_requester_identity(tmp_path: P
             team_name=None,
             requester_user_id=None,
         )
-
-
-@pytest.mark.asyncio
-async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_path: Path) -> None:
-    config, runtime_paths = _private_pair_config(tmp_path)
-    opened_scope = HistoryScope(kind="team", scope_id="team_private_worker+shared_requester_alice")
-    scope_context = ScopeSessionContext(
-        scope=opened_scope,
-        storage=MagicMock(),
-        session=None,
-        session_id="session-1",
-        storage_factory=lambda: MagicMock(),
-    )
-
-    with patch(
-        "mindroom.history.runtime.prepare_scope_history",
-        new=AsyncMock(return_value=MagicMock()),
-    ) as mock_prepare:
-        await prepare_bound_scope_history(
-            model=estimate_only_model(),
-            runtime_paths=runtime_paths,
-            config=config,
-            history_settings=config.resolve_scope(None).history_settings,
-            scope_context=scope_context,
-            static_prompt_tokens=5,
-            non_prompt_tokens=2,
-            team_name=None,
-            active_model_name=None,
-            active_context_window=None,
-            compaction_lifecycle=None,
-            pipeline_timing=None,
-            allow_native_compaction=True,
-        )
-
-    assert mock_prepare.await_count == 1
-    assert mock_prepare.await_args.kwargs["scope_context"].scope == opened_scope
-    assert mock_prepare.await_args.kwargs["non_prompt_tokens"] == 2

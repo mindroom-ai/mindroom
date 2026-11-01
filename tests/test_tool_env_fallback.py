@@ -30,10 +30,10 @@ UNDECLARED_AGNO_ENV_READS: dict[str, frozenset[str]] = {
     "agno.tools.google.base": frozenset({"GOOGLE_API_TIMEOUT", "GOOGLE_PROJECT_ID"}),
     # MindRoom's Google Drive toolkit reads it from the runtime environment itself and passes it on.
     "agno.tools.google.drive": frozenset({"GOOGLE_CLOUD_QUOTA_PROJECT_ID"}),
-    # The provider key import supplies it for unscoped agents; whether scoped agents read it from the environment is
-    # an open decision.
+    # The provider key import supplies it for unscoped agents. Scoped agents get no environment fallback on purpose:
+    # they need the granted shared key or their own saved setting, so no field declares it.
     "agno.tools.openai": frozenset({"OPENAI_API_KEY"}),
-    # The same open decision as `OPENAI_API_KEY`.
+    # Undeclared for the same reason as `OPENAI_API_KEY`: scoped agents need the granted shared key or their own setting.
     "agno.tools.models.groq": frozenset({"GROQ_API_KEY"}),
 }
 
@@ -194,6 +194,16 @@ def test_saved_settings_then_the_process_environment_win_over_the_env_file(
     tool = _tavily(tmp_path, monkeypatch, process_env=process_env, env_file=env_file, saved=saved)
 
     assert tool.api_key == expected
+
+
+def test_a_file_variant_supplies_a_tool_setting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `<NAME>_FILE` variable names a file whose contents set the field, as it does for model provider keys."""
+    secret_file = tmp_path / "tavily-key"
+    secret_file.write_text("file-key\n")
+
+    tool = _tavily(tmp_path, monkeypatch, process_env={"TAVILY_API_KEY_FILE": str(secret_file)})
+
+    assert tool.api_key == "file-key"
 
 
 def test_an_inline_setting_wins_over_saved_settings_and_the_environment(

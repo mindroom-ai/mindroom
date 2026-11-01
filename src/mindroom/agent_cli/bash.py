@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_access import ToolKey
@@ -21,7 +22,7 @@ __all__ = ["minimal_bash_toolkit"]
 def minimal_bash_toolkit(
     execute: Callable[[ToolKey, dict[str, object], str], Awaitable[str | ToolValue]] | None = None,
 ) -> AdaptedToolkit:
-    """Project only effective shell functions into one provider-visible function.
+    """Project the agent's shell function into one provider-visible Bash function.
 
     The required execution owner retains the canonical prepared call, approval
     state, hooks, operation mutex and dispatch-window lifetimes. There is
@@ -56,10 +57,8 @@ def minimal_bash_toolkit(
         if execute is None or not call_id:
             msg = "Bash requires an active response owner"
             raise RuntimeError(msg)
-        return await execute(ToolKey("shell", "run_shell_command"), arguments, call_id)
+        return await execute(ToolKey("shell", SHELL_FUNCTION), arguments, call_id)
 
-    # TODO(simplify): the schema derived from the signature and docstring is closed to other properties as Agno closed
-    # a schema it derived ahead of processing.
     function = adapt_callable(bash)
     function = replace(function, parameters=closed_parameters(bash, function.parameters))
     return AdaptedToolkit(name="minimal_bash", functions=(function,), instructions=None)

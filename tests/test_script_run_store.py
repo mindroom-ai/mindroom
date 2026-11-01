@@ -17,6 +17,9 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptRunState,
     ScriptToolGrant,
+    script_run_id_from_worker_key,
+    script_worker_key_belongs_to_run,
+    validated_script_run_id,
 )
 from mindroom.script_runs.store import (
     ScriptCallConflictError,
@@ -24,7 +27,6 @@ from mindroom.script_runs.store import (
     ScriptCapabilityError,
     ScriptRunStore,
     ScriptRunStoreError,
-    mint_script_capability,
 )
 
 if TYPE_CHECKING:
@@ -43,15 +45,27 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
-def _new_run(*, token_hash: str | None = None) -> ScriptRunRecord:
+_GRANT = ScriptToolGrant("website", "read_url")
+
+
+def _claim(
+    store: ScriptRunStore,
+    *,
+    call_id: str = "call-1",
+    arguments_digest: str = "digest-a",
+) -> ScriptCallClaim:
+    return store.claim_call(run_id="run-1", call_id=call_id, grant=_GRANT, arguments_digest=arguments_digest)
+
+
+def _new_run() -> ScriptRunRecord:
     return ScriptRunRecord(
         run_id="run-1",
         agent_name="watcher",
         owner_user_id="@alice:example.test",
         room_id="!room:example.test",
         source_digest="source-digest",
-        grants=(ScriptToolGrant("website", "read_url"),),
-        token_hash=token_hash or "capability-digest",
+        grants=(_GRANT,),
+        token_hash="capability-digest",  # noqa: S106
     )
 
 
@@ -72,27 +86,14 @@ def test_run_store_preserves_recovery_contract_across_reopen(runtime_paths: Runt
 def test_run_store_claims_one_logical_call_once(runtime_paths: RuntimePaths) -> None:
     """A retry with the same logical call returns its original claim."""
     store = ScriptRunStore(runtime_paths)
-    token, token_hash = mint_script_capability()
-    run = store.create_run(_new_run(token_hash=token_hash))
+    run = store.create_run(_new_run())
 
-    first = store.claim_call(
-        run_id=run.run_id,
-        call_id="call-1",
-        grant=ScriptToolGrant("website", "read_url"),
-        arguments_digest="digest-a",
-    )
-    duplicate = store.claim_call(
-        run_id=run.run_id,
-        call_id="call-1",
-        grant=ScriptToolGrant("website", "read_url"),
-        arguments_digest="digest-a",
-    )
+    first = _claim(store)
+    duplicate = _claim(store)
 
     assert first.created is True
     assert duplicate.created is False
     assert duplicate.call.call_id == first.call.call_id
-    authenticated = store.require_active_capability(run.run_id, token)
-    assert authenticated.run_id == run.run_id
     assert len(store.pending_calls(run.run_id)) == 1
 
 
@@ -191,7 +192,7 @@ def test_run_store_migrates_existing_table_for_resource_snapshots(runtime_paths:
         thread_root_event_id="$thread-root",
         execution_identity={"requester_id": "@alice:example.test"},
         source_digest="source-digest",
-        grants=(ScriptToolGrant("website", "read_url"),),
+        grants=(_GRANT,),
         token_hash="capability-digest",  # noqa: S106
         preapprove_launch_grants=True,
         worker_key="worker-key",
@@ -226,6 +227,94 @@ def test_run_store_migrates_existing_table_for_resource_snapshots(runtime_paths:
     assert reopened.get_run(profiled.run_id) == profiled
 
 
+def test_run_store_migrates_existing_table_without_recovery_signature(runtime_paths: RuntimePaths) -> None:
+    """A database from before durable recovery gains the column, and its running rows stay unrecoverable."""
+    database_path = runtime_paths.control_state_root / "script_runs" / "script_runs.sqlite3"
+    database_path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE script_runs (
+                run_id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                room_id TEXT NOT NULL,
+                thread_root_event_id TEXT,
+                execution_identity_json TEXT NOT NULL,
+                source_digest TEXT NOT NULL,
+                grants_json TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                preapprove_launch_grants INTEGER NOT NULL,
+                worker_key TEXT,
+                worker_id TEXT,
+                worker_backend_locator TEXT,
+                snapshot_locator TEXT,
+                name TEXT,
+                local_unsafe INTEGER NOT NULL,
+                resource_profile TEXT,
+                resource_requests_json TEXT NOT NULL DEFAULT '{}',
+                resource_limits_json TEXT NOT NULL DEFAULT '{}',
+                max_tool_calls_per_minute INTEGER NOT NULL,
+                max_runtime_seconds INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                exit_code INTEGER,
+                error TEXT,
+                output TEXT NOT NULL,
+                cancel_requested_at TEXT,
+                cancellation_reason TEXT
+            )
+            """,
+        )
+        connection.execute(
+            """
+            INSERT INTO script_runs (
+                run_id, agent_name, owner_user_id, room_id, execution_identity_json, source_digest, grants_json,
+                token_hash, preapprove_launch_grants, worker_key, worker_backend_locator, local_unsafe,
+                resource_profile, resource_requests_json, resource_limits_json,
+                max_tool_calls_per_minute, max_runtime_seconds, state, created_at, output
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "running-before-recovery",
+                "watcher",
+                "@alice:example.test",
+                "!room:example.test",
+                "{}",
+                "source-digest",
+                '[["website","read_url"]]',
+                "capability-digest",
+                0,
+                "worker-key",
+                "kubernetes:test",
+                0,
+                "standard",
+                '{"cpu":"250m","memory":"512Mi"}',
+                '{"cpu":"1","memory":"2Gi"}',
+                30,
+                3_600,
+                "running",
+                "2026-09-13T00:00:00Z",
+                "",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = ScriptRunStore(runtime_paths)
+    legacy = store.get_run("running-before-recovery")
+    recoverable = store.create_run(replace(_new_run(), recovery_signature="launch-contract-digest"))
+
+    assert legacy.state is ScriptRunState.RUNNING
+    assert legacy.recovery_signature is None
+    assert legacy.resource_requests == {"cpu": "250m", "memory": "512Mi"}
+    assert ScriptRunStore(runtime_paths).get_run(recoverable.run_id).recovery_signature == "launch-contract-digest"
+
+
 def test_write_transaction_closes_connection_when_begin_fails(
     runtime_paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
@@ -251,6 +340,23 @@ def test_write_transaction_closes_connection_when_begin_fails(
         pass
 
     assert connection.closed is True
+
+
+def test_write_transaction_rolls_back_when_its_body_fails(runtime_paths: RuntimePaths) -> None:
+    """A failed write leaves no partial change behind."""
+    store = ScriptRunStore(runtime_paths)
+    run = store.create_run(_new_run())
+
+    def delete_then_fail() -> None:
+        with store._write_transaction() as connection:
+            connection.execute("DELETE FROM script_runs WHERE run_id = ?", (run.run_id,))
+            msg = "body failed"
+            raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="body failed"):
+        delete_then_fail()
+
+    assert store.get_run(run.run_id) == run
 
 
 def test_snapshot_locator_is_durable_and_rejects_parent_traversal(runtime_paths: RuntimePaths) -> None:
@@ -341,12 +447,7 @@ def test_call_rate_limit_is_atomic_and_does_not_charge_stable_retries(runtime_pa
 
     def claim(call_id: str) -> ScriptCallClaim | ScriptCallRateLimitError:
         try:
-            return store.claim_call(
-                run_id=run.run_id,
-                call_id=call_id,
-                grant=ScriptToolGrant("website", "read_url"),
-                arguments_digest=f"digest-{call_id}",
-            )
+            return _claim(store, call_id=call_id, arguments_digest=f"digest-{call_id}")
         except ScriptCallRateLimitError as exc:
             return exc
 
@@ -359,10 +460,9 @@ def test_call_rate_limit_is_atomic_and_does_not_charge_stable_retries(runtime_pa
     assert len(rejected) == 1
     accepted_claim = accepted[0]
     assert isinstance(accepted_claim, ScriptCallClaim)
-    duplicate = store.claim_call(
-        run_id=run.run_id,
+    duplicate = _claim(
+        store,
         call_id=accepted_claim.call.call_id,
-        grant=ScriptToolGrant("website", "read_url"),
         arguments_digest=accepted_claim.call.arguments_digest,
     )
     assert duplicate.created is False
@@ -372,21 +472,11 @@ def test_call_rate_limit_is_atomic_and_does_not_charge_stable_retries(runtime_pa
 def test_run_store_rejects_call_id_reuse_with_different_arguments(runtime_paths: RuntimePaths) -> None:
     """A call ID cannot change its immutable arguments after acceptance."""
     store = ScriptRunStore(runtime_paths)
-    run = store.create_run(_new_run())
-    store.claim_call(
-        run_id=run.run_id,
-        call_id="call-1",
-        grant=ScriptToolGrant("website", "read_url"),
-        arguments_digest="digest-a",
-    )
+    store.create_run(_new_run())
+    _claim(store)
 
     with pytest.raises(ScriptCallConflictError):
-        store.claim_call(
-            run_id=run.run_id,
-            call_id="call-1",
-            grant=ScriptToolGrant("website", "read_url"),
-            arguments_digest="digest-b",
-        )
+        _claim(store, arguments_digest="digest-b")
 
 
 def test_run_store_rejects_call_grant_outside_launch_snapshot(runtime_paths: RuntimePaths) -> None:
@@ -405,88 +495,45 @@ def test_run_store_rejects_call_grant_outside_launch_snapshot(runtime_paths: Run
     assert store.pending_calls("run-1") == []
 
 
-def test_run_store_replays_equivalent_serialized_terminal_receipt(runtime_paths: RuntimePaths) -> None:
-    """Retries compare the durable JSON receipt rather than Python container types."""
+@pytest.mark.parametrize(
+    ("first_result", "duplicate_result", "stored_result"),
+    [
+        pytest.param(("page body",), ["page body"], ["page body"], id="container-type"),
+        pytest.param(
+            {"title": "Status", "body": "ok"},
+            {"body": "ok", "title": "Status"},
+            {"title": "Status", "body": "ok"},
+            id="mapping-order",
+        ),
+        pytest.param({2: "two", "one": 1}, {"one": 1, "2": "two"}, {"2": "two", "one": 1}, id="mixed-mapping-keys"),
+    ],
+)
+def test_run_store_replays_an_equivalent_terminal_receipt(
+    runtime_paths: RuntimePaths,
+    first_result: object,
+    duplicate_result: object,
+    stored_result: object,
+) -> None:
+    """Retries compare the canonical durable JSON receipt, not Python container types, mapping order, or key types."""
     store = ScriptRunStore(runtime_paths)
     store.create_run(_new_run())
-    store.claim_call(
-        run_id="run-1",
-        call_id="call-1",
-        grant=ScriptToolGrant("website", "read_url"),
-        arguments_digest="digest-a",
-    )
+    _claim(store)
 
     first = store.publish_call_result(
         run_id="run-1",
         call_id="call-1",
         state=ScriptCallState.COMPLETED,
-        result=("page body",),
+        result=first_result,
     )
     duplicate = store.publish_call_result(
         run_id="run-1",
         call_id="call-1",
         state=ScriptCallState.COMPLETED,
-        result=["page body"],
+        result=duplicate_result,
     )
 
     assert first == duplicate
-    assert duplicate.result == ["page body"]
-
-
-def test_run_store_replays_terminal_receipt_with_different_mapping_order(runtime_paths: RuntimePaths) -> None:
-    """Equivalent JSON mappings retain one durable terminal receipt."""
-    store = ScriptRunStore(runtime_paths)
-    store.create_run(_new_run())
-    store.claim_call(
-        run_id="run-1",
-        call_id="call-1",
-        grant=ScriptToolGrant("website", "read_url"),
-        arguments_digest="digest-a",
-    )
-
-    first = store.publish_call_result(
-        run_id="run-1",
-        call_id="call-1",
-        state=ScriptCallState.COMPLETED,
-        result={"title": "Status", "body": "ok"},
-    )
-    duplicate = store.publish_call_result(
-        run_id="run-1",
-        call_id="call-1",
-        state=ScriptCallState.COMPLETED,
-        result={"body": "ok", "title": "Status"},
-    )
-
-    assert first == duplicate
-    assert duplicate.result == {"title": "Status", "body": "ok"}
-
-
-def test_run_store_normalizes_mixed_json_mapping_keys_before_replay(runtime_paths: RuntimePaths) -> None:
-    """JSON-supported non-string keys replay as their canonical wire mapping."""
-    store = ScriptRunStore(runtime_paths)
-    store.create_run(_new_run())
-    store.claim_call(
-        run_id="run-1",
-        call_id="call-1",
-        grant=ScriptToolGrant("website", "read_url"),
-        arguments_digest="digest-a",
-    )
-
-    first = store.publish_call_result(
-        run_id="run-1",
-        call_id="call-1",
-        state=ScriptCallState.COMPLETED,
-        result={2: "two", "one": 1},
-    )
-    duplicate = store.publish_call_result(
-        run_id="run-1",
-        call_id="call-1",
-        state=ScriptCallState.COMPLETED,
-        result={"one": 1, "2": "two"},
-    )
-
-    assert first == duplicate
-    assert duplicate.result == {"2": "two", "one": 1}
+    assert duplicate.result == stored_result
 
 
 def test_run_store_rejects_terminal_run_mutation(runtime_paths: RuntimePaths) -> None:
@@ -538,12 +585,7 @@ def test_run_store_publishes_one_bounded_terminal_receipt(runtime_paths: Runtime
     """A claimed call retains its one terminal result for duplicate polling."""
     store = ScriptRunStore(runtime_paths)
     store.create_run(_new_run())
-    store.claim_call(
-        run_id="run-1",
-        call_id="call-1",
-        grant=ScriptToolGrant("website", "read_url"),
-        arguments_digest="digest-a",
-    )
+    _claim(store)
 
     published = store.publish_call_result(
         run_id="run-1",
@@ -557,17 +599,15 @@ def test_run_store_publishes_one_bounded_terminal_receipt(runtime_paths: Runtime
     assert published.error is None
 
 
-@pytest.mark.parametrize("result", [float("nan"), float("inf"), float("-inf")])
-def test_run_store_rejects_nonfinite_terminal_receipt(runtime_paths: RuntimePaths, result: float) -> None:
-    """Durable receipts must always remain readable by strict JSON consumers."""
+@pytest.mark.parametrize("result", [float("nan"), float("inf"), float("-inf"), "\udcff"])
+def test_run_store_rejects_a_terminal_receipt_strict_json_cannot_encode(
+    runtime_paths: RuntimePaths,
+    result: object,
+) -> None:
+    """Durable receipts stay readable by strict JSON consumers, so non-finite numbers and invalid Unicode get the store's typed error."""
     store = ScriptRunStore(runtime_paths)
     store.create_run(_new_run())
-    store.claim_call(
-        run_id="run-1",
-        call_id="call-1",
-        grant=ScriptToolGrant("website", "read_url"),
-        arguments_digest="digest-a",
-    )
+    _claim(store)
 
     with pytest.raises(ScriptRunStoreError, match="JSON serializable"):
         store.publish_call_result(
@@ -578,23 +618,64 @@ def test_run_store_rejects_nonfinite_terminal_receipt(runtime_paths: RuntimePath
         )
 
 
-def test_run_store_rejects_terminal_receipt_that_cannot_be_encoded_as_utf8(
-    runtime_paths: RuntimePaths,
-) -> None:
-    """Receipt validation must convert invalid Unicode into the store's typed error."""
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "workers/worker-1/workspace",
+        "workers/worker-1/workspace/.mindroom/script-runs/run-2",
+        "workers/worker-1/workspace/other/script-runs/run-1",
+    ],
+)
+def test_snapshot_locator_must_name_the_runs_own_snapshot_directory(runtime_paths: RuntimePaths, locator: str) -> None:
+    """Cleanup removes the recorded directory, so only this run's snapshot directory may be recorded."""
     store = ScriptRunStore(runtime_paths)
-    store.create_run(_new_run())
-    store.claim_call(
-        run_id="run-1",
-        call_id="call-1",
-        grant=ScriptToolGrant("website", "read_url"),
-        arguments_digest="digest-a",
-    )
+    run = store.create_run(_new_run())
 
-    with pytest.raises(ScriptRunStoreError, match="JSON serializable"):
-        store.publish_call_result(
-            run_id="run-1",
-            call_id="call-1",
-            state=ScriptCallState.COMPLETED,
-            result="\udcff",
-        )
+    with pytest.raises(ScriptRunStoreError, match="snapshot locator"):
+        store.record_snapshot_locator(run.run_id, locator)
+
+
+def test_running_run_cannot_return_to_starting(runtime_paths: RuntimePaths) -> None:
+    """A run that reported running never re-enters the pre-spawn state."""
+    store = ScriptRunStore(runtime_paths)
+    run = store.create_run(_new_run())
+    store.transition_run(run.run_id, state=ScriptRunState.RUNNING)
+
+    with pytest.raises(ScriptRunStoreError, match="cannot transition"):
+        store.transition_run(run.run_id, state=ScriptRunState.STARTING)
+
+
+def test_cancel_request_leaves_a_terminal_run_unchanged(runtime_paths: RuntimePaths) -> None:
+    """Revoking a finished run is a no-op on its durable record."""
+    store = ScriptRunStore(runtime_paths)
+    run = store.create_run(_new_run())
+    exited = store.transition_run(run.run_id, state=ScriptRunState.EXITED, exit_code=0)
+
+    assert store.request_cancel(run.run_id, reason="owner") == exited
+    assert store.get_run(run.run_id).cancel_requested_at is None
+
+
+@pytest.mark.parametrize("run_id", [f"script-{'a' * 32}/x", f"script-{'A' * 32}", f"script-{'a' * 31}"])
+def test_script_run_id_must_be_exactly_the_generated_form(run_id: str) -> None:
+    """A run ID names a handle and a directory, so nothing may follow the generated hex digits."""
+    with pytest.raises(ValueError, match="Script run ID"):
+        validated_script_run_id(run_id)
+
+
+_PINNED_RUN_ID = f"script-{'a' * 32}"
+
+
+@pytest.mark.parametrize(
+    ("worker_key", "run_id"),
+    [
+        pytest.param(f"v1:default:user_agent:alice:{_PINNED_RUN_ID}:watcher", _PINNED_RUN_ID, id="pinned"),
+        pytest.param(f"v1:default:shared:alice:{_PINNED_RUN_ID}:watcher", None, id="not-user-agent"),
+        pytest.param("v1:default:user_agent:alice:script-not-hex:watcher", None, id="not-a-run-id"),
+        pytest.param(f"v1:default:user_agent:{_PINNED_RUN_ID}:watcher", None, id="too-short"),
+    ],
+)
+def test_script_worker_key_names_only_its_pinned_run(worker_key: str, run_id: str | None) -> None:
+    """Only a user-agent key pinned to a generated run ID names that run, and it belongs to no other run."""
+    assert script_run_id_from_worker_key(worker_key) == run_id
+    assert script_worker_key_belongs_to_run(worker_key, _PINNED_RUN_ID) is (run_id == _PINNED_RUN_ID)
+    assert script_worker_key_belongs_to_run(worker_key, f"script-{'b' * 32}") is False

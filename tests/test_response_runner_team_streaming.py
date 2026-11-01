@@ -77,11 +77,10 @@ from tests.ai_user_id_helpers import (
     _response_request,
     _runtime_paths,
     _set_gateway_method,
-    bind_runtime_paths,
     team_orchestrator,
 )
 from tests.bot_helpers import unique_room_send_responses
-from tests.conftest import install_model_providers, publish_hook_plugin, seed_session
+from tests.conftest import bind_runtime_paths, install_model_providers, publish_hook_plugin, seed_session
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.reply_turn_helpers import runner_for
 from tests.response_runner_helpers import (
@@ -184,7 +183,6 @@ def _driven_team_stream(
             make_text_chunk=lambda text: text,
             user_message=ctx.prompt,
             unexpected_error_text=str,
-            entity_name=scope_id,
         )
         return stream_response_turn(
             ctx,

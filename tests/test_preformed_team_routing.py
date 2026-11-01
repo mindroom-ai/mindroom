@@ -58,7 +58,7 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
     return bind_runtime_paths(config, test_runtime_paths(tmp_path))
 
 
-async def _empty_event_iterator() -> AsyncGenerator[object, None]:
+async def _empty_event_iterator() -> AsyncGenerator[object]:
     if False:
         yield None
 

@@ -8,14 +8,13 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack, suppress
 from contextvars import Context
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, cast, overload
 from uuid import uuid4
 
 import uvicorn
 
-from mindroom import constants
 from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
@@ -34,16 +33,11 @@ from mindroom.background_tasks import (
     wait_for_background_tasks,
 )
 from mindroom.budgets.monitor import BudgetMonitor
-from mindroom.constants import ROUTER_AGENT_NAME, ROUTER_DISPLAY_NAME, tracking_dir
+from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
 from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.embeddings.embedder_health import check_embedder_health, handle_embedder_config_reload
-from mindroom.entity_resolution import (
-    DuplicateManagedEntityIdentityError,
-    MissingManagedEntityAccountError,
-    entity_identity_registry,
-)
 from mindroom.event_loop_stall import (
     EventLoopStallDetector,
     shorten_gil_switch_interval,
@@ -54,12 +48,10 @@ from mindroom.heap_probe import freeze_startup_heap, start_heap_tasks
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
     ConfigReloadedContext,
+    HookBindings,
     HookRegistry,
     HookRegistryLifetime,
     HookRegistryState,
-    build_hook_matrix_admin,
-    build_hook_room_state_putter,
-    build_hook_room_state_querier,
     emit,
 )
 from mindroom.integrations import bind_integrations, unbind_integrations
@@ -69,14 +61,7 @@ from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.knowledge_graph.runtime import KnowledgeGraphRuntime
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.provisioning_heartbeat import run_provisioning_heartbeat
-from mindroom.matrix.users import (
-    INTERNAL_USER_AGENT_NAME,
-    AgentMatrixUser,
-    ManagedAccountProvisioningRequest,
-    create_agent_user,
-    load_agent_user,
-    preflight_managed_account_provisioning,
-)
+from mindroom.matrix.users import load_agent_user
 from mindroom.matrix_rtc.call_manager import preload_matrix_call_dependencies
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager
@@ -119,6 +104,7 @@ from . import file_watcher
 from .bot import AgentBot, create_bot_for_entity
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
+from .orchestration.accounts import prepare_managed_accounts, validate_entity_accounts
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
 from .orchestration.config_updates import (
@@ -157,7 +143,7 @@ if TYPE_CHECKING:
 
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
-    from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.hooks import HookContextSupport
 
     from .config.main import Config
     from .constants import RuntimePaths
@@ -357,12 +343,14 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             bots=lambda: self.agent_bots,
-            matrix_admin=self.hook_matrix_admin,
             hooks=self.hook_registry_state.lifetime(),
         )
         self._knowledge_refresh_scheduler = runtime_refresh_scheduler(self.runtime_paths)
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler, self.runtime_paths)
-        self.agent_reply_membership_sync = AgentReplyMembershipSync(self.agent_reply_memberships)
+        self.agent_reply_membership_sync = AgentReplyMembershipSync(
+            self.agent_reply_memberships,
+            lambda: self.agent_bots.values(),
+        )
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
         self.turn_recovery = TurnJournalRecovery(
             config=lambda: self.config,
@@ -567,7 +555,7 @@ class _MultiAgentOrchestrator:
     ) -> bool:
         """Finalize frozen success as its original Matrix principal, without model startup."""
         bot = self.agent_bots.get(continuation.entity_name)
-        if bot is not None and bot.approval_store.principal_id != principal_id:
+        if bot is not None and bot.journal_principal().principal_id != principal_id:
             bot = None
         if bot is None:
             agent_user = load_agent_user(continuation.entity_name, self.runtime_paths)
@@ -581,12 +569,12 @@ class _MultiAgentOrchestrator:
                 return False
             # Built like any managed bot, but with no rooms: the entity may no longer be configured.
             bot = AgentBot(agent_user, rooms=[], orchestrator=self)
-            if bot.approval_store.principal_id != principal_id:
+            if bot.journal_principal().principal_id != principal_id:
                 logger.error(
                     "approval_original_principal_identity_mismatch",
                     approval_id=continuation.approval_id,
                     expected_principal_id=principal_id,
-                    actual_principal_id=bot.approval_store.principal_id,
+                    actual_principal_id=bot.journal_principal().principal_id,
                 )
                 return False
 
@@ -616,7 +604,7 @@ class _MultiAgentOrchestrator:
         bot construction supplies the real one.
         """
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        return None if router_bot is None else router_bot.approval_store
+        return None if router_bot is None else router_bot.journal_principal()
 
     def _bind_started_runtime_support_services(self) -> None:
         """Bind current runtime support objects needed by live callbacks."""
@@ -680,40 +668,6 @@ class _MultiAgentOrchestrator:
             transport=self._approval_transport,
             cards=self._approval_cards(),
             recovery=self._approval_recovery,
-        )
-
-    async def _ensure_user_account(self, config: Config) -> None:
-        """Ensure a user account exists, creating one if necessary.
-
-        This reuses the same `create_agent_user` flow that agents use,
-        treating the user as a special internal "agent" account.
-        Skipped when `mindroom_user` is not configured, such as hosted/public profiles.
-        """
-        if config.mindroom_user is None:
-            logger.debug("mindroom_user not configured, skipping user account creation")
-            return
-        # The user account is managed through the same Matrix account lifecycle as bots.
-        user_account = await create_agent_user(
-            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
-            INTERNAL_USER_AGENT_NAME,
-            config.mindroom_user.display_name,
-            username=config.mindroom_user.username,
-            runtime_paths=self.runtime_paths,
-        )
-        logger.info("user_account_ready", user_id=user_account.user_id)
-
-    async def _prepare_user_account(
-        self,
-        config: Config,
-        *,
-        update_runtime_state: bool,
-    ) -> None:
-        """Ensure the internal user account exists, retrying only transient failures."""
-        await run_with_retry(
-            "Preparing MindRoom user account",
-            lambda: self._ensure_user_account(config),
-            permanent_error_check=is_permanent_startup_error,
-            update_runtime_state=update_runtime_state,
         )
 
     def _running_startup_maintenance_bots(self) -> list[AgentBot]:
@@ -792,95 +746,19 @@ class _MultiAgentOrchestrator:
                 degraded_entities=sorted(degraded_entities),
             )
 
-    @staticmethod
-    def _entity_display_name(config: Config, entity_name: str) -> str:
-        """Return the Matrix display name for one configured managed entity."""
-        if entity_name == ROUTER_AGENT_NAME:
-            return ROUTER_DISPLAY_NAME
-        if entity_name in config.agents:
-            return config.agents[entity_name].display_name
-        if entity_name in config.teams:
-            return config.teams[entity_name].display_name
-        return entity_name
-
-    @staticmethod
-    def _entity_requested_username(config: Config, entity_name: str) -> str | None:
-        """Return a generated agent's stored Matrix username, so a wiped matrix_state recreates the same ID."""
-        instance = config.personal_agent_instance(entity_name)
-        return None if instance is None else instance.matrix_username
-
-    async def _prepare_entity_accounts(
-        self,
-        config: Config,
-        entity_names: Iterable[str],
-    ) -> dict[str, AgentMatrixUser]:
-        """Ensure managed Matrix accounts exist before runtime bot construction."""
-        homeserver = constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths)
-        users: dict[str, AgentMatrixUser] = {}
-        entity_names = tuple(entity_names)
-        self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=False)
-
-        async def _prepare_accounts() -> None:
-            nonlocal users
-            prepared_users: dict[str, AgentMatrixUser] = {}
-            for entity_name in entity_names:
-                prepared_users[entity_name] = await create_agent_user(
-                    homeserver,
-                    entity_name,
-                    self._entity_display_name(config, entity_name),
-                    runtime_paths=self.runtime_paths,
-                    username=self._entity_requested_username(config, entity_name),
-                )
-            self._validate_entity_accounts(config)
-            users = prepared_users
-
-        await run_with_retry(
-            "Preparing managed Matrix accounts",
-            _prepare_accounts,
-            permanent_error_check=is_permanent_startup_error,
-            update_runtime_state=not self.running,
-        )
-        return users
-
-    def _validate_entity_accounts(self, config: Config) -> None:
-        """Validate persisted Matrix identities for all configured runtime entities."""
-        try:
-            entity_identity_registry(config, self.runtime_paths)
-        except (DuplicateManagedEntityIdentityError, MissingManagedEntityAccountError) as exc:
-            raise PermanentStartupError(str(exc)) from exc
-
-    def _preflight_account_provisioning(
-        self,
-        config: Config,
-        *,
-        entity_names: Iterable[str],
-        include_internal_user: bool,
-    ) -> None:
-        """Reject account localpart collisions before any missing account is created."""
-        requests: list[ManagedAccountProvisioningRequest] = []
-        if include_internal_user and config.mindroom_user is not None:
-            requests.append(
-                ManagedAccountProvisioningRequest(
-                    INTERNAL_USER_AGENT_NAME,
-                    username=config.mindroom_user.username,
-                ),
-            )
-        requests.extend(
-            ManagedAccountProvisioningRequest(
-                entity_name,
-                username=self._entity_requested_username(config, entity_name),
-            )
-            for entity_name in entity_names
-        )
-        preflight_managed_account_provisioning(requests, self.runtime_paths)
-
     def validate_managed_entity_identities(self) -> None:
         """Validate persisted managed Matrix identities for the live config."""
-        self._validate_entity_accounts(self.config)
+        validate_entity_accounts(self.config, self.runtime_paths)
 
     async def _create_bots(self, entity_names: set[str]) -> dict[str, AgentBot]:
         """Prepare Matrix accounts, then build bots for entities the published config configures."""
-        entity_users = await self._prepare_entity_accounts(self.config, sorted(entity_names))
+        entity_users = await prepare_managed_accounts(
+            self.config,
+            self.runtime_paths,
+            sorted(entity_names),
+            include_internal_user=False,
+            update_runtime_state=not self.running,
+        )
         return {
             entity_name: create_bot_for_entity(entity_name, entity_users[entity_name], self)
             for entity_name in sorted(entity_names)
@@ -896,7 +774,7 @@ class _MultiAgentOrchestrator:
         self._computer_runtime.unbind()
         if ROUTER_AGENT_NAME in entity_names:
             # Fence room-backed grants before stopping their sole control client.
-            self.invalidate_agent_reply_memberships(reason="router_replacement")
+            self.agent_reply_membership_sync.invalidate(self.config, reason="router_replacement")
         await self.scheduled_tasks.release(entity_names)
 
     async def _reconcile_removed_entities(self, entity_names: set[str]) -> set[str]:
@@ -1016,7 +894,7 @@ class _MultiAgentOrchestrator:
         new_config = plan.new_config
         self.config = new_config
         if plan.reply_membership_policy_changed:
-            self.invalidate_agent_reply_memberships(reason="config_reload")
+            self.agent_reply_membership_sync.invalidate(new_config, reason="config_reload")
         if staged is None:
             # Equal plugin entries compose the hooks already live.
             self.plugin_watch.sync_roots(new_config)
@@ -1045,9 +923,13 @@ class _MultiAgentOrchestrator:
         generation = prepare_plugins(config, self.runtime_paths)
         try:
             entity_names = configured_entity_names(config)
-            self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
-            await self._prepare_user_account(config, update_runtime_state=True)
-            entity_users = await self._prepare_entity_accounts(config, entity_names)
+            entity_users = await prepare_managed_accounts(
+                config,
+                self.runtime_paths,
+                entity_names,
+                include_internal_user=True,
+                update_runtime_state=not self.running,
+            )
             self.agent_reply_memberships.invalidate(config, reason="initial_config")
             await self._bind_event_journal()
             await self._tool_job_runtime.initialize()
@@ -1095,33 +977,10 @@ class _MultiAgentOrchestrator:
         )
         return router_bot
 
-    def hook_message_sender(self) -> HookMessageSender | None:
-        """Return a router-backed sender for hook contexts when available."""
+    def router_hook_context(self) -> HookContextSupport | None:
+        """Return the router bot's hook support, whose client backs what another bot's own cannot."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None:
-            return None
-        return router_bot.hook_send_message
-
-    def hook_room_state_querier(self) -> HookRoomStateQuerier | None:
-        """Return a router-backed room-state querier for hook contexts when available."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None:
-            return None
-        return build_hook_room_state_querier(router_bot.client)
-
-    def hook_room_state_putter(self) -> HookRoomStatePutter | None:
-        """Return a router-backed room-state putter for hook contexts when available."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None:
-            return None
-        return build_hook_room_state_putter(router_bot.client)
-
-    def hook_matrix_admin(self) -> HookMatrixAdmin | None:
-        """Return a router-backed Matrix admin helper for hook contexts when available."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None:
-            return None
-        return build_hook_matrix_admin(router_bot.client, self.runtime_paths, config=self.config)
+        return None if router_bot is None else router_bot.hook_context
 
     def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
         """Return the Matrix client of one running managed entity."""
@@ -1177,46 +1036,20 @@ class _MultiAgentOrchestrator:
                 router.personal_room_target_ready()
         self.turn_recovery.schedule()
 
-    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
-        """Synchronously revoke every room-backed reply grant."""
-        if not self.agent_reply_membership_sync.invalidate(self.config, reason=reason):
-            return
-        for bot in self.agent_bots.values():
-            bot.schedule_reply_authorized_call_revocation()
-
-    async def reconcile_reply_authorized_calls(self) -> None:
-        """Recheck every active MatrixRTC call against current reply access."""
-        await asyncio.gather(*(bot.reconcile_reply_authorized_calls() for bot in self.agent_bots.values()))
-
-    async def reconcile_pending_invites(self) -> None:
-        """Recheck cached invites against each router, agent, or team policy."""
-        await asyncio.gather(*(bot.reconcile_pending_invites() for bot in self.agent_bots.values()))
-
-    async def revoke_reply_authorized_calls(self) -> None:
-        """End active MatrixRTC calls that no longer pass current reply access."""
-        await asyncio.gather(*(bot.revoke_reply_authorized_calls() for bot in self.agent_bots.values()))
-
     async def refresh_agent_reply_memberships(self) -> None:
         """Refresh room-backed reply grants through the router's Matrix client."""
         config = self.config
         router_client = self._router_client()
         if router_client is None:
-            self.invalidate_agent_reply_memberships(reason="router_unavailable")
+            self.agent_reply_membership_sync.invalidate(config, reason="router_unavailable")
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_client)
-        self.agent_reply_membership_sync.record_authoritative_refresh(config)
         self.turn_recovery.schedule()
-        for bot in self.agent_bots.values():
-            bot.schedule_pending_invite_reconciliation()
-        await self.revoke_reply_authorized_calls()
-        if self.agent_reply_memberships.needs_refresh(config):
-            return
-        for bot in self.agent_bots.values():
-            bot.schedule_reply_authorized_call_reconciliation()
+        await self.agent_reply_membership_sync.apply_grant_change()
 
     async def _end_unconfigured_entity_replies(self, config: Config) -> None:
         """End the replies of entities removed while MindRoom was stopped; no bot finishes them."""
-        configured = {ROUTER_AGENT_NAME, *config.agents, *config.teams}
+        configured = set(configured_entity_names(config))
         await self.event_journal_store().end_entity_replies(
             lambda entity_name: entity_name not in configured,
             now_ns=time.time_ns(),
@@ -1354,19 +1187,16 @@ class _MultiAgentOrchestrator:
         if not self.hook_registry.has_hooks(EVENT_CONFIG_RELOADED):
             return
 
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        router = self.router_hook_context()
+        bindings = HookBindings(runtime_started_at=time.time()) if router is None else router.bindings()
         context = ConfigReloadedContext(
-            event_name=EVENT_CONFIG_RELOADED,
-            config=plan.new_config,
-            runtime_paths=self.runtime_paths,
-            correlation_id=f"config-reload:{uuid4().hex}",
-            runtime_started_at=router_bot.runtime_started_at if router_bot is not None else time.time(),
-            message_sender=self.hook_message_sender(),
-            agent_message_snapshot_reader=router_bot.hook_agent_message_snapshot if router_bot is not None else None,
-            matrix_admin=self.hook_matrix_admin(),
-            room_state_querier=self.hook_room_state_querier(),
-            room_state_putter=self.hook_room_state_putter(),
-            _hook_registry_state=self._hook_lifetime,
+            # The router's Matrix capabilities, under the runtime's hook lifetime rather than the router bot's.
+            **replace(bindings, registry_state=self._hook_lifetime).context_kwargs(
+                EVENT_CONFIG_RELOADED,
+                config=plan.new_config,
+                runtime_paths=self.runtime_paths,
+                correlation_id=f"config-reload:{uuid4().hex}",
+            ),
             changed_entities=tuple(sorted(changed_entities)),
             added_entities=tuple(sorted(plan.start)),
             removed_entities=tuple(sorted(plan.remove)),
@@ -1449,21 +1279,6 @@ class _MultiAgentOrchestrator:
         elif plan.matrix_space_changed:
             await self._rooms.link_root_space(await self._rooms.ensure_rooms_exist())
 
-    async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
-        """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
-        entities_requiring_account_check = set(plan.start | plan.restart)
-        self._preflight_account_provisioning(
-            new_config,
-            entity_names=entities_requiring_account_check,
-            include_internal_user=plan.mindroom_user_changed,
-        )
-        if plan.mindroom_user_changed:
-            await self._prepare_user_account(new_config, update_runtime_state=not self.running)
-        if entities_requiring_account_check:
-            await self._prepare_entity_accounts(new_config, entities_requiring_account_check)
-        elif plan.mindroom_user_changed:
-            self._validate_entity_accounts(new_config)
-
     async def _finalize_config_reload(
         self,
         current_config: Config,
@@ -1480,7 +1295,15 @@ class _MultiAgentOrchestrator:
     async def _apply_config_update_plan(self, current_config: Config, plan: ConfigUpdatePlan) -> bool:
         """Apply one computed config update plan: stop what changes, publish the new config, then start."""
         new_config = plan.new_config
-        await self._prepare_accounts_for_config_update(new_config, plan)
+        # Accounts are ready, and their names checked, before anything stops or the config publishes.
+        if plan.start or plan.restart or plan.mindroom_user_changed:
+            await prepare_managed_accounts(
+                new_config,
+                self.runtime_paths,
+                sorted(plan.start | plan.restart),
+                include_internal_user=plan.mindroom_user_changed,
+                update_runtime_state=not self.running,
+            )
         await self._script_runtime.apply_update_plan(plan)
         try:
             async with self._paused_startup_maintenance():
@@ -1685,7 +1508,7 @@ class _MultiAgentOrchestrator:
         failures = [*fleet_shutdown.failures, *journal_failures]
         if failures:
             raise failures[0]
-        self.invalidate_agent_reply_memberships(reason="shutdown")
+        self.agent_reply_membership_sync.invalidate(self.config, reason="shutdown")
         logger.info("All agent bots stopped")
 
 

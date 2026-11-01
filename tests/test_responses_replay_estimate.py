@@ -16,6 +16,7 @@ from PIL import Image as PillowImage
 from structlog.testing import capture_logs
 
 from mindroom.config.models import CompactionConfig, ModelConfig
+from mindroom.config.resolution import entity_model_name
 from mindroom.history.policy import classify_compaction_decision
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
 from mindroom.history.runtime import (
@@ -103,10 +104,9 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
     resolved = resolve_entity_preparation_inputs(
         config=config,
         runtime_paths=runtime_paths,
-        entity_name="test_agent",
         history_settings=config.resolve_scope("test_agent").history_settings,
         static_prompt_tokens=100,
-        active_model_name=None,
+        active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
     )
     before = deepcopy(session)
@@ -597,10 +597,9 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
     inputs = resolve_entity_preparation_inputs(
         config=config,
         runtime_paths=runtime_paths,
-        entity_name="test_agent",
         history_settings=config.resolve_scope("test_agent").history_settings,
         static_prompt_tokens=0,
-        active_model_name=None,
+        active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
     )
     route_estimate = estimate_prompt_visible_history_tokens(

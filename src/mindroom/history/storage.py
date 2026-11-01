@@ -12,7 +12,7 @@ agent's scope, read or write summary rows directly:
   between the runs by ``seq``; replay is the scope's latest summary row and the
   runs it does not cover, and ``session.summary`` is derived from that row on read
 - the database owner's history state under ``MINDROOM_HISTORY_METADATA_KEY``: whether its next run
-  compacts first, and the consumed Matrix event ids no stored run carries (team consumption)
+  compacts first
 
 Nothing else the summary rows already know is stored: the event ids compacted
 history represents are derived from them when seen ids are read. A metadata change
@@ -28,7 +28,7 @@ summary covered to replay (see ``tests/test_compaction_fuzz.py`` for the invaria
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -52,9 +52,8 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
 
 
-# The fields of the owner's history state, each left out of the stored value at its default.
+# The only field of the owner's history state, left out of the stored value at its default.
 _FORCE_COMPACTION = "force_compact_before_next_run"
-_SEEN_EVENT_IDS = "seen_event_ids"
 
 
 async def record_summary_usage(
@@ -106,12 +105,23 @@ def _history_state(metadata: dict[str, Any] | None) -> dict[str, Any]:
     return raw_value if isinstance(raw_value, dict) else {}
 
 
-def _with_history_state(metadata: dict[str, Any] | None, field: str, value: object) -> dict[str, Any]:
-    """Return session ``metadata`` with one field of the owner's history state changed; ``metadata`` is left alone.
+# LEGACY_COMPAT: Seen ids earlier releases copied into the owner's history state.
+# Legacy format: ``seen_event_ids`` in a session row's ``MINDROOM_HISTORY_METADATA_KEY`` value, which layout version 7
+# fills from the older per-scope entry (``session_storage/legacy_scope_metadata.py``): the destructive compactor merged
+# compacted runs' ids into it, and team turns merged the ids each one consumed, which its stored run also holds.
+# Last legacy release: v2026.10.760; replacement: v2026.10.761, where each team turn's stored run is the only record of
+# the events it consumed.
+# Handling: Nothing reads the ids; seen ids come only from the replayable runs and the summary rows. The force flag's
+# writer keeps the field beside the flag, so a row holds it as inert data.
+# Coverage: tests/test_history_scope_state.py::test_seen_event_ids_match_model_history_visibility,
+# tests/test_history_scope_state.py::test_an_edit_cut_returns_the_messages_only_the_removed_run_read, and
+# tests/test_history_scope_state.py::test_the_force_flag_is_set_and_cleared_beside_the_seen_ids.
+def _with_force_flag(metadata: dict[str, Any] | None, *, forced: bool) -> dict[str, Any]:
+    """Return session ``metadata`` with the owner's force flag set to ``forced``; ``metadata`` is left alone.
 
-    A field at its default (false or empty) is left out, and an empty state removes the key.
+    A false flag is left out, and an empty state removes the key.
     """
-    state = {**_history_state(metadata), field: value}
+    state = {**_history_state(metadata), _FORCE_COMPACTION: forced}
     state = {name: stored for name, stored in state.items() if stored}
     session_metadata = dict(metadata or {})
     if state:
@@ -123,7 +133,7 @@ def _with_history_state(metadata: dict[str, Any] | None, field: str, value: obje
 
 def with_force_compaction(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Return session ``metadata`` asking its owner to compact before its next run; ``metadata`` itself is left alone."""
-    return _with_history_state(metadata, _FORCE_COMPACTION, value=True)
+    return _with_force_flag(metadata, forced=True)
 
 
 def has_queued_force_compaction(storage: ConversationStore, session_id: str) -> bool:
@@ -138,12 +148,10 @@ def has_queued_force_compaction(storage: ConversationStore, session_id: str) -> 
 def read_scope_seen_event_ids(storage: ConversationStore, session: ConversationSession) -> set[str]:
     """Return the Matrix event ids the replayed history of the scope owning ``session`` already represents.
 
-    Loaded runs carry their own ids, the summary rows supply those of compacted
-    history, and session metadata adds ids no stored run carries.
+    Loaded runs carry their own ids, and the summary rows supply those of compacted history.
     """
     scope = owner_scope(session)
-    seen = _preserved_seen_event_ids(session.metadata)
-    seen |= summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="seen")
+    seen = summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="seen")
     for run in session.runs:
         if replays_in_scope(run, scope):
             seen.update(seen_event_ids(run.metadata))
@@ -163,11 +171,6 @@ def _read_scope_history_event_ids(storage: ConversationStore, session: Conversat
         if run_in_scope(run, scope) and run.parent_run_id is None:
             event_ids |= seen_event_ids(run.metadata) | source_event_ids(run.metadata)
     return event_ids
-
-
-def update_scope_seen_event_ids(storage: ConversationStore, session: ConversationSession, event_ids: list[str]) -> None:
-    """Merge consumed Matrix event ids into the owner's preserved seen ids on ``session``'s stored row."""
-    storage.update_metadata(session, partial(_with_merged_seen_event_ids, event_ids=event_ids))
 
 
 def remove_runs_answering(storage: ConversationStore, session_id: str, scope: HistoryScope, event_id: str) -> bool:
@@ -196,16 +199,16 @@ def _remove_redacted_event_from_history(
     """Remove the part of the history of the scope owning ``session`` that derives from a redacted Matrix event.
 
     The first element that answered, read, or wrote the event goes with everything
-    after it, and the runs a removed summary covered replay again. Afterwards the
-    owner's preserved metadata seen ids are dropped, so messages only they covered
-    return as unseen thread context. ``session`` is synced to the stored result.
+    after it, and the runs a removed summary covered replay again. ``session`` is synced
+    to the stored result.
     Returns whether the scope's history changed.
     """
     session_id, scope = session.session_id, owner_scope(session)
     legacy_event_ids = summary_rows.legacy_event_ids(storage, session_id=session_id, scope_key=scope.key)
     if legacy_event_ids is not None and _legacy_summary_may_contain(event_id, legacy_source_event_id, legacy_event_ids):
         summary_rows.cut_at_legacy_row(storage, session=session, scope_key=scope.key)
-    elif not summary_rows.cut_at_event(
+        return True
+    if not summary_rows.cut_at_event(
         storage,
         # The id repeats the session's: `remove_runs_answering` cuts with the id alone, so this function takes both.
         session_id=session_id,
@@ -215,9 +218,8 @@ def _remove_redacted_event_from_history(
         session=session,
     ):
         return False
-    elif legacy_event_ids is not None:
+    if legacy_event_ids is not None:
         summary_rows.retire(storage, session=session, scope_key=scope.key)
-    storage.update_metadata(session, partial(_with_history_state, field=_SEEN_EVENT_IDS, value=[]))
     return True
 
 
@@ -276,41 +278,24 @@ def _legacy_summary_may_contain(
     return event_id in legacy_event_ids or legacy_source_event_id in legacy_event_ids
 
 
-def update_scope_state_on_latest(
-    storage: ConversationStore,
-    *,
-    session: ConversationSession,
-    update: Callable[[HistoryScopeState], HistoryScopeState],
-) -> HistoryScopeState:
-    """Apply one update to the state of the scope owning ``session`` in its stored row's metadata; return the new state.
-
-    ``session`` then holds the stored metadata. The update callable sees the latest stored state, so it can refuse to
-    write (return its input unchanged) when the durable row moved since the caller read it.
-    """
-
-    def change(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
-        latest = _scope_state(metadata)
-        next_state = update(latest)
-        if next_state == latest:
-            return metadata
-        return _with_history_state(metadata, _FORCE_COMPACTION, value=next_state.force_compact_before_next_run)
-
-    storage.update_metadata(session, change)
-    return read_scope_state(session)
-
-
 def set_force_compaction(
     storage: ConversationStore,
     *,
     session: ConversationSession,
     forced: bool,
-) -> HistoryScopeState:
-    """Store whether the next run of the scope owning ``session`` compacts first, on the stored row's latest state."""
-    return update_scope_state_on_latest(
-        storage,
-        session=session,
-        update=lambda latest: replace(latest, force_compact_before_next_run=forced),
-    )
+) -> None:
+    """Store whether the next run of the scope owning ``session`` compacts first.
+
+    The flag changes in the metadata the stored row holds, which writes nothing when the flag already reads
+    ``forced``, and ``session`` then holds that metadata.
+    """
+
+    def change(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+        if _scope_state(metadata).force_compact_before_next_run == forced:
+            return metadata
+        return _with_force_flag(metadata, forced=forced)
+
+    storage.update_metadata(session, change)
 
 
 def _latest_summary_row(storage: ConversationStore, session: ConversationSession) -> tuple[int | None, str | None]:
@@ -440,17 +425,3 @@ def append_fold(
 def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id: str) -> set[str]:
     """Return the tool calls the run's mid-turn folds summarized, from the rows they flagged."""
     return summary_rows.folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)
-
-
-def _preserved_seen_event_ids(metadata: dict[str, Any] | None) -> set[str]:
-    raw_seen_ids = _history_state(metadata).get(_SEEN_EVENT_IDS)
-    if not isinstance(raw_seen_ids, list):
-        return set()
-    return {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}
-
-
-def _with_merged_seen_event_ids(metadata: dict[str, Any] | None, *, event_ids: list[str]) -> dict[str, Any] | None:
-    """Return ``metadata`` with ``event_ids`` added to the owner's preserved seen ids, as it was when it holds them all."""
-    existing = _preserved_seen_event_ids(metadata)
-    merged = existing.union(event_id for event_id in event_ids if event_id)
-    return metadata if merged == existing else _with_history_state(metadata, _SEEN_EVENT_IDS, sorted(merged))

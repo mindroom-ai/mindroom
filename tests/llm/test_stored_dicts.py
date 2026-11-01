@@ -7,6 +7,8 @@ decode, are ``tests/llm/test_codecs.py``'s.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from mindroom.llm import usage as llm_usage
@@ -332,7 +334,7 @@ def test_only_context_no_history_keeps_stores_its_flag_and_reads_back_as_it() ->
     assert [Message.from_dict(message.to_dict()) for message in (context, prompt)] == [context, prompt]
 
 
-# --- tool executions and requirements --------------------------------------------------------------------------
+# --- tool executions and the requirements read from them ------------------------------------------------------
 
 
 def test_a_tool_execution_stores_its_id_name_and_the_fields_it_sets() -> None:
@@ -356,7 +358,6 @@ def test_a_tool_execution_stores_every_set_field_under_its_stored_key_false_incl
         confirmed=False,
         confirmation_note="No.",
         external_execution_required=False,
-        external_execution_silent=False,
         approval_type="mindroom_policy",
     )
 
@@ -372,7 +373,6 @@ def test_a_tool_execution_stores_every_set_field_under_its_stored_key_false_incl
         "confirmed": False,
         "confirmation_note": "No.",
         "external_execution_required": False,
-        "external_execution_silent": False,
         "approval_type": "mindroom_policy",
     }
     assert ToolExecution.from_dict(owned.to_dict()) == owned
@@ -470,29 +470,18 @@ def test_a_run_v2026_10_664_stored_with_every_default_reads_as_the_run_stored_no
                 "stop_after_tool_call": True,
             },
         ],
-        "requirements": [
-            {
-                "id": "q",
-                "tool_execution": {
-                    "tool_call_id": "c2",
-                    "tool_name": "add",
-                    "tool_args": {"a": 1},
-                    "requires_confirmation": True,
-                    "approval_type": "mindroom_policy",
-                },
-            },
-        ],
     }
+    # Requirements are no longer stored with the run; layout version 8 folded a paused row's into its tool rows.
+    del now["requirements"]
 
     assert RunRecord.from_dict(earlier).to_dict() == now
     assert RunRecord.from_dict(now) == RunRecord.from_dict(earlier)
 
 
-def test_new_tool_executions_and_requirements_store_no_timing() -> None:
-    stored = RunRequirement(ToolExecution(tool_call_id="c", tool_name="t", tool_args={})).to_dict()
+def test_new_tool_executions_store_no_timing() -> None:
+    stored = ToolExecution(tool_call_id="c", tool_name="t", tool_args={}).to_dict()
 
-    assert "created_at" not in stored
-    assert {"metrics", "created_at"}.isdisjoint(stored["tool_execution"])
+    assert {"metrics", "created_at"}.isdisjoint(stored)
 
 
 def _member_confirmation() -> RunRequirement:
@@ -505,35 +494,62 @@ def _member_confirmation() -> RunRequirement:
     )
     return RunRequirement(
         waiting,
-        id="req-1",
         member_agent_id="writer",
         member_display_name="Writer",
         member_run_id="member-run-1",
     )
 
 
-def test_a_requirement_stores_its_decision_and_member_and_reads_back_as_itself() -> None:
-    owned = _member_confirmation()
-    owned.confirm()
+def test_a_run_stores_a_paused_call_once_and_reads_its_requirement_and_decision_from_it() -> None:
+    """The paused tool execution is the only stored copy of the call: its requirement and decision read from it."""
+    done = ToolExecution(tool_call_id="call_1", tool_name="t", tool_args={}, result="ok")
+    waiting = ToolExecution(
+        tool_call_id="call_2",
+        tool_name="delegate",
+        tool_args={"task": "x"},
+        requires_confirmation=True,
+    )
+    record = RunRecord(run_id="r", agent_id="writer", status=RunStatus.paused, tools=[done, waiting], created_at=1)
+    [requirement] = record.requirements
+    assert requirement.tool_execution is waiting
 
-    stored = owned.to_dict()
+    requirement.confirm()
+    stored = record.to_dict()
 
-    assert {key: value for key, value in stored.items() if key != "tool_execution"} == {
-        "id": "req-1",
-        "confirmation": True,
-        "member_agent_id": "writer",
-        "member_agent_name": "Writer",
-        "member_run_id": "member-run-1",
+    assert "requirements" not in stored
+    assert stored["tools"][1] == {
+        "tool_call_id": "call_2",
+        "tool_name": "delegate",
+        "tool_args": {"task": "x"},
+        "requires_confirmation": True,
+        "confirmed": True,
     }
-    assert stored["tool_execution"] == owned.tool_execution.to_dict()
-    assert RunRequirement.from_dict(stored) == owned
+    assert RunRecord.from_dict(stored).requirements == [requirement]
+
+
+def test_a_paused_team_run_waits_on_its_own_calls_then_its_paused_members_naming_each_member() -> None:
+    own = ToolExecution(tool_call_id="call_1", tool_name="t", requires_confirmation=True)
+    member_call = ToolExecution(tool_call_id="call_1", tool_name="delegate", requires_confirmation=True)
+    member = RunRecord(
+        run_id="member-run-1",
+        agent_id="writer",
+        agent_display_name="Writer",
+        status=RunStatus.paused,
+        tools=[member_call],
+    )
+    team = TeamRunRecord(run_id="t", team_id="x", status=RunStatus.paused, tools=[own], member_responses=[member])
+
+    assert team.requirements == [RunRequirement(own), replace(_member_confirmation(), tool_execution=member_call)]
+    # The team row stores neither the requirements nor its members, whose rows hold their own calls.
+    assert {"requirements", "member_responses"} & set(team.to_dict()) == {"member_responses"}
+    assert team.to_dict()["member_responses"] == [member.to_dict()]
 
 
 @pytest.mark.parametrize(
     ("decision", "note"),
     [("confirm", None), ("reject", "Alice declined it."), ("reject", None), ("reject", "")],
 )
-def test_a_decision_is_recorded_on_the_requirement_and_its_call(decision: str, note: str | None) -> None:
+def test_a_decision_is_recorded_on_the_call(decision: str, note: str | None) -> None:
     """A denial always records the note the model is told: the requester's reason, or that the call was not approved."""
     owned = _member_confirmation()
     if decision == "confirm":
@@ -544,7 +560,7 @@ def test_a_decision_is_recorded_on_the_requirement_and_its_call(decision: str, n
     approved = decision == "confirm"
     recorded_note = None if approved else note or "Not approved by requester"
     execution = owned.tool_execution
-    assert (owned.confirmation, owned.confirmation_note) == (approved, recorded_note)
+    assert owned.confirmation == approved
     assert (execution.confirmed, execution.confirmation_note) == (approved, recorded_note)
     # The call still records that it needed confirmation; a resume clears that once it acts on the decision.
     assert execution.requires_confirmation is True
@@ -575,16 +591,15 @@ def test_a_requirement_that_was_not_denied_has_no_denial_note(decision: str) -> 
         _ = owned.denial_note
 
 
-def test_an_external_result_is_recorded_on_the_requirement_and_its_call() -> None:
+def test_an_external_result_is_recorded_on_the_call() -> None:
     delegation = ToolExecution(tool_call_id="call_3", tool_name="run_subagent", external_execution_required=True)
-    owned = RunRequirement(delegation, id="req-2")
+    owned = RunRequirement(delegation)
     assert owned.needs_external_execution is True
 
     owned.set_external_execution_result("subagent said hi")
 
-    assert (owned.external_execution_result, owned.tool_execution.result) == ("subagent said hi", "subagent said hi")
+    assert delegation.result == "subagent said hi"
     assert owned.is_resolved() is True
-    assert RunRequirement.from_dict(owned.to_dict()) == owned
 
 
 # --- run records -----------------------------------------------------------------------------------------------
@@ -612,13 +627,14 @@ def test_a_minimal_run_stores_its_ids_status_metrics_and_creation_time() -> None
     assert RunRecord.from_dict(owned.to_dict()) == owned
 
 
-def test_a_run_stores_tools_requirements_and_metrics_exactly_when_set() -> None:
-    """``[]`` stays apart from none, so a run with no tool calls and a resolved pause reads back as it was stored."""
-    empty = RunRecord(run_id="r", agent_id="a", tools=[], requirements=[], created_at=1)
+def test_a_run_stores_tools_and_metrics_exactly_when_set() -> None:
+    """``[]`` stays apart from none, so a run with no tool calls reads back as it was stored."""
+    empty = RunRecord(run_id="r", agent_id="a", tools=[], created_at=1)
     absent = RunRecord(run_id="r", agent_id="a", created_at=1)
 
-    assert (empty.to_dict()["tools"], empty.to_dict()["requirements"]) == ([], [])
+    assert empty.to_dict()["tools"] == []
     assert {"tools", "requirements", "metrics"}.isdisjoint(absent.to_dict())
+    assert "requirements" not in empty.to_dict()
     # A new run stores its starting status.
     assert absent.to_dict()["status"] == "RUNNING"
     assert [RunRecord.from_dict(run.to_dict()) for run in (empty, absent)] == [empty, absent]

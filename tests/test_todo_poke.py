@@ -189,6 +189,32 @@ async def test_scan_skips_malformed_unassigned_and_unconfigured_items(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_poke_message_lists_actionable_items_by_priority_then_id(tmp_path: Path) -> None:
+    """The most urgent work comes first, so the visible items are the ones to start with."""
+    todo_root = tmp_path / "todo"
+    _write_thread(
+        todo_root,
+        "scope",
+        items=[
+            _item("b", priority="low"),
+            _item("d", priority="critical"),
+            _item("c", priority="high"),
+            _item("a", priority="high"),
+        ],
+    )
+    deps, _queried_rooms, sent = _deps(todo_root)
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+
+    assert sent[0][1].splitlines()[1:] == [
+        "- `d` [critical] `Task d`",
+        "- `a` [high] `Task a`",
+        "- `c` [high] `Task c`",
+        "- `b` [low] `Task b`",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_scan_routes_room_io_through_assigned_candidates(tmp_path: Path) -> None:
     """One room query gets every assignee candidate while each poke keeps its owner."""
     todo_root = tmp_path / "todo"
@@ -1406,3 +1432,28 @@ async def test_worker_sleeps_first_continues_after_failure_and_stops(
     assert scan.await_args_list[1].kwargs["session_poke_records"] is worker._session_poke_records
     assert scan.await_args_list[0].kwargs["seen_warning_keys"] is worker._seen_warning_keys
     assert scan.await_args_list[1].kwargs["seen_warning_keys"] is worker._seen_warning_keys
+
+
+@pytest.mark.asyncio
+async def test_delivered_poke_records_the_fingerprint_and_scope_key_earlier_releases_stored(tmp_path: Path) -> None:
+    """The stored dedup record keeps its key and fingerprint, so an upgrade does not re-poke unchanged work."""
+    todo_root = tmp_path / "todo"
+    _write_thread(
+        todo_root,
+        "scope",
+        items=[
+            _item("ready", assigned_agent="code", priority="high"),
+            _item("later", assigned_agent="code", depends_on=["ready"]),
+            _item("finished", assigned_agent="code", status="done"),
+        ],
+    )
+    deps, _queried_rooms, sent = _deps(todo_root)
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+
+    assert len(sent) == 1
+    scopes = json.loads((todo_root / "poke_state.json").read_text(encoding="utf-8"))["scopes"]
+    assert list(scopes) == ['["code","!room:localhost","$thread"]']
+    assert scopes['["code","!room:localhost","$thread"]']["last_fingerprint"] == (
+        "c02adae40d4e81ecd90cb4ada2cdd4ec398728657a84c5c12a9c82dded4d84e8"
+    )

@@ -48,7 +48,7 @@ class TestMemoryIntegration:
         return model
 
     @pytest.fixture
-    def mock_memory_functions(self) -> Generator[AsyncMock, None, None]:
+    def mock_memory_functions(self) -> Generator[AsyncMock]:
         """Mock memory prompt splitting."""
         with patch("mindroom.ai.build_memory_prompt_parts", new_callable=AsyncMock) as mock_build:
             # Set up async side effects

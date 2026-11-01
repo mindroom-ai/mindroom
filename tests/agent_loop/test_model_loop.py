@@ -30,7 +30,7 @@ from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
 from tests.agent_loop.helpers import add, boom, context, echo, external, gated, spec, toolkit
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import LoopEvent
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.agent_loop.tools import PlannedCall
+    from mindroom.llm.runs import AnyRunRecord
 
 pytestmark = pytest.mark.asyncio
 
@@ -59,10 +60,10 @@ async def _run(
     messages: list[Message],
     *,
     hooks: LoopHooks = NO_HOOKS,
-    record: RunRecord | None = None,
+    record: AnyRunRecord | None = None,
     request_template: ModelRequest = EMPTY_REQUEST,
     resumed: Sequence[RunRequirement] | None = None,
-) -> tuple[list[LoopEvent], RunRecord]:
+) -> tuple[list[LoopEvent], AnyRunRecord]:
     record = record or _record()
     events = [
         event
@@ -100,7 +101,7 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     assert record.content == "Hello, Alice."
     assert record.status is RunStatus.running  # The run, not the loop, ends the record.
     assert record.tools is None
-    assert record.requirements is None
+    assert record.requirements == []
     assert record.metrics is not None
     assert record.metrics.to_dict() == {
         "input_tokens": 12,
@@ -164,21 +165,44 @@ async def test_a_stream_that_never_completes_raises_a_provider_error() -> None:
 # --- tool loop -------------------------------------------------------------------------------------------------------
 
 
-async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_request() -> None:
+async def test_parallel_calls_complete_as_they_finish_and_answer_the_next_request_in_call_order() -> None:
+    """The later call finishes first and is announced first; the next request still reads both in call order."""
+    later_finished = asyncio.Event()
+
+    async def first(label: str) -> ToolResult:
+        """Answer once the later call has finished.
+
+        Args:
+            label: Its label.
+
+        """
+        await asyncio.wait_for(later_finished.wait(), timeout=5)
+        return ToolResult(content=f"first {label}", images=[AgnoImage(content=b"first", format="png")])
+
+    async def second(label: str) -> ToolResult:
+        """Answer at once.
+
+        Args:
+            label: Its label.
+
+        """
+        later_finished.set()
+        return ToolResult(content=f"second {label}", images=[AgnoImage(content=b"second", format="png")])
+
     model = ScriptedModel(
         [
             calls(
-                tool_call("add", "c1", a=2, b=3),
-                tool_call("echo", "c2", text="yo"),
+                tool_call("first", "c1", label="a"),
+                tool_call("second", "c2", label="b"),
                 content="Checking. ",
                 metrics=usage(10, 2),
             ),
-            answer("2 + 3 = 5.", usage(20, 4)),
+            answer("Both done.", usage(20, 4)),
         ],
     )
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(add, echo)), messages)
+    events, record = await _run(spec(model, toolkit(first, second)), messages)
 
     assert _names(events) == [
         "TextDelta",
@@ -193,17 +217,36 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     ]
     started = [event.call for event in events if isinstance(event, ToolStarted)]
     completed = [event.call for event in events if isinstance(event, ToolCompleted)]
-    assert [call.tool_call_id for call in started] == ["c1", "c2"] == [call.tool_call_id for call in completed]
+    # Starts come in call order; each completion comes as its call finishes, so the later call's comes first.
+    assert [call.tool_call_id for call in started] == ["c1", "c2"]
+    assert [call.tool_call_id for call in completed] == ["c2", "c1"]
     assert record.tools is not None
     # A start reports the call before it ran; its completion reports the call as the run's record holds it.
     assert started == [replace(entry.call, result=None, is_error=None) for entry in record.tools]
-    assert completed == [entry.call for entry in record.tools]
-    assert [(call.result, call.is_error) for call in completed] == [('{"sum": 5}', False), ("yo", False)]
-    assert record.content == "Checking.\n\n2 + 3 = 5."
-    assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "tool", "assistant"]
-    assert [m.tool_call_id for m in messages if m.role == "tool"] == ["c1", "c2"]
-    second = model.requests[1]
-    assert second.messages == tuple(messages[:5])
+    assert completed == [entry.call for entry in reversed(record.tools)]
+    assert [(call.result, call.is_error) for call in completed] == [("second b", False), ("first a", False)]
+    assert record.content == "Checking.\n\nBoth done."
+    # The next request answers the calls in the order the model made them, and their media follow in that order.
+    assert [message.role for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+        "user",
+        "assistant",
+    ]
+    assert [(m.tool_call_id, m.content) for m in messages if m.role == "tool"] == [
+        ("c1", "first a"),
+        ("c2", "second b"),
+    ]
+    follow_up = messages[5]
+    assert (follow_up.content, [image.content for image in follow_up.images or ()]) == (
+        MEDIA_FOLLOW_UP_TEXT,
+        [b"first", b"second"],
+    )
+    second_request = model.requests[1]
+    assert second_request.messages == tuple(messages[:6])
     assert record.metrics is not None
     assert (record.metrics.tokens.input_tokens, record.metrics.tokens.output_tokens) == (30, 6)
 
@@ -345,7 +388,7 @@ async def test_a_denied_call_answers_with_its_note_as_a_failed_call_that_keeps_i
     requirement = RunRequirement(execution)
     requirement.reject("Alice declined.")
     record = _record()
-    record.requirements = [requirement]
+    record.tools = [execution]
     messages = _prompt()
 
     events, _ = await _run(spec(model, gated(echo)), messages, record=record, resumed=[requirement])
@@ -430,7 +473,6 @@ async def test_a_confirmation_pause_announces_the_call_records_a_requirement_and
     assert [event.call.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1"]
     assert len(model.requests) == 1
     assert record.tools is not None
-    assert record.requirements is not None
     plain, paused = record.tools
     assert (plain.result, plain.is_error, plain.is_paused) == ("fine", False, False)
     assert paused == ToolExecution(
@@ -447,9 +489,17 @@ async def test_a_confirmation_pause_announces_the_call_records_a_requirement_and
     assert record.content == "Checking first."
 
 
+def _team_record() -> TeamRunRecord:
+    return TeamRunRecord(run_id="run-1", team_id="squad", metrics=RunMetrics())
+
+
+def _paused_member(execution: ToolExecution) -> RunRecord:
+    return RunRecord(run_id="member-run", agent_id="checker", status=RunStatus.paused, tools=[execution])
+
+
 async def test_a_tool_that_leaves_a_decision_on_the_record_pauses_the_loop_after_its_batch() -> None:
-    """A delegation whose member paused leaves the member's requirement on the record; the loop pauses instead of asking."""
-    record = _record()
+    """A delegation whose member paused leaves the paused member on the team run; the loop pauses instead of asking."""
+    record = _team_record()
 
     def delegate(task: str) -> str:
         """Hand a task to a member that pauses on its own call.
@@ -460,7 +510,7 @@ async def test_a_tool_that_leaves_a_decision_on_the_record_pauses_the_loop_after
         """
         execution = ToolExecution(tool_call_id="m1", tool_name="multiply", tool_args={"task": task})
         execution.requires_confirmation = True
-        record.requirements = [RunRequirement(execution, member_agent_id="checker", member_run_id="member-run")]
+        record.member_responses.append(_paused_member(execution))
         return "Member 'Checker' requires human input before continuing."
 
     model = ScriptedModel([calls(tool_call("delegate", "c1", task="Multiply 6 by 7"), metrics=usage(1, 1))])
@@ -478,10 +528,10 @@ async def test_a_tool_that_leaves_a_decision_on_the_record_pauses_the_loop_after
 
 async def test_a_resume_that_leaves_the_record_waiting_ends_paused_before_any_request() -> None:
     """A team resume's paused member may leave the run waiting again; the loop sends nothing while it waits."""
-    record = _record()
+    record = _team_record()
     execution = ToolExecution(tool_call_id="m1", tool_name="multiply")
     execution.requires_confirmation = True
-    record.requirements = [RunRequirement(execution, member_agent_id="checker", member_run_id="member-run")]
+    record.member_responses.append(_paused_member(execution))
     model = ScriptedModel([])
 
     events, _ = await _run(spec(model), _prompt(), record=record, resumed=())
@@ -490,20 +540,15 @@ async def test_a_resume_that_leaves_the_record_waiting_ends_paused_before_any_re
     assert model.requests == []
 
 
-async def test_an_external_execution_pause_keeps_the_silent_flag() -> None:
+async def test_a_delegation_pause_waits_for_the_external_result() -> None:
     model = ScriptedModel([calls(tool_call("echo", "c1", text="task"), metrics=usage(1, 1))])
 
     events, record = await _run(spec(model, external(echo)), _prompt())
 
     assert events[-1] == LoopEnded(paused=True)
     assert record.tools is not None
-    assert record.requirements is not None
     [paused] = record.tools
-    assert (paused.external_execution_required, paused.external_execution_silent, paused.requires_confirmation) == (
-        True,
-        True,
-        None,
-    )
+    assert (paused.external_execution_required, paused.requires_confirmation) == (True, None)
     assert record.requirements[0].needs_external_execution
 
 

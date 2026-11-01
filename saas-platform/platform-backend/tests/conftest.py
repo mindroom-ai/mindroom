@@ -59,9 +59,6 @@ def _create_no_op_limiter():  # noqa: C901, ANN202
 
         def _check_request_limit(self, request, endpoint, current_limits) -> None:
             """Mock implementation that implements basic rate limiting."""
-            # Debug: Print when this method is called
-            # print(f"DEBUG: _check_request_limit called with endpoint={endpoint}, request.url.path={getattr(request, 'url', None)}")
-
             # Set the view_rate_limit on request.state as the real limiter does
             if hasattr(request, "state"):
                 request.state.view_rate_limit = "5/minute"
@@ -73,12 +70,11 @@ def _create_no_op_limiter():  # noqa: C901, ANN202
                 if hasattr(request, "headers"):
                     ip = request.headers.get("X-Forwarded-For", "127.0.0.1")
 
-                key = f"{endpoint.__name__ if hasattr(endpoint, '__name__') else str(endpoint)}:{ip}"
+                endpoint_name = endpoint.__name__ if hasattr(endpoint, "__name__") else str(endpoint)
+                key = f"{endpoint_name}:{ip}"
 
                 # Check if this endpoint has a limit defined
                 # First check _route_limits (from decorator), then _limits, then default
-                endpoint_name = endpoint.__name__ if hasattr(endpoint, "__name__") else str(endpoint)
-
                 # Special handling for admin endpoints - check request path
                 if hasattr(request, "url") and request.url.path == "/admin/stats":
                     # Force the correct limit for admin/stats endpoint
@@ -130,6 +126,11 @@ def _create_no_op_limiter():  # noqa: C901, ANN202
 
     return MockLimiter()
 
+
+import os
+
+# The tests mock Kubernetes; an empty kubeconfig keeps any unmocked kubectl or helm call off real clusters.
+os.environ["KUBECONFIG"] = os.devnull
 
 # Patch the limiter IMMEDIATELY before any routes load
 import sys

@@ -70,6 +70,7 @@ Another person's waiting message does not hold a follow-up back, because that pe
 A message is waiting only from its arrival during a busy turn until its own turn's dispatch starts, so a follow-up that takes an idle conversation while a message is still being prepared stops for it as for a newer message.
 A bot that left a room cannot clear its jobs state there, so clients ignore jobs state from users who are not joined.
 A restart interrupts a job that waits for its own call's approval, so that call never runs, and the model is told it did not run.
+A saved job stays readable only while its tool's registered factory keeps the module and name the job was built from, so moving or renaming a factory makes that tool's saved jobs unavailable after the upgrade.
 Only functions of toolkits MindRoom assembles become jobs; the knowledge search, skill access, and team delegation functions MindRoom adds beside those toolkits execute inline.
 A wait that ends while the mid-turn judge is still deciding cancels that judgment, so the post-batch check judges the same queue again.
 A primary that dies without closing its connection leaves a worker command running until the runner notices the dead connection, and a local shell job whose process is killed with SIGKILL keeps running.

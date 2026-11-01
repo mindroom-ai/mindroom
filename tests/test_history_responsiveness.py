@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import _finalize_prepared_history
 from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
 from mindroom.history.runtime import (
@@ -30,7 +31,7 @@ from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.token_budget import estimate_compaction_input_tokens
-from tests.conftest import install_model_providers, runtime_paths_for, seed_session
+from tests.conftest import install_model_providers, loop_runs_while_blocked, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     RecordingCompactionLifecycle,
@@ -53,12 +54,11 @@ if TYPE_CHECKING:
 def _agent_inputs(config: Config) -> HistoryPreparationInputs:
     """Resolve the configured test agent's history inputs for a 100-token static prompt."""
     return resolve_entity_preparation_inputs(
-        entity_name="test_agent",
         history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
         runtime_paths=runtime_paths_for(config),
         static_prompt_tokens=100,
-        active_model_name=None,
+        active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
     )
 
@@ -450,9 +450,7 @@ async def test_summary_retry_sizing_allows_loop_progress(
     loop_progress: list[bool] = []
 
     def controlled_estimate(value: str, *, model_id: str | None = None, conservative_fallback: bool = False) -> int:
-        released = threading.Event()
-        loop.call_soon_threadsafe(released.set)
-        loop_progress.append(released.wait(timeout=1))
+        loop_progress.append(loop_runs_while_blocked(loop))
         return estimate_compaction_input_tokens(
             value,
             model_id=model_id,

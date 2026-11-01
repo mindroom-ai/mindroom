@@ -42,6 +42,8 @@ ACCOUNT_ID = "00000000-0000-0000-0000-000000000001"
 SUBSCRIPTION_ID = "11111111-1111-1111-1111-111111111111"
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
 LEGACY = "backend.services.legacy_instance_lifecycle"
+LIFECYCLE = "backend.services.instance_lifecycle"
+SERVICE = "backend.services.provisioner_service"
 PERIOD_END = 1_790_000_000
 
 
@@ -135,7 +137,6 @@ def platform() -> Iterator[Platform]:
         )
         return {"success": True}
 
-    lifecycle = "backend.services.instance_lifecycle"
     platform = Platform(
         db=db,
         kubectl=AsyncMock(return_value=(0, "scaled", "")),
@@ -147,18 +148,18 @@ def platform() -> Iterator[Platform]:
         stripe=Mock(api_key=""),
     )
     with (
-        patch(f"{lifecycle}.ensure_supabase", return_value=db),
+        patch(f"{LIFECYCLE}.ensure_supabase", return_value=db),
         patch("backend.routes.webhooks.ensure_supabase", return_value=db),
         patch("backend.tasks.cleanup.ensure_supabase", return_value=db),
-        patch(f"{lifecycle}.run_kubectl", platform.kubectl),
-        patch(f"{lifecycle}.check_deployment_exists", AsyncMock(return_value=True)),
+        patch(f"{LIFECYCLE}.run_kubectl", platform.kubectl),
+        patch(f"{LIFECYCLE}.check_deployment_exists", AsyncMock(return_value=True)),
         patch(f"{LEGACY}.check_deployment_exists", AsyncMock(return_value=True)),
-        patch(f"{lifecycle}.start_instance", platform.start),
-        patch(f"{lifecycle}.provision_instance", platform.provision),
-        patch(f"{lifecycle}.uninstall_instance", platform.uninstall),
-        patch(f"{lifecycle}.set_instance_openrouter_key_disabled", platform.set_key_disabled),
-        patch(f"{lifecycle}.set_instance_openrouter_key_limit", platform.limit_key),
-        patch(f"{lifecycle}.stripe", platform.stripe),
+        patch(f"{LIFECYCLE}.start_instance", platform.start),
+        patch(f"{LIFECYCLE}.provision_instance", platform.provision),
+        patch(f"{LIFECYCLE}.uninstall_instance", platform.uninstall),
+        patch(f"{LIFECYCLE}.set_instance_openrouter_key_disabled", platform.set_key_disabled),
+        patch(f"{LIFECYCLE}.set_instance_openrouter_key_limit", platform.limit_key),
+        patch(f"{LIFECYCLE}.stripe", platform.stripe),
         patch("backend.routes.webhooks.STRIPE_WEBHOOK_SECRET", "whsec_test"),
     ):
         yield platform
@@ -205,14 +206,23 @@ def _held(now: datetime) -> dict[str, Any]:
     }
 
 
+def _unreachable_cluster() -> AsyncMock:
+    return AsyncMock(side_effect=RuntimeError("kubectl get deployment/mindroom-7 failed: connection refused"))
+
+
 def _pending_deletion(platform: Platform, *, days_ago: float = 1) -> None:
     deleted_at = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat()
     platform.db.row("accounts", id=ACCOUNT_ID).update({"deleted_at": deleted_at, "status": "deleted"})
 
 
 def _stripe_lists(platform: Platform, *subscriptions: Mock) -> None:
+    """List the subscriptions for the account's Stripe customer, and none for any other customer."""
     platform.stripe.api_key = "sk_test"
-    platform.stripe.Subscription.list.return_value.auto_paging_iter.return_value = list(subscriptions)
+    listed = platform.stripe.Subscription.list.return_value
+    listed.auto_paging_iter.return_value = list(subscriptions)
+    platform.stripe.Subscription.list.side_effect = lambda *, customer, **_kwargs: (
+        listed if customer == "cus_1" else Mock(auto_paging_iter=Mock(return_value=[]))
+    )
 
 
 def _stripe_sub(
@@ -269,8 +279,7 @@ def test_webhook_resubscribe_starts_instance_and_reenables_key(platform: Platfor
     platform.db.tables["instances"].append(
         _instance(
             "stopped",
-            lifecycle_stopped_at=(now - timedelta(days=3)).isoformat(),
-            teardown_after=(now + timedelta(days=27)).isoformat(),
+            **_held(now),
         )
     )
 
@@ -331,12 +340,11 @@ async def test_resume_of_a_torn_down_instance_another_replica_claimed_mints_no_k
             platform.instance()["status"] = "provisioning"
         return result
 
-    service = "backend.services.provisioner_service"
     with (
-        patch("backend.services.instance_lifecycle.provision_instance", provision_instance),
+        patch(f"{LIFECYCLE}.provision_instance", provision_instance),
         patch.object(FakeQuery, "execute", claim_after_read),
-        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
-        patch(f"{service}.create_openrouter_key") as mint,
+        patch(f"{SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{SERVICE}.create_openrouter_key") as mint,
     ):
         summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
 
@@ -364,16 +372,15 @@ async def test_plan_redeploy_never_revokes_the_key_another_replica_recorded_but_
             platform.instance().update({"status": "provisioning", "openrouter_key_hash": "hash_other"})
         return result
 
-    service = "backend.services.provisioner_service"
     with (
-        patch("backend.services.instance_lifecycle.provision_instance", provision_instance),
+        patch(f"{LIFECYCLE}.provision_instance", provision_instance),
         patch.object(FakeQuery, "execute", claim_after_read),
-        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
-        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
-        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
-        patch(f"{service}.set_openrouter_key_limit", Mock()),
-        patch(f"{service}.delete_openrouter_key") as delete_key,
-        patch(f"{service}.create_openrouter_key") as mint,
+        patch(f"{SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{SERVICE}.set_openrouter_key_limit", Mock()),
+        patch(f"{SERVICE}.delete_openrouter_key") as delete_key,
+        patch(f"{SERVICE}.create_openrouter_key") as mint,
     ):
         summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
 
@@ -601,8 +608,7 @@ def test_provision_route_restarts_held_instance(platform: Platform) -> None:
     platform.db.tables["instances"].append(
         _instance(
             "stopped",
-            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
-            teardown_after=(now + timedelta(days=28)).isoformat(),
+            **_held(now),
         )
     )
     app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
@@ -626,8 +632,7 @@ def test_admin_lifecycle_overview_reports_last_run_pending_and_stuck(platform: P
         [
             _instance(
                 "stopped",
-                lifecycle_stopped_at=(now - timedelta(days=5)).isoformat(),
-                teardown_after=(now + timedelta(days=25)).isoformat(),
+                **_held(now),
             ),
             _instance("running", id="instance-row-8", instance_id=8, subscription_id="sub-2"),
         ]
@@ -656,7 +661,7 @@ def test_admin_lifecycle_overview_reports_last_run_pending_and_stuck(platform: P
 @pytest.mark.asyncio
 async def test_disabling_a_missing_key_succeeds_but_reenabling_it_raises() -> None:
     missing = Mock(side_effect=OpenRouterKeyNotFoundError("status 404"))
-    with patch("backend.services.provisioner_service.set_openrouter_key_disabled", missing):
+    with patch(f"{SERVICE}.set_openrouter_key_disabled", missing):
         await set_instance_openrouter_key_disabled({"instance_id": 7, "openrouter_key_hash": "gone"}, disabled=True)
         with pytest.raises(OpenRouterKeyNotFoundError):
             await set_instance_openrouter_key_disabled(
@@ -790,8 +795,7 @@ async def test_held_instance_is_not_resumed_on_a_stale_active_status(platform: P
     platform.db.tables["instances"].append(
         _instance(
             "stopped",
-            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
-            teardown_after=(now + timedelta(days=28)).isoformat(),
+            **_held(now),
         )
     )
     platform.stripe.api_key = "sk_test"
@@ -879,8 +883,7 @@ async def test_resume_after_a_failed_secret_publication_reprovisions(platform: P
     platform.db.tables["instances"].append(
         _instance(
             "stopped",
-            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
-            teardown_after=(now + timedelta(days=28)).isoformat(),
+            **_held(now),
         )
     )
     platform.set_key_disabled.side_effect = [OpenRouterKeyNotFoundError("status 404"), None]
@@ -1023,8 +1026,7 @@ async def test_resume_replaces_a_key_that_openrouter_deleted(platform: Platform)
     platform.db.tables["instances"].append(
         _instance(
             "stopped",
-            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
-            teardown_after=(now + timedelta(days=28)).isoformat(),
+            **_held(now),
         )
     )
     platform.set_key_disabled.side_effect = [OpenRouterKeyNotFoundError("status 404"), None]
@@ -1045,8 +1047,7 @@ async def test_failed_key_replacement_is_retried_by_reprovisioning(platform: Pla
     platform.db.tables["instances"].append(
         _instance(
             "stopped",
-            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
-            teardown_after=(now + timedelta(days=28)).isoformat(),
+            **_held(now),
         )
     )
     platform.set_key_disabled.side_effect = [OpenRouterKeyNotFoundError("status 404"), None]
@@ -1094,15 +1095,14 @@ def test_customer_start_of_held_instance_resumes_through_lifecycle(platform: Pla
     platform.db.tables["instances"].append(
         _instance(
             "stopped",
-            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
-            teardown_after=(now + timedelta(days=28)).isoformat(),
+            **_held(now),
         )
     )
     app.dependency_overrides[verify_user] = lambda: {"account_id": ACCOUNT_ID, "email": "customer@example.com"}
     try:
         with (
             patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
-            patch("backend.services.provisioner_service.start_instance", platform.start),
+            patch(f"{SERVICE}.start_instance", platform.start),
         ):
             response = TestClient(app).post("/my/instances/7/start")
     finally:
@@ -1126,13 +1126,12 @@ async def test_operator_reprovision_keeps_held_instance_stopped() -> None:
     )
     kubectl = AsyncMock(return_value=(0, "", ""))
     wait_ready = AsyncMock(return_value=True)
-    service = "backend.services.provisioner_service"
     with (
-        patch(f"{service}.run_kubectl", kubectl),
-        patch(f"{service}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
-        patch(f"{service}._apply_instance_secret", AsyncMock(return_value="hash")),
-        patch(f"{service}.wait_for_deployment_ready", wait_ready),
-        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{SERVICE}.run_kubectl", kubectl),
+        patch(f"{SERVICE}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        patch(f"{SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{SERVICE}.wait_for_deployment_ready", wait_ready),
+        patch(f"{SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
     ):
         result = await provision_instance(
             db,
@@ -1154,8 +1153,7 @@ def test_customer_start_is_refused_when_stripe_contradicts_the_stored_active_sta
     platform.db.tables["instances"].append(
         _instance(
             "stopped",
-            lifecycle_stopped_at=(now - timedelta(days=2)).isoformat(),
-            teardown_after=(now + timedelta(days=28)).isoformat(),
+            **_held(now),
         )
     )
     platform.stripe.api_key = "sk_test"
@@ -1164,7 +1162,7 @@ def test_customer_start_is_refused_when_stripe_contradicts_the_stored_active_sta
     try:
         with (
             patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
-            patch("backend.services.provisioner_service.start_instance", platform.start),
+            patch(f"{SERVICE}.start_instance", platform.start),
         ):
             response = TestClient(app).post("/my/instances/7/start")
     finally:
@@ -1220,18 +1218,17 @@ async def test_failed_secret_publication_never_leaves_stored_metadata_naming_an_
                 return 0, base64.b64encode(value.encode()).decode(), ""
         return 0, "", ""
 
-    service = "backend.services.provisioner_service"
     data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
     with (
-        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
-        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
-        patch(f"{service}.create_openrouter_key", create_key),
-        patch(f"{service}.delete_openrouter_key", delete_key),
-        patch(f"{service}.set_openrouter_key_limit", Mock()),
-        patch(f"{service}._apply_instance_secret", apply_secret),
-        patch(f"{service}.run_kubectl", kubectl),
-        patch(f"{service}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
-        patch(f"{service}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+        patch(f"{SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{SERVICE}.create_openrouter_key", create_key),
+        patch(f"{SERVICE}.delete_openrouter_key", delete_key),
+        patch(f"{SERVICE}.set_openrouter_key_limit", Mock()),
+        patch(f"{SERVICE}._apply_instance_secret", apply_secret),
+        patch(f"{SERVICE}.run_kubectl", kubectl),
+        patch(f"{SERVICE}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        patch(f"{SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
     ):
         with pytest.raises(HTTPException):
             await provision_instance(db, data=data, background_tasks=None, resume_lifecycle_hold=True)
@@ -1267,17 +1264,16 @@ async def test_concurrent_redeploys_keep_only_the_first_recorded_key() -> None:
         return "hash"
 
     helm = AsyncMock(return_value=(0, "deployed", ""))
-    service = "backend.services.provisioner_service"
     data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
     with (
-        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
-        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
-        patch(f"{service}.create_openrouter_key", create_key),
-        patch(f"{service}.delete_openrouter_key", delete_key),
-        patch(f"{service}._apply_instance_secret", apply_secret),
-        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
-        patch(f"{service}.run_helm", helm),
-        patch(f"{service}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+        patch(f"{SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{SERVICE}.create_openrouter_key", create_key),
+        patch(f"{SERVICE}.delete_openrouter_key", delete_key),
+        patch(f"{SERVICE}._apply_instance_secret", apply_secret),
+        patch(f"{SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{SERVICE}.run_helm", helm),
+        patch(f"{SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
         pytest.raises(InstanceClaimLostError),
     ):
         await provision_instance(db, data=data, background_tasks=None)
@@ -1320,16 +1316,15 @@ async def test_a_recorded_key_whose_secret_publication_fails_is_deleted_and_forg
         raise RuntimeError(msg)
 
     helm = AsyncMock(return_value=(0, "deployed", ""))
-    service = "backend.services.provisioner_service"
     data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
     with (
-        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
-        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
-        patch(f"{service}.create_openrouter_key", create_key),
-        patch(f"{service}.delete_openrouter_key", delete_key),
-        patch(f"{service}._apply_instance_secret", apply_secret),
-        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
-        patch(f"{service}.run_helm", helm),
+        patch(f"{SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{SERVICE}.create_openrouter_key", create_key),
+        patch(f"{SERVICE}.delete_openrouter_key", delete_key),
+        patch(f"{SERVICE}._apply_instance_secret", apply_secret),
+        patch(f"{SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{SERVICE}.run_helm", helm),
         pytest.raises(HTTPException),
     ):
         await provision_instance(db, data=data, background_tasks=None)
@@ -1348,7 +1343,7 @@ async def test_revoking_a_key_keeps_the_replacement_another_run_recorded_meanwhi
         # Another provision, which also found the old key gone, records its replacement while this delete runs.
         db.row("instances", instance_id=7)["openrouter_key_hash"] = "hash_new"
 
-    with patch("backend.services.provisioner_service.delete_openrouter_key", delete_key):
+    with patch(f"{SERVICE}.delete_openrouter_key", delete_key):
         await revoke_instance_openrouter_key(db, 7)
 
     assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_new"
@@ -1370,16 +1365,15 @@ async def test_a_recorded_key_whose_secret_publication_fails_stays_recorded_unti
     def create_key(*, management_api_key: str, plan: Any) -> CreatedOpenRouterKey:  # noqa: ARG001
         return CreatedOpenRouterKey("key_ours", "hash_ours", plan.name, plan.monthly_limit_usd, "monthly")
 
-    service = "backend.services.provisioner_service"
     data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
     with (
-        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
-        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
-        patch(f"{service}.create_openrouter_key", create_key),
-        patch(f"{service}.delete_openrouter_key", Mock(side_effect=delete_error)),
-        patch(f"{service}._apply_instance_secret", AsyncMock(side_effect=RuntimeError("Secret apply failed"))),
-        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
-        patch(f"{service}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        patch(f"{SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{SERVICE}.create_openrouter_key", create_key),
+        patch(f"{SERVICE}.delete_openrouter_key", Mock(side_effect=delete_error)),
+        patch(f"{SERVICE}._apply_instance_secret", AsyncMock(side_effect=RuntimeError("Secret apply failed"))),
+        patch(f"{SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{SERVICE}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
         pytest.raises(HTTPException),
     ):
         await provision_instance(db, data=data, background_tasks=None)
@@ -1660,7 +1654,7 @@ def test_fresh_provision_confirms_the_stored_status_with_stripe(platform: Platfo
     try:
         with (
             patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
-            patch("backend.services.provisioner_service.provision_instance", provision),
+            patch(f"{SERVICE}.provision_instance", provision),
         ):
             response = TestClient(app).post("/my/instances/provision")
     finally:
@@ -1693,7 +1687,7 @@ def test_start_of_a_stopped_instance_redeploys_it_for_its_tier(platform: Platfor
     try:
         with (
             patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
-            patch("backend.services.provisioner_service.start_instance", platform.start),
+            patch(f"{SERVICE}.start_instance", platform.start),
         ):
             response = TestClient(app).post("/my/instances/7/start")
     finally:
@@ -1808,7 +1802,6 @@ async def test_plan_upgrade_keeps_the_smaller_key_of_a_stopped_instance(platform
     platform.start.assert_not_awaited()
 
 
-_SERVICE = "backend.services.provisioner_service"
 _REPROVISION_7 = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "instance_id": 7}
 
 
@@ -1834,15 +1827,15 @@ async def test_reprovisioning_on_a_tier_without_budget_zeros_the_stored_key_limi
         return "hash"
 
     with (
-        patch(f"{_SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
-        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
-        patch(f"{_SERVICE}.create_openrouter_key", Mock(side_effect=AssertionError("byok has no budget"))),
-        patch(f"{_SERVICE}.set_openrouter_key_limit", set_limit),
-        patch(f"{_SERVICE}._existing_instance_secret_value", AsyncMock(return_value="same-key")),
-        patch(f"{_SERVICE}._apply_instance_secret", apply_secret),
-        patch(f"{_SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
-        patch(f"{_SERVICE}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
-        patch(f"{_SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+        patch(f"{SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{SERVICE}.create_openrouter_key", Mock(side_effect=AssertionError("byok has no budget"))),
+        patch(f"{SERVICE}.set_openrouter_key_limit", set_limit),
+        patch(f"{SERVICE}._existing_instance_secret_value", AsyncMock(return_value="same-key")),
+        patch(f"{SERVICE}._apply_instance_secret", apply_secret),
+        patch(f"{SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{SERVICE}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        patch(f"{SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
     ):
         await provision_instance(
             db, data={**_REPROVISION_7, "tier": "byok"}, background_tasks=None, resume_lifecycle_hold=True
@@ -1860,10 +1853,10 @@ async def test_reprovisioning_on_a_tier_without_budget_zeros_the_stored_key_limi
 async def test_a_failed_redeploy_keeps_the_previously_deployed_tier() -> None:
     db = FakeSupabase({"instances": [_instance("running", tier="pro", openrouter_key_hash=None)]})
     with (
-        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
-        patch(f"{_SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
-        patch(f"{_SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
-        patch(f"{_SERVICE}.run_helm", AsyncMock(return_value=(1, "", "timed out"))),
+        patch(f"{SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{SERVICE}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{SERVICE}.run_helm", AsyncMock(return_value=(1, "", "timed out"))),
         pytest.raises(HTTPException),
     ):
         await provision_instance(db, data={**_REPROVISION_7, "tier": "byok"}, background_tasks=None)
@@ -1889,13 +1882,13 @@ async def test_reprovisioning_never_shrinks_the_instance_volumes(
 
     created = CreatedOpenRouterKey("key", "hash_new", "label", get_plan_details(tier).included_ai_budget_usd, "monthly")
     with (
-        patch(f"{_SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
-        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
-        patch(f"{_SERVICE}.create_openrouter_key", Mock(return_value=created)),
-        patch(f"{_SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
-        patch(f"{_SERVICE}.run_kubectl", kubectl),
-        patch(f"{_SERVICE}.run_helm", helm),
-        patch(f"{_SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+        patch(f"{SERVICE}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{SERVICE}.create_openrouter_key", Mock(return_value=created)),
+        patch(f"{SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{SERVICE}.run_kubectl", kubectl),
+        patch(f"{SERVICE}.run_helm", helm),
+        patch(f"{SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
     ):
         await provision_instance(db, data={**_REPROVISION_7, "tier": tier}, background_tasks=None)
 
@@ -1919,9 +1912,9 @@ async def test_a_second_instance_for_one_subscription_is_refused_by_the_database
         {"code": "23505", "message": f'duplicate key value violates unique constraint "{constraint}"'}
     )
     with (
-        patch(f"{_SERVICE}.create_instance", Mock(side_effect=duplicate)),
-        patch(f"{_SERVICE}.create_openrouter_key", create_key),
-        patch(f"{_SERVICE}.run_helm", helm),
+        patch(f"{SERVICE}.create_instance", Mock(side_effect=duplicate)),
+        patch(f"{SERVICE}.create_openrouter_key", create_key),
+        patch(f"{SERVICE}.run_helm", helm),
         pytest.raises(HTTPException) as refused,
     ):
         await provision_instance(
@@ -1965,6 +1958,49 @@ async def test_legacy_soft_deleted_instance_of_a_paying_restored_account_runs(pl
     platform.kubectl.assert_not_awaited()
     assert platform.instance()["status"] == "running"
     assert platform.instance()["lifecycle_stopped_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_failed_legacy_lookup_of_a_torn_down_instance_clears_once_a_lookup_succeeds(platform: Platform) -> None:
+    # An admin uninstalled the instance of a lapsed subscription, so it is deprovisioned without a lifecycle hold.
+    _pending_deletion(platform)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(_instance("deprovisioned", openrouter_key_hash=None))
+
+    with patch(f"{LEGACY}.check_deployment_exists", _unreachable_cluster()):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+    assert len(summary.errors) == 1
+    assert platform.instance()["lifecycle_error"]
+
+    with patch(f"{LEGACY}.check_deployment_exists", AsyncMock(return_value=False)):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert summary.errors == []
+    assert platform.instance()["lifecycle_error"] is None
+    assert platform.instance()["status"] == "deprovisioned"
+
+
+@pytest.mark.asyncio
+async def test_resume_during_a_cluster_outage_keeps_the_hold_and_redeploys_nothing(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            **_held(now),
+        )
+    )
+
+    with patch(f"{LIFECYCLE}.check_deployment_exists", _unreachable_cluster()):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert len(summary.errors) == 1
+    platform.provision.assert_not_awaited()
+    platform.start.assert_not_awaited()
+    instance = platform.instance()
+    assert instance["status"] == "stopped"
+    assert instance["lifecycle_stopped_at"] is not None
+    assert instance["lifecycle_error"]
 
 
 @pytest.mark.asyncio
@@ -2095,8 +2131,8 @@ def test_account_pending_deletion_cannot_provision_or_start_instances(
     try:
         with (
             patch("backend.routes.instances.ensure_supabase", return_value=platform.db),
-            patch("backend.services.provisioner_service.provision_instance", provision),
-            patch("backend.services.provisioner_service.start_instance", platform.start),
+            patch(f"{SERVICE}.provision_instance", provision),
+            patch(f"{SERVICE}.start_instance", platform.start),
         ):
             response = TestClient(app).post(path)
     finally:
@@ -2122,11 +2158,11 @@ async def test_an_instance_provisioned_for_an_account_pending_deletion_stays_sto
     )
     kubectl = AsyncMock(return_value=(0, "", ""))
     with (
-        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
-        patch(f"{_SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
-        patch(f"{_SERVICE}.run_kubectl", kubectl),
-        patch(f"{_SERVICE}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
-        patch(f"{_SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+        patch(f"{SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{SERVICE}.run_kubectl", kubectl),
+        patch(f"{SERVICE}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        patch(f"{SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
     ):
         result = await provision_instance(
             db,
@@ -2159,11 +2195,11 @@ async def test_a_hold_that_lands_while_provisioning_keeps_the_instance_stopped(d
         return True
 
     with (
-        patch(f"{_SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
-        patch(f"{_SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
-        patch(f"{_SERVICE}.run_kubectl", kubectl),
-        patch(f"{_SERVICE}.run_helm", helm),
-        patch(f"{_SERVICE}.wait_for_deployment_ready", wait_ready),
+        patch(f"{SERVICE}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{SERVICE}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{SERVICE}.run_kubectl", kubectl),
+        patch(f"{SERVICE}.run_helm", helm),
+        patch(f"{SERVICE}.wait_for_deployment_ready", wait_ready),
     ):
         result = await provision_instance(db, data={**_REPROVISION_7, "tier": "byok"}, background_tasks=None)
 
@@ -2412,7 +2448,7 @@ async def test_nightly_cleanup_pages_through_every_pending_account(platform: Pla
 
     with (
         _cleanup_with_other_tasks_stubbed(),
-        patch("backend.tasks.cleanup._PAGE_SIZE", 1),
+        patch("backend.utils.paging._PAGE_SIZE", 1),
         patch("backend.tasks.cleanup.end_account_billing_at_period_end", side_effect=record),
         patch("backend.tasks.cleanup.cancel_unpaid_subscriptions", AsyncMock()),
     ):
@@ -2447,7 +2483,7 @@ async def test_stopped_instance_clears_a_deleted_key_when_lowering_its_limit(pla
     platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
     platform.db.tables["instances"].append(_instance("stopped", tier="pro", **_pro_key()))
     platform.limit_key.side_effect = OpenRouterKeyNotFoundError("key gone")
-    with patch(f"{_SERVICE}.delete_openrouter_key", side_effect=OpenRouterKeyNotFoundError("key gone")):
+    with patch(f"{SERVICE}.delete_openrouter_key", side_effect=OpenRouterKeyNotFoundError("key gone")):
         first = await reconcile_subscription_instances(SUBSCRIPTION_ID)
         second = await reconcile_subscription_instances(SUBSCRIPTION_ID)
 

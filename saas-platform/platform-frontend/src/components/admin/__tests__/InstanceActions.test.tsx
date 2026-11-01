@@ -25,9 +25,22 @@ describe('InstanceActions Component', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockConfirm.mockReturnValue(true)
-    if (window.location.reload && typeof window.location.reload === 'function') {
-      (window.location.reload as jest.Mock).mockClear?.()
-    }
+  })
+
+  it.each([
+    { action: 'provision', status: 'deprovisioned', button: /Provision/i, endpoint: '/admin/instances/1/provision' },
+    { action: 'start', status: 'stopped', button: /Start/i, endpoint: '/admin/instances/1/start' },
+    { action: 'stop', status: 'running', button: /Stop/i, endpoint: '/admin/instances/1/stop' },
+    { action: 'restart', status: 'running', button: /Restart/i, endpoint: '/admin/instances/1/restart' },
+  ])('should $action a $status instance when clicked', async ({ status, button, endpoint }) => {
+    mockApiCall.mockResolvedValue({ ok: true })
+    const user = userEvent.setup()
+
+    render(<InstanceActions instanceId="1" currentStatus={status} />)
+
+    await user.click(screen.getByRole('button', { name: button }))
+
+    expect(mockApiCall).toHaveBeenCalledWith(endpoint, { method: 'POST' })
   })
 
   describe('Provisioning Actions', () => {
@@ -47,22 +60,6 @@ describe('InstanceActions Component', () => {
       render(<InstanceActions instanceId="1" currentStatus="error" />)
 
       expect(screen.getByRole('button', { name: /Provision/i })).toBeInTheDocument()
-    })
-
-    it('should provision instance when button clicked', async () => {
-      mockApiCall.mockResolvedValue({ ok: true })
-      const user = userEvent.setup()
-
-      render(<InstanceActions instanceId="1" currentStatus="deprovisioned" />)
-
-      await user.click(screen.getByRole('button', { name: /Provision/i }))
-
-      expect(mockApiCall).toHaveBeenCalledWith(
-        '/admin/instances/1/provision',
-        { method: 'POST' }
-      )
-
-      // Reload is an implementation detail - not testing
     })
 
     it('should handle provision failure gracefully', async () => {
@@ -101,38 +98,6 @@ describe('InstanceActions Component', () => {
       expect(screen.queryByRole('button', { name: /^Start$/i })).not.toBeInTheDocument()
     })
 
-    it('should start instance when start clicked', async () => {
-      mockApiCall.mockResolvedValue({ ok: true })
-      const user = userEvent.setup()
-
-      render(<InstanceActions instanceId="1" currentStatus="stopped" />)
-
-      await user.click(screen.getByRole('button', { name: /Start/i }))
-
-      expect(mockApiCall).toHaveBeenCalledWith(
-        '/admin/instances/1/start',
-        { method: 'POST' }
-      )
-
-      // Reload is an implementation detail - not testing
-    })
-
-    it('should stop instance when stop clicked', async () => {
-      mockApiCall.mockResolvedValue({ ok: true })
-      const user = userEvent.setup()
-
-      render(<InstanceActions instanceId="1" currentStatus="running" />)
-
-      await user.click(screen.getByRole('button', { name: /Stop/i }))
-
-      expect(mockApiCall).toHaveBeenCalledWith(
-        '/admin/instances/1/stop',
-        { method: 'POST' }
-      )
-
-      // Reload is an implementation detail - not testing
-    })
-
     it('should show loading state during operations', async () => {
       mockApiCall.mockImplementation(() =>
         new Promise(resolve => setTimeout(() => resolve({ ok: true }), 100))
@@ -158,26 +123,18 @@ describe('InstanceActions Component', () => {
       expect(screen.getByRole('button', { name: /Restart/i })).toBeInTheDocument()
     })
 
+    it('should show stop and restart for provisioning instances, such as a crash loop', () => {
+      render(<InstanceActions instanceId="1" currentStatus="provisioning" />)
+
+      expect(screen.getByRole('button', { name: /Stop/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Restart/i })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /Provision/i })).not.toBeInTheDocument()
+    })
+
     it('should not show restart for stopped instances', () => {
       render(<InstanceActions instanceId="1" currentStatus="stopped" />)
 
       expect(screen.queryByRole('button', { name: /Restart/i })).not.toBeInTheDocument()
-    })
-
-    it('should restart instance when clicked', async () => {
-      mockApiCall.mockResolvedValue({ ok: true })
-      const user = userEvent.setup()
-
-      render(<InstanceActions instanceId="1" currentStatus="running" />)
-
-      await user.click(screen.getByRole('button', { name: /Restart/i }))
-
-      expect(mockApiCall).toHaveBeenCalledWith(
-        '/admin/instances/1/restart',
-        { method: 'POST' }
-      )
-
-      // Reload is an implementation detail - not testing
     })
   })
 

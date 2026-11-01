@@ -260,7 +260,7 @@ def _message_envelope(
 
 
 @pytest.fixture
-def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
+def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop]:
     """Load the workloop plugin into an isolated runtime rooted at tmp_path."""
     runtime_paths = test_runtime_paths(tmp_path)
     plugin_root = _copy_plugin_root(tmp_path)
@@ -726,7 +726,8 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
         runtime_paths=loaded_workloop.runtime_paths,
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),
-        hook_send_message=AsyncMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        logger=get_logger("tests.hooks"),
     )
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -734,7 +735,6 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
             runtime_paths=loaded_workloop.runtime_paths,
             agent_name="code",
             logger=get_logger("tests.workloop.delivery"),
-            redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=ResponseHookService(hook_context=hook_context),
             outbox=make_outbox_mock(),

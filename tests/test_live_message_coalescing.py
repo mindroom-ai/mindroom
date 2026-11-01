@@ -4709,7 +4709,6 @@ async def test_stop_drains_pending_debounce_tasks(tmp_path: Path) -> None:
     """Drain pending debounce tasks when a bot is cleaned up."""
     bot = _make_bot(tmp_path, debounce_ms=1000)
     bot.client = AsyncMock()
-    bot._emit_agent_lifecycle_event = AsyncMock()
     room = _make_room()
     event = _image_event(event_id="$m1")
 

@@ -96,7 +96,7 @@ async def test_the_model_reads_an_oauth_requirement_as_a_successful_call_whose_t
     function = offered_agno_function(Function.from_callable(search_mail))
     planned = PlannedCall(function=function, execution=function.planned_execution("call-1", {"query": "inbox"}))
 
-    [answer] = await dispatch_tool_calls([planned], run=run_context(), middleware=[_policy()])
+    [(_, answer)] = [item async for item in dispatch_tool_calls([planned], run=run_context(), middleware=[_policy()])]
 
     assert answer.content == repr(_OAUTH_PAYLOAD)
     assert answer.tool_call_error is False

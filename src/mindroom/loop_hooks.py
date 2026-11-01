@@ -87,7 +87,6 @@ def agent_loop_hooks(
     return _loop_hooks(
         turn,
         model=build.spec.model,
-        entity_name=agent_name,
         scope=HistoryScope(kind="agent", scope_id=agent_name),
         history_settings=build.history_settings,
         deferred_tools=build.request_template.deferred_tools,
@@ -105,20 +104,16 @@ def agent_loop_hooks(
 def leader_loop_hooks(
     built: BuiltTeam,
     turn: HookTurn,
-    *,
-    entity_name: str | None,
 ) -> LoopHooks:
     """Return the hooks of one team leader's turn or resume, from the built team's model, history settings, and jobs.
 
-    The leader compacts as the team: as the configured team ``entity_name`` names, or as no entity when it is None
-    for an ad hoc team. It has no participation gate, deferred tools, job definitions, or skill-review capture; it
-    owns the turn's queued-message notices and hears of its team's ended jobs.
+    The leader compacts in the team's scope. It has no participation gate, deferred tools, job definitions, or
+    skill-review capture; it owns the turn's queued-message notices and hears of its team's ended jobs.
     """
     jobs = built.leader_jobs
     return _loop_hooks(
         turn,
         model=built.spec.leader.model,
-        entity_name=entity_name,
         scope=HistoryScope(kind="team", scope_id=built.spec.leader.id),
         history_settings=built.history_settings,
         deferred_tools=DeferredTools(),
@@ -135,7 +130,6 @@ def _loop_hooks(
     turn: HookTurn,
     *,
     model: ModelProvider,
-    entity_name: str | None,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     deferred_tools: DeferredTools,
@@ -166,7 +160,6 @@ def _loop_hooks(
         mid_turn_compaction_hook(
             config=turn.config,
             runtime_paths=turn.runtime_paths,
-            entity_name=entity_name,
             scope=scope,
             model_name=turn.model_name,
             model=model,

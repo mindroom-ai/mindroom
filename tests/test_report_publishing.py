@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
@@ -26,6 +27,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -36,18 +38,15 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.test_dynamic_workflows import _RESEARCH_BRIEF_STEPS, file_work_waiting_for_the_loop
 from tests.test_dynamic_workflows import _workflow_spec as dynamic_workflow_spec
-from tests.test_dynamic_workflows import file_work_waiting_for_the_loop
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def _workflow_spec() -> dict[str, object]:
-    return dynamic_workflow_spec(
-        workflow=[{"id": "research", "type": "transform_step", "template": "Research brief for {input.topic}."}],
-        outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
-    )
+    return dynamic_workflow_spec(**_RESEARCH_BRIEF_STEPS)
 
 
 def _make_context(
@@ -693,6 +692,44 @@ def test_report_publishing_store_rejects_static_site_asset_traversal(tmp_path: P
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("confirm_public", [False, "no", "0", "false"])
+async def test_a_model_sending_a_false_like_confirmation_does_not_publish(
+    tmp_path: Path,
+    confirm_public: bool | str,
+) -> None:
+    """The model's arguments are validated as their declared types, so a string "no" means False."""
+    dynamic_workflow_tool = DynamicWorkflowTools()
+    publish = toolkit_offers(ReportPublishingTools(), "publish_report").entrypoint
+    context = _make_context(tmp_path)
+
+    with tool_runtime_context(context):
+        _tool_payload(await dynamic_workflow_tool.create_workflow(_workflow_spec(), reason="initial design"))
+        run = _tool_payload(
+            await dynamic_workflow_tool.run_workflow("competitor-research-report", {"topic": "Agno factories"}),
+        )
+        result = _tool_payload(
+            await publish(
+                source_type="dynamic_workflow_run",
+                source={"workflow_id": "competitor-research-report", "run_id": run["run_id"]},
+                confirm_public=confirm_public,
+            ),
+        )
+
+    assert result["status"] == "error"
+    assert "confirm_public" in result["message"]
+    assert list((context.runtime_paths.storage_root / "report_publishing").rglob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_a_model_sending_a_non_string_slug_is_refused_before_the_revoke_runs() -> None:
+    """Revoking validates its argument too, so a wrong type fails as a validation error."""
+    revoke = toolkit_offers(ReportPublishingTools(), "revoke_public_report").entrypoint
+
+    with pytest.raises(ValidationError, match="slug"):
+        await revoke(slug=123)
+
+
+@pytest.mark.asyncio
 async def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: Path) -> None:
     """Report Publishing should expose Dynamic Workflow reports through a source reference."""
     dynamic_workflow_tool = DynamicWorkflowTools()
@@ -704,11 +741,11 @@ async def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_
         run = _tool_payload(
             await dynamic_workflow_tool.run_workflow("competitor-research-report", {"topic": "Agno factories"}),
         )
-        missing_confirmation = _tool_payload(
+        with_scope = _tool_payload(
             await report_tool.publish_report(
                 source_type="dynamic_workflow_run",
-                source={"workflow_id": "competitor-research-report", "run_id": run["run_id"]},
-                confirm_public=False,
+                source={"workflow_id": "competitor-research-report", "run_id": run["run_id"], "scope": "agent"},
+                confirm_public=True,
             ),
         )
         published = _tool_payload(
@@ -720,14 +757,12 @@ async def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_
         )
         revoked = _tool_payload(await report_tool.revoke_public_report(published["slug"]))
 
-    assert missing_confirmation["status"] == "error"
-    assert "confirm_public" in missing_confirmation["message"]
+    assert with_scope["message"] == "dynamic_workflow_run source contains unsupported field 'scope'."
     assert published["status"] == "ok"
     assert published["source_type"] == "dynamic_workflow_run"
     assert published["source"] == {
         "workflow_id": "competitor-research-report",
         "run_id": run["run_id"],
-        "scope": "agent",
     }
     assert published["public_url"] == f"https://acme.mindroom.chat/mindroom/reports/public/{published['slug']}"
     assert published["public_path"] == f"/mindroom/reports/public/{published['slug']}"
@@ -866,6 +901,31 @@ async def test_report_publishing_tool_rejects_arbitrary_sources(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ({"title": "Demo"}, "static_site source field 'path' is missing."),
+        ({"path": "   ", "title": "Demo"}, "static_site source field 'path' must be a non-empty string."),
+        ({"path": "demo", "title": 7}, "static_site source field 'title' must be a non-empty string."),
+    ],
+)
+async def test_report_publishing_tool_requires_nonblank_source_text(
+    tmp_path: Path,
+    source: dict[str, object],
+    message: str,
+) -> None:
+    """Each required source field must be present and hold nonblank text."""
+    report_tool = ReportPublishingTools()
+    with tool_runtime_context(_make_context(tmp_path)):
+        result = _tool_payload(
+            await report_tool.publish_report(source_type="static_site", source=source, confirm_public=True),
+        )
+
+    assert result["status"] == "error"
+    assert result["message"] == message
+
+
+@pytest.mark.asyncio
 async def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_path: Path) -> None:
     """Only completed Dynamic Workflow runs should be exposed as public report links."""
     report_tool = ReportPublishingTools()
@@ -882,7 +942,7 @@ async def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_p
     spec["outputs"] = [{"id": "brief", "type": "text", "from_step": "write"}]
 
     with tool_runtime_context(context):
-        store, owner_id = dynamic_workflow_store_and_owner(context, "agent")
+        store, owner_id = dynamic_workflow_store_and_owner(context)
         store.create_workflow(
             spec=parse_workflow_spec(spec),
             scope="agent",

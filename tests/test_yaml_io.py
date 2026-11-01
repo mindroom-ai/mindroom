@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import io
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,7 +14,7 @@ import yaml
 from mindroom import yaml_io
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable
 
 _SAMPLE_DOCUMENT = """\
 thread:
@@ -139,8 +142,12 @@ def test_safe_dump_rejects_unsafe_types_like_safe_dump() -> None:
         yaml_io.safe_dump({"bad": Unrepresentable()})
 
 
+def _reject_rename(_source: Path, _target: Path) -> None:
+    raise OSError(errno.EBUSY, "Device or resource busy")
+
+
 def test_write_text_atomic_replaces_content_and_preserves_mode(tmp_path: Path) -> None:
-    """Atomic text replacement must retain file permissions and leave no temp file."""
+    """Atomic text replacement keeps the file's permissions and leaves no temp file."""
     path = tmp_path / "config.yaml"
     path.write_text("old\n", encoding="utf-8")
     path.chmod(0o640)
@@ -150,6 +157,83 @@ def test_write_text_atomic_replaces_content_and_preserves_mode(tmp_path: Path) -
     assert path.read_text(encoding="utf-8") == "new\n"
     assert path.stat().st_mode & 0o777 == 0o640
     assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_text_atomic_rewrites_a_bind_mounted_file_it_may_write_but_does_not_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single-file bind mount owned by another user gets the new content and keeps its own metadata.
+
+    Only a file's owner may set its times or mode, so the in-place copy must change nothing but the content.
+    """
+    path = tmp_path / "config.yaml"
+    path.write_text("old\n", encoding="utf-8")
+    path.chmod(0o664)
+    monkeypatch.setattr(Path, "replace", _reject_rename)
+
+    def owner_only(change: Callable[..., None]) -> Callable[..., None]:
+        def change_unless_target(target: str | Path, *args: object, **kwargs: object) -> None:
+            if os.fspath(target) == os.fspath(path):
+                raise PermissionError(errno.EPERM, "Operation not permitted", os.fspath(target))
+            change(target, *args, **kwargs)
+
+        return change_unless_target
+
+    monkeypatch.setattr(os, "utime", owner_only(os.utime))
+    monkeypatch.setattr(os, "chmod", owner_only(os.chmod))
+
+    yaml_io.write_text_atomic(path, "new\n", copy_when_rename_fails=True)
+
+    assert path.read_text(encoding="utf-8") == "new\n"
+    assert path.stat().st_mode & 0o777 == 0o664
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_text_atomic_refuses_a_bind_mount_unless_copying_is_allowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the copy fallback a failed rename leaves the old content and no temp file."""
+    path = tmp_path / "config.yaml"
+    path.write_text("old\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "replace", _reject_rename)
+
+    with pytest.raises(OSError, match="busy"):
+        yaml_io.write_text_atomic(path, "new\n")
+
+    assert path.read_text(encoding="utf-8") == "old\n"
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_text_atomic_leaves_no_temp_file_when_writing_it_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write that fails before the replace, such as on a full disk, keeps the old content and removes its temp file."""
+    path = tmp_path / "config.yaml"
+    path.write_text("old\n", encoding="utf-8")
+
+    def fail_fsync(_fd: int) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(yaml_io.os, "fsync", fail_fsync)
+
+    with pytest.raises(OSError, match="No space left"):
+        yaml_io.write_text_atomic(path, "new\n", copy_when_rename_fails=True)
+
+    assert path.read_text(encoding="utf-8") == "old\n"
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_write_text_atomic_creates_a_missing_file_readable_only_by_its_owner(tmp_path: Path) -> None:
+    """A file that does not exist yet gets owner-only permissions."""
+    path = tmp_path / "config.yaml"
+
+    yaml_io.write_text_atomic(path, "new\n", copy_when_rename_fails=True)
+
+    assert path.read_text(encoding="utf-8") == "new\n"
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_prefers_libyaml_classes_when_available() -> None:

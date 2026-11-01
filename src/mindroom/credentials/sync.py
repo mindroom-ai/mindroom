@@ -150,8 +150,8 @@ def get_ollama_host(runtime_paths: RuntimePaths, *, configured_host: str | None,
     """
     if configured_host and not saved_first:
         return configured_host
-    saved = (get_runtime_shared_credentials_manager(runtime_paths).load_credentials("ollama") or {}).get("host")
-    return saved or configured_host or OLLAMA_HOST_DEFAULT
+    saved_host = (get_runtime_shared_credentials_manager(runtime_paths).load_credentials("ollama") or {}).get("host")
+    return saved_host or configured_host or OLLAMA_HOST_DEFAULT
 
 
 def get_ollama_api_key(runtime_paths: RuntimePaths) -> str | None:

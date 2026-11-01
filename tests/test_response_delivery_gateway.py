@@ -50,7 +50,7 @@ from mindroom.event_journal.matrix_delivery import (
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.final_delivery import Cancelled, Completed, Failed, FailureCause, Suppressed, Suppression
-from mindroom.history.types import CompactionLifecycleFailure
+from mindroom.history.types import CompactionLifecycleFailure, CompactionLifecycleStart, CompactionOutcome
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.large_messages import (
@@ -203,7 +203,6 @@ def _gateway(
             runtime_paths=runtime_paths_for(config),
             agent_name="agent",
             logger=MagicMock(),
-            redact_message_event=AsyncMock(return_value=True),
             resolver=SimpleNamespace(
                 build_message_target=MagicMock(),
                 deps=SimpleNamespace(
@@ -817,13 +816,9 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.ending == Suppressed(Suppression.HOOK)
         send.assert_not_awaited()
 
-    async def test_a_suppressed_regeneration_reports_the_answer_it_kept(
-        self,
-        tmp_path: Path,
-        alice: PrincipalStore,
-    ) -> None:
-        """A hook that suppresses a regenerated answer leaves the earlier answer shown, and the outcome names it."""
-        gateway = _gateway(tmp_path, alice)
+    @staticmethod
+    def _suppress_answers(gateway: DeliveryGateway) -> None:
+        """Make the gateway's before-response hook suppress every draft it passes through."""
         pass_through = gateway.deps.response_hooks.apply_before_response
 
         async def suppress(**kwargs: object) -> ResponseDraft:
@@ -832,6 +827,22 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             return draft
 
         gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=suppress)
+
+    @staticmethod
+    def _redactable_client(gateway: DeliveryGateway) -> AsyncMock:
+        """Return the gateway's Matrix client, answering each redaction as the homeserver accepts it."""
+        client = gateway.deps.runtime.client
+        client.room_redact = AsyncMock(return_value=nio.RoomRedactResponse("$redaction", _ROOM_ID))
+        return client
+
+    async def test_a_suppressed_regeneration_reports_the_answer_it_kept(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A hook that suppresses a regenerated answer leaves the earlier answer shown, and the outcome names it."""
+        gateway = _gateway(tmp_path, alice)
+        self._suppress_answers(gateway)
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "unused"}))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -846,6 +857,51 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.event_id == "$prior_answer"
         assert outcome.is_visible_response
         send.assert_not_awaited()
+        gateway.deps.runtime.client.room_redact.assert_not_awaited()
+
+    async def test_a_suppressed_answer_redacts_the_placeholder_it_replaced(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A hook that suppresses the answer removes the placeholder the reply showed, leaving no answer event."""
+        gateway = _gateway(tmp_path, alice)
+        self._suppress_answers(gateway)
+        client = self._redactable_client(gateway)
+
+        outcome = await final_in_span(
+            gateway,
+            alice,
+            replace(self._final_request("Handled"), existing_event_id="$placeholder"),
+        )
+
+        assert outcome.ending == Suppressed(Suppression.HOOK)
+        assert outcome.event_id is None
+        client.room_redact.assert_awaited_once_with(_ROOM_ID, "$placeholder", reason="Reply removed")
+
+    async def test_a_regeneration_that_cannot_be_sent_keeps_the_answer_it_regenerated(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A failed edit of an earlier answer leaves that answer shown, and the outcome still names it."""
+        gateway = _gateway(tmp_path, alice)
+        client = gateway.deps.runtime.client
+        # Without a synced room cache the edit cannot learn whether the room is encrypted,
+        # so it fails before it is recorded.
+        client.rooms = {}
+        client.room_get_state_event.return_value = nio.RoomGetStateEventError("denied", "M_FORBIDDEN")
+
+        outcome = await final_in_span(
+            gateway,
+            alice,
+            replace(self._final_request("Updated answer"), existing_event_id="$existing"),
+            regenerates=True,
+        )
+
+        client.room_send.assert_not_awaited()
+        assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED)
+        assert outcome.final_visible_event_id == "$existing"
 
     async def test_ordinary_before_hook_failure_keeps_existing_eventless_behavior(
         self,
@@ -863,6 +919,26 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.ending == Failed(FailureCause.HOOK_FAILED)
         assert outcome.event_id is None
         send_text.assert_not_awaited()
+
+    async def test_a_before_hook_failure_redacts_the_placeholder_it_replaced(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A before-response crash must clean up a visible placeholder instead of leaving it behind."""
+        gateway = _gateway(tmp_path, alice)
+        gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=RuntimeError("hook boom"))
+        client = self._redactable_client(gateway)
+
+        outcome = await final_in_span(
+            gateway,
+            alice,
+            replace(self._final_request("Updated answer"), existing_event_id="$thinking"),
+        )
+
+        assert outcome.ending == Failed(FailureCause.HOOK_FAILED)
+        assert outcome.event_id is None
+        client.room_redact.assert_awaited_once_with(_ROOM_ID, "$thinking", reason="Reply removed")
 
     async def test_a_stop_recorded_while_a_silent_schedule_s_hook_fails_ends_it_cancelled(
         self,
@@ -1359,6 +1435,91 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert client.upload.await_count == 1
         assert client.room_send.await_count == 1
         assert delivery.result is None
+
+    @pytest.mark.parametrize(
+        ("reasoning_chars", "cut"),
+        [(500, False), (12_000, True)],
+        ids=["reasoning-that-fits-kept-whole", "long-reasoning-cut-to-fit"],
+    )
+    async def test_reasoning_never_turns_an_ordinary_reply_into_a_sidecar(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        reasoning_chars: int,
+        cut: bool,
+    ) -> None:
+        """A short answer stays an ordinary edit that keeps its reasoning, cut to the space left when it is long."""
+        gateway = _gateway(tmp_path, alice)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+        text = "r" * reasoning_chars
+
+        outcome = await final_in_span(
+            gateway,
+            alice,
+            replace(
+                self._final_request("answer " * 600),
+                existing_event_id="$placeholder",
+                extra_content={"io.mindroom.reasoning": {"text": text, "duration_ms": 4200}},
+            ),
+        )
+
+        assert outcome.ending == Completed()
+        frozen = (await _turn_row(alice, DeliveryStage.FINAL)).payload
+        assert frozen["m.new_content"]["msgtype"] == "m.text"
+        assert client.upload.await_count == 0
+        # The fallback copy of an edit carries no reasoning; clients that read it do not show it.
+        assert "io.mindroom.reasoning" not in frozen
+        kept = frozen["m.new_content"]["io.mindroom.reasoning"]
+        assert kept["duration_ms"] == 4200
+        if cut:
+            assert kept["text"].endswith("…")
+            assert 1_000 < len(kept["text"]) < reasoning_chars
+        else:
+            assert kept["text"] == text
+
+    async def test_split_strategy_keeps_a_short_answer_whole_with_its_reasoning_cut(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """Under `split`, long reasoning is cut to the segmenting budget, so a short answer stays one message with it."""
+        gateway = _gateway(tmp_path, alice, large_message_strategy="split")
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+
+        outcome = await final_in_span(
+            gateway,
+            alice,
+            replace(
+                self._final_request("answer " * 300),
+                existing_event_id="$placeholder",
+                extra_content={"io.mindroom.reasoning": {"text": "r" * 30_000, "duration_ms": 4200}},
+            ),
+        )
+
+        assert outcome.ending == Completed()
+        delivery = await _turn_row(alice, DeliveryStage.FINAL)
+        assert delivery.result is None
+        assert client.room_send.await_count == 1
+        kept = delivery.payload["m.new_content"]["io.mindroom.reasoning"]
+        assert kept["text"].endswith("…")
 
     async def test_recovery_from_a_new_device_sends_only_the_missing_continuations(
         self,
@@ -3586,4 +3747,71 @@ async def test_compaction_failure_notice_says_the_reply_continues_without_compac
     assert mock_edit.await_args is not None
     assert mock_edit.await_args.args[3]["body"] == (
         "Compaction failed; continuing without compaction. summary model unavailable"
+    )
+
+
+async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path: Path) -> None:
+    """Lifecycle completion edits should reuse the outcome notice text."""
+    gateway = _gateway(tmp_path)
+    outcome = CompactionOutcome(
+        mode="auto",
+        session_id="session-1",
+        scope="agent:agent",
+        summary="Merged summary",
+        summary_model="summary-model",
+        before_tokens=30_000,
+        after_tokens=12_000,
+        window_tokens=100_000,
+        threshold_tokens=80_000,
+        runs_before=20,
+        runs_after=8,
+        compacted_run_count=12,
+        compacted_at="2026-01-01T00:00:00Z",
+        history_budget_tokens=100_000,
+    )
+
+    target = MessageTarget.resolve(_ROOM_ID, None, "$reply")
+    with (
+        patch(
+            "mindroom.delivery_gateway.send_message_outcome",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
+        ) as mock_send,
+        patch(
+            "mindroom.delivery_gateway.edit_message_outcome",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice-edit")),
+        ) as mock_edit,
+    ):
+        event_id = await gateway._send_compaction_lifecycle_start(
+            target=target,
+            reply_to_event_id="$reply",
+            event=CompactionLifecycleStart(
+                mode="auto",
+                session_id="session-1",
+                scope="agent:agent",
+                summary_model="summary-model",
+                before_tokens=30_000,
+                history_budget_tokens=100_000,
+                runs_before=20,
+                threshold_tokens=80_000,
+            ),
+        )
+        await gateway._edit_compaction_lifecycle_success(
+            target=target,
+            outcome=replace(outcome, lifecycle_notice_event_id=event_id, duration_ms=123),
+        )
+
+    assert event_id == "$notice"
+    assert mock_send.await_args is not None
+    start_content = mock_send.await_args.args[2]
+    assert start_content["io.mindroom.compaction"]["threshold_tokens"] == 80_000
+    assert mock_edit.await_args is not None
+    sent_content = mock_edit.await_args.args[3]
+    assert sent_content["io.mindroom.compaction"]["version"] == 3
+    assert sent_content["io.mindroom.compaction"]["history_budget_tokens"] == 100_000
+    assert sent_content["io.mindroom.compaction"]["threshold_tokens"] == 80_000
+    assert sent_content["io.mindroom.compaction"]["duration_ms"] == 123
+    assert sent_content["body"] == outcome.format_notice()
+    assert sent_content["body"] == ("\U0001f4e6 Compacted 12 runs: 30,000 → 12,000 / 100,000 history budget")
+    assert sent_content["formatted_body"] == (
+        "<em>\U0001f4e6 Compacted 12 runs: 30,000 → 12,000 / 100,000 history budget</em>"
     )

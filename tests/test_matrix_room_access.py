@@ -257,6 +257,27 @@ async def test_ensure_all_rooms_passes_resolved_policy(
 
 
 @pytest.mark.asyncio
+async def test_ensure_all_rooms_skips_unmanaged_room_references(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Room IDs and aliases in an agent's rooms are joined as-is, never created as managed rooms."""
+    config = membership_config(tmp_path, agent_rooms=["lobby", "#ops:example.com", "!raw:example.com"])
+    ensured_keys: list[str] = []
+
+    async def ensure_room(*, room_key: str, **_kwargs: object) -> str:
+        ensured_keys.append(room_key)
+        return f"!{room_key}:example.com"
+
+    monkeypatch.setattr(matrix_rooms, "_ensure_room_exists", ensure_room)
+
+    result = await matrix_rooms.ensure_all_rooms_exist(AsyncMock(), config, runtime_paths_for(config))
+
+    assert result == {"lobby": "!lobby:example.com"}
+    assert ensured_keys == ["lobby"]
+
+
+@pytest.mark.asyncio
 async def test_managed_room_reconciliation_has_bounded_overlap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """All configured rooms are attempted with at most four requests in flight."""
     rooms = [f"room{i}" for i in range(12)]

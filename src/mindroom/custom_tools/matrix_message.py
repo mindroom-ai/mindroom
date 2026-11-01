@@ -9,11 +9,9 @@ from pathlib import Path  # noqa: TC003 - tool config sync evaluates constructor
 from threading import Lock
 from typing import TYPE_CHECKING, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter
-
 from mindroom.custom_tools import matrix_conversation_operations
 from mindroom.custom_tools.attachment_helpers import (
-    normalize_str_list,
+    explicit_thread_root,
     resolve_context_thread_id,
     resolve_requested_room_id,
     room_access_allowed,
@@ -25,32 +23,20 @@ from mindroom.custom_tools.matrix_message_idempotency import (
     claim_matrix_message_send,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
-from mindroom.matrix.message_extras import parse_message_extra_sections
+from mindroom.matrix.message_extras import MatrixMessageExtra, parse_message_extra_sections
 from mindroom.requester_identity import is_human_requester_id
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
-    from mindroom.matrix.message_extras import MessageExtraSection
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-
-
-class MatrixMessageExtra(BaseModel):
-    """Model-facing fields for one optional collapsible section."""
-
-    model_config = ConfigDict(strict=True, extra="forbid")
-
-    title: str
-    content: str
-    content_type: Literal["text/plain", "text/markdown", "text/html"] = "text/markdown"
-    collapsed: bool = True
 
 
 def _optional_string(value: str | None, name: str) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or not value.strip():
+    if not value.strip():
         msg = f"{name} must be a non-empty string when provided."
         raise ValueError(msg)
     return value.strip()
@@ -66,7 +52,6 @@ class MatrixMessageTools(Toolkit):
     _MAX_ATTACHMENTS_PER_CALL: ClassVar[int] = 5
     _DEFAULT_READ_LIMIT: ClassVar[int] = 20
     _MAX_READ_LIMIT: ClassVar[int] = 50
-    _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset({"send", "read", "edit", "react"})
 
     def __init__(
         self,
@@ -141,50 +126,36 @@ class MatrixMessageTools(Toolkit):
             return context
         if idempotency_key is None:
             context = replace(context, config=context.current_config, config_provider=None)
-        if not isinstance(action, str) or action.strip().lower() not in self._VALID_ACTIONS:
-            return self._payload("error", message="Unsupported action. Use send, read, edit, or react.")
-        normalized_action = action.strip().lower()
         try:
             recipient = _optional_string(recipient, "recipient")
             thread_id = _optional_string(thread_id, "thread_id")
             event_id = _optional_string(event_id, "event_id")
         except ValueError as exc:
-            return self._payload("error", action=normalized_action, message=str(exc))
-        if not isinstance(new_thread, bool):
-            return self._payload("error", message="new_thread must be a boolean.")
-        if message is not None and not isinstance(message, str):
-            return self._payload("error", message="message must be a string.")
-        if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool)):
-            return self._payload("error", message="limit must be an integer.")
-        if attachments is not None and not isinstance(attachments, list):
-            return self._payload("error", message="attachments must be a list of attachment IDs or file paths.")
-        references, attachment_error = normalize_str_list(attachments, field_name="attachments")
-        if attachment_error is not None:
-            return self._payload("error", message=attachment_error)
+            return self._payload("error", action=action, message=str(exc))
+        references = [reference.strip() for reference in attachments or [] if reference.strip()]
         if len(references) > self._MAX_ATTACHMENTS_PER_CALL:
             return self._payload("error", message="attachments cannot exceed 5 per call.")
-        if normalized_action != "send" and (recipient is not None or new_thread or references):
+        if action != "send" and (recipient is not None or new_thread or references):
             return self._payload("error", message="recipient, new_thread, and attachments are only supported for send.")
         if idempotency_key is not None:
-            if not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 256:
+            if not idempotency_key.strip() or len(idempotency_key) > 256:
                 return self._payload("error", message="idempotency_key must be nonblank and at most 256 characters.")
-            if normalized_action != "send" or attachments:
+            if action != "send" or references:
                 return self._payload(
                     "error",
                     message="idempotency_key is only supported for text sends without attachments.",
                 )
         if new_thread and thread_id is not None:
             return self._payload("error", message="Use either new_thread=True or thread_id, not both.")
-        if event_id is not None and normalized_action not in {"edit", "react"}:
+        if event_id is not None and action not in {"edit", "react"}:
             return self._payload("error", message="event_id is only supported for edit and react.")
         parsed_extras = None
         if message_extras:
-            if normalized_action not in {"send", "edit"}:
+            if action not in {"send", "edit"}:
                 return self._payload("error", message="message_extras is only supported for send and edit.")
             try:
-                sections = TypeAdapter(list[MatrixMessageExtra]).validate_python(message_extras)
-                parsed_extras = parse_message_extra_sections([section.model_dump() for section in sections])
-            except (TypeError, ValueError) as exc:
+                parsed_extras = parse_message_extra_sections(message_extras)
+            except ValueError as exc:
                 return self._payload("error", message=str(exc))
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
@@ -193,7 +164,7 @@ class MatrixMessageTools(Toolkit):
             return self._payload("error", room_id=resolved_room_id, message="Not authorized to access the target room.")
         dispatch = partial(
             self._dispatch_action,
-            action=normalized_action,
+            action=action,
             message=message,
             recipient=recipient,
             room_id=resolved_room_id,
@@ -224,7 +195,7 @@ class MatrixMessageTools(Toolkit):
         new_thread: bool,
         event_id: str | None,
         attachments: list[str],
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         limit: int | None,
         send_claim: MatrixMessageSendClaim | None = None,
     ) -> str:
@@ -274,6 +245,9 @@ class MatrixMessageTools(Toolkit):
                         message=f"Recipient '{recipient}' uses room conversations. Omit new_thread/thread_id or use thread_id=\"room\".",
                     )
                 thread_id = "room"
+        # A replayed keyed send delivers its stored target, so only a new request resolves its thread.
+        if stored_intent is None and thread_id is not None and thread_id != "room":
+            thread_id = await explicit_thread_root(context, room_id=room_id, thread_id=thread_id)
         effective_thread_id = resolve_context_thread_id(
             context,
             room_id=room_id,

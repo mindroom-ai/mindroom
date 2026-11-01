@@ -19,15 +19,10 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import EventJournalStore
-    from mindroom.hooks import (
-        HookMatrixAdmin,
-        HookMessageSender,
-        HookRegistryState,
-        HookRoomStatePutter,
-        HookRoomStateQuerier,
-    )
+    from mindroom.hooks import HookContextSupport, HookRegistryState
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
+    from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.skill_learning.runner import SkillReviewRunner
@@ -85,6 +80,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     def scheduled_tasks(self) -> ScheduledTaskRuntime: ...  # noqa: D102
 
     @property
+    def script_runtime(self) -> ScriptRuntimeLifecycle: ...  # noqa: D102
+
+    @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
 
     @property
@@ -107,13 +105,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Note that a bot admitted a conversation event in one room."""
         ...
 
-    def hook_message_sender(self) -> HookMessageSender | None: ...  # noqa: D102
-
-    def hook_room_state_querier(self) -> HookRoomStateQuerier | None: ...  # noqa: D102
-
-    def hook_room_state_putter(self) -> HookRoomStatePutter | None: ...  # noqa: D102
-
-    def hook_matrix_admin(self) -> HookMatrixAdmin | None: ...  # noqa: D102
+    def router_hook_context(self) -> HookContextSupport | None:
+        """Return the router bot's hook support, whose client backs what another bot's own cannot."""
+        ...
 
     def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
         """Return the Matrix client of one running managed entity."""
@@ -145,24 +139,8 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Handle a managed bot completing its first sync."""
         ...
 
-    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
-        """Revoke room-backed reply grants until the router refreshes them."""
-        ...
-
     def refresh_agent_reply_memberships(self) -> Awaitable[None]:
         """Rebuild room-backed reply grants from the router client."""
-        ...
-
-    async def reconcile_reply_authorized_calls(self) -> None:
-        """Revoke denied calls, then reconcile newly authorized joined rooms."""
-        ...
-
-    async def reconcile_pending_invites(self) -> None:
-        """Recheck cached room invites against each entity's invitation policy."""
-        ...
-
-    async def revoke_reply_authorized_calls(self) -> None:
-        """End active calls without running positive room reconciliation."""
         ...
 
     def send_approval_notice(

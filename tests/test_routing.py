@@ -47,9 +47,7 @@ if TYPE_CHECKING:
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound config for routing tests."""
     runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
-    bound_config = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound_config, runtime_paths)
-    return bound_config
+    return bind_runtime_paths(config, runtime_paths)
 
 
 async def suggest_responder_for_message(
@@ -156,10 +154,7 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     """Curated seam modules should not freeze low-level runtime or prompt-plumbing helpers as public API."""
     hidden_attrs = {
         "mindroom.agents": ("create_state_storage",),
-        "mindroom.ai": (
-            "queued_message_signal_context",
-            "scrub_queued_notice_session_context",
-        ),
+        "mindroom.ai": ("queued_message_signal_context",),
     }
     for module_name, attrs in hidden_attrs.items():
         module = importlib.import_module(module_name)

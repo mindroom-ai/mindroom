@@ -18,11 +18,10 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from mindroom.tool_system.plugins import config_plugins
-from tests.conftest import completed_ai_response_mock, completing, install_model_providers, seed_session
+from tests.conftest import completed_ai_response_mock, completing, install_model_providers
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
-    from types import SimpleNamespace
 
     from agno.run import RunContext as AgnoRunContext
     from httpx import Response
@@ -58,10 +57,10 @@ from mindroom.config.judgment import TypeSafeJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import (
-    ScopeSessionContext,
     create_scope_session_storage,
     load_bound_scope_session,
 )
@@ -81,7 +80,6 @@ from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_turn import CompletedAttempt
 from mindroom.routing import ResponderSelection
 from mindroom.teams import leader as leader_module
@@ -108,9 +106,6 @@ from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
 from tests.teams.squad import built_team, resolved_members, team_spec
 from tests.teams.squad import member as team_member
 from tests.turn_model_helpers import turn_model
-
-_QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
-_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 
 
 @contextmanager
@@ -198,7 +193,6 @@ def _prepared_team_execution_context(
         summary=None,
         run_metadata=cast("dict[str, Any] | None", run_metadata)
         or build_prepared_history_metadata_content(prepared_history),
-        unseen_event_ids=[],
         prepared_history=prepared_history,
         runtime_model_name="default",
     )
@@ -3518,7 +3512,6 @@ class TestTeamCompletion:
         assert preparation_ctx.thread_id is None
         assert preparation_ctx.requester_id is None
         assert re.fullmatch(r"[0-9a-f]{32}", preparation_ctx.correlation_id)
-        assert preparation_kwargs["configured_team_name"] == "super_team"
         assert preparation_ctx.matrix_run_metadata is None
         assert preparation_kwargs["runtime_model"].model_name == "default"
 
@@ -3785,14 +3778,12 @@ class TestTeamCompletion:
         request_log_contexts: list[dict[str, object]] = []
         run_metadata: list[dict[str, Any] | None] = []
 
-        async def mock_prepare_team_execution(ctx: object, **_kwargs: object) -> SimpleNamespace:
-            correlation_id = ctx.correlation_id
-            assert isinstance(correlation_id, str)
+        async def mock_prepare_team_execution(ctx: ResponseTurnContext, **_kwargs: object) -> PreparedTeamExecution:
             assert ctx.requester_id is None
-            prepared_correlation_ids.append(correlation_id)
+            prepared_correlation_ids.append(ctx.correlation_id)
             return _prepared_team_execution_context(
                 final_prompt="Build it",
-                run_metadata={"correlation_id": correlation_id},
+                run_metadata={"correlation_id": ctx.correlation_id},
             )
 
         async def run(*_args: object, ctx: RunContext, **_kwargs: object) -> AsyncIterator[object]:
@@ -4555,8 +4546,8 @@ class TestTeamCompletion:
         ]
 
     @pytest.mark.asyncio
-    async def test_prepare_openai_team_execution_scrubs_queued_notices_and_renders_the_messages_as_sent(self) -> None:
-        """OpenAI team prep should recover notice facts and render the leader's messages as they are sent."""
+    async def test_prepare_openai_team_execution_renders_the_messages_as_sent(self) -> None:
+        """OpenAI team prep renders the leader's messages as they are sent."""
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
             models={"default": ModelConfig(provider="openai", id="test-model")},
@@ -4566,69 +4557,6 @@ class TestTeamCompletion:
         built = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
         leader = ScriptedModel([], model_params={"temperature": 0.7})
         built = replace(built, spec=replace(built.spec, leader=replace(built.spec.leader, model=leader)))
-        prior_response_id = "prior-openai-team-response"
-
-        def notice(marker: object) -> Message:
-            return Message(
-                role="user",
-                content=QUEUED_MESSAGE_NOTICE_TEXT,
-                provider_data={
-                    _QUEUED_NOTICE_MARKER_KEY: marker,
-                    _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
-                },
-            )
-
-        loaded = load_bound_scope_session(
-            member_names=["general"],
-            team_name=None,
-            session_id="session-openai-team-prep",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-        )
-        assert loaded is not None
-        scope_context = loaded.with_session()
-        assert scope_context.session is not None
-        scope_context.session.runs = [
-            TeamRunRecord(
-                run_id="run-queued-notice",
-                team_id=scope_context.session.owner_id,
-                session_id="session-openai-team-prep",
-                content="done",
-                messages=[notice(True)],
-                member_responses=[
-                    RunRecord(run_id="member-run-queued-notice", session_id="session-openai-team-prep"),
-                ],
-            ),
-        ]
-        seed_session(scope_context.storage, scope_context.session)
-
-        def collect_messages(run: RunRecord | TeamRunRecord) -> list[Message]:
-            messages = list(run.messages)
-            if isinstance(run, TeamRunRecord):
-                for member_response in run.member_responses:
-                    messages.extend(collect_messages(member_response))
-            return messages
-
-        def assert_notices_persisted(runs: Sequence[RunRecord | TeamRunRecord]) -> None:
-            persisted_messages = [message for run in runs for message in collect_messages(run)]
-            persisted_notices = [
-                message
-                for message in persisted_messages
-                if isinstance(message.provider_data, dict)
-                and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) == "persisted"
-            ]
-            assert len(persisted_notices) == 1
-            assert persisted_notices[0].content == QUEUED_MESSAGE_NOTICE_TEXT
-            assert persisted_notices[0].provider_data == {
-                _QUEUED_NOTICE_MARKER_KEY: "persisted",
-                _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
-            }
-            assert not any(
-                isinstance(message.provider_data, dict) and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) is True
-                for message in persisted_messages
-            )
-
         scope_context = load_bound_scope_session(
             member_names=["general"],
             team_name=None,
@@ -4638,26 +4566,22 @@ class TestTeamCompletion:
             execution_identity=None,
         )
         assert scope_context is not None
-        assert scope_context.session is not None
+        team_execution = _prepared_team_execution_context(
+            final_prompt="Previous team reply\n\nAnalyze this.",
+            messages=[
+                Message(role="assistant", content="Previous team reply"),
+                Message(role="user", content="Analyze this."),
+            ],
+        )
+        prepared_execution = _PreparedExecutionContext(
+            turn=team_execution.turn,
+            unseen_event_ids=[],
+            prepared_history=team_execution.prepared_history,
+        )
 
-        async def fake_prepare_bound_team_execution_context(_ctx: object, **kwargs: object) -> SimpleNamespace:
-            prepared_scope_context = kwargs["scope_context"]
-            assert isinstance(prepared_scope_context, ScopeSessionContext)
-            assert prepared_scope_context.session is not None
-            assert_notices_persisted(prepared_scope_context.session.runs)
-            return _prepared_team_execution_context(
-                final_prompt="Previous team reply\n\nAnalyze this.",
-                messages=[
-                    Message(role="assistant", content="Previous team reply"),
-                    Message(role="user", content="Analyze this."),
-                ],
-            )
-
-        with (
-            patch(
-                "mindroom.execution_preparation._prepare_bound_team_execution_context",
-                new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
-            ),
+        with patch(
+            "mindroom.teams.envelope.prepare_bound_team_run_context",
+            new=AsyncMock(return_value=prepared_execution),
         ):
             prepared = await openai_compat._prepare_openai_team_execution(
                 scope_context=scope_context,
@@ -4676,17 +4600,6 @@ class TestTeamCompletion:
         # The run records no route settings: nothing reads them, and the request log keeps them.
         assert {"tools_schema", "model_params"}.isdisjoint(prepared.run_metadata)
         assert prepared.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
-        scope_context = load_bound_scope_session(
-            member_names=["general"],
-            team_name=None,
-            session_id="session-openai-team-prep",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-        )
-        assert scope_context is not None
-        assert scope_context.session is not None
-        assert_notices_persisted(scope_context.session.runs)
 
     @pytest.mark.parametrize(
         ("mode", "expected"),

@@ -16,6 +16,7 @@ FORBIDDEN_FACADE_MODULES = {
     "mindroom.tool_system.runtime",
 }
 PRIVATE_REGISTRY_INTERFACE_VISIBILITY = {
+    "mindroom.tool_system.google_workspaces",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.registration",
@@ -74,10 +75,7 @@ def _tach_interface_exposes(
     for interface in config["interfaces"]:
         if tuple(interface["from"]) != from_modules:
             continue
-        interface_visibility = set(interface.get("visibility", []))
-        if visibility is None and interface_visibility:
-            continue
-        if visibility is not None and interface_visibility != visibility:
+        if set(interface.get("visibility", [])) != (visibility or set()):
             continue
         matching_interfaces.append(list(interface["expose"]))
     assert len(matching_interfaces) == 1
@@ -85,7 +83,7 @@ def _tach_interface_exposes(
 
 
 def _private_registry_exports() -> set[str]:
-    """Return the registry members only the plugin loader and registration may use.
+    """Return the registry members only the plugin loader and the registration modules may use.
 
     Tach applies only an exclusive interface to the modules it names, so that interface repeats the public members
     those modules also use.
@@ -217,45 +215,21 @@ def _function_local_imports(py_path: Path) -> set[str]:
 def _builtin_tool_forbidden_importers() -> dict[str, set[str]]:
     importers: dict[str, set[str]] = {}
     for py_path in (SOURCE_ROOT / "tools").glob("*.py"):
-        importer_module = f"mindroom.tools.{py_path.stem}"
-        imported_modules = {
-            module_name
-            for node in ast.walk(ast.parse(py_path.read_text()))
-            for module_name in _imported_module_names(node)
-            if module_name in FORBIDDEN_BUILTIN_TOOL_DEPENDENCIES
-        }
-        if imported_modules:
-            importers[importer_module] = imported_modules
+        if (
+            imported_modules := _collect_nested_imports(ast.parse(py_path.read_text()))
+            & FORBIDDEN_BUILTIN_TOOL_DEPENDENCIES
+        ):
+            importers[f"mindroom.tools.{py_path.stem}"] = imported_modules
     return importers
 
 
 def _builtin_registration_modules() -> list[str]:
-    modules: list[str] = []
-    for py_path in (SOURCE_ROOT / "tools").glob("*.py"):
-        if py_path.name == "__init__.py":
-            continue
-        imported_modules = {
-            module_name
-            for node in ast.walk(ast.parse(py_path.read_text()))
-            for module_name in _imported_module_names(node)
-        }
-        if "mindroom.tool_system.registration" in imported_modules:
-            modules.append(f"mindroom.tools.{py_path.stem}")
-    return sorted(modules)
-
-
-def _manifest_modules() -> list[str]:
-    tree = ast.parse((SOURCE_ROOT / "tools" / "__init__.py").read_text())
-    modules: list[str] = []
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            modules.extend(alias.name for alias in node.names if alias.name.startswith("mindroom.tools."))
-        elif isinstance(node, ast.ImportFrom):
-            if node.module == "mindroom.tools":
-                modules.extend(f"mindroom.tools.{alias.name}" for alias in node.names)
-            elif node.module and node.module.startswith("mindroom.tools."):
-                modules.append(node.module)
-    return modules
+    return sorted(
+        f"mindroom.tools.{py_path.stem}"
+        for py_path in (SOURCE_ROOT / "tools").glob("*.py")
+        if py_path.name != "__init__.py"
+        and "mindroom.tool_system.registration" in _collect_nested_imports(ast.parse(py_path.read_text()))
+    )
 
 
 def test_tool_system_runtime_and_extensions_modules_are_removed() -> None:
@@ -312,11 +286,23 @@ def test_builtin_tools_depend_only_on_declaration_and_registration_leaves() -> N
     assert not _builtin_tool_forbidden_importers()
 
 
-def test_builtin_tool_manifest_explicitly_imports_every_registration_module() -> None:
-    """The deterministic manifest should list every built-in registration module exactly once."""
-    manifest_modules = _manifest_modules()
-    assert len(manifest_modules) == len(set(manifest_modules))
-    assert sorted(manifest_modules) == _builtin_registration_modules()
+def test_builtin_tool_manifest_imports_every_registration_module_once() -> None:
+    """The package imports each registration module once, itself or through its factory, and exports no list of names."""
+    tree = ast.parse((SOURCE_ROOT / "tools" / "__init__.py").read_text())
+    manifest = [
+        f"mindroom.tools.{alias.name}" if node.module == "mindroom.tools" else node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module and (node.module + ".").startswith("mindroom.tools.")
+        for alias in node.names
+    ]
+    assert sorted(manifest) == _builtin_registration_modules()
+    assert "__all__" not in {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
 
 
 def test_tach_does_not_expose_catalog_private_registry_helpers() -> None:

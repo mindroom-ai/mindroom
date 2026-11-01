@@ -34,16 +34,13 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Show parts of MindRoom Chat to the user: the Computer panel (a live view of the agent's own worker browser), the Canvas panel (an interactive web page the agent writes, such as a dashboard, slides, or a form, which the user can answer; opt in with enable_show_canvas), the Members panel, or a Settings section. Sends a UI request; does not navigate or control the user's own browser.",
       "display_name": "Chat UI",
       "docs_url": "https://docs.mindroom.chat/tools/chat-ui/",
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "show_computer",
         "open_settings",
         "open_panel",
         "show_canvas",
@@ -65,7 +62,7 @@
       "category": "communication",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -194,9 +191,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Invite the MindRoom router to the current Matrix room",
       "display_name": "Invite Router",
       "docs_url": "https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing",
@@ -222,9 +217,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Low-level Matrix event, state, and room search operations (send_event, get_state, put_state, redact, get_event, search)",
       "display_name": "Matrix API",
       "docs_url": "https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_api",
@@ -249,9 +242,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Read, send, edit, and react to messages in Matrix rooms and threads",
       "display_name": "Matrix Message",
       "docs_url": "https://docs.mindroom.chat/tools/matrix-message/",
@@ -276,9 +267,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Discover available agents and view Matrix room details, members, and conversation threads",
       "display_name": "Matrix Room",
       "docs_url": "https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_room",
@@ -302,7 +291,7 @@
       "category": "communication",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "When empty, OpenAI models use OPENAI_API_KEY and OpenRouter voice models use OPENROUTER_API_KEY.",
           "env": [],
@@ -550,9 +539,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Stop the reply another agent or team is writing in the current conversation",
       "display_name": "Stop Reply",
       "docs_url": "https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply",
@@ -591,7 +578,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -817,7 +804,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
-        "httpx"
+        "pytelegrambotapi"
       ],
       "description": "Send messages and media, manage messages, and read chat details via a Telegram bot",
       "display_name": "Telegram",
@@ -855,9 +842,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Move a conversation thread into another room",
       "display_name": "Thread Move",
       "docs_url": "https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_move",
@@ -882,9 +867,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Mark conversation threads as resolved or reopen them",
       "display_name": "Thread Resolution",
       "docs_url": "https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_resolution",
@@ -910,9 +893,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Write or update a summary of a conversation thread",
       "display_name": "Thread Summary",
       "docs_url": "https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_summary",
@@ -937,9 +918,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Add, remove, and view tags on conversation threads",
       "display_name": "Thread Tags",
       "docs_url": "https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_tags",
@@ -980,7 +959,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -995,7 +974,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -1010,7 +989,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -1189,7 +1168,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -1233,7 +1212,7 @@
       "category": "communication",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "WhatsApp Business API access token",
           "env": [
@@ -1566,7 +1545,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Apify API token for authentication",
           "env": [
@@ -1718,7 +1697,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Basic-auth password for deployments that support it; use token for Bitbucket Cloud.",
           "env": [
@@ -1733,7 +1712,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Scoped Bitbucket Cloud API token; takes precedence over password.",
           "env": [
@@ -1848,7 +1827,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -2016,9 +1995,7 @@
       "config_fields": [],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Mathematical calculator with basic and advanced operations",
       "display_name": "Calculator",
       "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#calculator",
@@ -2049,7 +2026,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -2172,7 +2149,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -2198,7 +2175,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Optional bearer token for Anthropic-compatible gateways.",
           "env": [],
@@ -2446,7 +2423,6 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
-        "agno",
         "pydantic",
         "pyyaml"
       ],
@@ -2507,7 +2483,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Confluence password",
           "env": [
@@ -2522,7 +2498,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Confluence API key, alternative to password",
           "env": [
@@ -2609,7 +2585,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -2622,7 +2598,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -2635,7 +2611,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Default headers sent only to the Base URL (JSON format)",
           "env": [],
@@ -2728,7 +2704,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Daytona API key",
           "env": [
@@ -2836,7 +2812,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Environment variables for the sandbox (JSON format)",
           "env": [],
@@ -3078,7 +3054,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -3166,7 +3142,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -3302,7 +3278,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -3596,9 +3572,7 @@
       ],
       "consumes_workspace_paths": true,
       "default_execution_target": "worker",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Read, write, list, and search files in the agent workspace",
       "display_name": "File Tools",
       "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#file",
@@ -3794,7 +3768,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -3863,7 +3837,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4015,7 +3989,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4097,7 +4071,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4308,8 +4282,7 @@
         "google-cloud-bigquery",
         "google-api-python-client",
         "google-auth",
-        "google-auth-httplib2",
-        "google-auth-oauthlib"
+        "google-auth-httplib2"
       ],
       "description": "Query Google BigQuery - list tables, describe schemas, and run SQL queries",
       "display_name": "Google BigQuery",
@@ -4337,7 +4310,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4591,7 +4564,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -4768,7 +4741,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4783,7 +4756,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4908,7 +4881,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -4958,7 +4931,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -5102,7 +5075,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "The ModelsLab API key for authentication",
           "env": [
@@ -5351,7 +5324,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Neo4j password",
           "env": [
@@ -5475,7 +5448,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -5697,7 +5670,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -5886,7 +5859,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -5960,9 +5933,7 @@
       ],
       "consumes_workspace_paths": true,
       "default_execution_target": "worker",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Execute Python code, manage files, and install packages",
       "display_name": "Python Tools",
       "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#python",
@@ -6154,7 +6125,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -6226,7 +6197,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6241,7 +6212,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6256,7 +6227,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6345,7 +6316,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6487,9 +6458,7 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Run Python scripts in the background, monitor them, or cancel them",
       "display_name": "Background Scripts",
       "docs_url": "https://docs.mindroom.chat/tools/background-scripts/",
@@ -6690,9 +6659,7 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Sleep utility for introducing delays and pauses in execution",
       "display_name": "Sleep",
       "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#sleep",
@@ -6716,7 +6683,7 @@
       "category": "development",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6731,7 +6698,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6746,7 +6713,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -6985,7 +6952,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -7214,7 +7181,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -7489,7 +7456,7 @@
       "category": "email",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -7752,9 +7719,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Add daily-cached installed and latest MindRoom release information to the agent system prompt",
       "display_name": "MindRoom Update Awareness",
       "docs_url": "https://docs.mindroom.chat/tools/#mindroom-update-awareness",
@@ -7793,9 +7758,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Inspect retained token usage without modifying session storage",
       "display_name": "Usage Statistics",
       "docs_url": "https://docs.mindroom.chat/usage/#usage_stats",
@@ -7875,7 +7838,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Composio API key",
           "env": [],
@@ -8072,9 +8035,7 @@
       "config_fields": [],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Get a confirmation link to reset an account connection for this agent",
       "display_name": "OAuth Connections",
       "docs_url": "https://docs.mindroom.chat/oauth-framework/#oauth_connections",
@@ -8114,7 +8075,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Shopify Admin API access token.",
           "env": [
@@ -8291,9 +8252,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Create a single-use script that wakes this agent when background work finishes",
       "display_name": "Callback Manager",
       "docs_url": "https://docs.mindroom.chat/external-triggers/#agent-callbacks",
@@ -8318,7 +8277,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "API key from ClickUp",
           "env": [
@@ -8735,9 +8694,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Create and manage signed external trigger endpoints",
       "display_name": "External Trigger Manager",
       "docs_url": "https://docs.mindroom.chat/external-triggers/",
@@ -8881,8 +8838,7 @@
       "dependencies": [
         "google-api-python-client",
         "google-auth",
-        "google-auth-httplib2",
-        "google-auth-oauthlib"
+        "google-auth-httplib2"
       ],
       "description": "Create, read, and edit documents through the connected user's Google Docs",
       "display_name": "Google Docs",
@@ -9073,8 +9029,7 @@
       "dependencies": [
         "google-api-python-client",
         "google-auth",
-        "google-auth-httplib2",
-        "google-auth-oauthlib"
+        "google-auth-httplib2"
       ],
       "description": "List, create, update, complete, and delete tasks in the connected user's Google Tasks",
       "display_name": "Google Tasks",
@@ -9136,7 +9091,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -9547,7 +9502,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Internal integration token",
           "env": [
@@ -9659,7 +9614,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "OpenBB PAT for premium data providers. Optional - works without it using yfinance.",
           "env": [
@@ -9940,9 +9895,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Schedule tasks and reminders, and manage upcoming runs",
       "display_name": "Scheduler",
       "docs_url": "https://docs.mindroom.chat/scheduling/#scheduler",
@@ -9972,9 +9925,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Create directories that other agents can read from their own workers",
       "display_name": "Shared Directories",
       "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories",
@@ -10028,7 +9979,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -10054,7 +10005,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -10204,9 +10155,7 @@
       "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Choose which AI model responds in the current conversation thread",
       "display_name": "Thread Model",
       "docs_url": "https://docs.mindroom.chat/configuration/models/#thread_model",
@@ -10264,7 +10213,7 @@
       "category": "productivity",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -10505,7 +10454,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -10629,7 +10578,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -10834,7 +10783,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [],
@@ -10941,7 +10890,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Brandfetch API key for Brand API",
           "env": [
@@ -11067,7 +11016,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -11430,7 +11379,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -12024,7 +11973,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -12253,7 +12202,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -12684,7 +12633,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -12833,7 +12782,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -13012,7 +12961,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Oxylabs dashboard password",
           "env": [
@@ -13177,7 +13126,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -13426,7 +13375,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -13509,7 +13458,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -13793,7 +13742,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -14444,7 +14393,7 @@
       "category": "research",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "API access key from Unsplash Developer account",
           "env": [
@@ -14662,7 +14611,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Long-lived access token from Home Assistant",
           "env": [],
@@ -14742,7 +14691,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -14787,7 +14736,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": null,
           "env": [
@@ -14850,7 +14799,7 @@
       "category": "social",
       "config_fields": [
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Twitter API Bearer token",
           "env": [
@@ -14865,7 +14814,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Twitter API consumer key",
           "env": [
@@ -14880,7 +14829,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Twitter API consumer secret",
           "env": [
@@ -14895,7 +14844,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Twitter API access token",
           "env": [
@@ -14910,7 +14859,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Twitter API access token secret",
           "env": [
@@ -15014,7 +14963,7 @@
           "validation": null
         },
         {
-          "authored_override": true,
+          "authored_override": false,
           "default": null,
           "description": "Client secret from Server-to-Server OAuth app",
           "env": [

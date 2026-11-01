@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import { API_BASE_URL } from "@/lib/api";
 import { fetchUsage } from "@/services/usageService";
 import { listSchedules } from "@/services/scheduleService";
 import type { ScheduleTask } from "@/types/schedule";
@@ -89,7 +88,7 @@ export type RuntimeLabel =
 export async function fetchRuntimeActivity(
   signal?: AbortSignal,
 ): Promise<RuntimeLabel> {
-  const response = await fetch(`${API_BASE_URL}/api/responses/activity`, {
+  const response = await fetch("/api/responses/activity", {
     signal,
     cache: "no-store",
     credentials: "same-origin",
@@ -155,11 +154,16 @@ export function useHomeData() {
         !isRecord(data) ||
         !Array.isArray(data.tasks) ||
         !data.tasks.every(isHomeSchedule) ||
+        !Array.isArray(data.unreadable_rooms) ||
         typeof data.timezone !== "string"
       )
         throw new Error("Invalid schedules response");
       new Intl.DateTimeFormat("en-US", { timeZone: data.timezone }).format();
-      return { tasks: data.tasks, timezone: data.timezone };
+      return {
+        tasks: data.tasks,
+        timezone: data.timezone,
+        unreadableRoomCount: data.unreadable_rooms.length,
+      };
     },
     retry: false,
     staleTime: 60_000,
