@@ -733,8 +733,8 @@ async def test_apply_message_enrichment_preserves_hook_chain_metadata(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_message_enrichment_can_stay_out_of_history(tmp_path: Path) -> None:
-    """Transient plugin context should use non-persisted user context."""
+async def test_transient_message_enrichment_stays_out_of_the_prompt_text(tmp_path: Path) -> None:
+    """A ``persist=False`` item stays out of the prompt text and goes into the turn's transient enrichment."""
     bot = _agent_bot(tmp_path)
     dispatch = PreparedDispatch(
         requester_user_id="@user:localhost",

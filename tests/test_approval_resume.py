@@ -74,12 +74,15 @@ async def test_a_paused_approval_resumes_into_a_completed_run(
 
     assert isinstance(outcome, CompletedApprovalRun)
     assert run.executed == ([(6, 7)] if case.approve else [])
+    # The run stores the receipt its resumed request sent where it sent it, after the decided call's result.
+    [request] = run.code.requests
+    receipt = request.messages[-1]
     call, waiting = waiting_call(run.paused)
     if case.approve:
         expected = resumed(
             run.paused,
             decided=approved_call(waiting, PRODUCT),
-            added=[result(call, PRODUCT)],
+            added=[result(call, PRODUCT), receipt],
             answered=_answered(case.code),
         )
     else:
@@ -87,7 +90,7 @@ async def test_a_paused_approval_resumes_into_a_completed_run(
         expected = resumed(
             run.paused,
             decided=denied_call(waiting, reason),
-            added=[result(call, reason, is_error=True)],
+            added=[result(call, reason, is_error=True), receipt],
             answered=_answered(case.code),
         )
     expected = as_stored(expected)
@@ -96,7 +99,6 @@ async def test_a_paused_approval_resumes_into_a_completed_run(
     assert _without_published_metadata(stored) == _without_published_metadata(run.paused)
     assert run.paused.to_dict() == before
     # The resumed request carries the stored prompt, the turn, the decided call's result, then the receipt once.
-    [request] = run.code.requests
     assert [message.role for message in request.messages] == ["system", "user", "assistant", "tool", "user"]
     assert receipt_call_ids(request) == [f"call-{run_id}"]
     assert request.messages[-2].tool_call_id == f"call-{run_id}"
@@ -126,12 +128,15 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
     assert case.helper is not None
     child_record = child_store.get_run(child.run_id)
     assert isinstance(child_record, RunRecord)
+    # Each resumed run stores the receipt its request sent, after the decided call's result.
+    child_receipt = run.helper.requests[-1].messages[-1]
+    assert receipt_call_ids(run.helper.requests[-1]) == [child_call["id"]]
     assert settled(child_record) == settled(
         as_stored(
             resumed(
                 paused_child,
                 decided=approved_call(child_waiting, PRODUCT),
-                added=[result(child_call, PRODUCT)],
+                added=[result(child_call, PRODUCT), child_receipt],
                 answered=_answered(case.helper),
             ),
         ),
@@ -142,11 +147,12 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
         f"\nSubagent ID: {child.subagent_id}"
     )
     call, waiting = waiting_call(run.paused)
+    [request] = run.code.requests
     expected = as_stored(
         resumed(
             run.paused,
             decided=replace(waiting, result=handed_over, external_execution_required=False),
-            added=[result(call, handed_over, is_error=None)],
+            added=[result(call, handed_over, is_error=None), request.messages[-1]],
             answered=_answered(case.code),
         ),
     )
@@ -169,7 +175,6 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
         DELEGATION_STATE_KEY,
     )
     # The parent reads the child's answer where it read the pause, on its own stored request, then the receipt.
-    [request] = run.code.requests
     assert [message.role for message in request.messages] == ["system", "user", "assistant", "tool", "user"]
     assert request.messages[-2].tool_call_id == "call-delegate-approved"
     assert str(request.messages[-2].content).startswith("42")

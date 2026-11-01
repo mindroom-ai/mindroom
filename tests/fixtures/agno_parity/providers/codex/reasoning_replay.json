@@ -171,6 +171,7 @@
       ],
       "instructions": "You are a helpful assistant.",
       "reasoning": {
+        "summary": "auto",
         "effort": "medium"
       },
       "store": false

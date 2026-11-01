@@ -498,7 +498,6 @@ __all__ = [
     "agent_response_should_respond",
     "aioresponse",
     "approval_manager_for_test",
-    "bind_mock_config_event_journal",
     "bind_runtime_paths",
     "build_private_template_dir",
     "bypass_authorization",
@@ -2503,18 +2502,6 @@ class FakeCredentialsManager:
         )
 
 
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Skip tests marked with requires_matrix unless MATRIX_SERVER_URL is set."""
-    if os.environ.get("MATRIX_SERVER_URL"):
-        # Matrix server available, don't skip
-        return
-
-    skip_marker = pytest.mark.skip(reason="requires_matrix: no MATRIX_SERVER_URL set")
-    for item in items:
-        if "requires_matrix" in item.keywords:
-            item.add_marker(skip_marker)
-
-
 # Test credentials constants - not real credentials, safe for testing
 TEST_PASSWORD = "mock_test_password"  # noqa: S105
 TEST_ACCESS_TOKEN = "mock_test_token"  # noqa: S105
@@ -2735,11 +2722,6 @@ def bind_runtime_paths(
         bound.defaults.thread_summary_first_threshold = sys.maxsize
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
     return bound
-
-
-def bind_mock_config_event_journal(mock_config: MagicMock) -> None:
-    """Give a config mock the durable-store contract the bot runtime reads."""
-    mock_config.event_journal.backend = "sqlite"
 
 
 def runtime_paths_for(config: Config) -> RuntimePaths:
