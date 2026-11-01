@@ -732,7 +732,7 @@ async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -
 
 @pytest.mark.asyncio
 async def test_setup_rooms_and_memberships_reconciles_root_space_once(tmp_path) -> None:  # noqa: ANN001
-    """Space reconciliation should happen as a post-room phase during startup."""
+    """Space and server emoji room reconciliation should happen as a post-room phase during startup."""
     orchestrator = _MultiAgentOrchestrator(
         runtime_paths=orchestrator_runtime_paths(tmp_path),
         config=Config(
@@ -758,6 +758,7 @@ async def test_setup_rooms_and_memberships_reconciles_root_space_once(tmp_path) 
             new=AsyncMock(side_effect=[{"lobby": "!room1:localhost"}, {"lobby": "!room1:localhost"}]),
         ),
         patch.object(orchestrator._rooms, "link_root_space", new=AsyncMock()) as mock_root_space,
+        patch.object(orchestrator._rooms, "ensure_server_emoji_room", new=AsyncMock()) as mock_emoji_room,
         patch.object(orchestrator._rooms, "_ensure_room_invitations", new=AsyncMock()),
         patch("mindroom.orchestration.rooms.get_rooms_for_entity", return_value=["lobby"]),
         patch("mindroom.orchestration.rooms.resolve_room_aliases", return_value=["!room1:localhost"]),
@@ -769,6 +770,7 @@ async def test_setup_rooms_and_memberships_reconciles_root_space_once(tmp_path) 
     assert mock_root_space.await_args_list == [
         call({"lobby": "!room1:localhost"}),
     ]
+    mock_emoji_room.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
