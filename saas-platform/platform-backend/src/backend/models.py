@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from backend.pricing import Discounts, Product, Trial
+from backend.pricing import BillingCycle, Discounts, Product, Trial
 
 
 class InstanceOut(BaseModel):
@@ -46,8 +46,9 @@ class SubscriptionOut(BaseModel):
     ]
     stripe_subscription_id: str | None = None
     stripe_customer_id: str | None = None
-    # The Stripe price the subscription pays, in cents per billing cycle; None until a Stripe price is recorded.
-    billing_cycle: Literal["monthly", "yearly"] | None = None
+    # The subscription's Stripe price, None before one is recorded; `price_cents` is also None for a price without
+    # a unit amount.
+    billing_cycle: BillingCycle | None = None
     price_cents: int | None = None
     current_period_start: str | None = None
     current_period_end: str | None = None
