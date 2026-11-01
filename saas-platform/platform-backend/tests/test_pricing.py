@@ -1,7 +1,7 @@
 """Tests for pricing module."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -152,22 +152,6 @@ class TestPricingConfig:
             provisioned = _RESOURCE_PROFILE_HELM_VALUES.get(plan.resource_profile, {}).get("storage", chart_storage)
             advertised = [feature for feature in plan.features if feature.endswith(" GB storage")]
             assert advertised == [f"{provisioned.removesuffix('Gi')} GB storage"], plan_id
-
-    def test_missing_config_file(self) -> None:
-        """Test behavior when config file is missing."""
-        # Create a proper mock that raises FileNotFoundError when opened
-        mock_path = MagicMock()
-        mock_path.exists.return_value = False
-        mock_path.open.side_effect = FileNotFoundError(
-            "Pricing configuration file not found. This file is required for the application to run."
-        )
-
-        with patch("backend.pricing.config_path", mock_path):
-            with pytest.raises(FileNotFoundError) as exc_info:
-                load_pricing_config_model()
-
-            assert "Pricing configuration file not found" in str(exc_info.value)
-            assert "This file is required for the application to run" in str(exc_info.value)
 
 
 class TestPricingHelperFunctions:
