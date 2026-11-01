@@ -39,7 +39,10 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
+import {
+  confirmLeavingUnsavedDrafts,
+  useUnsavedDraft,
+} from "@/hooks/useUnsavedDraft";
 import type { ConfigPath } from "@/lib/configSchema";
 import { getConfigValidationIssues } from "@/lib/configValidation";
 import {
@@ -801,7 +804,11 @@ function AgentKeys({ checked }: { checked: ServicesListing }) {
             className="h-9 rounded-md border border-input bg-background px-3 text-sm"
             value={target?.value ?? UNSCOPED_VALUE}
             disabled={targets.length === 0}
-            onChange={(event) => setSelected(event.target.value)}
+            // Another target remounts the services below, dropping an open editor.
+            onChange={(event) => {
+              if (confirmLeavingUnsavedDrafts())
+                setSelected(event.target.value);
+            }}
           >
             {targets.map((item) => (
               <option key={item.value} value={item.value}>

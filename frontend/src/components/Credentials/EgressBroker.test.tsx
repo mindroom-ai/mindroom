@@ -1948,6 +1948,28 @@ describe("egress broker service editor", () => {
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
   });
 
+  it("asks before changing Keys for drops an editor with unsaved changes", async () => {
+    keyAgents = { shared_agents: ["coder"], has_unscoped_agents: true };
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await openEdit("GitHub");
+    openMoreOptions();
+    fill("Description", "typed but not saved");
+
+    selectTarget("");
+
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+    expect(screen.getByLabelText("Keys for")).toHaveValue("coder");
+    expect(screen.getByLabelText("Description")).toHaveValue(
+      "typed but not saved",
+    );
+
+    confirmSpy.mockReturnValue(true);
+    selectTarget("");
+
+    expect(screen.getByLabelText("Keys for")).toHaveValue("");
+    await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
+  });
+
   it("opens another service straight away when nothing was changed", async () => {
     await openEdit("GitHub");
     fireEvent.click(await rowAction("Edit service for OpenAI"));
