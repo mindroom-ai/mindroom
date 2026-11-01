@@ -36,7 +36,8 @@ class _ConfiguredToken(NamedTuple):
 
 
 def _appservice_token_from_env(runtime_paths: RuntimePaths) -> _ConfiguredToken | None:
-    token = (runtime_paths.env_value(MATRIX_APPSERVICE_TOKEN_ENV) or "").strip()
+    plain = runtime_paths.plain_env_value((MATRIX_APPSERVICE_TOKEN_ENV,))
+    token = plain[0].strip() if plain else ""
     file_path = runtime_env_path(runtime_paths, MATRIX_APPSERVICE_TOKEN_FILE_ENV)
     if token and file_path is not None:
         msg = f"Set only one of {MATRIX_APPSERVICE_TOKEN_ENV} or {MATRIX_APPSERVICE_TOKEN_FILE_ENV}"

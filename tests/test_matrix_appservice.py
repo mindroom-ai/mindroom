@@ -105,6 +105,14 @@ def test_resolve_managed_account_auth_reads_token_file(tmp_path: Path, encoding:
     assert auth.appservice_token == APPSERVICE_TOKEN
 
 
+def test_a_blank_exported_appservice_token_does_not_hide_the_env_file_token(tmp_path: Path) -> None:
+    """A blank export, as a compose passthrough of an unset variable produces, counts as unset."""
+    (tmp_path / ".env").write_text(f"MATRIX_APPSERVICE_TOKEN={APPSERVICE_TOKEN}\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path, MATRIX_MANAGED_ACCOUNT_AUTH="appservice", MATRIX_APPSERVICE_TOKEN="")
+
+    assert resolve_managed_account_auth(runtime_paths).appservice_token == APPSERVICE_TOKEN
+
+
 @pytest.mark.asyncio
 async def test_register_appservice_user_uses_passwordless_spec_flow(tmp_path: Path) -> None:
     """Registration uses bearer auth and never sends a password."""
