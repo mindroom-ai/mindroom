@@ -1320,7 +1320,11 @@ export function ModelConfig() {
           className="h-8 text-xs"
         />
         <p className="text-xs text-muted-foreground">
-          Leave empty to use{" "}
+          Empty uses{" "}
+          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+            OPENAI_BASE_URL
+          </code>
+          , else{" "}
           <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
             {DEFAULT_OPENAI_BASE_URL}
           </code>

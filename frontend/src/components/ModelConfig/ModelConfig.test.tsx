@@ -692,7 +692,7 @@ describe("ModelConfig", () => {
     });
   });
 
-  it("accepts empty base URL for OpenAI and uses default endpoint", async () => {
+  it("accepts empty base URL for OpenAI and saves no endpoint of its own", async () => {
     render(<ModelConfig />);
 
     fireEvent.click(screen.getByRole("button", { name: /add model/i }));
@@ -712,6 +712,9 @@ describe("ModelConfig", () => {
     expect(
       within(addRow).getByPlaceholderText("https://api.openai.com/v1"),
     ).toBeTruthy();
+    expect(within(addRow).getByText(/^Empty uses/).textContent).toBe(
+      "Empty uses OPENAI_BASE_URL, else https://api.openai.com/v1.",
+    );
     fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
 
     await waitFor(() => {
