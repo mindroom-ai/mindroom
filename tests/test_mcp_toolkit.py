@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.tools.function import ToolResult
@@ -11,7 +11,7 @@ from agno.tools.function import ToolResult
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.mcp.config import MCPServerConfig
-from mindroom.mcp.errors import MCPToolUnavailableError
+from mindroom.mcp.errors import MCPToolCallError, MCPToolUnavailableError
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.oauth.providers import OAuthConnectionRequired
@@ -511,6 +511,94 @@ async def test_oauth_mcp_toolkit_bridge_respects_tool_filters(tmp_path: Path) ->
     assert result.content == "ok"
     assert manager.calls == [("demo", "ping", {}, credentials_manager, worker_target, None)]
     assert manager.call_filters == [(("ping",), ()), (("ping",), ())]
+
+
+_GENERIC_FAILURE = "An unexpected error occurred. Please try again."
+
+
+class _FailingManager(_DummyManager):
+    def __init__(self, input_schema: dict[str, Any] | None) -> None:
+        super().__init__()
+        self.input_schema = input_schema
+
+    async def call_tool(self, server_id: str, *_args: object, **_kwargs: object) -> ToolResult:
+        """Fail every call the way a server that hides the cause fails it, with the schema the call was sent against."""
+        raise MCPToolCallError(server_id, _GENERIC_FAILURE, input_schema=self.input_schema)
+
+
+def _search_toolkit(schema: dict[str, Any], *, known_schema: bool = True) -> MindRoomMCPToolkit:
+    """Return a toolkit offering ``search``, whose calls fail and carry ``schema`` when the manager knows it."""
+    tool = MCPDiscoveredTool(
+        remote_name="search",
+        function_name="demo_search",
+        description="Search",
+        input_schema=schema,
+        output_schema=None,
+    )
+    manager = _FailingManager(schema if known_schema else None)
+    return MindRoomMCPToolkit(server_id="demo", manager=manager, catalog=_catalog(tool))
+
+
+@pytest.mark.asyncio
+async def test_a_typed_mcp_tool_names_arguments_its_schema_does_not_list_when_a_call_fails() -> None:
+    """A generic failure names the unlisted arguments and gives the schema; with listed names it stays unchanged."""
+    schema = {"type": "object", "properties": {"query": {"type": "string"}}, "additionalProperties": True}
+    search = _search_toolkit(schema).functions["demo_search"]
+
+    with pytest.raises(MCPToolCallError) as unlisted:
+        await search(query="x", limit=5)
+    with pytest.raises(MCPToolCallError) as listed:
+        await search(query="x")
+
+    assert str(unlisted.value) == (
+        f"{_GENERIC_FAILURE}\n\n"
+        "Arguments not listed in the properties of the input schema of 'search': 'limit'.\n"
+        f"Input schema of 'search': {json.dumps(schema)}"
+    )
+    assert str(listed.value) == _GENERIC_FAILURE
+
+
+@pytest.mark.asyncio
+async def test_an_mcp_call_failure_names_at_most_twenty_unlisted_arguments() -> None:
+    """Past twenty unlisted names, the note counts the rest."""
+    search = _search_toolkit({"type": "object", "properties": {}}).functions["demo_search"]
+
+    with pytest.raises(MCPToolCallError) as failed:
+        await search(**{f"name{index}": index for index in range(23)})
+
+    named = ", ".join(f"'name{index}'" for index in range(20))
+    assert f"'search': {named}, and 3 more.\n" in str(failed.value)
+
+
+@pytest.mark.asyncio
+async def test_an_mcp_call_failure_stays_unchanged_when_the_called_tools_schema_is_unknown() -> None:
+    """A failure that does not carry the schema the call was sent against keeps the server's error."""
+    search = _search_toolkit({"type": "object", "properties": {}}, known_schema=False).functions["demo_search"]
+
+    with pytest.raises(MCPToolCallError) as failed:
+        await search(limit=5)
+
+    assert str(failed.value) == _GENERIC_FAILURE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "properties": {"query": {"type": "string", "description": "wörd " * 50_000}}},
+        {"type": "object", "properties": {"kind": {"enum": [f"kind-{index}" for index in range(50_000)]}}},
+    ],
+    ids=["long-description", "long-enum"],
+)
+async def test_an_mcp_call_failure_repeats_at_most_a_bounded_part_of_a_large_schema(schema: dict[str, Any]) -> None:
+    """A schema past the bound is cut, unescaped, and the error says it was cut and how long the whole schema is."""
+    whole = json.dumps(schema, ensure_ascii=False)
+
+    with pytest.raises(MCPToolCallError) as failed:
+        await _search_toolkit(schema).functions["demo_search"](unlisted=1)
+
+    hint = str(failed.value).split("Input schema of 'search': ", 1)[1]
+    assert hint == f"{whole[:4000]}... [truncated, {len(whole)} characters in all]"
 
 
 def test_mcp_toolkit_filters_remote_tools() -> None:

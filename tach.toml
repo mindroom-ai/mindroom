@@ -703,6 +703,7 @@ visibility = [
     "mindroom.bot",
     "mindroom.conversation_resolver",
     "mindroom.matrix.conversation_reads",
+    "mindroom.scheduling.tasks",
     "mindroom.thread_export.projected_history",
     "mindroom.model_selection_scope",
 ]
@@ -4417,6 +4418,7 @@ visibility = ["mindroom.cli.desktop"]
 path = "mindroom.desktop.bridge_session"
 depends_on = [
     "mindroom.desktop.bridge",
+    "mindroom.desktop.command_journal",
     "mindroom.desktop.filesystem",
     "mindroom.desktop.login_environment",
     "mindroom.desktop.native_config",
@@ -5585,6 +5587,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.constants",
     "mindroom.entity_resolution",
+    "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
@@ -6818,6 +6821,7 @@ depends_on = ["mindroom.knowledge.refresh_runner"]
 [[modules]]
 path = "mindroom.knowledge.refresh_runner"
 depends_on = [
+    "mindroom.knowledge.file_listing",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
     "mindroom.config.main",

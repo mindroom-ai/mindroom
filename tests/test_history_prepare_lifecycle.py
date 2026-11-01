@@ -19,7 +19,6 @@ from mindroom.execution_preparation import prepare_agent_execution_context, prep
 from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_tokens
 from mindroom.history.runtime import (
     PreparedScopeHistory,
-    prepare_bound_scope_history,
     prepare_scope_history,
     resolve_entity_preparation_inputs,
 )
@@ -95,7 +94,6 @@ def _included_run_count(
 def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> None:
     assert "execution_identity" not in inspect.signature(prepare_agent_execution_context).parameters
     assert "execution_identity" not in inspect.signature(prepare_bound_team_run_context).parameters
-    assert "execution_identity" not in inspect.signature(prepare_bound_scope_history).parameters
     assert "execution_identity" not in inspect.signature(prepare_scope_history).parameters
 
 

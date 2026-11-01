@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import aiohttp
 import nio
 
 from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
@@ -55,9 +56,15 @@ async def decide_task_owner(
     A synced room view can lack members a lazy-loading sync never sent, so
     only the full state gives every bot that later reads the task the same answer.
     """
-    response = await client.room_get_state(room_id)
+    failure = f"Could not read the state of room {room_id} to choose which bot runs the task"
+    try:
+        response = await client.room_get_state(room_id)
+    except aiohttp.ClientError as exc:
+        # nio raises a response that broke off instead of answering it.
+        msg = f"{failure}: {type(exc).__name__}: {exc}"
+        raise SchedulingError(msg) from exc
     if not isinstance(response, nio.RoomGetStateResponse):
-        msg = f"Could not read the state of room {room_id} to choose which bot runs the task: {response}"
+        msg = f"{failure}: {response}"
         raise SchedulingError(msg)
     room = room_from_state(room_id, client.user_id, response.events)
     router_id = current_entity_id(ROUTER_AGENT_NAME, runtime_paths).full_id

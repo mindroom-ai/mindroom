@@ -41,7 +41,6 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.history_helpers import _plugin
-from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -127,7 +126,6 @@ def test_private_ad_hoc_team_history_scope_is_requester_partitioned(tmp_path: Pa
         ),
         runtime_paths,
     )
-    persist_entity_accounts(config, runtime_paths_for(config))
     runtime_paths = runtime_paths_for(config)
     writer = ConversationStateWriter(
         ConversationStateWriterDeps(
@@ -172,7 +170,6 @@ def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: 
         ),
         runtime_paths,
     )
-    persist_entity_accounts(config, runtime_paths_for(config))
     runtime_paths = runtime_paths_for(config)
     writer = ConversationStateWriter(
         ConversationStateWriterDeps(

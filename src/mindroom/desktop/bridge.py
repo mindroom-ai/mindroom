@@ -16,7 +16,7 @@ from mindroom.desktop.accessibility import (
     AccessibilityActionOutcomeUnknownError,
     AccessibilityError,
 )
-from mindroom.desktop.command_journal import DesktopCommandJournal
+from mindroom.desktop.command_journal import DesktopCommandJournal, controller_journal_key
 from mindroom.desktop.command_parameters import (
     reject_unexpected_parameters,
     required_object_parameter,
@@ -120,15 +120,12 @@ class DesktopBridgePolicy:
     shell_enabled: bool = False
 
     def __post_init__(self) -> None:
-        """Require explicit caller and agent allowlists plus at least one local capability."""
+        """Require explicit caller and agent allowlists and a lease expiry exactly when control is allowed."""
         if not self.allowed_requester_ids:
             msg = "Desktop bridge requires at least one allowed requester Matrix ID."
             raise ValueError(msg)
         if not self.allowed_agent_names:
             msg = "Desktop bridge requires at least one allowed agent name."
-            raise ValueError(msg)
-        if not (self.allowed_app_ids or self.allowed_file_roots or self.shell_enabled or self.browser_enabled):
-            msg = "Desktop bridge requires at least one local capability."
             raise ValueError(msg)
         if any(not value.strip() for value in self.allowed_requester_ids):
             msg = "Desktop bridge requester IDs must not be empty."
@@ -207,13 +204,7 @@ class DesktopBridge:
         self._observations = DesktopObservations(clock=self.monotonic_clock)
         self._journal = DesktopCommandJournal.load(
             self.journal_path,
-            controller_key=json.dumps(
-                [
-                    self.policy.controller.user_id,
-                    self.policy.controller.device_id,
-                    self.policy.controller.ed25519,
-                ],
-            ),
+            controller_key=controller_journal_key(self.policy.controller),
             legacy_path=self.legacy_journal_path,
         )
         if self.policy.control_lease_expires_at_ms is None:
