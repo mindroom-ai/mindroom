@@ -51,7 +51,6 @@
     "whatwg-fetch": "^3.6.20"
   },
   "overrides": {
-    "picomatch": "4.0.4",
-    "postcss": "8.5.14"
+    "postcss": "8.5.32"
   }
 }
