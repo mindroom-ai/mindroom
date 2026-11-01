@@ -13,7 +13,7 @@ from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.resolution import authored_tool_entries
 from mindroom.contacts.parties import agent_party, party_label, personal_room_of
 from mindroom.contacts.policy import NO_CONTACT_RULES, effective_rules
-from mindroom.contacts.store import contact_party_in_room, read_contacts
+from mindroom.contacts.store import contact_party_in_room, contact_room_ids
 from mindroom.hooks import EnrichmentItem
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.session_ids import session_in_room
@@ -50,11 +50,7 @@ def contact_session_check(config: Config, runtime_paths: RuntimePaths, agent_nam
     """
     if agent_party(config, agent_name) is None:
         return lambda _session_id: False
-    rooms = frozenset(
-        record.room_id
-        for record in read_contacts(runtime_paths).contacts
-        if record.room_id is not None and record.agent_side(agent_name) is not None
-    )
+    rooms = contact_room_ids(runtime_paths, agent_name, include_removed=True)
     return lambda session_id: any(session_in_room(session_id, room_id) for room_id in rooms)
 
 

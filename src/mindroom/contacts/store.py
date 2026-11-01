@@ -159,12 +159,17 @@ def _contact_in_room(runtime_paths: RuntimePaths, room_id: str) -> ContactRecord
     )
 
 
-def contact_room_ids(runtime_paths: RuntimePaths, agent_name: str) -> frozenset[str]:
-    """Return the rooms of the active contacts this agent is a party of, which it keeps across restarts."""
+def contact_room_ids(runtime_paths: RuntimePaths, agent_name: str, *, include_removed: bool = False) -> frozenset[str]:
+    """Return the rooms of the active contacts this agent is a party of, which it keeps across restarts.
+
+    With ``include_removed`` the rooms of its removed contacts count too, since a contact keeps its room once removed.
+    """
     return frozenset(
         record.room_id
         for record in read_contacts(runtime_paths).contacts
-        if record.status == "active" and record.room_id is not None and record.agent_side(agent_name) is not None
+        if (include_removed or record.status == "active")
+        and record.room_id is not None
+        and record.agent_side(agent_name) is not None
     )
 
 

@@ -17,6 +17,7 @@ from mindroom.contacts.store import contact_room_ids
 from mindroom.custom_tools.contacts import ContactsTools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import get_logger
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_invited_room
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -50,6 +51,7 @@ ROOM_STATE = [
 ]
 NOT_PENDING = r"^Only a pending contact can be accepted$"
 REMOVED_ROOM = "!removed:localhost"
+ADHOC_ROOM = "!adhoc:localhost"
 
 
 @dataclass
@@ -415,6 +417,31 @@ async def test_room_cleanup_keeps_an_active_contact_room_for_its_agents_and_leav
         "mind_bob": [REMOVED_ROOM, "!stale:localhost"],
         "mind_carol": [CONTACT_ROOM, REMOVED_ROOM, "!stale:localhost"],
     }
+
+
+@pytest.mark.asyncio
+async def test_a_contact_room_is_never_kept_as_an_invited_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent that accepts invites records the contact room's invite, yet never rejoins the room once it is removed."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    with _matrix():
+        await _accept(config, paths, runtime, record.id)
+    # The invite handler of an agent that accepts invites records every room whose invite it accepted.
+    for room_id in (CONTACT_ROOM, ADHOC_ROOM):
+        remember_invited_room(invited_rooms_path(paths, "mind_alice"), room_id)
+    assert _room_lifecycle(config, paths, "mind_alice").invited_room_ids() == {ADHOC_ROOM}
+
+    await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", record.id)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
+    lifecycle = _room_lifecycle(config, paths, "mind_alice")
+    await lifecycle.join_configured_rooms()
+
+    assert lifecycle.invited_room_ids() == {ADHOC_ROOM}
+    lifecycle.deps.change_membership.assert_awaited_once_with(ADHOC_ROOM, "join")
 
 
 @pytest.mark.asyncio

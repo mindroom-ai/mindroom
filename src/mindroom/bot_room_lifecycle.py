@@ -233,8 +233,15 @@ class BotRoomLifecycle:
         return pending_room_invites_path(self.deps.runtime_paths, self.deps.agent_name)
 
     def invited_room_ids(self) -> frozenset[str]:
-        """Return the rooms this entity keeps across restarts because it accepted their invites."""
-        return read_invited_rooms(self.deps.runtime_paths, self._config(), self.deps.agent_name)
+        """Return the rooms this entity keeps across restarts because it accepted their invites.
+
+        A personal agent's contact rooms never count, though it may have accepted their invites: it keeps a contact
+        room only while the contact is active.
+        """
+        invited = read_invited_rooms(self.deps.runtime_paths, self._config(), self.deps.agent_name)
+        if not invited or self._config().personal_agent_instance(self.deps.agent_name) is None:
+            return invited
+        return invited - contact_room_ids(self.deps.runtime_paths, self.deps.agent_name, include_removed=True)
 
     async def _invited_room_ids_after_joined_invites(self) -> frozenset[str]:
         """Return invited rooms once every pending invite this client already joined is persisted.
