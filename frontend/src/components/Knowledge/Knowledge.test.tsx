@@ -1188,6 +1188,14 @@ describe("Knowledge", () => {
       response: new Response("<html>Bad gateway</html>", { status: 502 }),
       message: "Request failed (502)",
     },
+    {
+      body: "no JSON and a status text",
+      response: new Response("<html>Bad gateway</html>", {
+        status: 502,
+        statusText: "Bad Gateway",
+      }),
+      message: "Bad Gateway",
+    },
   ])("surfaces a reindex failure with $body", async ({ response, message }) => {
     mockStore({
       git_docs: {
