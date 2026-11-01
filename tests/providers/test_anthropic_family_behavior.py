@@ -1695,10 +1695,10 @@ def test_a_blank_exported_anthropic_base_url_keeps_the_direct_route_on_anthropic
 
 
 @pytest.mark.parametrize(
-    ("name", "setting", "value"),
+    ("name", "setting", "value", "fix"),
     [
-        ("ANTHROPIC_VERTEX_BASE_URL", "base_url", "https://vertex.example/v1"),
-        ("CLOUD_ML_REGION", "region", "europe-west1"),
+        ("ANTHROPIC_VERTEX_BASE_URL", "base_url", "https://vertex.example/v1", "unset it for the region's endpoint"),
+        ("CLOUD_ML_REGION", "region", "europe-west1", "set a region"),
     ],
 )
 def test_a_blank_exported_vertex_endpoint_or_region_fails_the_build_and_names_the_variable(
@@ -1707,6 +1707,7 @@ def test_a_blank_exported_vertex_endpoint_or_region_fails_the_build_and_names_th
     name: str,
     setting: str,
     value: str,
+    fix: str,
 ) -> None:
     """The Vertex SDK reads these itself when given none, and would build every request URL from a blank export."""
     config_path = tmp_path / "config.yaml"
@@ -1716,7 +1717,7 @@ def test_a_blank_exported_vertex_endpoint_or_region_fails_the_build_and_names_th
     hide_provider_environment(monkeypatch)
     model = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5")
 
-    with pytest.raises(ValueError, match=f"{name} is exported blank, .*; (set a region|unset it for the region's)"):
+    with pytest.raises(ValueError, match=f"{name} is exported blank, .*; {fix}"):
         build_provider(model, runtime_paths)
     # A value the model or the `.env` sets reaches the SDK, which then reads nothing from the environment.
     for extra_kwargs in ({setting: value}, {"client_params": {setting: value}}):
