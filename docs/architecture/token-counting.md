@@ -67,4 +67,4 @@ Provider tokens per o200k_base token on those samples:
 - Ollama, OpenRouter models other than OpenAI's, and other OpenAI-compatible servers have no counting endpoint wired, so their counts stay estimated with fixed margins; vLLM's `/tokenize` is not used because no route identifies a vLLM server.
 - OpenAI models tiktoken does not map, such as the GPT-6 family, count exactly only through the input-token endpoint of OpenAI's own Responses route; on Codex, Azure, and Chat Completions they stay estimated.
 - `prompt_curation` measures file sizes with the calibration frozen when it plans, not with provider counts, because verify must compare the edited files on the basis the plan measured; its checks also run synchronously, with no event loop to await a count on.
-  Whether the `MEMORY.md` preload withholds lines it judges as a reply's preload does, from the file's own provider count.
+  It judges whether the `MEMORY.md` preload withholds lines as a reply's preload does, from the file's own provider count.

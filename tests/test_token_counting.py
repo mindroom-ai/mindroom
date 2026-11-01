@@ -119,6 +119,31 @@ def test_cached_count_makes_no_endpoint_call() -> None:
     assert endpoint.texts == ["same text"]
 
 
+def test_calibration_weighs_the_newest_provider_counts_most() -> None:
+    """The route's content drifts, so each earlier provider count weighs less than the one after it."""
+
+    async def endpoint(text: str) -> int:
+        return len(text) * (2 if text.startswith("a") else 1)
+
+    counter = TokenCounter(key="drifting", estimate=len, count=endpoint)
+    asyncio.run(count_exact(counter, "a" * 100))
+    asyncio.run(count_exact(counter, "b" * 100))
+
+    # The first count weighs 0.9 of the second: (200 * 0.9 + 100) / (100 * 0.9 + 100) tokens per estimated token.
+    assert count(counter, "c" * 1_000) == TokenCount(math.ceil(1_000 * 280 / 190), "calibrated")
+
+
+def test_the_exact_count_cache_keeps_the_newest_counts_within_its_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(counts, "_MAX_CACHED", 3)
+    counter = fake_token_counter(count=_Endpoint())
+    texts = [f"text {index}" for index in range(4)]
+    for text in texts:
+        asyncio.run(count_exact(counter, text))
+
+    assert counts.cached_count(counter, texts[0]) is None
+    assert [counts.cached_count(counter, text) for text in texts[1:]] == [6, 6, 6]
+
+
 def test_blank_text_never_reaches_the_endpoint() -> None:
     endpoint = _Endpoint()
     counter = fake_token_counter(count=endpoint)

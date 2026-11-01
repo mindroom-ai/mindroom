@@ -735,10 +735,10 @@ def finalize_history_preparation(
         compaction_decision=prepared_scope_history.compaction_decision,
         compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
         prepared_context_tokens=prepared_context_tokens,
-        # Authored replay limits keep older history out of every request.
+        # Authored replay limits keep older history out of every request, and a native checkpoint stands in for it.
         history_anchor=(
             HistoryAnchor(prepared_scope_history.non_prompt_tokens, counter.key)
-            if history_settings.replays_whole_history
+            if history_settings.replays_whole_history and native_history_route(native_history) is None
             else None
         ),
         native_history=native_history,

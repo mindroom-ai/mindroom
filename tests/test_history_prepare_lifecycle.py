@@ -45,6 +45,7 @@ from mindroom.history.types import (
     HistoryAnchor,
     HistoryPolicy,
     HistoryScope,
+    NativeHistory,
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
@@ -2179,6 +2180,25 @@ async def test_a_request_with_trimmed_history_leaves_no_anchor_for_the_next_repl
     assert (state.replay_plan.mode, state.replay_plan.num_history_runs) != ("configured", None)
     # The run records no system prompt and tools, so the next reply sizes its history by estimate.
     assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(state), "overcounts") is None
+
+
+@pytest.mark.asyncio
+async def test_a_request_on_a_native_route_leaves_no_anchor_for_the_next_reply(tmp_path: Path) -> None:
+    """A native checkpoint stands in for older history, so the size the provider reports covers only what followed it.
+
+    A later turn on the same model without native compaction, such as a scheduled task, replays the whole history.
+    """
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 1_000})
+    native = NativeHistory(
+        native_compaction=NativeCompactionReplay(route="checkpoints", threshold=None),
+        portable_replay=True,
+    )
+
+    state = _finalize_with_history_budget(tmp_path, replace(prepared, native_history=native), 20_000)
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode == "configured"
+    assert state.history_anchor is None
 
 
 @pytest.mark.asyncio
