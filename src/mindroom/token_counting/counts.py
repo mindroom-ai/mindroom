@@ -98,13 +98,14 @@ def utf8_byte_bound(text: str) -> int:
     return len(text.encode("utf-8", "surrogatepass"))
 
 
-def _without_encoder(text: str) -> TokenCount:
-    """Estimate a quarter token per character while the counter's encoder is unavailable.
+def _without_encoder(text: str, *, calibrated: bool) -> TokenCount:
+    """Estimate ``text`` while the counter's encoder is unavailable, as ``count``'s ``calibrated`` asks.
 
-    That is only briefly after startup, or for good when its vocabulary cannot be loaded; an upper bound such as the
-    UTF-8 byte count would triple history estimates meanwhile and compact conversations that fit.
+    That is only briefly after startup, or for good when its vocabulary cannot be loaded. A size that must not
+    undercount takes the UTF-8 byte count, an upper bound; any other takes a quarter token per character, since the
+    byte count would triple history estimates meanwhile and compact conversations that fit.
     """
-    return TokenCount(len(text) // 4, "estimated")
+    return TokenCount(len(text) // 4 if calibrated else utf8_byte_bound(text), "estimated")
 
 
 def cached_count(counter: TokenCounter, text: str) -> int | None:
@@ -124,7 +125,7 @@ def count(counter: TokenCounter, text: str, *, calibrated: bool = True) -> Token
         return TokenCount(0, "exact")
     if counter.exact_locally:
         tokens = counter.estimate(text)
-        return _without_encoder(text) if tokens is None else TokenCount(tokens, "exact")
+        return _without_encoder(text, calibrated=calibrated) if tokens is None else TokenCount(tokens, "exact")
     key = _text_key(counter, text)
     state = _state
     with state.lock:
@@ -134,7 +135,7 @@ def count(counter: TokenCounter, text: str, *, calibrated: bool = True) -> Token
         return TokenCount(exact, "exact")
     estimate = counter.estimate(text)
     if estimate is None:
-        return _without_encoder(text)
+        return _without_encoder(text, calibrated=calibrated)
     if ratio is not None and calibrated:
         counted, estimated = ratio
         return TokenCount(math.ceil(estimate * counted / estimated), "calibrated")

@@ -68,7 +68,10 @@ def _load_in_background() -> None:
     try:
         load_o200k()
     except Exception:
-        logger.warning("o200k_base did not load; token estimates use a quarter token per character", exc_info=True)
+        logger.warning(
+            "o200k_base did not load; token estimates use a quarter token per character, and compaction input its bytes",
+            exc_info=True,
+        )
 
 
 def _loaded_o200k() -> tiktoken.Encoding | None:

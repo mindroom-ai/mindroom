@@ -119,6 +119,21 @@ def test_cached_count_makes_no_endpoint_call() -> None:
     assert endpoint.texts == ["same text"]
 
 
+def test_without_its_vocabulary_a_size_that_must_not_undercount_counts_bytes() -> None:
+    """Compaction input still has an upper bound when o200k_base cannot load, while history keeps the quarter token.
+
+    A quarter token per character counts Japanese text at a quarter of its real size, so a summary request sized by it
+    would fail every time.
+    """
+    text = "今日は会議の議事録をまとめました。" * 20
+    for counter in (
+        TokenCounter(key="no-vocabulary", estimate=lambda _text: None),
+        TokenCounter(key="no-vocabulary-own", estimate=lambda _text: None, exact_locally=True),
+    ):
+        assert count(counter, text) == TokenCount(len(text) // 4, "estimated")
+        assert count(counter, text, calibrated=False) == TokenCount(len(text.encode()), "estimated")
+
+
 def test_calibration_weighs_the_newest_provider_counts_most() -> None:
     """The route's content drifts, so each earlier provider count weighs less than the one after it."""
 

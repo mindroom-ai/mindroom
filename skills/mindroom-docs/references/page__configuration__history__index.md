@@ -45,6 +45,7 @@ Every token limit, including `context_window`, the compaction thresholds, `memor
 Claude on Anthropic, Vertex AI, and Bedrock, Gemini, OpenAI models through OpenAI's own Responses endpoint, and `llama_cpp` models count exactly through the provider's free token counting.
 OpenAI models with a known tokenizer, such as GPT-4o, also count exactly on Chat Completions, Azure, Codex, and OpenRouter.
 Other models, such as those on Ollama or other OpenAI-compatible servers, use an estimate.
+Estimates need the `o200k_base` vocabulary, which downloads on first use; without network access, set `TIKTOKEN_CACHE_DIR` to a directory that already holds it, or the log shows `o200k_base did not load` and estimates fall back to a quarter token per character.
 Text that rarely changes, such as the system prompt, the tools, and `MEMORY.md`, is counted in the background, so a reply never waits for a count and later replies use the exact number; other text uses an estimate corrected by the provider's earlier counts.
 Counting sends that text to the provider that also receives the agent's requests.
 A count that fails uses the estimate and logs a `Token count failed` warning, once until that route's counting works again.
