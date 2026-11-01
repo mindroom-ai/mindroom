@@ -440,8 +440,10 @@ async def _host_call_within_time_limit[T](action: str, call: Awaitable[T]) -> T:
         if not task.cancelled():
             raise
         msg = (
-            f"Browser action={action} did not finish within {HOST_CALL_TIMEOUT_SECONDS:g} seconds and was "
-            "stopped. If the page stays unresponsive, close its tab with action=close."
+            f"Browser action={action} did not finish within {HOST_CALL_TIMEOUT_SECONDS:g} seconds, so MindRoom "
+            "stopped waiting for it. Work it already sent to the page, such as typing or a running script, may "
+            "continue. Take a snapshot before acting on that tab again, and close the tab with action=close if it "
+            "stays unresponsive."
         )
         raise HostCallTimeLimitError(msg) from None
 
