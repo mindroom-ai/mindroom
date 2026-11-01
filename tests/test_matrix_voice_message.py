@@ -181,6 +181,17 @@ async def test_matrix_voice_message_rejects_unauthorized_room(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_matrix_voice_message_reports_an_unknown_room_name(tmp_path: Path) -> None:
+    """A room name that resolves to no room ID or alias is unknown, not an access denial."""
+    with tool_runtime_context(_context(tmp_path)):
+        result = await MatrixVoiceMessageTools(api_key="sk-test").matrix_voice_message("hello", room_id="Ops Room")
+
+    payload = _payload(result)
+    assert payload["status"] == "error"
+    assert payload["message"] == "Unknown room 'Ops Room'; pass a room ID, alias, or configured room name."
+
+
+@pytest.mark.asyncio
 async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread(
     tmp_path: Path,
     speech: _SpeechMocks,
