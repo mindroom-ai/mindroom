@@ -27,7 +27,10 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
-import { withAgentExecutionScope } from "@/lib/api";
+import {
+  apiErrorMessageFromResponse,
+  withAgentExecutionScope,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { WorkerScope } from "@/types/config";
 
@@ -298,18 +301,6 @@ export function EnhancedConfigDialog({
     return normalized;
   };
 
-  const saveErrorMessage = async (response: Response): Promise<string> => {
-    try {
-      const data = await response.json();
-      if (typeof data.detail === "string" && data.detail) {
-        return data.detail;
-      }
-    } catch {
-      // Fall back to the generic message when the response has no JSON detail.
-    }
-    return "Failed to save configuration";
-  };
-
   const handleSave = async () => {
     // Validate all fields
     const errors: Record<string, string> = {};
@@ -349,7 +340,12 @@ export function EnhancedConfigDialog({
       );
 
       if (!response.ok) {
-        throw new Error(await saveErrorMessage(response));
+        throw new Error(
+          await apiErrorMessageFromResponse(
+            response,
+            "Failed to save configuration",
+          ),
+        );
       }
 
       toast({

@@ -31,7 +31,7 @@ from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.token_budget import estimate_compaction_input_tokens
-from tests.conftest import install_model_providers, runtime_paths_for, seed_session
+from tests.conftest import install_model_providers, loop_runs_while_blocked, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     RecordingCompactionLifecycle,
@@ -450,9 +450,7 @@ async def test_summary_retry_sizing_allows_loop_progress(
     loop_progress: list[bool] = []
 
     def controlled_estimate(value: str, *, model_id: str | None = None, conservative_fallback: bool = False) -> int:
-        released = threading.Event()
-        loop.call_soon_threadsafe(released.set)
-        loop_progress.append(released.wait(timeout=1))
+        loop_progress.append(loop_runs_while_blocked(loop))
         return estimate_compaction_input_tokens(
             value,
             model_id=model_id,

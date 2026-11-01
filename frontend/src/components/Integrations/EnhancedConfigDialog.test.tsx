@@ -231,7 +231,22 @@ describe("EnhancedConfigDialog", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("shows backend save error detail", async () => {
+  it.each([
+    {
+      body: "a JSON detail",
+      json: async () => ({
+        detail: "client_secret is required when client_id changes.",
+      }),
+      message: "client_secret is required when client_id changes.",
+    },
+    {
+      body: "no JSON",
+      json: async () => {
+        throw new SyntaxError("Unexpected token '<'");
+      },
+      message: "Failed to save configuration",
+    },
+  ])("shows a save error with $body", async ({ json, message }) => {
     const onClose = vi.fn();
     const onSuccess = vi.fn();
 
@@ -240,12 +255,7 @@ describe("EnhancedConfigDialog", () => {
         ok: true,
         json: async () => ({ credentials: { api_key: "old-key" } }),
       })
-      .mockResolvedValueOnce({
-        ok: false,
-        json: async () => ({
-          detail: "client_secret is required when client_id changes.",
-        }),
-      });
+      .mockResolvedValueOnce({ ok: false, json });
 
     render(
       <EnhancedConfigDialog
@@ -281,7 +291,7 @@ describe("EnhancedConfigDialog", () => {
       expect(mockToast).toHaveBeenCalledWith(
         expect.objectContaining({
           title: "Configuration Failed",
-          description: "client_secret is required when client_id changes.",
+          description: message,
           variant: "destructive",
         }),
       );

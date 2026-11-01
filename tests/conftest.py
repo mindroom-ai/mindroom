@@ -3708,6 +3708,13 @@ async def aioresponse() -> AsyncGenerator[aioresponses]:
 SETTLE_TIMEOUT_SECONDS = 30.0
 
 
+def loop_runs_while_blocked(loop: asyncio.AbstractEventLoop) -> bool:
+    """From inside a blocking call, return whether ``loop`` runs a callback meanwhile, as it can only when the call runs off the loop."""
+    loop_ran = threading.Event()
+    loop.call_soon_threadsafe(loop_ran.set)
+    return loop_ran.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_structlog_configuration(
     monkeypatch: pytest.MonkeyPatch,
@@ -4055,7 +4062,7 @@ def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Ge
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Keep Google client libraries from authenticating as the developer.
+    """Keep Google client libraries and Git from acting as the developer.
 
     With no credentials named, google-auth reads gcloud's application default credentials file and asks the GCE
     metadata server, and it refreshes tokens through ``requests``, which the network guard does not cover. An
@@ -4064,10 +4071,14 @@ def pytest_configure(config: pytest.Config) -> None:
     Google keys that MindRoom and google-genai read.
     This is a configure hook, not a fixture, because google-auth reads ``NO_GCE_CHECK`` once, when collection first
     imports ``google.auth.compute_engine``.
+    Git also ignores the developer's global and system config, so commits in test repositories never sign or run
+    template hooks.
     """
     gcloud_config = tempfile.mkdtemp(prefix="mindroom-test-gcloud-")
     config.add_cleanup(lambda: shutil.rmtree(gcloud_config, ignore_errors=True))
     hide_developer_google_credentials(os.environ, gcloud_config)
+    os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+    os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 
 
 def hide_developer_google_credentials(environ: MutableMapping[str, str], gcloud_config: str) -> None:

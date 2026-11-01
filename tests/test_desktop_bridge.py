@@ -29,7 +29,11 @@ from mindroom.desktop.bridge import (
     _DesktopBridgeStoppedError,
     _run_macos_application_events,
 )
-from mindroom.desktop.command_journal import DesktopCommandJournalError
+from mindroom.desktop.command_journal import (
+    DesktopCommandJournalError,
+    check_controller_binding,
+    desktop_journal_path,
+)
 from mindroom.desktop.filesystem import DesktopFilesystem
 from mindroom.desktop.media import DesktopMediaError, download_encrypted_media
 from mindroom.desktop.playwright_mcp import (
@@ -1090,9 +1094,7 @@ async def test_bridge_without_apps_never_starts_gui_event_pump(
 
 
 def test_local_capabilities_require_matching_policy_and_providers(selected_root: Path) -> None:
-    """A bridge needs one capability, and every enabled capability needs its own provider."""
-    with pytest.raises(ValueError, match="at least one local capability"):
-        replace(_policy(), allowed_app_ids=frozenset())
+    """Every enabled capability needs its own provider."""
     files = DesktopFilesystem((selected_root,))
     no_gui = replace(_policy(), allowed_app_ids=frozenset(), allowed_file_roots=(selected_root,))
     for arguments, message in (
@@ -2183,6 +2185,15 @@ async def test_bridge_refuses_permissive_command_journal(tmp_path: Path, transpo
             clock=lambda: NOW_SECONDS,
             journal_path=journal_path,
         )
+
+
+def test_setup_binding_check_accepts_only_the_controller_the_bridge_journal_records(tmp_path: Path) -> None:
+    """Setup's read-only pre-check agrees with the bridge on where its journal lives and whom it is bound to."""
+    DesktopBridge(object(), FakeProvider(), _policy(), journal_path=desktop_journal_path(tmp_path)).close()
+
+    check_controller_binding(tmp_path, CONTROLLER)
+    with pytest.raises(DesktopCommandJournalError, match="different controller"):
+        check_controller_binding(tmp_path, replace(CONTROLLER, device_id="OTHER"))
 
 
 @pytest.mark.asyncio

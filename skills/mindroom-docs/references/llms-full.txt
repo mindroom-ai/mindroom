@@ -14925,7 +14925,7 @@ agents:
 `composio` exposes the Composio actions listed in `actions` as agent tools.
 Callable names are the lowercase action IDs; for example, `GITHUB_GET_THE_AUTHENTICATED_USER` becomes `github_get_the_authenticated_user`.
 Before loading the tool, configure the API key and connect the apps' accounts for the chosen `entity_id` in Composio, because the agent cannot create connections itself.
-A missing or empty `actions` list fails with `Composio requires a nonempty actions list.`
+An empty `actions` list in a tool entry fails config validation, and when no setting provides `actions`, the tool fails to load with `Composio requires a nonempty actions list.`
 `composio` does not accept `include_tools` or `exclude_tools`; choose its functions with `actions`.
 It is not confined by `file_access` and cannot run in a worker, so enable it only for agents trusted with the primary runtime (see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access)).
 
@@ -15577,7 +15577,7 @@ The provider callback URL is `<MINDROOM_PUBLIC_URL or MINDROOM_BASE_URL>/api/oau
 Register that URL on the provider's OAuth app, or store an explicit `redirect_uri` in the provider-specific client config service.
 
 Conversation connect links for a scoped connection are valid for 10 minutes, work once, and are tied to the requester, provider, and agent scope that produced them.
-For a personal (`user` or `user_agent`) connection, the browser must be signed in to MindRoom as that same requester; for a shared connection, the link itself is enough and no dashboard login is needed.
+For a personal (`user` or `user_agent`) connection, the browser must be signed in to MindRoom as that same requester, through the dashboard, trusted upstream auth, or a [Connections portal](https://docs.mindroom.chat/connections-portal/) session, which MindRoom Chat starts when the link is clicked; for a shared connection, the link itself is enough and no dashboard login is needed.
 MindRoom rechecks the requester's authority when the link is used and rejects the link if the connection changed after it was issued.
 An expired, reused, unauthorized, or outdated link saves no credentials; rerun the original request for a fresh link.
 For an unscoped connection, or a tool call without a concrete requester, the link is reusable and requires dashboard login instead.
@@ -15736,6 +15736,10 @@ Sign-in works as follows:
 1. The portal shows nothing until sign-in succeeds, then shows `Signed in as <display name>`, with the Matrix ID on hover.
    It ignores any session the browser still holds, so the account signed in to Chat replaces another account's session in the same browser.
 2. MindRoom accepts only users of its configured homeserver, and only from the Chat origins it allows (see `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` below).
+
+An agent's connect and reset links, which it posts when a tool needs an account, open the same way: MindRoom Chat opens `/connections/?next=<link>` for a link to its Computers backend, and after its sign-in attempt the portal opens the link, which accepts the session of the requester it was made for; if sign-in failed, the link behaves as if opened directly.
+The portal opens only `/api/oauth/<provider>/authorize` and `/api/oauth/<provider>/reset` links on its own origin.
+Opened outside Chat, a link works in a browser that still holds that requester's session, and otherwise asks for the dashboard login.
 
 When the portal is opened directly rather than from Chat, or reloaded after the Chat tab that opened it closed, it uses the existing session or a [trusted upstream](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) identity, or asks the user to open Connections from Chat.
 If two Connections tabs, on the Agents or Agent Keys page, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
@@ -16342,7 +16346,8 @@ Do not report or "fix" these; they are deliberate.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
 - The Connections portal signs users in either through trusted upstream auth or through a Matrix OpenID token that MindRoom Chat hands to the portal window, from the origins `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists or, unset, from MindRoom's hosted Chat and, for a portal on a local address, any Chat on a local address.
   Under the default list, MindRoom accepts that sign-in only while the homeserver binds tokens, because otherwise any backend a user opens from Chat could replay their token to it, and request headers cannot show that a portal is out of such a backend's reach; an explicit list is the operator's choice.
-  The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page.
+  The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates the portal and its APIs, its user's own conversation connect and reset links for requester-owned connections, the OAuth callback for flows it started, and the OAuth success page.
+  The portal opens a connect or reset link given as `?next=` after its sign-in attempt, which grants nothing beyond opening that link directly: the link still checks that the signed-in user is its requester, and the user still approves at the provider or on the reset confirmation page.
   Outside hosted platform mode, it also opens the dashboard, but only for a user in `administrators` whose token the homeserver bound to this deployment at sign-in; everyone else, and every session on a homeserver that does not bind tokens, needs the API key for the dashboard.
   Binding is proven by the homeserver's `/_matrix/client/versions` and a second verification of the token after reading it, so turning binding on or off once during a sign-in cannot promote an unbound token; turning it on and off again within that one sign-in is not covered.
   An allowlisted origin can sign a browser in as any Matrix user whose OpenID token it holds, so list only Chat origins you operate or trust; with the default list, a page served from any local address can do so for a portal on a local address.

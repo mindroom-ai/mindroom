@@ -25,7 +25,10 @@
             "$ref": "#/$defs/ToolConfigEntry"
           },
           "title": "Tools",
-          "type": "array"
+          "type": "array",
+          "x-mindroom": {
+            "reference": "tool"
+          }
         },
         "include_default_tools": {
           "default": true,
@@ -434,7 +437,10 @@
           ],
           "default": null,
           "description": "Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",
-          "title": "Worker Tools"
+          "title": "Worker Tools",
+          "x-mindroom": {
+            "reference": "tool"
+          }
         },
         "worker_scope": {
           "anyOf": [
@@ -875,7 +881,10 @@
             "type": "string"
           },
           "title": "Exclude Toolkits",
-          "type": "array"
+          "type": "array",
+          "x-mindroom": {
+            "reference": "tool"
+          }
         },
         "approval_wait_timeout": {
           "anyOf": [

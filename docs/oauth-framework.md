@@ -98,7 +98,7 @@ The provider callback URL is `<MINDROOM_PUBLIC_URL or MINDROOM_BASE_URL>/api/oau
 Register that URL on the provider's OAuth app, or store an explicit `redirect_uri` in the provider-specific client config service.
 
 Conversation connect links for a scoped connection are valid for 10 minutes, work once, and are tied to the requester, provider, and agent scope that produced them.
-For a personal (`user` or `user_agent`) connection, the browser must be signed in to MindRoom as that same requester; for a shared connection, the link itself is enough and no dashboard login is needed.
+For a personal (`user` or `user_agent`) connection, the browser must be signed in to MindRoom as that same requester, through the dashboard, trusted upstream auth, or a [Connections portal](connections-portal.md) session, which MindRoom Chat starts when the link is clicked; for a shared connection, the link itself is enough and no dashboard login is needed.
 MindRoom rechecks the requester's authority when the link is used and rejects the link if the connection changed after it was issued.
 An expired, reused, unauthorized, or outdated link saves no credentials; rerun the original request for a fresh link.
 For an unscoped connection, or a tool call without a concrete requester, the link is reusable and requires dashboard login instead.
