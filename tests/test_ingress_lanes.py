@@ -12,7 +12,7 @@ import pytest
 
 from mindroom import inbound_turn_normalizer, interactive
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
-from mindroom.coalescing.batch import ActiveFollowUpCoalescingOwner, CoalescingKey, RequesterCoalescingOwner
+from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner, active_follow_up_coalescing_key
 from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import IngressRetryError, ReceiptLaneKey
 from mindroom.config.access import ResponderAccessConfig
@@ -140,7 +140,8 @@ def test_receipt_lane_key_derives_only_for_requester_owners() -> None:
         "!room:localhost",
         RequesterCoalescingOwner("@user:localhost"),
     ) == ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost")
-    assert ReceiptLaneKey.for_coalescing_owner("!room:localhost", ActiveFollowUpCoalescingOwner()) is None
+    follow_up_owner = active_follow_up_coalescing_key("!room:localhost", None).owner
+    assert ReceiptLaneKey.for_coalescing_owner("!room:localhost", follow_up_owner) is None
 
 
 @pytest.mark.asyncio

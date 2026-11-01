@@ -44,11 +44,11 @@ class RequesterCoalescingOwner:
 
 
 @dataclass(frozen=True)
-class ActiveFollowUpCoalescingOwner:
+class _ActiveFollowUpCoalescingOwner:
     """Batching owner for follow-ups queued behind an active response."""
 
 
-type CoalescingOwner = RequesterCoalescingOwner | ActiveFollowUpCoalescingOwner
+type CoalescingOwner = RequesterCoalescingOwner | _ActiveFollowUpCoalescingOwner
 
 
 class CoalescingKey(NamedTuple):
@@ -69,12 +69,12 @@ def requester_coalescing_key(room_id: str, thread_id: str | None, requester_user
 
 def active_follow_up_coalescing_key(room_id: str, thread_id: str | None) -> CoalescingKey:
     """Return the target-scoped key for follow-ups queued behind an active response."""
-    return CoalescingKey(room_id, thread_id, ActiveFollowUpCoalescingOwner())
+    return CoalescingKey(room_id, thread_id, _ActiveFollowUpCoalescingOwner())
 
 
 def is_active_follow_up_coalescing_key(key: CoalescingKey) -> bool:
     """Return whether a coalescing key is target-scoped for an active response."""
-    return isinstance(key.owner, ActiveFollowUpCoalescingOwner)
+    return isinstance(key.owner, _ActiveFollowUpCoalescingOwner)
 
 
 def coalescing_owner_log_label(owner: CoalescingOwner) -> str:
