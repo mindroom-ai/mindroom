@@ -68,6 +68,14 @@ def _record_test_room(room_id: str = "!test_room:localhost") -> None:
     )
 
 
+def _configure_agent_rooms(temp_config_file: Path, rooms: list[str]) -> None:
+    """Give ``test_agent`` these rooms and load the config into the app."""
+    config_data = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    config_data["agents"]["test_agent"]["rooms"] = rooms
+    temp_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app).loaded
+
+
 def test_list_schedules_success(test_client: TestClient) -> None:
     """List schedules should return serialized pending tasks."""
     _record_test_room()
@@ -136,10 +144,7 @@ def test_list_schedules_reports_an_unreadable_room_beside_the_readable_ones(
     reason: str,
 ) -> None:
     """A room whose state cannot be read is reported with the reason instead of looking empty or failing the list."""
-    config_data = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
-    config_data["agents"]["test_agent"]["rooms"] = ["!readable:localhost", "!unreadable:localhost"]
-    temp_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
-    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app).loaded
+    _configure_agent_rooms(temp_config_file, ["!readable:localhost", "!unreadable:localhost"])
     stored = _stored()
 
     async def room_get_state(room_id: str) -> object:
@@ -173,10 +178,7 @@ def test_list_schedules_reads_a_room_configured_by_alias_under_its_room_id(
     temp_config_file: Path,
 ) -> None:
     """A configured alias is read once under the room ID it resolves to, and one that does not resolve says why."""
-    config_data = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
-    config_data["agents"]["test_agent"]["rooms"] = ["#lobby:example.org", "test_room", "#gone:example.org"]
-    temp_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
-    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app).loaded
+    _configure_agent_rooms(temp_config_file, ["#lobby:example.org", "test_room", "#gone:example.org"])
     # The room key and the alias name the same room, which must be read once.
     _record_test_room("!lobby:localhost")
 
@@ -229,10 +231,7 @@ def test_list_schedules_filtered_by_alias_reads_only_that_room(test_client: Test
 
 def test_list_schedules_without_rooms_needs_no_matrix_account(test_client: TestClient, temp_config_file: Path) -> None:
     """With no room configured, the list is empty before MindRoom has created its Matrix accounts."""
-    config_data = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
-    config_data["agents"]["test_agent"]["rooms"] = []
-    temp_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
-    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app).loaded
+    _configure_agent_rooms(temp_config_file, [])
 
     response = test_client.get("/api/schedules")
 

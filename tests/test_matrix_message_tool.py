@@ -377,8 +377,9 @@ async def test_matrix_message_send_resolves_a_room_alias_through_the_directory()
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_alias_the_directory_cannot_resolve_is_unknown() -> None:
-    """An alias that names no room is reported as unknown, not as an access denial."""
+@pytest.mark.parametrize("room_id", ["Ops Room", "#gone:example.org"])
+async def test_matrix_message_unknown_room_is_reported_as_unknown(room_id: str) -> None:
+    """A room name or alias that names no room is unknown, not an access denial."""
     tool = MatrixMessageTools()
     ctx = _make_context()
     ctx.client.room_resolve_alias = AsyncMock(
@@ -386,23 +387,10 @@ async def test_matrix_message_alias_the_directory_cannot_resolve_is_unknown() ->
     )
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id="#gone:example.org"))
+        payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id=room_id))
 
     assert payload["status"] == "error"
-    assert payload["message"] == "Unknown room '#gone:example.org'; pass a room ID, alias, or configured room name."
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_unknown_room_name_is_reported_as_unknown() -> None:
-    """A room name that resolves to no room ID or alias is unknown, not an access denial."""
-    tool = MatrixMessageTools()
-    ctx = _make_context()
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id="Ops Room"))
-
-    assert payload["status"] == "error"
-    assert payload["message"] == "Unknown room 'Ops Room'; pass a room ID, alias, or configured room name."
+    assert payload["message"] == f"Unknown room {room_id!r}; pass a room ID, alias, or configured room name."
 
 
 @pytest.mark.asyncio
