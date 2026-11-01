@@ -112,6 +112,25 @@ const DEFAULT_GIT_SETTINGS: KnowledgeGitConfig = {
 };
 const REDACTED_CREDENTIALS_SENTINEL = "***";
 
+/** The "Create Knowledge Base" form. */
+interface NewBaseForm {
+  name: string;
+  description: string;
+  sourceType: KnowledgeSourceType;
+  mode: KnowledgeAccessMode;
+  path: string;
+  git: KnowledgeGitConfig;
+}
+
+const EMPTY_NEW_BASE: NewBaseForm = {
+  name: "",
+  description: "",
+  sourceType: "local",
+  mode: "semantic",
+  path: "",
+  git: DEFAULT_GIT_SETTINGS,
+};
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -298,23 +317,8 @@ export function Knowledge() {
   const { toast } = useToast();
 
   const [selectedBase, setSelectedBase] = useState<string>("");
-  const [newBaseName, setNewBaseName] = useState("");
-  const [newBaseDescription, setNewBaseDescription] = useState("");
-  const [newBaseSourceType, setNewBaseSourceType] =
-    useState<KnowledgeSourceType>("local");
-  const [newBaseMode, setNewBaseMode] =
-    useState<KnowledgeAccessMode>("semantic");
-  const [newBasePath, setNewBasePath] = useState("");
-  const [newBaseGitSettings, setNewBaseGitSettings] =
-    useState<KnowledgeGitConfig>(() => defaultGitSettings());
-  // The Create form counts as a draft once something is typed into it.
-  useUnsavedDraft(
-    [newBaseName, newBaseDescription, newBasePath].some(
-      (value) => value.trim() !== "",
-    ) ||
-      JSON.stringify(newBaseGitSettings) !==
-        JSON.stringify(DEFAULT_GIT_SETTINGS),
-  );
+  const [newBase, setNewBase] = useState<NewBaseForm>(EMPTY_NEW_BASE);
+  useUnsavedDraft(JSON.stringify(newBase) !== JSON.stringify(EMPTY_NEW_BASE));
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);
   const [gitRepoUrlReplacement, setGitRepoUrlReplacement] = useState("");
@@ -487,11 +491,15 @@ export function Knowledge() {
     [settings.git, updateSettings],
   );
 
+  const updateNewBase = useCallback((updates: Partial<NewBaseForm>) => {
+    setNewBase((previous) => ({ ...previous, ...updates }));
+  }, []);
+
   const updateNewBaseGitSettings = useCallback(
     (updates: Partial<KnowledgeGitConfig>) => {
-      setNewBaseGitSettings((previous) => ({
+      setNewBase((previous) => ({
         ...previous,
-        ...updates,
+        git: { ...previous.git, ...updates },
       }));
     },
     [],
@@ -575,7 +583,7 @@ export function Knowledge() {
   ]);
 
   const handleCreateBase = useCallback(async () => {
-    const baseName = newBaseName.trim();
+    const baseName = newBase.name.trim();
     const validationError = validateBaseName(baseName);
     if (validationError) {
       setError(validationError);
@@ -591,14 +599,14 @@ export function Knowledge() {
     setError(null);
 
     try {
-      if (newBaseSourceType === "git" && !newBaseGitSettings.repo_url.trim()) {
+      if (newBase.sourceType === "git" && !newBase.git.repo_url.trim()) {
         setError("Repository URL is required for Git-based knowledge bases");
         return;
       }
 
       const basePath =
-        newBaseMode === "files"
-          ? newBasePath.trim()
+        newBase.mode === "files"
+          ? newBase.path.trim()
           : defaultPathForBase(baseName);
       if (!basePath) {
         setError("Folder path is required for files-only knowledge bases");
@@ -606,16 +614,16 @@ export function Knowledge() {
       }
 
       const nextBaseConfig: KnowledgeBaseConfig = {
-        description: newBaseDescription.trim(),
-        mode: newBaseMode,
+        description: newBase.description.trim(),
+        mode: newBase.mode,
         path: basePath,
-        watch: newBaseMode === "semantic",
+        watch: newBase.mode === "semantic",
         chunk_size: DEFAULT_CHUNK_SIZE,
         chunk_overlap: DEFAULT_CHUNK_OVERLAP,
       };
 
-      if (newBaseSourceType === "git") {
-        nextBaseConfig.git = normalizeGitConfig(newBaseGitSettings);
+      if (newBase.sourceType === "git") {
+        nextBaseConfig.git = normalizeGitConfig(newBase.git);
       }
 
       updateKnowledgeBase(baseName, nextBaseConfig);
@@ -625,19 +633,14 @@ export function Knowledge() {
         return;
       }
       setSelectedBase(baseName);
-      setNewBaseName("");
-      setNewBaseDescription("");
-      setNewBaseSourceType("local");
-      setNewBaseMode("semantic");
-      setNewBasePath("");
-      setNewBaseGitSettings(defaultGitSettings());
+      setNewBase(EMPTY_NEW_BASE);
       await loadData(baseName);
       toast({
         title: "Knowledge base created",
         description:
-          newBaseSourceType === "git"
+          newBase.sourceType === "git"
             ? `Git base '${baseName}' is ready to sync.`
-            : newBaseMode === "files"
+            : newBase.mode === "files"
               ? `Base '${baseName}' is ready for direct file access.`
               : `Base '${baseName}' is ready for uploads.`,
       });
@@ -653,12 +656,7 @@ export function Knowledge() {
     baseNames,
     updateKnowledgeBase,
     loadData,
-    newBaseName,
-    newBaseMode,
-    newBasePath,
-    newBaseSourceType,
-    newBaseGitSettings,
-    newBaseDescription,
+    newBase,
     reportFailure,
     saveConfig,
     toast,
@@ -928,7 +926,7 @@ export function Knowledge() {
     void uploadFiles(droppedFiles);
   };
 
-  const createBaseNamePreview = newBaseName.trim() || "new_base_name";
+  const createBaseNamePreview = newBase.name.trim() || "new_base_name";
   const createBasePathPreview = defaultPathForBase(createBaseNamePreview);
   const createFileModePathPlaceholder = fileModePathPlaceholder(
     createBaseNamePreview,
@@ -1078,8 +1076,10 @@ export function Knowledge() {
                 </label>
                 <Input
                   id="new-base-name"
-                  value={newBaseName}
-                  onChange={(event) => setNewBaseName(event.target.value)}
+                  value={newBase.name}
+                  onChange={(event) =>
+                    updateNewBase({ name: event.target.value })
+                  }
                   placeholder="new_base_name"
                 />
               </div>
@@ -1093,9 +1093,9 @@ export function Knowledge() {
                 </label>
                 <Textarea
                   id="new-base-description"
-                  value={newBaseDescription}
+                  value={newBase.description}
                   onChange={(event) =>
-                    setNewBaseDescription(event.target.value)
+                    updateNewBase({ description: event.target.value })
                   }
                   placeholder="Product docs, support notes, and operating procedures"
                   rows={3}
@@ -1108,10 +1108,10 @@ export function Knowledge() {
                   <Button
                     type="button"
                     variant={
-                      newBaseSourceType === "local" ? "default" : "outline"
+                      newBase.sourceType === "local" ? "default" : "outline"
                     }
                     aria-label="Create local source"
-                    onClick={() => setNewBaseSourceType("local")}
+                    onClick={() => updateNewBase({ sourceType: "local" })}
                     disabled={creatingBase || isDirty}
                     className="justify-start"
                   >
@@ -1121,10 +1121,10 @@ export function Knowledge() {
                   <Button
                     type="button"
                     variant={
-                      newBaseSourceType === "git" ? "default" : "outline"
+                      newBase.sourceType === "git" ? "default" : "outline"
                     }
                     aria-label="Create git source"
-                    onClick={() => setNewBaseSourceType("git")}
+                    onClick={() => updateNewBase({ sourceType: "git" })}
                     disabled={creatingBase || isDirty}
                     className="justify-start"
                   >
@@ -1139,9 +1139,11 @@ export function Knowledge() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <Button
                     type="button"
-                    variant={newBaseMode === "semantic" ? "default" : "outline"}
+                    variant={
+                      newBase.mode === "semantic" ? "default" : "outline"
+                    }
                     aria-label="Create semantic search access"
-                    onClick={() => setNewBaseMode("semantic")}
+                    onClick={() => updateNewBase({ mode: "semantic" })}
                     disabled={creatingBase || isDirty}
                     className="justify-start"
                   >
@@ -1150,9 +1152,9 @@ export function Knowledge() {
                   </Button>
                   <Button
                     type="button"
-                    variant={newBaseMode === "files" ? "default" : "outline"}
+                    variant={newBase.mode === "files" ? "default" : "outline"}
                     aria-label="Create files-only access"
-                    onClick={() => setNewBaseMode("files")}
+                    onClick={() => updateNewBase({ mode: "files" })}
                     disabled={creatingBase || isDirty}
                     className="justify-start"
                   >
@@ -1162,7 +1164,7 @@ export function Knowledge() {
                 </div>
               </div>
 
-              {newBaseMode === "files" ? (
+              {newBase.mode === "files" ? (
                 <div className="space-y-2">
                   <label
                     className="text-sm font-medium"
@@ -1172,8 +1174,10 @@ export function Knowledge() {
                   </label>
                   <Input
                     id="new-base-path"
-                    value={newBasePath}
-                    onChange={(event) => setNewBasePath(event.target.value)}
+                    value={newBase.path}
+                    onChange={(event) =>
+                      updateNewBase({ path: event.target.value })
+                    }
                     placeholder={createFileModePathPlaceholder}
                   />
                   <p className="text-xs text-muted-foreground">
@@ -1183,7 +1187,7 @@ export function Knowledge() {
                 </div>
               ) : null}
 
-              {newBaseSourceType === "git" ? (
+              {newBase.sourceType === "git" ? (
                 <div className="space-y-3 rounded-md border p-3">
                   <div className="space-y-2">
                     <label
@@ -1194,7 +1198,7 @@ export function Knowledge() {
                     </label>
                     <Input
                       id="new-base-git-repo-url"
-                      value={newBaseGitSettings.repo_url}
+                      value={newBase.git.repo_url}
                       onChange={(event) =>
                         updateNewBaseGitSettings({
                           repo_url: event.target.value,
@@ -1212,7 +1216,7 @@ export function Knowledge() {
                     </label>
                     <ParsedInput
                       id="new-base-git-branch"
-                      value={newBaseGitSettings.branch ?? "main"}
+                      value={newBase.git.branch ?? "main"}
                       format={(branch) => branch}
                       parse={branchOrMain}
                       onChange={(branch) =>
@@ -1222,7 +1226,7 @@ export function Knowledge() {
                     />
                   </div>
                 </div>
-              ) : newBaseMode === "semantic" ? (
+              ) : newBase.mode === "semantic" ? (
                 <p className="text-xs text-muted-foreground">
                   Local base folder path: <code>{createBasePathPreview}</code>
                 </p>
@@ -1237,7 +1241,7 @@ export function Knowledge() {
                   <Plus className="h-4 w-4 mr-2" />
                   {creatingBase
                     ? "Creating..."
-                    : newBaseSourceType === "git"
+                    : newBase.sourceType === "git"
                       ? "Create Git Base"
                       : "Add Base"}
                 </Button>

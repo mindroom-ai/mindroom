@@ -508,13 +508,16 @@ describe("Knowledge", () => {
     });
   });
 
-  it("asks before leaving the page drops a half-filled Create form", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+  async function renderCreateForm() {
     mockStore({});
     setKnowledgeApiMock({});
     render(<Knowledge />);
     await screen.findByText("Knowledge Bases");
-    fireEvent.click(screen.getByRole("button", { name: "Create git source" }));
+  }
+
+  it("asks before leaving the page drops a typed Create form name", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await renderCreateForm();
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
     expect(confirmSpy).not.toHaveBeenCalled();
 
@@ -527,14 +530,10 @@ describe("Knowledge", () => {
     confirmSpy.mockRestore();
   });
 
-  it("counts a changed Git branch in the Create form as unsaved until it is restored", async () => {
+  it("counts a changed Git branch in the Create form as unsaved until the form is back to empty", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-    mockStore({});
-    setKnowledgeApiMock({});
-    render(<Knowledge />);
-    await screen.findByText("Knowledge Bases");
+    await renderCreateForm();
     fireEvent.click(screen.getByRole("button", { name: "Create git source" }));
-
     fireEvent.change(screen.getByLabelText("Branch"), {
       target: { value: "release" },
     });
@@ -543,6 +542,27 @@ describe("Knowledge", () => {
     fireEvent.change(screen.getByLabelText("Branch"), {
       target: { value: "main" },
     });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create local source" }),
+    );
+    confirmSpy.mockClear();
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    expect(confirmSpy).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("counts a changed access mode in the Create form as unsaved", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await renderCreateForm();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create files-only access" }),
+    );
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create semantic search access" }),
+    );
     confirmSpy.mockClear();
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
     expect(confirmSpy).not.toHaveBeenCalled();
@@ -633,6 +653,14 @@ describe("Knowledge", () => {
         }),
       );
     });
+    // A created base leaves an empty Create form, which is no unsaved draft.
+    await waitFor(() =>
+      expect(screen.getByLabelText("Base Name")).toHaveValue(""),
+    );
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    expect(confirmSpy).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 
   it("creates a files-only knowledge base", async () => {
