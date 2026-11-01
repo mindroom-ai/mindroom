@@ -84,13 +84,16 @@ async def reply_span(
     placeholder: str = AGENT_PLACEHOLDER,
     show_tool_calls: bool = True,
     placeholder_event_id: str | None = None,
+    pending_placeholder: bool = False,
     regenerated_event_id: str | None = None,
     runtime: ReplyRuntime | None = None,
 ) -> AsyncIterator[SpanHandle]:
     """Claim a reply span for one source, admitted as ingress admits it, and run the block in it.
 
     With ``placeholder_event_id``, the reply's placeholder is already in the
-    room as that event, the way a turn shows it before its answer. With
+    room as that event, the way a turn shows it before its answer; with
+    ``pending_placeholder``, its create is recorded but Matrix has not
+    acknowledged it. With
     ``regenerated_event_id``, the source is an edit regenerating that answer.
     ``runtime`` claims as an existing bot instance instead of a fresh one.
     """
@@ -136,7 +139,7 @@ async def reply_span(
         )
         assert isinstance(handle, SpanHandle)
         slot.handle = handle
-        if placeholder_event_id is not None:
+        if placeholder_event_id is not None or pending_placeholder:
             write = initial_write(handle, Presentation(placeholder=placeholder), placeholder_only=True)
             enqueued = await principal.enqueue_reply_row(
                 ReplyRowRequest(
@@ -150,13 +153,14 @@ async def reply_span(
             )
             assert enqueued is not None
             handle.note(enqueued.applied)
-            assert await principal.claim_matrix_delivery(delivery_id=source_event_id, stage=DeliveryStage.INITIAL)
-            await principal.acknowledge_matrix_delivery(
-                delivery_id=source_event_id,
-                stage=DeliveryStage.INITIAL,
-                event_id=placeholder_event_id,
-                delivered_projections=(),
-            )
+            if placeholder_event_id is not None:
+                assert await principal.claim_matrix_delivery(delivery_id=source_event_id, stage=DeliveryStage.INITIAL)
+                await principal.acknowledge_matrix_delivery(
+                    delivery_id=source_event_id,
+                    stage=DeliveryStage.INITIAL,
+                    event_id=placeholder_event_id,
+                    delivered_projections=(),
+                )
             reply = await principal.replies.load(handle.reply_id)
             assert reply is not None
             handle.reply = reply

@@ -728,6 +728,27 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             assert reply is not None
             assert reply.state is rl.ReplyState.COMPLETED
 
+    async def test_an_empty_answer_whose_placeholder_create_is_unacknowledged_ends_without_a_note(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A placeholder Matrix has not acknowledged has no event to note on; the reply ends as a suppression does."""
+        gateway = _gateway(tmp_path, alice)
+        send = AsyncMock(side_effect=delivered_matrix_side_effect("$sent"))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            async with reply_span(alice, source_event_id="$cause", room_id=_ROOM_ID, pending_placeholder=True):
+                outcome = await gateway.deliver_final(self._final_request("", source_kind=MESSAGE_SOURCE_KIND))
+
+        assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
+        assert outcome.event_id is None
+        reply = await alice.replies.for_sources(("$cause",))
+        assert reply is not None
+        assert reply.state is rl.ReplyState.GONE
+        note = note_segment(NoteKind.NOTHING_TO_SHOW).text
+        assert all(note not in json.dumps(call.args[2]) for call in send.await_args_list)
+
     @pytest.mark.parametrize("failed", [False, True], ids=["finished_empty", "delivery_failed"])
     async def test_a_stream_that_showed_only_its_placeholder_ends_it_by_how_it_finished(
         self,

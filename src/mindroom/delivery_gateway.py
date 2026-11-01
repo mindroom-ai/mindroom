@@ -619,7 +619,7 @@ class DeliveryGateway:
             assert reply is not None, "a span's reply exists while the span ends"
             # The span's latest progress edit counts, though its confirmation is not in the records yet.
             shown = rl.confirm_progress(reply, handle.unconfirmed_progress)
-            if cause is FailureCause.NOTHING_TO_SHOW and shown.placeholder_only:
+            if cause is FailureCause.NOTHING_TO_SHOW and shown.event_id is not None and shown.placeholder_only:
                 noted = await self.end_interrupted_span(handle, target, ending=ending, delivery_started=True)
                 assert noted is not None, "a failure always ends with its note"
                 return noted
