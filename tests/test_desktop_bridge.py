@@ -2189,14 +2189,7 @@ async def test_bridge_refuses_permissive_command_journal(tmp_path: Path, transpo
 
 def test_setup_binding_check_accepts_only_the_controller_the_bridge_journal_records(tmp_path: Path) -> None:
     """Setup's read-only pre-check agrees with the bridge on where its journal lives and whom it is bound to."""
-    bridge = DesktopBridge(
-        client=object(),
-        provider=FakeProvider(),
-        policy=_policy(),
-        clock=lambda: NOW_SECONDS,
-        journal_path=desktop_journal_path(tmp_path),
-    )
-    bridge.close()
+    DesktopBridge(object(), FakeProvider(), _policy(), journal_path=desktop_journal_path(tmp_path)).close()
 
     check_controller_binding(tmp_path, CONTROLLER)
     with pytest.raises(DesktopCommandJournalError, match="different controller"):
