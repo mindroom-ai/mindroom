@@ -256,6 +256,7 @@ class AgentConfig(BaseModel):
     tools: list[ToolConfigEntry] = Field(
         default_factory=list,
         description="List of tool entries with optional inline per-agent overrides",
+        json_schema_extra=dashboard_hint(reference="tool"),
     )
     include_default_tools: bool = Field(
         default=True,

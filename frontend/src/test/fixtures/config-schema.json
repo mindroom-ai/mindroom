@@ -25,7 +25,10 @@
             "$ref": "#/$defs/ToolConfigEntry"
           },
           "title": "Tools",
-          "type": "array"
+          "type": "array",
+          "x-mindroom": {
+            "reference": "tool"
+          }
         },
         "include_default_tools": {
           "default": true,
