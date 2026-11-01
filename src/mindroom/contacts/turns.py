@@ -13,7 +13,7 @@ from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.resolution import authored_tool_entries
 from mindroom.contacts.parties import agent_party, party_label, personal_room_of
 from mindroom.contacts.policy import NO_CONTACT_RULES, effective_rules
-from mindroom.contacts.store import contact_party_in_room, contact_room_ids
+from mindroom.contacts.store import contact_of_room, contact_party_in_room, contact_room_ids
 from mindroom.hooks import EnrichmentItem
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.session_ids import session_in_room
@@ -35,11 +35,28 @@ def contact_turn(
 ) -> tuple[ContactRecord, SideName] | None:
     """Return the contact and side of this agent's turns in ``room_id``, or None when they are no contact turns.
 
+    A turn reads this once when it starts and stays what it found, so a removal while it runs changes nothing it shows.
     Only an agent that can be a party reads the contacts store.
     """
     if agent_party(config, agent_name) is None:
         return None
     return contact_party_in_room(runtime_paths, room_id, agent_name)
+
+
+def contact_room(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    room_id: str,
+    agent_name: str,
+) -> tuple[ContactRecord, SideName] | None:
+    """Return the contact whose room ``room_id`` is or was and this agent's side, in any status, or None.
+
+    Tools read this to police every message into the room, and a removed contact's room takes no more messages.
+    Only a personal agent reads the contacts store, whether or not its contacts are still enabled.
+    """
+    if config.personal_agent_instance(agent_name) is None:
+        return None
+    return contact_of_room(runtime_paths, room_id, agent_name)
 
 
 def contact_session_check(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> Callable[[str], bool]:

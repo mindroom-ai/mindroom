@@ -19,7 +19,6 @@ from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
 from mindroom.cancellation import classify_cancel_source
 from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
-from mindroom.contacts.turns import contact_turn
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     MatrixDelivery,
@@ -380,6 +379,8 @@ class ResponseIdentity:
     correlation_id: str
     sources: ResponseSources
     participating_agent_names: tuple[str, ...] = ()
+    # Set for a contact turn, whose answer is never shown.
+    contact_turn: bool = False
 
 
 @dataclass(frozen=True)
@@ -1117,6 +1118,7 @@ class DeliveryGateway:
         *,
         ending: Cancelled | Failed,
         delivery_started: bool,
+        contact_turn: bool,
     ) -> FinalDeliveryOutcome | None:
         """End a span whose response was stopped, interrupted, or failed, as ``interrupted_end`` decides.
 
@@ -1126,7 +1128,7 @@ class DeliveryGateway:
         reply = await self.deps.outbox.replies.load(handle.reply_id)
         assert reply is not None, "a span's reply exists while the span ends"
         end = interrupted_end(reply, ending, delivery_started=delivery_started)
-        if end is not None and self._runs_contact_turns(target.room_id):
+        if end is not None and contact_turn:
             self.deps.logger.warning(
                 "contact_turn_ended_unshown",
                 reason=hook_failure_reason(ending),
@@ -1138,12 +1140,6 @@ class DeliveryGateway:
             return await self._end_reply_span_with_note(handle, target, state=end.state, note=end.note, ending=ending)
         await self.end_reply_span(handle, release_decision(handle))
         return None
-
-    def _runs_contact_turns(self, room_id: str) -> bool:
-        """Return whether this agent's turns in the room are contact turns, which show nothing there."""
-        return (
-            contact_turn(self.deps.runtime.config, self.deps.runtime_paths, room_id, self.deps.agent_name) is not None
-        )
 
     async def _end_reply_span_with_note(
         self,

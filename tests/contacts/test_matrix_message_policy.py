@@ -55,6 +55,7 @@ OWNER_ROOM_THREAD_ERROR = (
     "Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread"
 )
 TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
+REMOVED_ERROR = "Error: contact c1 was removed, so nothing more can be sent into its room"
 NOT_AUTHORIZED = "Not authorized to access the target room."
 MENU = MatrixMessageExtra(title="Menu", content="Soup")
 
@@ -104,6 +105,15 @@ def _contact(paths: RuntimePaths, status: _ContactStatus = "active") -> None:
         created_at=1.0,
     )
     update_contacts(paths, lambda book: book.contacts.append(record))
+
+
+def _remove(paths: RuntimePaths) -> None:
+    """Remove contact ``c1``, as its other owner can at any moment."""
+
+    def remove(book: Any) -> None:  # noqa: ANN401
+        book.contacts[0].status = "removed"
+
+    update_contacts(paths, remove)
 
 
 def _agent(paths: RuntimePaths, agent_name: str) -> str:
@@ -532,19 +542,49 @@ async def test_only_the_owner_drives_the_agent_into_its_contact_room(tmp_path: P
     assert _sent(context) == []
 
 
+_WRITES = [
+    {"message": "Still there?"},
+    {"action": "edit", "event_id": "$mine:localhost", "message": "Changed."},
+    {"action": "react", "event_id": "$theirs:localhost", "message": "👍"},
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", _WRITES)
+async def test_a_contact_turn_cannot_write_into_its_room_once_the_contact_is_removed(
+    tmp_path: Path,
+    call: dict[str, object],
+) -> None:
+    """A removal while the turn runs closes its room to it, and the turn still reaches no room but its owner's."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    seen: list[str] = []
+    context = _context(config, paths, _recorder(seen))
+    _remove(paths)
+
+    refused = await _call(context, **call)
+    elsewhere = await _call(context, message="Psst.", room_id=OTHER_ROOM)
+
+    assert (refused["status"], refused["message"]) == ("error", REMOVED_ERROR)
+    assert (elsewhere["status"], elsewhere["message"]) == ("error", DESTINATION_ERROR)
+    assert seen == []
+    assert _sent(context) == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_send_after_removal_is_refused(tmp_path: Path) -> None:
-    """A removed contact's room is an ordinary room the owner never joined, so the agent cannot send there for them."""
+@pytest.mark.parametrize("call", _WRITES)
+async def test_no_turn_writes_into_a_removed_contacts_room(tmp_path: Path, call: dict[str, object]) -> None:
+    """A removed contact's room accepts nothing more from the agent, even when its owner asks from their own room."""
     config, paths = _setup(tmp_path)
     _contact(paths, status="removed")
     context = _context(config, paths, room_id=PERSONAL_ROOM)
 
-    payload = await _call(context, message="Still there?", room_id=CONTACT_ROOM)
+    payload = await _call(context, room_id=CONTACT_ROOM, **call)
 
-    assert payload["status"] == "error"
-    assert payload["message"] == NOT_AUTHORIZED
+    assert (payload["status"], payload["message"]) == ("error", REMOVED_ERROR)
     assert _sent(context) == []
+    assert not await room_access_allowed(context, CONTACT_ROOM)
 
 
 @pytest.mark.asyncio

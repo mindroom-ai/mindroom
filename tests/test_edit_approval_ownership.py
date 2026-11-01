@@ -659,6 +659,7 @@ async def test_failed_pause_without_visible_response_shows_the_approval_failure(
                 request.response_envelope.target,
                 ending=Failed(FailureCause.APPROVAL_NOT_STARTED),
                 delivery_started=False,
+                contact_turn=False,
             )
     assert outcome is not None
     assert outcome.ending == Failed(FailureCause.APPROVAL_NOT_STARTED)

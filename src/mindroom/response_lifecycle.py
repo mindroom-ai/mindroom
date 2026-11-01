@@ -13,7 +13,6 @@ from mindroom import constants
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
 from mindroom.cancellation import current_task_is_process_shutdown
-from mindroom.contacts.turns import contact_turn
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.final_delivery import AwaitingApproval, Owed, Suppression, hook_failure_reason, outcome_label
 from mindroom.hooks import (
@@ -774,10 +773,7 @@ async def answer_suppression(
             no_report_text = strip_matching_visible_tool_markers(no_report_text, draft.tool_trace)
         if constants.is_silent_schedule_no_report_response(no_report_text):
             suppression = Suppression.SILENT_NO_REPORT
-    if (
-        suppression is None
-        and contact_turn(config, runtime_paths, draft.envelope.target.room_id, entity_name) is not None
-    ):
+    if suppression is None and identity.contact_turn:
         suppression = Suppression.CONTACT_TURN
     await record_silent_schedule_result_if_needed(
         entity_name=entity_name,

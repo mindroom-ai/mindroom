@@ -147,18 +147,6 @@ def update_contacts[T](runtime_paths: RuntimePaths, change: Callable[[ContactBoo
     return result
 
 
-def _contact_in_room(runtime_paths: RuntimePaths, room_id: str) -> ContactRecord | None:
-    """Return the active contact whose room this is."""
-    return next(
-        (
-            record
-            for record in read_contacts(runtime_paths).contacts
-            if record.status == "active" and record.room_id == room_id
-        ),
-        None,
-    )
-
-
 def contact_room_ids(runtime_paths: RuntimePaths, agent_name: str, *, include_removed: bool = False) -> frozenset[str]:
     """Return the rooms of the active contacts this agent is a party of, which it keeps across restarts.
 
@@ -173,14 +161,26 @@ def contact_room_ids(runtime_paths: RuntimePaths, agent_name: str, *, include_re
     )
 
 
+def contact_of_room(
+    runtime_paths: RuntimePaths,
+    room_id: str,
+    agent_name: str,
+) -> tuple[ContactRecord, SideName] | None:
+    """Return the contact whose room this is, in any status, and this agent's side; None when it is no party of one.
+
+    A contact keeps its room once removed.
+    """
+    for record in read_contacts(runtime_paths).contacts:
+        if record.room_id == room_id and (side := record.agent_side(agent_name)) is not None:
+            return record, side
+    return None
+
+
 def contact_party_in_room(
     runtime_paths: RuntimePaths,
     room_id: str,
     agent_name: str,
 ) -> tuple[ContactRecord, SideName] | None:
-    """Return the contact of this room and the side this agent is on, or None when the agent is no party of it."""
-    record = _contact_in_room(runtime_paths, room_id)
-    if record is None:
-        return None
-    side = record.agent_side(agent_name)
-    return None if side is None else (record, side)
+    """Return the active contact of this room and the side this agent is on, or None when the agent is no party of it."""
+    found = contact_of_room(runtime_paths, room_id, agent_name)
+    return found if found is not None and found[0].status == "active" else None

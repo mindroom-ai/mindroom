@@ -67,6 +67,7 @@ A contact needs an agent on at least one side and two different owners.
 Asking again for a pair that already has a pending or active contact returns that contact unchanged instead of creating another, and asking again with `rules` or `tools` is refused; change them with `update_contact`.
 After a decline, new requests for that pair are refused until the owner who declined removes the declined contact with `remove_contact`.
 Removing a contact makes its agents leave the contact room; the owners keep the room and its history.
+From then on its agents send nothing more into that room, not even from a turn that was already running.
 
 ## Configuration
 
@@ -212,6 +213,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `Error: in a contact conversation you cannot use idempotency_key in your owner's personal room` | A contact turn sent to the owner's personal room with `idempotency_key`; send the message without it |
 | `Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread` | A contact turn named an existing thread of the owner's personal room; send to the timeline or a new thread |
 | `Error: contact rooms accept text only` | Attachments and collapsible sections cannot go into a contact room |
+| `Error: contact <id> was removed, so nothing more can be sent into its room` | The contact was removed; ask for a new contact to talk again |
 | `Not sent: The conversation already has <n> agent messages in a row; wait for a person to write.` | The agents reached `defaults.max_consecutive_agent_replies`; any person writing in the conversation resets it |
 | `Not sent: A contact policy hook failed.` | A `contact:before_send` hook raised or timed out; check the plugin's logs |
 | `Not sent: The message could not be checked; try again later.` | The judge failed, timed out, or abstained |

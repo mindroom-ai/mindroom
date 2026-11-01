@@ -12,8 +12,8 @@ from mindroom.contacts.store import (
     ContactParty,
     ContactRecord,
     ContactSide,
-    _contact_in_room,
     _contacts_path,
+    contact_of_room,
     contact_party_in_room,
     read_contacts,
     update_contacts,
@@ -55,7 +55,7 @@ def test_a_missing_file_is_an_empty_book(paths: RuntimePaths) -> None:
     """Before the first contact, the book is empty and no file is created by reading."""
     assert read_contacts(paths) == ContactBook()
     assert not _contacts_path(paths).exists()
-    assert _contact_in_room(paths, "!room:localhost") is None
+    assert contact_of_room(paths, "!room:localhost", "mind_bob") is None
 
 
 def test_update_contacts_round_trips_and_read_sees_new_mtime(paths: RuntimePaths) -> None:
@@ -113,30 +113,20 @@ def test_contact_files_reject_unknown_fields(paths: RuntimePaths) -> None:
         read_contacts(paths)
 
 
-def test_contact_party_in_room_only_matches_active(paths: RuntimePaths) -> None:
-    """Pending, declined, and removed contacts never put an agent in a contact room."""
+def test_a_contact_keeps_its_room_once_removed_but_only_an_active_one_seats_its_agents(paths: RuntimePaths) -> None:
+    """A room belongs to its contact in any status, while only an active contact puts its agents in a contact room."""
+    removed = _record("c1", status="removed", room_id="!removed:localhost")
+    active = _record("c2", status="active", room_id="!room:localhost")
+    update_contacts(paths, lambda book: book.contacts.extend([_record("c0"), removed, active]))
 
-    def store(book: ContactBook) -> None:
-        book.contacts.extend(
-            _record(contact_id, status=status, room_id="!room:localhost")
-            for contact_id, status in (("c1", "pending"), ("c2", "declined"), ("c3", "removed"))
-        )
-
-    update_contacts(paths, store)
-    assert _contact_in_room(paths, "!room:localhost") is None
-    assert contact_party_in_room(paths, "!room:localhost", "mind_bob") is None
-
-    def activate(book: ContactBook) -> None:
-        book.contacts.append(_record("c4", status="active", room_id="!room:localhost"))
-
-    update_contacts(paths, activate)
-    record = _contact_in_room(paths, "!room:localhost")
-    assert record is not None
-    assert record.id == "c4"
-    assert contact_party_in_room(paths, "!room:localhost", "mind_bob") == (record, "target")
-    assert contact_party_in_room(paths, "!room:localhost", "mind_alice") == (record, "requester")
+    assert contact_of_room(paths, "!removed:localhost", "mind_bob") == (removed, "target")
+    assert contact_party_in_room(paths, "!removed:localhost", "mind_bob") is None
+    assert contact_of_room(paths, "!room:localhost", "mind_bob") == (active, "target")
+    assert contact_party_in_room(paths, "!room:localhost", "mind_bob") == (active, "target")
+    assert contact_party_in_room(paths, "!room:localhost", "mind_alice") == (active, "requester")
+    assert contact_of_room(paths, "!room:localhost", "other") is None
     assert contact_party_in_room(paths, "!room:localhost", "other") is None
-    assert contact_party_in_room(paths, "!elsewhere:localhost", "mind_bob") is None
+    assert contact_of_room(paths, "!elsewhere:localhost", "mind_bob") is None
 
 
 def test_record_helpers_name_the_side_of_an_agent_or_owner() -> None:

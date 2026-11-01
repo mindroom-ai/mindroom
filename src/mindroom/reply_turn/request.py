@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.participation import ParticipationConfig
+    from mindroom.contacts.store import ContactRecord, SideName
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -101,6 +102,9 @@ class ResponseRequest:
     # replaces only then, so a Stop that refuses the claim leaves that history whole.
     on_reply_claimed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
+    # The contact and side of a contact turn, read once when the turn starts: everything the turn shows and offers
+    # follows it, so a contact removed while the turn runs still hides its final reply and its errors.
+    contact: tuple[ContactRecord, SideName] | None = None
 
     def __post_init__(self) -> None:
         """Require the envelope to name the source driving this response."""

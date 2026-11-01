@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.authorization import is_sender_allowed_for_responder
-from mindroom.contacts.turns import contact_turn
+from mindroom.contacts.turns import contact_room
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.projected_thread_membership import resolve_thread_root_event_id
 from mindroom.matrix.state import resolve_room_id
@@ -33,15 +33,15 @@ async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str
     and an agent relaying another agent's message must stay in their shared
     conversation.
 
-    The agent's own contact room belongs to its owner alone, who is only invited
-    to it, because there the agent speaks for its owner.
+    The agent's own contact room, active or removed, belongs to its owner alone,
+    who is only invited to it, because there the agent speaks for its owner.
     """
     if room_id == context.room_id:
         return True
     config = context.current_config
     if not is_human_requester_id(context.requester_id, config, context.runtime_paths):
         return False
-    if (contact := contact_turn(config, context.runtime_paths, room_id, context.agent_name)) is not None:
+    if (contact := contact_room(config, context.runtime_paths, room_id, context.agent_name)) is not None:
         record, side = contact
         owner = record.party(side).owner
         return resolve_human_requester_alias(context.requester_id, config, context.runtime_paths) == owner
@@ -54,13 +54,14 @@ async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str
 async def room_access_allowed(context: ToolRuntimeContext, room_id: str, *, contact_room_ok: bool = False) -> bool:
     """Return whether the requester may act in the given room.
 
-    The agent's own contact room, even as the current room, is open only to callers that set ``contact_room_ok``:
-    they only read it, or they run the contact policy on everything they post there, as ``matrix_message`` does.
+    The agent's own contact room, active or removed and even as the current room, is open only to callers that set
+    ``contact_room_ok``: they only read it, or they run the contact policy on everything they post there and post
+    nothing into a removed contact's room, as ``matrix_message`` does.
     """
     if not room_id:
         return False
     config = context.current_config
-    if not contact_room_ok and contact_turn(config, context.runtime_paths, room_id, context.agent_name) is not None:
+    if not contact_room_ok and contact_room(config, context.runtime_paths, room_id, context.agent_name) is not None:
         return False
     if room_id == context.room_id:
         return True

@@ -17,7 +17,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.contacts.policy import ContactVerdict, check_contact_message
-from mindroom.contacts.turns import contact_turn
+from mindroom.contacts.turns import contact_room
 from mindroom.custom_tools.attachments import (
     resolve_send_attachment,
     send_resolved_attachments,
@@ -128,11 +128,16 @@ class MatrixMessageOperations:
         """Run the contact policy on a message into a contact room of this agent, before anything is sent or stored.
 
         Return None for any other room, the verdict whose text to send, or the result that stops the message.
+        A removed contact's room takes nothing more, even from a turn that started before the removal.
         """
         config = context.current_config
-        contact = contact_turn(config, context.runtime_paths, room_id, context.agent_name)
+        contact = contact_room(config, context.runtime_paths, room_id, context.agent_name)
         if contact is None:
             return None
+        record, side = contact
+        if record.status != "active":
+            message = f"Error: contact {record.id} was removed, so nothing more can be sent into its room"
+            return self._result("error", action=action, room_id=room_id, message=message)
         if text is None or not text_only:
             return self._result("error", action=action, room_id=room_id, message=_CONTACT_TEXT_ONLY_ERROR)
         # An edit or a reaction adds no message to the conversation, so only a send counts toward the limit.
@@ -148,7 +153,6 @@ class MatrixMessageOperations:
             if action == "send"
             else 0
         )
-        record, side = contact
         verdict = await check_contact_message(
             context,
             record,

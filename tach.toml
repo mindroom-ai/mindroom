@@ -2599,7 +2599,6 @@ depends_on = [
     "mindroom.failure_text",
     "mindroom.response_lifecycle",
     "mindroom.constants",
-    "mindroom.contacts.turns",
     "mindroom.event_journal",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.room_history_reads",
@@ -3390,7 +3389,6 @@ path = "mindroom.response_lifecycle"
 depends_on = [
     "mindroom.cancellation",
     "mindroom.constants",
-    "mindroom.contacts.turns",
     "mindroom.tool_jobs.control",
     "mindroom.mid_turn",
     "mindroom.ai_runtime",

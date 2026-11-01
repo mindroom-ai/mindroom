@@ -558,9 +558,7 @@ class ResponseRunner:
                         self.deps.runtime.config,
                         self.deps.runtime_paths,
                         # A contact turn shows nothing, not even a reaction on the other side's message.
-                        on_defer=None
-                        if self.locked.contact_turn(request.room_id) is not None
-                        else acknowledge_deferred,
+                        on_defer=None if request.contact is not None else acknowledge_deferred,
                     ),
                     locked_operation=lambda target: self._run_locked_ending_span(
                         request,
@@ -597,7 +595,7 @@ class ResponseRunner:
             return await self._run_owned_or_locked_response(request, target=target, locked_operation=locked_operation)
         except BaseException as error:
             handle = current_span()
-            await self._exit_unended_span(handle, error, target=target)
+            await self._exit_unended_span(handle, error, target=target, contact_turn=request.contact is not None)
             if isinstance(error, _PostLockRequestPreparationError) and handle is not None and handle.exited:
                 return Owned()
             raise
@@ -629,6 +627,7 @@ class ResponseRunner:
         error: BaseException,
         *,
         target: MessageTarget,
+        contact_turn: bool,
     ) -> None:
         """End a claimed span the error left running.
 
@@ -636,10 +635,19 @@ class ResponseRunner:
         instance ends it as lost and replays its sources.
         """
         if handle is not None and not handle.exited and not current_task_is_process_shutdown():
-            await run_coroutine_until_complete(self._exit_span_on_error(handle, error, target=target))
+            await run_coroutine_until_complete(
+                self._exit_span_on_error(handle, error, target=target, contact_turn=contact_turn),
+            )
 
-    async def _exit_span_on_error(self, handle: SpanHandle, error: BaseException, *, target: MessageTarget) -> None:
-        """End a span whose locked response raised before ending it."""
+    async def _exit_span_on_error(
+        self,
+        handle: SpanHandle,
+        error: BaseException,
+        *,
+        target: MessageTarget,
+        contact_turn: bool,
+    ) -> None:
+        """End a span whose locked response raised before ending it; a contact turn's failure stays unshown."""
         gateway = self.deps.delivery_gateway
         if isinstance(error, asyncio.CancelledError):
             await gateway.end_interrupted_span(
@@ -647,6 +655,7 @@ class ResponseRunner:
                 target,
                 ending=Cancelled(classify_cancel_source(error)),
                 delivery_started=False,
+                contact_turn=contact_turn,
             )
             return
         if isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError)):
@@ -654,7 +663,7 @@ class ResponseRunner:
             return
         if isinstance(error, _PostLockRequestPreparationError):
             cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
-            if self.locked.contact_turn(target.room_id) is not None:
+            if contact_turn:
                 # A contact turn shows nothing in its contact room, not even its failure.
                 self.deps.logger.warning("contact_turn_preparation_failed", error=str(cause), **target.log_context)
                 await gateway.end_reply_span(handle, suppress_decision(handle))
@@ -901,8 +910,12 @@ class ResponseRunner:
                 request.system_enrichment_items,
                 request.response_envelope,
             )
-            if (contact := self.locked.contact_turn(request.room_id)) is not None:
-                instructions = contact_turn_instructions(self.deps.runtime.config, self.deps.runtime_paths, *contact)
+            if request.contact is not None:
+                instructions = contact_turn_instructions(
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                    *request.contact,
+                )
                 # The runtime owns these instructions; a hook's item under the same key never stands in for them.
                 system_enrichment_items = (
                     *(item for item in system_enrichment_items if item.key != instructions.key),
@@ -986,8 +999,8 @@ class ResponseRunner:
         no interactive questions, since its reply never shows.
         """
         tool_names = None
-        if (contact := self.locked.contact_turn(request.room_id)) is not None:
-            record, side = contact
+        if request.contact is not None:
+            record, side = request.contact
             tool_names = contact_turn_tools(self.deps.runtime.config, self.deps.agent_name, record.side(side))
         state_root = resolve_agent_storage(
             self.deps.agent_name,
@@ -1335,6 +1348,7 @@ class ResponseRunner:
         response_kind: str,
     ) -> SourceFate:
         """Finalize an empty prompt through the locked lifecycle before setup side effects."""
+        request = self.locked.with_contact(request)
         return await self._run_locked_response_lifecycle(
             request,
             response_kind=response_kind,
@@ -2016,7 +2030,11 @@ class ResponseRunner:
         )
 
     async def generate_response(self, request: ResponseRequest) -> SourceFate:
-        """Generate and send/edit an agent response with lifecycle locking; return what it did with its sources."""
+        """Generate and send/edit an agent response with lifecycle locking; return what it did with its sources.
+
+        Whether it is a contact turn is read here once, and the whole turn follows it.
+        """
+        request = self.locked.with_contact(request)
         return await self._run_locked_response_lifecycle(
             request,
             response_kind="ai",
@@ -2145,7 +2163,7 @@ class ResponseRunner:
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        if self.locked.contact_turn(resolved_target.room_id) is not None:
+        if request.contact is not None:
             # The other side drives a contact turn, so it writes no long-term memory and teaches the agent no skill.
             queue_memory_persistence = None
             queue_skill_review = None

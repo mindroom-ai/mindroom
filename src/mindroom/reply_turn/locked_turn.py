@@ -58,7 +58,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
-    from mindroom.contacts.store import ContactRecord, SideName
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter, ReplySession
     from mindroom.delivery_gateway import DeliveryGateway
@@ -144,13 +143,14 @@ class LockedTurns:
             raise RuntimeError(msg)
         return client
 
-    def contact_turn(self, room_id: str) -> tuple[ContactRecord, SideName] | None:
-        """Return the contact and side of this agent's turns in the room, when it is the agent's contact room."""
-        return contact_turn(self.deps.runtime.config, self.deps.runtime_paths, room_id, self.deps.agent_name)
+    def with_contact(self, request: ResponseRequest) -> ResponseRequest:
+        """Return the request carrying the contact of this agent's turns in its room, read once as the turn starts."""
+        contact = contact_turn(self.deps.runtime.config, self.deps.runtime_paths, request.room_id, self.deps.agent_name)
+        return replace(request, contact=contact)
 
     def is_quiet(self, request: ResponseRequest) -> bool:
         """Return whether a turn shows no progress in its room: a silent schedule's turn, or a contact turn."""
-        return is_silent_schedule_response(request) or self.contact_turn(request.room_id) is not None
+        return is_silent_schedule_response(request) or request.contact is not None
 
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
         """Return the runtime's knowledge refresh scheduler."""
@@ -483,6 +483,7 @@ class LockedTurns:
                 outcome,
                 target=target,
                 delivery_started=progress.delivery_started,
+                contact_turn=request.contact is not None,
             )
         progress.ending = outcome.ending
         await self._finalize_locked_outcome(
@@ -501,6 +502,7 @@ class LockedTurns:
         *,
         target: MessageTarget,
         delivery_started: bool,
+        contact_turn: bool,
     ) -> FinalDeliveryOutcome:
         """End a span whose settled outcome wrote no terminal row; return the ending its records committed."""
         gateway = self.deps.delivery_gateway
@@ -519,6 +521,7 @@ class LockedTurns:
                     target,
                     ending=ending,
                     delivery_started=delivery_started,
+                    contact_turn=contact_turn,
                 )
                 return outcome if noted is None else noted
 
@@ -536,6 +539,7 @@ class LockedTurns:
                 sources=request.sources,
                 correlation_id=correlation_id_for_request(request),
                 participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
+                contact_turn=request.contact is not None,
             ),
             pipeline_timing=request.pipeline_timing,
         )

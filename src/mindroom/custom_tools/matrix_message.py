@@ -10,7 +10,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 from mindroom.contacts.parties import personal_room_of
-from mindroom.contacts.turns import contact_turn
+from mindroom.contacts.turns import contact_room
 from mindroom.custom_tools import matrix_conversation_operations
 from mindroom.custom_tools.attachment_helpers import (
     explicit_thread_root,
@@ -60,6 +60,7 @@ def _contact_turn_target_error(
 ) -> str | None:
     """Return why this turn may not act in ``room_id`` this way, or None when it may.
 
+    A turn in a room that is or was the agent's contact room is a contact turn here, even after a removal mid-turn.
     A contact turn acts only in its own room, apart from a plain message to its owner in their personal room with it,
     in that room's timeline or a new thread, never in one of the owner's own threads.
     Anything more there, such as naming a recipient, would start a normal turn with the owner's full authority.
@@ -67,7 +68,7 @@ def _contact_turn_target_error(
     prepared, such as a pending request to an agent, instead of the contact turn's message.
     """
     config = context.current_config
-    contact = contact_turn(config, context.runtime_paths, context.room_id, context.agent_name)
+    contact = contact_room(config, context.runtime_paths, context.room_id, context.agent_name)
     if contact is None or room_id == context.room_id:
         return None
     record, side = contact

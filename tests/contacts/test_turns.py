@@ -271,17 +271,22 @@ def _identity(room_id: str, agent_name: str) -> tuple[ResponseDraft, ResponseIde
 
 @pytest.mark.asyncio
 async def test_a_contact_turns_answer_is_withheld(tmp_path: Path) -> None:
-    """An agent party's answer in its contact room is never shown; its answers anywhere else are."""
+    """A contact turn's answer is never shown and any other turn's answer is, as the turn decided when it started."""
     config, paths = _setup(tmp_path)
     _contact(paths)
 
-    async def suppression(room_id: str, agent_name: str) -> Suppression | None:
-        draft, identity = _identity(room_id, agent_name)
-        return await answer_suppression(draft, identity, entity_name=agent_name, config=config, runtime_paths=paths)
+    async def suppression(*, contact_turn: bool) -> Suppression | None:
+        draft, identity = _identity(CONTACT_ROOM, "mind_bob")
+        return await answer_suppression(
+            draft,
+            replace(identity, contact_turn=contact_turn),
+            entity_name="mind_bob",
+            config=config,
+            runtime_paths=paths,
+        )
 
-    assert await suppression(CONTACT_ROOM, "mind_bob") is Suppression.CONTACT_TURN
-    assert await suppression(OTHER_ROOM, "mind_bob") is None
-    assert await suppression(CONTACT_ROOM, "mind_carol") is None
+    assert await suppression(contact_turn=True) is Suppression.CONTACT_TURN
+    assert await suppression(contact_turn=False) is None
 
 
 def _policy(config: Config, paths: RuntimePaths, agent_name: str) -> TurnPolicy:
@@ -648,3 +653,50 @@ async def test_a_contact_turn_whose_preparation_fails_shows_nothing(tmp_path: Pa
     assert reply.terminal
     # Elsewhere the reply sends its placeholder, then edits the error note into it.
     assert bot.client.room_send.await_count == (0 if room_id == CONTACT_ROOM else 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_a_contact_turn_whose_contact_is_removed_mid_turn_still_shows_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fails: bool,
+) -> None:
+    """A turn stays a contact turn once it starts, so a removal while it runs never shows its final reply or error."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer("Told Alice's agent Bob is free.")])})
+    bot = _bot(config, paths)
+    ended: list[FinalDeliveryOutcome] = []
+    contexts: list[ResponseTurnContext] = []
+
+    async def record_ending(delivery: FinalDeliveryOutcome, *_args: object) -> None:
+        ended.append(delivery)
+
+    def remove_then_answer(ctx: ResponseTurnContext, *args: object, **kwargs: object) -> object:
+        contexts.append(ctx)
+
+        def remove(book: Any) -> None:  # noqa: ANN401
+            book.contacts[0].status = "removed"
+
+        update_contacts(paths, remove)
+        if fails:
+            msg = "calendar token abc123 expired"
+            raise RuntimeError(msg)
+        return ai.stream_agent_response(ctx, *args, **kwargs)  # type: ignore[arg-type]
+
+    with patch_response_runner_module(
+        should_use_streaming=AsyncMock(return_value=True),
+        apply_post_response_effects=AsyncMock(side_effect=record_ending),
+        stream_agent_response=remove_then_answer,
+    ):
+        await bot._response_runner.generate_response(_request(CONTACT_ROOM))
+
+    [delivery], [context] = ended, contexts
+    if fails:
+        assert isinstance(delivery.ending, Failed)
+    else:
+        assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
+    assert context.tool_names == ("calculator", "sleep", "matrix_message")
+    bot.client.room_send.assert_not_awaited()
+    bot.client.room_typing.assert_not_awaited()
