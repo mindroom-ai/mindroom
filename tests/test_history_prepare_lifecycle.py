@@ -65,6 +65,7 @@ from tests.history_helpers import (
     ReplayEstimate,
     _completed_run,
     _completed_team_run,
+    _included_run_count,
     _make_config,
     _session,
     _team_session,
@@ -76,23 +77,7 @@ from tests.history_helpers import (
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
-    from mindroom.llm.runs import RunRecord, TeamRunRecord
-
-
-def _included_run_count(
-    previous_summary: str | None,
-    compacted_runs: list[RunRecord | TeamRunRecord],
-    budget: int,
-) -> int:
-    return len(
-        build_summary_input(
-            previous_summary=previous_summary,
-            compacted_runs=compacted_runs,
-            max_input_tokens=budget,
-            history_settings=_ALL_HISTORY_SETTINGS,
-            token_estimator=estimate_compaction_input_tokens,
-        )[1],
-    )
+    from mindroom.llm.runs import RunRecord
 
 
 def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> None:
@@ -1011,20 +996,19 @@ async def test_compaction_stores_no_summary_the_reply_cannot_replay(
     seed_session(storage, session)
     summary = " ".join(["fact"] * summary_words)
     lifecycle = RecordingCompactionLifecycle()
-    install_model_providers(monkeypatch, {"default": summary_model()})
+    install_model_providers(monkeypatch, {"default": summary_model(summary)})
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value=summary)):
-        prepared = await prepare_history_for_run_for_test(
-            agent_name="test_agent",
-            full_prompt="Current prompt",
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-            storage=storage,
-            session=session,
-            compaction_lifecycle=lifecycle,
-        )
+    prepared = await prepare_history_for_run_for_test(
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        compaction_lifecycle=lifecycle,
+    )
 
     decision = prepared.compaction_decision
     assert decision.hard_budget_tokens is not None

@@ -84,6 +84,7 @@ from tests.history_helpers import (
     _completed_run,
     _forced_compaction_context,
     _hook_runtime_context,
+    _included_run_count,
     _make_config,
     _plugin,
     _reported,
@@ -1272,15 +1273,12 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("first_chunk_fits", [True, False])
-async def test_compact_scope_history_stores_no_summary_the_reply_cannot_replay(
+async def test_compact_scope_history_keeps_earlier_chunks_when_a_later_summary_exceeds_the_budget(
     tmp_path: Path,
-    *,
-    first_chunk_fits: bool,
 ) -> None:
     """Replay never drops a saved summary, so a chunk whose summary exceeds the history budget is not stored.
 
-    Earlier chunks stand; without one, compaction fails and the reply fits raw runs instead.
+    The earlier chunks stand.
     """
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -1288,49 +1286,29 @@ async def test_compact_scope_history_stores_no_summary_the_reply_cannot_replay(
     session = _session("session-1", runs=runs)
     seed_session(storage, session)
     short_summary = "short summary"
-    long_summary = "long " * 400
     summary_input_budget = next(
         budget
         for budget in range(1, 5_000)
-        if all(
-            len(
-                build_summary_input(
-                    previous_summary=previous_summary,
-                    compacted_runs=candidate_runs,
-                    max_input_tokens=budget,
-                    history_settings=_ALL_HISTORY_SETTINGS,
-                    token_estimator=estimate_compaction_input_tokens,
-                )[1],
-            )
-            == 1
-            for previous_summary, candidate_runs in ((None, runs), (short_summary, runs[1:]))
-        )
+        if _included_run_count(None, runs, budget) == 1 and _included_run_count(short_summary, runs[1:], budget) == 1
     )
-    summary_mock = AsyncMock(side_effect=[short_summary if first_chunk_fits else long_summary, long_summary])
+    model = summary_model(short_summary, " ".join(["long"] * 400))
 
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
-        compaction = compact_scope_history(
-            storage=storage,
-            session=session,
-            state=HistoryScopeState(),
-            summarizer=_summarizer(input_budget_tokens=summary_input_budget),
-            available_history_budget=1,
-            max_summary_tokens=estimate_summary_text_tokens(short_summary),
-            before_tokens=2,
-            replay_window_tokens=16_000,
-            threshold_tokens=1,
-            progress=None,
-            complete=_reported,
-            replay_estimator=None,
-        )
-        if not first_chunk_fits:
-            with pytest.raises(RuntimeError, match=r"^The summary exceeds the history budget \(\d+ estimated tokens; "):
-                await compaction
-            assert summary_rows_of(storage, "agent:test_agent") == []
-            return
-        outcome = await compaction
+    outcome = await compact_scope_history(
+        storage=storage,
+        session=session,
+        state=HistoryScopeState(),
+        summarizer=_summarizer(model, summary_input_budget),
+        available_history_budget=1,
+        max_summary_tokens=estimate_summary_text_tokens(short_summary),
+        before_tokens=2,
+        replay_window_tokens=16_000,
+        threshold_tokens=1,
+        progress=None,
+        complete=_reported,
+        replay_estimator=None,
+    )
 
-    assert summary_mock.await_count == 2
+    assert len(model.requests) == 2
     assert outcome is not None
     assert outcome.summary == short_summary
     assert outcome.compacted_run_count == 1
