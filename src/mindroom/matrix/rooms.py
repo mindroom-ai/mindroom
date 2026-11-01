@@ -268,7 +268,7 @@ async def _verify_alias_target(
         room_alias=room_alias,
         room_id=room_id,
         reason=problem,
-        hint="The alias points at a room the router did not create for it; MindRoom creates a room without the alias.",
+        hint="The alias points at a room the router did not create for it, so MindRoom does not adopt that room.",
     )
     return _AliasResolution.CREATE_WITHOUT_ALIAS
 
@@ -640,7 +640,7 @@ async def _ensure_server_emoji_room_exists(
     if resolution is _AliasResolution.RETRY_LATER:
         return None
     if resolution is _AliasResolution.CREATE_WITHOUT_ALIAS:
-        # The operator publishes the alias, so MindRoom Chat would never find a room created without it.
+        # A room without the alias would be a second emoji room next to the one the alias names.
         logger.error("server_emoji_room_alias_taken", room_alias=full_alias, hint="No emoji room was created.")
         return None
     if isinstance(resolution, str):
