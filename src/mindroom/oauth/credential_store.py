@@ -203,7 +203,7 @@ class OAuthCredentialTransaction:
         connection_generation = (
             secrets.token_hex(32) if advance_connection_generation else generations.connection_generation
         )
-        published = legacy_credentials.without_legacy_publication(credentials)
+        published = dict(credentials)
         payload = self._context.credentials_manager.encode_credentials(
             self._context.provider.credential_service,
             published,
@@ -266,17 +266,16 @@ class OAuthCredentialTransaction:
         )
 
     def _decode_credentials(self, row: sqlite3.Row) -> dict[str, Any] | None:
-        normalized = _decode_credentials(self._context, row)
-        if normalized is None:
-            return None
-        credentials = self._context.credentials_manager.decode_credentials(
-            self._context.provider.credential_service,
-            bytes(row["credential_payload"]),
-        )
-        if bool(row["credential_unreadable"]) or normalized != credentials:
+        credentials = _decode_credentials(self._context, row)
+        # LEGACY_COMPAT: OAuth stores adopted from undecodable credential files.
+        # Legacy format: `credential_unreadable = 1` with the retained file payload, written when adoption failed to decode it.
+        # Last legacy release: v2026.9.48; v2026.9.49 removed credential-file adoption, and current writers store 0.
+        # Handling: a write transaction that now decodes the payload re-encodes it and clears the flag.
+        # Coverage: tests/test_oauth_credential_store.py::test_committed_snapshot_clears_unreadable_adoption_flag_once_payload_decodes.
+        if credentials is not None and bool(row["credential_unreadable"]):
             encoded = self._context.credentials_manager.encode_credentials(
                 self._context.provider.credential_service,
-                normalized,
+                credentials,
             )
             self._connection.execute(
                 """
@@ -286,7 +285,7 @@ class OAuthCredentialTransaction:
                 """,
                 (encoded,),
             )
-        return normalized
+        return credentials
 
 
 def _state_row(connection: sqlite3.Connection) -> sqlite3.Row:
@@ -318,7 +317,7 @@ def _decode_credentials(
     context: OAuthCredentialStoreContext,
     row: sqlite3.Row,
 ) -> dict[str, Any] | None:
-    """Decode and normalize one stored payload without mutating its transaction."""
+    """Decode one stored payload without mutating its transaction."""
     if not bool(row["credential_present"]):
         return None
     payload = row["credential_payload"]
@@ -333,7 +332,7 @@ def _decode_credentials(
     except (OSError, TypeError, ValueError, InvalidTag) as exc:
         msg = "Stored OAuth credentials could not be loaded"
         raise OAuthCredentialUnreadableError(msg) from exc
-    return legacy_credentials.without_legacy_publication(credentials)
+    return credentials
 
 
 def _oauth_credential_database_path(context: OAuthCredentialStoreContext) -> Path:

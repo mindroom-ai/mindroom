@@ -16,7 +16,6 @@ OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY = "_oauth_dynamic_client_registere
 OAUTH_CREDENTIAL_FIELDS = frozenset(
     {
         "_id_token",
-        "_mindroom_oauth_publication",
         "_oauth_claims",
         "_oauth_claims_verified",
         "_oauth_provider",
