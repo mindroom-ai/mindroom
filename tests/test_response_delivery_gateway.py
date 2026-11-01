@@ -724,23 +724,45 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert "m.relates_to" not in content
         assert content["body"] == note_segment(NoteKind.NOTHING_TO_SHOW).text
 
+    @pytest.mark.parametrize("streamed", [False, True], ids=["whole", "streamed"])
     async def test_an_empty_regeneration_keeps_the_answer_it_regenerated(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
+        streamed: bool,
     ) -> None:
-        """A regeneration that wrote nothing leaves the earlier answer shown, and the outcome names it."""
+        """A regeneration that wrote nothing leaves the earlier answer shown, and the outcome names it in both modes."""
         gateway = _gateway(tmp_path, alice)
         send = AsyncMock(side_effect=delivered_matrix_side_effect("$sent"))
+        request = replace(self._final_request("", source_kind=MESSAGE_SOURCE_KIND), existing_event_id="$prior_answer")
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
-            outcome = await final_in_span(
-                gateway,
-                alice,
-                replace(self._final_request("", source_kind=MESSAGE_SOURCE_KIND), existing_event_id="$prior_answer"),
-                regenerates=True,
-                end_failed_span=True,
-            )
+            if not streamed:
+                outcome = await final_in_span(gateway, alice, request, regenerates=True, end_failed_span=True)
+            else:
+                async with reply_span(
+                    alice,
+                    source_event_id="$cause",
+                    room_id=_ROOM_ID,
+                    regenerated_event_id="$prior_answer",
+                ) as handle:
+                    outcome = await gateway.finalize_streamed_response(
+                        FinalizeStreamedResponseRequest(
+                            target=request.target,
+                            # The regeneration's stream ran to its end without showing anything.
+                            stream_transport_outcome=StreamTransportOutcome(
+                                last_physical_stream_event_id="$prior_answer",
+                                rendered_body=None,
+                                visible_body_state="none",
+                            ),
+                            initial_delivery_kind="edited",
+                            identity=request.identity,
+                            tool_trace=None,
+                            extra_content=None,
+                            existing_event_id="$prior_answer",
+                        ),
+                    )
+                    outcome = await end_span_as_locked_turn(gateway, handle, request.target, outcome)
 
         assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
         assert outcome.final_visible_event_id == "$prior_answer"

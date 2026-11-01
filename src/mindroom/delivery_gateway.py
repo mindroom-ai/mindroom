@@ -2284,7 +2284,7 @@ class DeliveryGateway:
         with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
             return await self._finalize_streamed_response(request)
 
-    async def _finalize_streamed_response(  # noqa: C901, PLR0911
+    async def _finalize_streamed_response(  # noqa: PLR0911
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
@@ -2313,24 +2313,6 @@ class DeliveryGateway:
                     ),
                 )
 
-            if (
-                stream_outcome.visible_body_state == "none"
-                and not stream_outcome.failed
-                and request.initial_delivery_kind == "edited"
-                and not request.existing_event_is_placeholder
-            ):
-                existing_visible_event_id = request.existing_event_id or streamed_event_id
-                if existing_visible_event_id is not None:
-                    return FinalDeliveryOutcome(
-                        ending=Completed(),
-                        event_id=existing_visible_event_id,
-                        is_visible_response=True,
-                        final_visible_body=streamed_text or None,
-                        delivery_kind="edited",
-                        tool_trace=tuple(request.tool_trace or ()),
-                        extra_content=request.extra_content,
-                    )
-
             if stream_outcome.failed and stream_outcome.visible_body_state != "visible_body":
                 placeholder_only = stream_outcome.visible_body_state == "placeholder_only"
                 if placeholder_only and (handle := self._live_span()) is not None:
@@ -2348,8 +2330,8 @@ class DeliveryGateway:
                 )
 
             if stream_outcome.visible_body_state != "visible_body":
-                # An edited stream that showed nothing below an answer already returned above; the span's end notes
-                # that this one finished without a reply.
+                # The span's end notes that the turn finished without a reply, or keeps the answer a regeneration
+                # that wrote nothing was replacing, as a whole delivery's does.
                 return FinalDeliveryOutcome(
                     ending=Failed(FailureCause.NOTHING_TO_SHOW),
                     tool_trace=tuple(request.tool_trace or ()),
