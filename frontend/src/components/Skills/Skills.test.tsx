@@ -3,12 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Skills } from "./Skills";
 import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
-import {
-  createSkill,
-  getSkill,
-  listSkills,
-  updateSkill,
-} from "@/services/skillsService";
+import { createSkill, getSkill, listSkills } from "@/services/skillsService";
 
 vi.mock("@/services/skillsService", () => ({
   createSkill: vi.fn(),
@@ -56,11 +51,9 @@ const SKILLS = [
 async function editAlpha() {
   render(<Skills />);
   fireEvent.click(await screen.findByText("alpha"));
-  const editor = await screen.findByLabelText("Skill content");
-  await waitFor(() =>
-    expect(screen.getByLabelText("Skill content")).toHaveValue("alpha content"),
-  );
-  fireEvent.change(editor, { target: { value: "unsaved edit" } });
+  fireEvent.change(await screen.findByDisplayValue("alpha content"), {
+    target: { value: "unsaved edit" },
+  });
 }
 
 describe("Skills unsaved edits", () => {
@@ -72,8 +65,6 @@ describe("Skills unsaved edits", () => {
       ...SKILLS.find((skill) => skill.name === name)!,
       content: `${name} content`,
     }));
-    vi.mocked(createSkill).mockResolvedValue(undefined as never);
-    vi.mocked(updateSkill).mockResolvedValue(undefined as never);
   });
 
   afterEach(() => {
@@ -199,11 +190,7 @@ describe("Skills unsaved edits", () => {
     const confirmSpy = vi.spyOn(window, "confirm");
     render(<Skills />);
     fireEvent.click(await screen.findByText("alpha"));
-    await waitFor(() =>
-      expect(screen.getByLabelText("Skill content")).toHaveValue(
-        "alpha content",
-      ),
-    );
+    await screen.findByDisplayValue("alpha content");
 
     fireEvent.click(screen.getByRole("button", { name: "Back to skills" }));
 

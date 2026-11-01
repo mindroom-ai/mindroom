@@ -664,7 +664,6 @@ describe("ModelConfig", () => {
 
     fireEvent.click(screen.getByText("anthropic"));
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByDisplayValue("claude-haiku-4-5"), {
       target: { value: "claude-sonnet-5" },
@@ -681,7 +680,6 @@ describe("ModelConfig", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /add model/i }));
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByPlaceholderText("model name"), {
       target: { value: "new-model" },

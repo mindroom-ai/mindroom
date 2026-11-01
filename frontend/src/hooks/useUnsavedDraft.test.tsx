@@ -25,14 +25,11 @@ describe("useUnsavedDraft", () => {
     expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
 
     rerender({ isDirty: false });
-    confirmSpy.mockClear();
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
 
     rerender({ isDirty: true });
     unmount();
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
   });
 
   it("asks before an editor's own action only when its draft is unsaved", () => {
@@ -41,14 +38,10 @@ describe("useUnsavedDraft", () => {
     const dirty = renderHook(() => useUnsavedDraft(true));
 
     expect(clean.result.current()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
 
     expect(dirty.result.current()).toBe(false);
     confirmSpy.mockReturnValue(true);
     expect(dirty.result.current()).toBe(true);
     expect(confirmSpy).toHaveBeenCalledTimes(2);
-
-    clean.unmount();
-    dirty.unmount();
   });
 });

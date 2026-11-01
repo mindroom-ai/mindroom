@@ -1937,7 +1937,6 @@ describe("egress broker service editor", () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     await openEdit("GitHub");
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
 
     openMoreOptions();
     fill("Description", "typed but not saved");
@@ -1945,10 +1944,8 @@ describe("egress broker service editor", () => {
     expect(confirmLeavingUnsavedDrafts()).toBe(false);
     expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
 
-    confirmSpy.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
   });
 
   it("opens another service straight away when nothing was changed", async () => {

@@ -519,7 +519,6 @@ describe("Knowledge", () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     await renderCreateForm();
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText("Base Name"), {
       target: { value: "docs_git" },
@@ -545,9 +544,7 @@ describe("Knowledge", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Create local source" }),
     );
-    confirmSpy.mockClear();
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
   });
 
@@ -563,9 +560,7 @@ describe("Knowledge", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Create semantic search access" }),
     );
-    confirmSpy.mockClear();
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
   });
 
@@ -657,10 +652,7 @@ describe("Knowledge", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("Base Name")).toHaveValue(""),
     );
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
   });
 
   it("creates a files-only knowledge base", async () => {

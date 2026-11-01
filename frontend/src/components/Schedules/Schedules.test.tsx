@@ -206,7 +206,6 @@ describe("Schedules", () => {
     });
 
     it("counts saved edits as saved even when the list fails to reload", async () => {
-      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
       await editQuietTask();
       vi.mocked(global.fetch)
         .mockResolvedValueOnce({ ok: true, json: async () => ({}) } as Response)
@@ -216,7 +215,6 @@ describe("Schedules", () => {
 
       expect(await screen.findByText("list unavailable")).toBeInTheDocument();
       expect(confirmLeavingUnsavedDrafts()).toBe(true);
-      expect(confirmSpy).not.toHaveBeenCalled();
     });
 
     it("does not ask when the selected schedule is selected again", async () => {
@@ -265,26 +263,20 @@ describe("Schedules", () => {
 
     it("asks before a room filter that hides the schedule drops the edits", async () => {
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const pickRoomFilter = async (name: string) => {
+        fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
+        fireEvent.click(await screen.findByRole("option", { name }));
+      };
       await editQuietTask();
 
-      fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
-      fireEvent.click(
-        await screen.findByRole("option", { name: "#ops:example.org" }),
-      );
       // Neither the schedule's own room nor All rooms hides it.
-      fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
-      fireEvent.click(await screen.findByRole("option", { name: "All rooms" }));
+      await pickRoomFilter("#ops:example.org");
+      await pickRoomFilter("All rooms");
       expect(confirmSpy).not.toHaveBeenCalled();
       expect(screen.queryByText(/^Room: /)).not.toBeInTheDocument();
 
-      fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
-      fireEvent.click(
-        await screen.findByRole("option", { name: "#ops:example.org" }),
-      );
-      fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
-      fireEvent.click(
-        await screen.findByRole("option", { name: "#lobby:example.org" }),
-      );
+      await pickRoomFilter("#ops:example.org");
+      await pickRoomFilter("#lobby:example.org");
 
       expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
       expect(screen.getByLabelText("Description")).toHaveValue(

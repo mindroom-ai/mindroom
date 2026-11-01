@@ -450,7 +450,6 @@ export function ModelConfig() {
     { id: "modelName", desc: false },
   ]);
 
-  const [editingRowId, setEditingRowId] = useState<string | null>(null);
   const [rowDraft, setRowDraft] = useState<RowDraft | null>(null);
   // The model, row draft, and loaded config as they were when row editing
   // began, so Cancel can also undo More settings edits, Save only writes a
@@ -460,6 +459,7 @@ export function ModelConfig() {
     draft: RowDraft;
     loadedConfig: typeof loadedConfig;
   } | null>(null);
+  const editingRowId = editingStart?.draft.modelName ?? null;
   const [isSavingRow, setIsSavingRow] = useState(false);
 
   const [isAddingRow, setIsAddingRow] = useState(false);
@@ -667,13 +667,11 @@ export function ModelConfig() {
       selectedKeySourceModel: "",
       clearCustomKey: false,
     };
-    setEditingRowId(row.modelName);
     setEditingStart({ config: models[row.modelName], draft, loadedConfig });
     setRowDraft(draft);
   };
 
   const finishEditingRow = () => {
-    setEditingRowId(null);
     setRowDraft(null);
     setEditingStart(null);
   };

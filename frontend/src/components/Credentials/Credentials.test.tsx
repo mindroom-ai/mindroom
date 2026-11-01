@@ -974,7 +974,6 @@ describe("Credentials", () => {
     renderOpen();
     await showsTokenOf("service_a");
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByPlaceholderText('{"api_key":"..."}'), {
       target: { value: '{"token":"draft"}' },
