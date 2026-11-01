@@ -22,8 +22,9 @@ _MAX_PROGRESS_CHARS = 2000
 # A live reply shows this much of a running call's output.
 _SHOWN_PROGRESS_CHARS = 1000
 # A listener that shows a report masks credentials before cutting it, so a long credential keeps the label that
-# identifies it; redaction gives up on very long text, so a report carries at most this much.
-_REPORT_WINDOW_CHARS = 16 * _MAX_PROGRESS_CHARS
+# identifies it: a report carries the shown output plus the longest private key (8192-bit, about 6.5K characters). A
+# line redaction cannot delimit hides the shown output until it scrolls out of this window, so it stays small.
+_REPORT_WINDOW_CHARS = 8000
 
 _REPORTER: ContextVar[Callable[[str], None] | None] = ContextVar("tool_progress_reporter", default=None)
 
@@ -50,7 +51,7 @@ def report_tool_progress(text: str) -> None:
     """Report the call's latest progress, replacing the previous report; nothing happens when nobody listens.
 
     Listeners receive the report's latest characters unmasked; one that shows them masks credentials before it cuts
-    them with ``cap_progress``.
+    them, as ``shown_progress`` does.
     """
     reporter = _REPORTER.get()
     if reporter is not None:
