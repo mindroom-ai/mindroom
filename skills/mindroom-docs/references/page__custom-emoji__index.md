@@ -46,10 +46,13 @@ MindRoom creates the room `#emoji:<server name>`, or `#emoji_<namespace>:<server
 On every start it logs `server_emoji_room_ready` with the room's alias and ID.
 Publish that alias with the `io.mindroom.emoji` key as described in [Enable it](#enable-it); with the `mindroom-client` Helm chart, set `serverEmoji.room: "#emoji:example.com"`.
 
-On every start, and on a config reload that changes `server_emoji` or `room_defaults`, MindRoom sets who may add emoji from `moderators_only`, keeps members from posting, and gives the users in `room_defaults.admins` administrator power in the room.
+On every start, and on a config reload that changes `server_emoji` or `room_defaults`, MindRoom sets who may add emoji from `moderators_only`, keeps members from posting, gives the users in `room_defaults.admins` administrator power in the room, and publishes the alias again if someone deleted it.
 Changing `name` later renames neither the room nor its pack; rename the pack in MindRoom Chat.
 Setting `enabled: false` leaves the room as it is.
-If the alias already names a room another account made, for example with the script, MindRoom logs `server_emoji_room_alias_taken` and creates no room; keep publishing that room and turn `server_emoji` off.
+If the alias already names another room, MindRoom logs `server_emoji_room_alias_taken`, leaves that room alone, and creates no room.
+If you made that room with the script, keep publishing it and turn `server_emoji` off.
+Otherwise, delete the alias and restart MindRoom, which then creates the room.
+Do not publish a room you did not make: on a homeserver with open registration, anyone can create a room under a free alias.
 On a homeserver without MindRoom, create the room with the script.
 
 ## Enable it

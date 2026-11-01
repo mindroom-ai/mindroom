@@ -623,6 +623,25 @@ async def ensure_root_space(
     return root_space_id
 
 
+async def _is_server_emoji_room(client: nio.AsyncClient, room_id: str, room_alias: str) -> bool:
+    """Return whether a room the router made for the alias is a server emoji room, and not one made for another use."""
+    response = await _get_room_state(client, room_id, room_alias)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        return False
+    state = {(event["type"], event["state_key"]): event["content"] for event in response.events}
+    create = state.get(("m.room.create", ""))
+    # MindRoom Chat trusts an alias only in a local-only emoji room.
+    if isinstance(create, dict) and create.get("type") == _SERVER_EMOJI_ROOM_TYPE and create.get("m.federate") is False:
+        return True
+    logger.error(
+        "server_emoji_room_alias_taken",
+        room_alias=room_alias,
+        room_id=room_id,
+        hint="The alias names a room MindRoom made for another use; no emoji room was created.",
+    )
+    return False
+
+
 async def _ensure_server_emoji_room_exists(
     client: nio.AsyncClient,
     config: Config,
@@ -633,9 +652,7 @@ async def _ensure_server_emoji_room_exists(
     """Return the server emoji room, joining the router's room for the alias or creating it."""
     known_room_id = matrix_state.matrix_state_for_runtime(runtime_paths).server_emoji_room_id
     joined_room_ids = await get_joined_rooms(client) or []
-    if known_room_id and known_room_id in joined_room_ids:
-        return known_room_id
-
+    # Resolving the alias even for a joined room publishes it again when someone deleted it.
     resolution = await _resolve_managed_alias(client, full_alias, known_room_id)
     if resolution is _AliasResolution.RETRY_LATER:
         return None
@@ -645,6 +662,8 @@ async def _ensure_server_emoji_room_exists(
         return None
     if isinstance(resolution, str):
         room_id = resolution
+        if room_id != known_room_id and not await _is_server_emoji_room(client, room_id, full_alias):
+            return None
         joined = room_id in client.rooms or room_id in joined_room_ids
         if not joined and await join_room(client, room_id) is not RoomJoinOutcome.JOINED:
             logger.warning("server_emoji_room_join_failed", room_alias=full_alias, room_id=room_id)
@@ -660,6 +679,8 @@ async def _ensure_server_emoji_room_exists(
             room_type=_SERVER_EMOJI_ROOM_TYPE,
             federate=False,
             preset=nio.RoomPreset.public_chat,
+            # Members may not post from the start, even when the power-level update below fails.
+            power_level_override={"events_default": _MODERATOR_POWER_LEVEL},
             initial_state=[
                 {
                     "type": _EMOJI_PACK_EVENT_TYPE,

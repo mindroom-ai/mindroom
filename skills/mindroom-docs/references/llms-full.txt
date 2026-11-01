@@ -6379,10 +6379,13 @@ MindRoom creates the room `#emoji:<server name>`, or `#emoji_<namespace>:<server
 On every start it logs `server_emoji_room_ready` with the room's alias and ID.
 Publish that alias with the `io.mindroom.emoji` key as described in [Enable it](#enable-it); with the `mindroom-client` Helm chart, set `serverEmoji.room: "#emoji:example.com"`.
 
-On every start, and on a config reload that changes `server_emoji` or `room_defaults`, MindRoom sets who may add emoji from `moderators_only`, keeps members from posting, and gives the users in `room_defaults.admins` administrator power in the room.
+On every start, and on a config reload that changes `server_emoji` or `room_defaults`, MindRoom sets who may add emoji from `moderators_only`, keeps members from posting, gives the users in `room_defaults.admins` administrator power in the room, and publishes the alias again if someone deleted it.
 Changing `name` later renames neither the room nor its pack; rename the pack in MindRoom Chat.
 Setting `enabled: false` leaves the room as it is.
-If the alias already names a room another account made, for example with the script, MindRoom logs `server_emoji_room_alias_taken` and creates no room; keep publishing that room and turn `server_emoji` off.
+If the alias already names another room, MindRoom logs `server_emoji_room_alias_taken`, leaves that room alone, and creates no room.
+If you made that room with the script, keep publishing it and turn `server_emoji` off.
+Otherwise, delete the alias and restart MindRoom, which then creates the room.
+Do not publish a room you did not make: on a homeserver with open registration, anyone can create a room under a free alias.
 On a homeserver without MindRoom, create the room with the script.
 
 ## Enable it
@@ -17905,7 +17908,7 @@ Custom events default to 1000 ms.
   The hook can run more than once for the same occurrence, so side-effecting hooks should use `ctx.correlation_id`, which is stable per occurrence, as an idempotency key.
 - **Room membership**: both events exclude configured agents, the internal `mindroom_user`, and `bot_accounts`.
   `room:member_joined` fires only for live joins, not for members already present at startup or for profile changes; `room:member_left` fires when a joined user leaves on their own, not when they are kicked or banned.
-  With [`server_emoji`](https://docs.mindroom.chat/custom-emoji/#let-mindroom-create-the-room) enabled, `room:member_joined` also fires when MindRoom Chat joins a user to the server emoji room, so filter on `ctx.room_id` if a handler should only react to joins in certain rooms.
+  Once MindRoom has created the [server emoji room](https://docs.mindroom.chat/custom-emoji/#let-mindroom-create-the-room), `room:member_joined` also fires when MindRoom Chat joins a user to it, even after `server_emoji` is turned off, so filter on `ctx.room_id` if a handler should only react to joins in certain rooms.
   `room:member_left` reports the `display_name` and `avatar_url` the user had while joined.
   Either event can be delivered more than once for the same join or leave after a restart, so handlers that create rooms, send invites, or write state must be idempotent.
 

@@ -181,6 +181,7 @@ async def test_missing_emoji_room_is_created_with_the_script_shape(tmp_path: Pat
         "room_alias_name": "emoji",
         "name": "Example",
         "creation_content": {"type": "io.mindroom.emoji", "m.federate": False},
+        "power_level_content_override": {"events_default": 50},
         "is_direct": False,
         "initial_state": [
             {
@@ -220,7 +221,7 @@ async def test_emoji_room_power_levels_are_reconciled(
         "events": {"m.room.name": 50, "m.room.message": 0, "m.room.encrypted": 75},
     }
     state = _emoji_room_state(levels)
-    client = _router_client(state, joined=True, alias=_missing_alias())
+    client = _router_client(state, joined=True, alias=_alias_of(_ROOM))
     config = _config(
         tmp_path,
         server_emoji={"enabled": True, "moderators_only": moderators_only},
@@ -243,7 +244,6 @@ async def test_emoji_room_power_levels_are_reconciled(
         "state_default": 50,
         "ban": 50,
     }
-    client.room_resolve_alias.assert_not_awaited()
     client.room_create.assert_not_awaited()
 
 
@@ -256,7 +256,7 @@ async def test_reconciled_emoji_room_gets_no_power_level_write(tmp_path: Path) -
         "events": {"im.ponies.room_emotes": 0},
         "events_default": 100,
     }
-    client = _router_client(_emoji_room_state(levels), joined=True, alias=_missing_alias())
+    client = _router_client(_emoji_room_state(levels), joined=True, alias=_alias_of(_ROOM))
     config = _config(tmp_path, server_emoji={"enabled": True}, room_defaults={"admins": ["@admin:localhost"]})
     _record_room(config)
 
@@ -306,8 +306,37 @@ async def test_alias_held_by_another_account_creates_no_room(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_router_room_that_is_not_an_emoji_room_is_left_alone(tmp_path: Path) -> None:
+    """A room the router made for the alias for another purpose, such as an old managed room, is not adopted."""
+    state = _emoji_room_state(dict(_SERVER_LEVELS))
+    state["m.room.create", ""] = {"room_version": "11"}
+    client = _router_client(state, joined=True, alias=_alias_of(_ROOM))
+    config = _config(tmp_path, server_emoji={"enabled": True})
+
+    assert await ensure_server_emoji_room(client, config, runtime_paths_for(config)) is None
+
+    client.room_put_state.assert_not_awaited()
+    client.room_create.assert_not_awaited()
+    assert _recorded_room(config) is None
+
+
+@pytest.mark.asyncio
+async def test_deleted_alias_of_the_joined_emoji_room_is_published_again(tmp_path: Path) -> None:
+    """MindRoom Chat finds the room by its alias, so the router restores a deleted alias."""
+    client = _router_client(_emoji_room_state(dict(_SERVER_LEVELS)), joined=True, alias=_missing_alias())
+    client.room_put_alias.return_value = nio.RoomPutAliasResponse(_ALIAS, _ROOM)
+    config = _config(tmp_path, server_emoji={"enabled": True})
+    _record_room(config)
+
+    assert await ensure_server_emoji_room(client, config, runtime_paths_for(config)) == _ROOM
+
+    client.room_put_alias.assert_awaited_once_with(_ALIAS, _ROOM)
+    client.room_create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_room_setup_ensures_the_emoji_room_through_the_router(tmp_path: Path) -> None:
-    """Startup and config reload reach the emoji room with the router's client."""
+    """Room setup maintains the emoji room with the router's client."""
     config = _config(tmp_path, server_emoji={"enabled": True})
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
     router_bot = MagicMock()
