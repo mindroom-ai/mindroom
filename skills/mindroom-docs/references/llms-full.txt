@@ -10884,7 +10884,7 @@ browser_control(action="screenshot")
 
 Host-target profiles are named, with `mindroom` as the default; names starting with a dot are rejected.
 In the primary process a profile lives at `browser-profiles/<profile>` under the agent's state root, so every requester of a shared agent shares its signed-in sessions, while different agents never share them.
-This holds even with `worker_scope: user` or `user_agent` unless `browser` is in `worker_tools`, which gives each dedicated Docker or Kubernetes worker its own profiles; on the shared `static_runner` backend every agent routed there shares one set (see [Browsers in workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#browsers-in-workers)).
+This holds even with `worker_scope: user` or `user_agent` unless `browser` is in `worker_tools`, which gives each dedicated Docker or Kubernetes worker its own profiles; for the `static_runner` backend see [Browsers in workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#browsers-in-workers).
 In the primary process a started profile keeps running, with its tabs, across replies until `action="stop"` or a MindRoom restart, and replies using it at the same time share it.
 Use a private agent when requesters need separate browser sessions.
 Chromium is taken from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable`.
