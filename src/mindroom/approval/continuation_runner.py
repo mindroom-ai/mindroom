@@ -130,6 +130,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from contextlib import AbstractAsyncContextManager
 
+    from mindroom.delivery_gateway import ResponseIdentity
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import RunRequirement
     from mindroom.message_target import MessageTarget
@@ -779,10 +780,11 @@ class ApprovalContinuationRunner:
         *,
         request: ResponseRequest,
         target: MessageTarget,
+        identity: ResponseIdentity,
     ) -> tuple[FinalDeliveryOutcome, ApprovalContinuation]:
         """Run and classify one claimed continuation for either lifecycle entry path."""
         if claimed.cli_call is None:
-            return await self._deliver_claimed_approval(claimed, request=request, target=target)
+            return await self._deliver_claimed_approval(claimed, request=request, target=target, identity=identity)
         progress = TurnProgress()
         async with self._cli_approval_handler_scope(
             request=request,
@@ -800,6 +802,7 @@ class ApprovalContinuationRunner:
                 claimed,
                 request=request,
                 target=target,
+                identity=identity,
                 cli_approval_handler=handler,
             )
             progress.ending = outcome.ending
@@ -811,14 +814,11 @@ class ApprovalContinuationRunner:
         *,
         request: ResponseRequest,
         target: MessageTarget,
+        identity: ResponseIdentity,
         cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None,
     ) -> tuple[FinalDeliveryOutcome, ApprovalContinuation]:
         """Deliver execution output against the latest native continuation generation."""
         tool_trace: list[ToolTraceEntry] = []
-        identity = self.locked.response_identity(
-            request,
-            response_kind=continuation_response_kind(claimed),
-        )
         # Streaming requesters watch the resumed work in the reply it continues.
         # Progress closes before any terminal edit, which stays owned below.
         progress_scope: AbstractAsyncContextManager[ProgressPublisher | None] = (
@@ -920,6 +920,7 @@ class ApprovalContinuationRunner:
                     claimed,
                     request=request,
                     target=target,
+                    identity=lifecycle.identity,
                 )
             except (asyncio.CancelledError, Exception):
                 delivery, _span_outcome = await run_coroutine_until_complete(self._read_final(claimed, recover=True))

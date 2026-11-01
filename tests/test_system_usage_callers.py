@@ -19,7 +19,6 @@ from mindroom.thread_summary.generation import GeneratedSummary, generate_summar
 from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import bind_runtime_paths, install_model_providers, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
-from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -52,7 +51,6 @@ async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(
         ),
         paths,
     )
-    persist_entity_accounts(config, paths)
     if storage_failure:
 
         async def fail_write(*_args: object, **_kwargs: object) -> None:

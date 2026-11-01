@@ -47,7 +47,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
 from tests.turn_dispatch_helpers import dispatch_test_turn, make_test_turn
 
 if TYPE_CHECKING:
@@ -58,9 +58,7 @@ if TYPE_CHECKING:
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound test config."""
     runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
-    bound_config = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
-    return bound_config
+    return bind_runtime_paths(config, runtime_paths)
 
 
 def _message(

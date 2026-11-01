@@ -50,6 +50,15 @@
 {{- if and (not .Values.nginx.create) (not .Values.nginx.existingConfigMap) -}}
 {{- fail "nginx.existingConfigMap is required when nginx.create=false" -}}
 {{- end -}}
+{{- if and .Values.nginx.create (not .Values.nginx.existingConfigMap) -}}
+{{- $keys := list .Values.nginx.key -}}
+{{- if .Values.rootServiceWorkerCleanup.enabled -}}
+{{- $keys = append $keys .Values.nginx.cleanupWorkerKey -}}
+{{- end -}}
+{{- if has "nginx.conf" $keys -}}
+{{- fail "nginx.key and nginx.cleanupWorkerKey cannot be nginx.conf, which holds the chart-managed main nginx config" -}}
+{{- end -}}
+{{- end -}}
 {{- if and .Values.nginx.serverSnippet (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
 {{- fail "nginx.serverSnippet requires the chart-managed nginx config" -}}
 {{- end -}}

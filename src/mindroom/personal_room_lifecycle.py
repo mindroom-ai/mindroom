@@ -45,6 +45,8 @@ _RECONCILIATION_RETRY_SECONDS = 30.0
 # A candidate that keeps failing, such as a room waiting for a person to fix its
 # membership, is retried after doubling delays up to this cap.
 _RECONCILIATION_MAX_RETRY_SECONDS = 3600.0
+# Every bot in a room reports each membership event, so the router drops repeats among this many recent ones.
+_RECENT_MEMBERSHIP_EVENTS = 1024
 
 
 class _TargetNotReadyError(RuntimeError):
@@ -92,6 +94,8 @@ class PersonalRoomLifecycle:
     lookup_target: Callable[[str], PersonalRoomTarget | None]
     # Starts a user's agent once provisioning added it to the roster.
     config_reload: ConfigReloadLifecycle
+    # Tells the router that a membership event (room_id, event_id) changed a room, which may unblock its roster.
+    report_membership_change: Callable[[str, str], None]
     # A live join and a reconciliation pass can both reach one user; only one may register the account.
     _provisioning: set[tuple[str, str]] = field(default_factory=set, init=False)
     _reconciled: bool = field(default=False, init=False)
@@ -100,9 +104,18 @@ class PersonalRoomLifecycle:
     _candidate_backoff: dict[tuple[str, str], _CandidateBackoff] = field(default_factory=dict, init=False)
     # Live triggers that failed, with whether they asked to re-invite a departed owner.
     _retry_candidates: dict[tuple[str, str], bool] = field(default_factory=dict, init=False)
+    # The personal room and unattested members each candidate last reported, warned about only when they change.
+    # Kept across reloads, which each user's provisioning from a template requests.
+    _roster_mismatches: dict[tuple[str, str], tuple[str, tuple[str, ...]]] = field(default_factory=dict, init=False)
+    # Candidates whose personal room's membership changed since their last attempt, retried without their delay.
+    _membership_changed: set[tuple[str, str]] = field(default_factory=set, init=False)
+    # Recently reported membership events, in arrival order.
+    _reported_events: dict[str, None] = field(default_factory=dict, init=False)
+    # Rooms whose membership changed during the reconciliation attempt in flight, if one is.
+    _changes_during_attempt: set[str] | None = field(default=None, init=False)
     _reconciliation_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _next_reconciliation_at: float = field(default=0.0, init=False)
-    _target_ready_during_pass: bool = field(default=False, init=False)
+    _rerun_after_pass: bool = field(default=False, init=False)
 
     @property
     def observes_onboarding_joins(self) -> bool:
@@ -119,10 +132,34 @@ class PersonalRoomLifecycle:
 
     def target_ready(self) -> None:
         """Reconcile at once because a user's own agent has just finished its first sync."""
+        self._reconcile_now()
+
+    def membership_changed(self, room_id: str, event_id: str) -> None:
+        """Retry at once each requester whose personal room is this room and failed its imported-roster check.
+
+        Passes this starts have no minimum gap, but at most one runs and one more waits.
+        """
+        if event_id in self._reported_events:
+            return
+        self._reported_events[event_id] = None
+        if len(self._reported_events) > _RECENT_MEMBERSHIP_EVENTS:
+            del self._reported_events[next(iter(self._reported_events))]
+        if self._changes_during_attempt is not None:
+            self._changes_during_attempt.add(room_id)
+        self._retry_at_once({candidate for candidate, (room, _) in self._roster_mismatches.items() if room == room_id})
+
+    def _retry_at_once(self, candidates: set[tuple[str, str]]) -> None:
+        """Mark candidates to retry without their delay, starting a pass only for ones not marked yet."""
+        new = candidates - self._membership_changed
+        if new:
+            self._membership_changed |= new
+            self._reconcile_now()
+
+    def _reconcile_now(self) -> None:
         self._reconciled = False
         self._next_reconciliation_at = 0.0
-        # A running pass may have seen that agent unsynced, so another pass follows it without the cooldown.
-        self._target_ready_during_pass = self._reconciliation_task is not None
+        # A running pass may have read the old state, so another pass follows it without the cooldown.
+        self._rerun_after_pass = self._reconciliation_task is not None
         self.schedule_reconciliation()
 
     def _uses_template(self, settings: PersonalRoomsConfig) -> bool:
@@ -171,12 +208,12 @@ class PersonalRoomLifecycle:
             cancelled = True
             raise
         finally:
-            nudged, self._target_ready_during_pass = self._target_ready_during_pass, False
+            nudged, self._rerun_after_pass = self._rerun_after_pass, False
             if not cancelled and not nudged and revision == self._config_revision:
                 self._next_reconciliation_at = monotonic() + _RECONCILIATION_RETRY_SECONDS
             self._reconciliation_task = None
             if nudged and not cancelled:
-                self.target_ready()
+                self._reconcile_now()
 
     async def cancel_reconciliation(self, *, timeout_seconds: float) -> None:
         """Cancel within the shutdown budget, retaining ownership of unfinished work."""
@@ -333,6 +370,7 @@ class PersonalRoomLifecycle:
             )
             self._queue_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
         else:
+            self._roster_mismatches.pop(candidate, None)
             self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
 
     def _queue_retry(self, candidate: tuple[str, str], *, reinvite_departed_owner: bool) -> None:
@@ -386,7 +424,11 @@ class PersonalRoomLifecycle:
         roster, is logged and settles: raising would hold the room's event lane, so this agent would answer nothing
         there until someone repaired the room. A room whose reconciliation is still failing keeps retrying after
         doubling delays up to hourly; otherwise the room is checked again on restart or configuration reload.
+        Any change of membership, unlike a profile update, also tells the router, which retries at once onboarding
+        that this room's imported roster blocked.
         """
+        if event.membership != event.prev_membership:
+            self.report_membership_change(room.room_id, event.event_id)
         if event.membership in {"join", "leave", "ban"}:
             try:
                 await self.service.owner_membership_event(room.room_id, event.state_key, event.membership)
@@ -493,6 +535,10 @@ class PersonalRoomLifecycle:
             candidates.update(backfill)
             failed |= backfill_failed
         candidates.update(self._retry_candidates)
+        if not failed:
+            # Forget what requesters whose intent is gone last reported.
+            self._roster_mismatches = {key: seen for key, seen in self._roster_mismatches.items() if key in candidates}
+            self._membership_changed &= candidates
         for candidate in sorted(candidates - self._completed_candidates):
             if revision != self._config_revision:
                 return
@@ -503,12 +549,16 @@ class PersonalRoomLifecycle:
             self._reconciled = True
 
     async def _reconcile_candidate(self, candidate: tuple[str, str], revision: int) -> bool:
-        """Retry one candidate once its delay has passed; False leaves it pending."""
+        """Retry one candidate when due or its personal room's membership changed; False leaves it pending."""
         previous = self._candidate_backoff.get(candidate)
-        if previous is not None and monotonic() < previous.retry_at:
+        if previous is not None and monotonic() < previous.retry_at and candidate not in self._membership_changed:
             return False
+        # A change during this attempt may come after the state it reads, so it marks the candidate again.
+        self._membership_changed.discard(candidate)
         user_id, room_id = candidate
         reinvite_departed_owner = self._retry_candidates.get(candidate, False)
+        changed: set[str] = set()
+        self._changes_during_attempt = changed
         try:
             await self._onboard(user_id, room_id, reinvite_departed_owner=reinvite_departed_owner)
         except _TargetPendingError:
@@ -520,8 +570,11 @@ class PersonalRoomLifecycle:
                 self._candidate_backoff[candidate] = backoff
             retry = {"attempt": backoff.failures, "retry_in_seconds": backoff.delay_seconds}
             if isinstance(error, PersonalRoomRosterMismatchError):
-                # Expected until a person changes the room, so no traceback.
-                logger.warning(
+                # Expected until a person changes the room, so no traceback, and a warning only when the members change.
+                mismatch = (error.room_id, error.unexpected_user_ids)
+                unchanged = self._roster_mismatches.get(candidate) == mismatch
+                self._roster_mismatches[candidate] = mismatch
+                (logger.debug if unchanged else logger.warning)(
                     "Personal-room imported roster has unattested members",
                     user_id=user_id,
                     room_id=room_id,
@@ -529,6 +582,9 @@ class PersonalRoomLifecycle:
                     unexpected_user_ids=error.unexpected_user_ids,
                     **retry,
                 )
+                if error.room_id in changed:
+                    # The room changed while this attempt read it, possibly before the router knew it was this room.
+                    self._retry_at_once({candidate})
             elif previous is None or previous.error_type is not type(error):
                 logger.exception("Personal-room reconciliation failed", user_id=user_id, room_id=room_id, **retry)
             else:
@@ -541,6 +597,11 @@ class PersonalRoomLifecycle:
                     **retry,
                 )
             return False
+        finally:
+            self._changes_during_attempt = None
+        self._roster_mismatches.pop(candidate, None)
+        # Its own owner invite comes back as a change, and the attempt already validated the room after it.
+        self._membership_changed.discard(candidate)
         if revision == self._config_revision:
             self._candidate_backoff.pop(candidate, None)
             # A live trigger can fail during this attempt and ask for a re-invite it did not carry.

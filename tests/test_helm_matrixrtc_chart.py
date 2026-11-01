@@ -75,6 +75,14 @@ def test_both_components_share_one_secret_without_putting_keys_in_the_config() -
     assert "key_file" not in _livekit_config(docs)
 
 
+@pytest.mark.parametrize(("set_args", "level"), [((), "warn"), (("auth.logLevel=debug",), "debug")])
+def test_authorization_service_logs_at_the_configured_level(set_args: tuple[str, ...], level: str) -> None:
+    """The service logs every health probe at info, on stderr, where log collectors read each line as an error."""
+    auth_env = _env_by_name(_container(_resource(_render(*set_args), "Deployment", AUTH), "auth"))
+
+    assert auth_env["LIVEKIT_LOG_LEVEL"] == {"name": "LIVEKIT_LOG_LEVEL", "value": level}
+
+
 def test_pods_disable_service_links_that_livekit_would_parse_as_flags() -> None:
     """A Service named livekit injects LIVEKIT_PORT=tcp://..., which LiveKit rejects as its port flag."""
     docs = _render()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import importlib.util
 import sys
 import threading
@@ -28,7 +29,7 @@ from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
@@ -823,6 +824,9 @@ async def test_leaving_a_call_room_ends_its_call_and_forgets_its_state(tmp_path:
     assert state.retry_task.cancelled()
     assert state.expiry_handle.cancelled()
     assert manager._rooms == {}
+    # The mock re-raises one stored OSError, so its traceback and the mock's frame form a cycle that keeps the finished
+    # reconcile's frame, and its lock, alive until a collection runs.
+    gc.collect()
     assert ROOM_ID not in manager._locks
     assert ROOM_ID in manager._departed_rooms
     client.room_get_state.reset_mock()
@@ -5649,7 +5653,7 @@ def test_calls_config_rejects_agents_sharing_a_resolved_room(tmp_path: Path) -> 
     state.add_room("voice", ROOM_ID, "#voice:example.org", "Voice")
     save_matrix_state(state, runtime_paths)
 
-    with pytest.raises(ValueError, match=r"calls\.agents configures multiple agents for room"):
+    with pytest.raises(ConfigRuntimeValidationError, match=r"calls\.agents configures multiple agents for room"):
         Config.validate_with_runtime(
             {
                 "agents": {
@@ -5675,7 +5679,7 @@ def test_calls_config_rejects_agents_sharing_a_resolved_room(tmp_path: Path) -> 
 
 def test_calls_config_rejects_equivalent_room_refs_before_matrix_state(tmp_path: Path) -> None:
     """Managed room keys and their full aliases cannot bypass call ownership validation."""
-    with pytest.raises(ValueError, match=r"calls\.agents configures multiple agents for room"):
+    with pytest.raises(ConfigRuntimeValidationError, match=r"calls\.agents configures multiple agents for room"):
         Config.validate_with_runtime(
             {
                 "agents": {
