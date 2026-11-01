@@ -828,8 +828,15 @@ def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
     """
     if (plain := runtime_paths._plain_env_value((name,))) is None:
         return None
-    path = Path(plain[0]).expanduser()
-    return (path if path.is_absolute() else runtime_paths.config_dir / path).resolve()
+    return _resolve_runtime_relative_path(plain[0], base_dir=runtime_paths.config_dir)
+
+
+def secret_path_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return the variables naming the primary's secret files: every `<NAME>_FILE`, and a set credentials path."""
+    names = {name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")}
+    if runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS") is not None:
+        names.add("GOOGLE_APPLICATION_CREDENTIALS")
+    return frozenset(names)
 
 
 def runtime_env_flag(

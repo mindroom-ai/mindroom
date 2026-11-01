@@ -32,7 +32,7 @@ from mindroom.config.main import Config, config_validation_issues
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig, ModelConfig, RouterConfig
 from mindroom.config.resolution import memory_search
-from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths, resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
@@ -79,8 +79,12 @@ _DOTENV_BASE_URL = f"OPENAI_BASE_URL={_DOTENV_URL}\n"
 _CONFIGURED_OLLAMA = "http://config-ollama:11434"
 
 
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "mindroom_data")
+def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) -> RuntimePaths:
+    return resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env=process_env,
+    )
 
 
 class TestMemoryConfig:
@@ -851,15 +855,12 @@ class TestMemoryConfig:
     ) -> None:
         """The embedder and the memory LLM read `OPENAI_BASE_URL` as chat models do, unless the embedder sets `host`."""
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-        monkeypatch.delenv("OPENAI_BASE_URL_FILE", raising=False)
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         for name, value in exported.items():
             monkeypatch.setenv(name, value)
-        config_path = tmp_path / "config.yaml"
-        config_path.write_text("router:\n  model: default\n", encoding="utf-8")
         (tmp_path / ".env").write_text(env_file, encoding="utf-8")
         (tmp_path / "endpoint").write_text("http://file.local/v1\n", encoding="utf-8")
-        runtime_paths = resolve_runtime_paths(config_path=config_path, process_env=exported)
+        runtime_paths = _runtime_paths(tmp_path, exported)
         embedder = {"model": "text-embedding-3-small", "api_key": "key", "host": embedder_host}
         config = Config(
             memory={
@@ -891,10 +892,8 @@ class TestMemoryConfig:
         expected_url: str,
     ) -> None:
         """A memory LLM's own `openai_base_url` wins, and a blank or null one falls back to `OPENAI_BASE_URL`."""
-        config_path = tmp_path / "config.yaml"
-        config_path.write_text("router:\n  model: default\n", encoding="utf-8")
         (tmp_path / ".env").write_text("OPENAI_BASE_URL=http://runtime.local/v1\n", encoding="utf-8")
-        runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
+        runtime_paths = _runtime_paths(tmp_path, {})
         llm = {"model": OPENAI_GPT_LUNA, "api_key": "key", "openai_base_url": configured_url}
         config = Config(memory={"llm": {"provider": "openai", "config": llm}}, router=RouterConfig(model="default"))
 
