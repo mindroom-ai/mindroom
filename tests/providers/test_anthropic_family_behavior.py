@@ -1726,6 +1726,19 @@ def test_a_blank_exported_vertex_endpoint_or_region_fails_the_build_and_names_th
     assert getattr(build_provider(model, env_file_paths).settings, setting) == value
 
 
+def test_a_blank_exported_vertex_project_still_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Vertex SDK reads a blank project as unset and takes the credentials' project, so the build goes on."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    env = {"ANTHROPIC_VERTEX_PROJECT_ID": "", "CLOUD_ML_REGION": "us-east5"}
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
+    hide_provider_environment(monkeypatch)
+
+    vertex = build_provider(ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5"), runtime_paths)
+
+    assert (vertex.settings.project_id, vertex.settings.region) == (None, "us-east5")
+
+
 @pytest.mark.asyncio
 async def test_client_params_override_route_settings_but_not_headers_or_the_http_client(tmp_path: Path) -> None:
     """``client_params`` may override any SDK client argument, while ``default_headers`` and the HTTP client win."""
