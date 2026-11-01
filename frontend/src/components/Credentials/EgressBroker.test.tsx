@@ -1949,7 +1949,6 @@ describe("egress broker service editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
     expect(confirmSpy).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
   });
 
   it("opens another service straight away when nothing was changed", async () => {

@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ScheduleTask } from "@/types/schedule";
 
+import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
+
 import { Schedules } from "./Schedules";
 
 const silentTask = {
@@ -201,6 +203,20 @@ describe("Schedules", () => {
       expect(screen.getByLabelText("Description")).toHaveValue(
         "Visible status check",
       );
+    });
+
+    it("counts saved edits as saved even when the list fails to reload", async () => {
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+      await editQuietTask();
+      vi.mocked(global.fetch)
+        .mockResolvedValueOnce({ ok: true, json: async () => ({}) } as Response)
+        .mockRejectedValueOnce(new Error("list unavailable"));
+
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+      expect(await screen.findByText("list unavailable")).toBeInTheDocument();
+      expect(confirmLeavingUnsavedDrafts()).toBe(true);
+      expect(confirmSpy).not.toHaveBeenCalled();
     });
 
     it("does not ask when the selected schedule is selected again", async () => {

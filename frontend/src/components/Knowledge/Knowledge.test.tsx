@@ -4,6 +4,7 @@ import { Knowledge } from "./Knowledge";
 import { API_ENDPOINTS } from "@/lib/api";
 import { useConfigStore } from "@/store/configStore";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
+import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
 import type { SaveConfigResult } from "@/store/configStore";
 import type { Config, KnowledgeBaseConfig } from "@/types/config";
 
@@ -505,6 +506,25 @@ describe("Knowledge", () => {
       expect(screen.getAllByText("beta.md")).not.toHaveLength(0);
       expect(screen.queryByText("alpha.md")).not.toBeInTheDocument();
     });
+  });
+
+  it("asks before leaving the page drops a half-filled Create form", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mockStore({});
+    setKnowledgeApiMock({});
+    render(<Knowledge />);
+    await screen.findByText("Knowledge Bases");
+    fireEvent.click(screen.getByRole("button", { name: "Create git source" }));
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    expect(confirmSpy).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("Repository URL"), {
+      target: { value: "https://github.com/org/repo" },
+    });
+
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+    confirmSpy.mockRestore();
   });
 
   it("creates a git-based knowledge base in one step", async () => {

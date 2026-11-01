@@ -223,7 +223,8 @@ function ServiceSection({
   const [preloaded] = useState(initial !== undefined);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
-  useUnsavedDraft(editor !== null && editorDirty);
+  const hasUnsavedEdit = editor !== null && editorDirty;
+  useUnsavedDraft(hasUnsavedEdit);
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const latest = useRef(0);
@@ -317,7 +318,7 @@ function ServiceSection({
 
   // Opening another service's editor would throw away what is typed in this one.
   const requestEdit = (name: string) => {
-    if (editor !== null && editorDirty) setPendingEdit(name);
+    if (hasUnsavedEdit) setPendingEdit(name);
     else startEdit(name);
   };
 

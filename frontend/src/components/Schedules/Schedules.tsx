@@ -418,6 +418,7 @@ export function Schedules() {
     setIsSaving(true);
     try {
       await updateSchedule(selectedTask.task_id, payload);
+      setSavedDraft(draft);
       await load(true);
       toast({
         title: "Schedule updated",

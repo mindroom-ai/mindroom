@@ -19,6 +19,7 @@ import { useConfigStore, type SaveConfigResult } from "@/store/configStore";
 import { SchemaSection } from "@/components/SchemaForm";
 import type { KnowledgeBaseConfig, KnowledgeGitConfig } from "@/types/config";
 import { useToast } from "@/components/ui/use-toast";
+import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -306,6 +307,15 @@ export function Knowledge() {
   const [newBasePath, setNewBasePath] = useState("");
   const [newBaseGitSettings, setNewBaseGitSettings] =
     useState<KnowledgeGitConfig>(() => defaultGitSettings());
+  // The Create form counts as a draft once something is typed into it.
+  useUnsavedDraft(
+    [
+      newBaseName,
+      newBaseDescription,
+      newBasePath,
+      newBaseGitSettings.repo_url,
+    ].some((value) => value.trim() !== ""),
+  );
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);
   const [gitRepoUrlReplacement, setGitRepoUrlReplacement] = useState("");
