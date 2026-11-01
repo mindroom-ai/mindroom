@@ -1521,12 +1521,12 @@ visibility = [
 [[modules]]
 path = "mindroom.oauth.credential_store"
 depends_on = [
-    "mindroom.oauth.legacy_credentials",
+    "mindroom.oauth.legacy_requester_bindings",
 ]
 visibility = ["mindroom.oauth.credential_lifecycle"]
 
 [[modules]]
-path = "mindroom.oauth.legacy_credentials"
+path = "mindroom.oauth.legacy_requester_bindings"
 depends_on = [
     "mindroom.credentials.policy",
     "mindroom.tool_system.worker_routing",

@@ -44,6 +44,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_sources import ResponseSources
 from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
+from mindroom.thread_utils import mentions_another_participant
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.timing import (
     DispatchPipelineTiming,
@@ -57,7 +58,7 @@ from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     import nio
     import structlog
@@ -73,6 +74,7 @@ if TYPE_CHECKING:
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.matrix.identity import MatrixID
     from mindroom.response_runner import ResponseRunner
     from mindroom.response_sources import SourceFate
     from mindroom.teams.spec import TeamMode
@@ -219,6 +221,7 @@ class TurnDispatchDeps:
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str
+    matrix_id: MatrixID
     pending_turns: PendingTurnView
     resolver: ConversationResolver
     normalizer: InboundTurnNormalizer
@@ -406,6 +409,8 @@ class TurnDispatcher:
             # requester, or this requester's message for another participant, a
             # newer message from this requester may only be answered after it, so
             # letting it absorb this turn would answer out of receipt order or not at all.
+            # The guards below read a text message's mentions themselves, but a voice
+            # message's mentions live in its transcript, not in the stored audio event.
             and not prepared.turn.queues_other_run(requester_user_id)
         )
         thread_history = prepared.dispatch.context.thread_history
@@ -421,6 +426,7 @@ class TurnDispatcher:
                 pending_turns=self.deps.pending_turns,
                 classify=self.deps.ingress.classify_source,
                 is_handled=partial(self.deps.turn_store.handled_among, room.room_id),
+                for_another_participant=partial(self._for_another_participant, room),
                 logger=self.deps.logger,
             )
             if may_be_superseded and not skips_turn:
@@ -433,7 +439,7 @@ class TurnDispatcher:
                 )
         else:
             skips_turn = await self._has_newer_unresponded_in_thread(
-                room.room_id,
+                room,
                 event,
                 requester_user_id,
                 thread_history,
@@ -583,7 +589,7 @@ class TurnDispatcher:
 
     async def _has_newer_unresponded_in_thread(
         self,
-        room_id: str,
+        room: nio.MatrixRoom,
         event: PreparedIngress,
         requester_user_id: str,
         thread_history: Sequence[ResolvedVisibleMessage],
@@ -597,9 +603,21 @@ class TurnDispatcher:
             thread_history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
             classify=self.deps.ingress.classify_source,
-            is_handled=partial(self.deps.turn_store.handled_among, room_id),
+            is_handled=partial(self.deps.turn_store.handled_among, room.room_id),
+            for_another_participant=partial(self._for_another_participant, room),
             logger=self.deps.logger,
         )
+
+    def _for_another_participant(self, room: nio.MatrixRoom, source: Mapping[str, object]) -> bool:
+        """Return whether a message mentions only other agents or people, so this agent ignores it."""
+        mentions = mentions_another_participant(
+            dict(source),
+            self.deps.matrix_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room=room,
+        )
+        return mentions is True
 
     async def _agent_mention_may_wake(
         self,

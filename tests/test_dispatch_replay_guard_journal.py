@@ -70,6 +70,12 @@ def _classify(
     )
 
 
+def _for_bob(source: Mapping[str, object]) -> bool:
+    """Stand in for the agent's mention check: a message that opens with ``@bob`` is for Bob alone."""
+    content = source.get("content")
+    return isinstance(content, dict) and str(content.get("body", "")).startswith("@bob")
+
+
 def _older_turn(*, timestamp: int | None = 1_000) -> PreparedIngress:
     """Return the turn whose right to run is under question."""
     return PreparedIngress(
@@ -158,6 +164,7 @@ async def _guard(
         pending_turns=pending_turns,  # type: ignore[arg-type]
         classify=lambda sender, source: _classify(sender, source, requester_for=requester_for),
         is_handled=AsyncMock(side_effect=lambda event_ids: frozenset(event_ids) & frozenset(handled_event_ids)),
+        for_another_participant=_for_bob,
         logger=structlog.get_logger("test"),
         # ``Any`` only to satisfy the structlog stub's bound-logger type.
     )  # type: ignore[no-any-return]
@@ -173,6 +180,7 @@ async def _guard(
         (ALICE, "!help", False, False, False, False),
         (ALICE, "!help", False, False, True, True),
         (ALICE, "", False, False, False, True),
+        (ALICE, "@bob what do you think?", False, False, False, False),
     ],
 )
 async def test_history_and_journal_share_requester_turn_eligibility(
@@ -183,7 +191,7 @@ async def test_history_and_journal_share_requester_turn_eligibility(
     voice: bool,
     expected: bool,
 ) -> None:
-    """Both evidence sources apply the same requester, echo, ledger, and command policy."""
+    """Both evidence sources apply the same requester, echo, ledger, addressing, and command policy."""
     pending = _pending(sender=sender, body=body, voice_echo=echo)
     if voice:
         pending.source["content"][SOURCE_KIND_KEY] = "voice"
@@ -203,6 +211,7 @@ async def test_history_and_journal_share_requester_turn_eligibility(
         may_be_superseded_by_newer_requester_turn=True,
         classify=_classify,
         is_handled=AsyncMock(side_effect=lambda event_ids: frozenset(event_ids) if handled else frozenset()),
+        for_another_participant=_for_bob,
         logger=structlog.get_logger("test"),
     )
     from_journal = await _guard(
