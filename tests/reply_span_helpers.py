@@ -11,6 +11,7 @@ from uuid import uuid4
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import ApprovalContinuation, DeliveryStage, EventClass, EventKind, InboundEvent, replies
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
+from mindroom.final_delivery import Failed
 from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, Segment, encode_presentation
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write
 from mindroom.response_sources import ResponseSources
@@ -84,16 +85,13 @@ async def reply_span(
     placeholder: str = AGENT_PLACEHOLDER,
     show_tool_calls: bool = True,
     placeholder_event_id: str | None = None,
-    pending_placeholder: bool = False,
     regenerated_event_id: str | None = None,
     runtime: ReplyRuntime | None = None,
 ) -> AsyncIterator[SpanHandle]:
     """Claim a reply span for one source, admitted as ingress admits it, and run the block in it.
 
     With ``placeholder_event_id``, the reply's placeholder is already in the
-    room as that event, the way a turn shows it before its answer; with
-    ``pending_placeholder``, its create is recorded but Matrix has not
-    acknowledged it. With
+    room as that event, the way a turn shows it before its answer. With
     ``regenerated_event_id``, the source is an edit regenerating that answer.
     ``runtime`` claims as an existing bot instance instead of a fresh one.
     """
@@ -139,7 +137,7 @@ async def reply_span(
         )
         assert isinstance(handle, SpanHandle)
         slot.handle = handle
-        if placeholder_event_id is not None or pending_placeholder:
+        if placeholder_event_id is not None:
             write = initial_write(handle, Presentation(placeholder=placeholder), placeholder_only=True)
             enqueued = await principal.enqueue_reply_row(
                 ReplyRowRequest(
@@ -153,14 +151,13 @@ async def reply_span(
             )
             assert enqueued is not None
             handle.note(enqueued.applied)
-            if placeholder_event_id is not None:
-                assert await principal.claim_matrix_delivery(delivery_id=source_event_id, stage=DeliveryStage.INITIAL)
-                await principal.acknowledge_matrix_delivery(
-                    delivery_id=source_event_id,
-                    stage=DeliveryStage.INITIAL,
-                    event_id=placeholder_event_id,
-                    delivered_projections=(),
-                )
+            assert await principal.claim_matrix_delivery(delivery_id=source_event_id, stage=DeliveryStage.INITIAL)
+            await principal.acknowledge_matrix_delivery(
+                delivery_id=source_event_id,
+                stage=DeliveryStage.INITIAL,
+                event_id=placeholder_event_id,
+                delivered_projections=(),
+            )
             reply = await principal.replies.load(handle.reply_id)
             assert reply is not None
             handle.reply = reply
@@ -173,11 +170,14 @@ async def final_in_span(
     request: FinalDeliveryRequest,
     *,
     regenerates: bool = False,
+    end_failed_span: bool = False,
 ) -> FinalDeliveryOutcome:
     """Deliver one final answer from inside the reply span its request names, as a locked response turn does.
 
     A regeneration regenerates the answer the request names; any other
     request with an existing event shows that event as its placeholder.
+    With ``end_failed_span``, a failure that leaves its span running ends it
+    as the locked turn's exit does, and the noted outcome is returned.
     """
     runtime = _runtime(principal)
     gateway = replace(gateway, deps=replace(gateway.deps, reply_effects=runtime.run_effects))
@@ -192,8 +192,12 @@ async def final_in_span(
         placeholder_event_id=None if regenerated is not None else request.existing_event_id,
         regenerated_event_id=regenerated,
         runtime=runtime,
-    ):
-        return await gateway.deliver_final(request)
+    ) as handle:
+        outcome = await gateway.deliver_final(request)
+        if not end_failed_span or handle.exited or not isinstance(outcome.ending, Failed):
+            return outcome
+        noted = await gateway.end_interrupted_span(handle, request.target, ending=outcome.ending, delivery_started=True)
+        return outcome if noted is None else noted
 
 
 async def final_in_resume_span(

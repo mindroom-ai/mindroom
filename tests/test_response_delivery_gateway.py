@@ -689,6 +689,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 gateway,
                 alice,
                 replace(self._final_request("", source_kind=MESSAGE_SOURCE_KIND), existing_event_id="$placeholder"),
+                end_failed_span=True,
             )
 
         client.room_redact.assert_not_awaited()
@@ -701,53 +702,55 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert reply is not None
         assert reply.state is rl.ReplyState.FAILED
 
-    @pytest.mark.parametrize("regenerates", [False, True], ids=["no_placeholder", "kept_answer"])
-    async def test_an_empty_answer_that_replaced_nothing_shown_writes_nothing(
+    async def test_an_empty_answer_with_nothing_shown_posts_the_note(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
-        regenerates: bool,
     ) -> None:
-        """With no placeholder in the room, or an earlier answer a regeneration keeps, an empty answer writes nothing."""
+        """A reply that showed nothing yet, as one whose placeholder a compaction notice replaced, posts the note."""
+        gateway = _gateway(tmp_path, alice)
+        send = AsyncMock(side_effect=delivered_matrix_side_effect("$note"))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_span(
+                gateway,
+                alice,
+                self._final_request("", source_kind=MESSAGE_SOURCE_KIND),
+                end_failed_span=True,
+            )
+
+        assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
+        assert outcome.final_visible_event_id == "$note"
+        content = send.await_args.args[2]
+        assert "m.relates_to" not in content
+        assert content["body"] == note_segment(NoteKind.NOTHING_TO_SHOW).text
+
+    async def test_an_empty_regeneration_keeps_the_answer_it_regenerated(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A regeneration that wrote nothing leaves the earlier answer shown, and the outcome names it."""
         gateway = _gateway(tmp_path, alice)
         client = self._redactable_client(gateway)
         send = AsyncMock(side_effect=delivered_matrix_side_effect("$sent"))
-        request = self._final_request("", source_kind=MESSAGE_SOURCE_KIND)
-        if regenerates:
-            request = replace(request, existing_event_id="$prior_answer")
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
-            outcome = await final_in_span(gateway, alice, request, regenerates=regenerates)
+            outcome = await final_in_span(
+                gateway,
+                alice,
+                replace(self._final_request("", source_kind=MESSAGE_SOURCE_KIND), existing_event_id="$prior_answer"),
+                regenerates=True,
+                end_failed_span=True,
+            )
 
         assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
-        assert outcome.event_id is None
+        assert outcome.final_visible_event_id == "$prior_answer"
         send.assert_not_awaited()
         client.room_redact.assert_not_awaited()
-        if regenerates:
-            reply = await alice.replies.for_event("$prior_answer")
-            assert reply is not None
-            assert reply.state is rl.ReplyState.COMPLETED
-
-    async def test_an_empty_answer_whose_placeholder_create_is_unacknowledged_ends_without_a_note(
-        self,
-        tmp_path: Path,
-        alice: PrincipalStore,
-    ) -> None:
-        """A placeholder Matrix has not acknowledged has no event to note on; the reply ends as a suppression does."""
-        gateway = _gateway(tmp_path, alice)
-        send = AsyncMock(side_effect=delivered_matrix_side_effect("$sent"))
-
-        with patch("mindroom.delivery_gateway.send_message_outcome", send):
-            async with reply_span(alice, source_event_id="$cause", room_id=_ROOM_ID, pending_placeholder=True):
-                outcome = await gateway.deliver_final(self._final_request("", source_kind=MESSAGE_SOURCE_KIND))
-
-        assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
-        assert outcome.event_id is None
-        reply = await alice.replies.for_sources(("$cause",))
+        reply = await alice.replies.for_event("$prior_answer")
         assert reply is not None
-        assert reply.state is rl.ReplyState.GONE
-        note = note_segment(NoteKind.NOTHING_TO_SHOW).text
-        assert all(note not in json.dumps(call.args[2]) for call in send.await_args_list)
+        assert reply.state is rl.ReplyState.COMPLETED
 
     @pytest.mark.parametrize("failed", [False, True], ids=["finished_empty", "delivery_failed"])
     async def test_a_stream_that_showed_only_its_placeholder_ends_it_by_how_it_finished(
@@ -759,6 +762,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         """A stream that finished with no answer notes it on the placeholder; one whose delivery failed removes it."""
         gateway = _gateway(tmp_path, alice)
         send = AsyncMock(side_effect=delivered_matrix_side_effect("$note"))
+        target = MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True)
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
             async with reply_span(
@@ -766,10 +770,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 source_event_id="$cause",
                 room_id=_ROOM_ID,
                 placeholder_event_id="$placeholder",
-            ):
+            ) as handle:
                 outcome = await gateway.finalize_streamed_response(
                     FinalizeStreamedResponseRequest(
-                        target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                        target=target,
                         stream_transport_outcome=StreamTransportOutcome(
                             last_physical_stream_event_id="$placeholder",
                             rendered_body="Thinking...",
@@ -784,6 +788,17 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                         existing_event_is_placeholder=True,
                     ),
                 )
+                if not failed:
+                    # The span's exit ends the failure, as the locked turn's does.
+                    assert not handle.exited
+                    noted = await gateway.end_interrupted_span(
+                        handle,
+                        target,
+                        ending=outcome.ending,
+                        delivery_started=True,
+                    )
+                    assert noted is not None
+                    outcome = noted
 
         reply = await alice.replies.for_sources(("$cause",))
         assert reply is not None
@@ -808,6 +823,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         """
         gateway = _gateway(tmp_path, alice)
         send = AsyncMock(side_effect=delivered_matrix_side_effect("$note"))
+        target = MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True)
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
             async with reply_span(
@@ -820,7 +836,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 handle.unconfirmed_progress = rl.ProgressConfirmation(event_id="$prior_answer", placeholder_only=True)
                 outcome = await gateway.finalize_streamed_response(
                     FinalizeStreamedResponseRequest(
-                        target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                        target=target,
                         stream_transport_outcome=StreamTransportOutcome(
                             last_physical_stream_event_id="$prior_answer",
                             rendered_body="Thinking...",
@@ -834,12 +850,14 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                         existing_event_is_placeholder=False,
                     ),
                 )
+                noted = await gateway.end_interrupted_span(handle, target, ending=outcome.ending, delivery_started=True)
 
         reply = await alice.replies.for_event("$prior_answer")
         assert reply is not None
         assert reply.state is rl.ReplyState.FAILED
-        assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
-        assert outcome.final_visible_event_id == "$prior_answer"
+        assert noted is not None
+        assert noted.ending == Failed(FailureCause.NOTHING_TO_SHOW)
+        assert noted.final_visible_event_id == "$prior_answer"
         assert send.await_args.args[2]["m.new_content"]["body"] == note_segment(NoteKind.NOTHING_TO_SHOW).text
 
     @pytest.mark.parametrize("generated_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])

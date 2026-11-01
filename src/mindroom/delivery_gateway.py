@@ -599,33 +599,18 @@ class DeliveryGateway:
         if not isinstance(result, nio.RoomSendResponse):
             self.deps.logger.warning("Judgment reaction failed", kind=kind, room_id=room_id, event_id=event_id)
 
-    async def _end_without_answer(
+    async def _drop_placeholder_after_failed_delivery(
         self,
-        target: MessageTarget,
         *,
-        cause: FailureCause,
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
     ) -> FinalDeliveryOutcome:
-        """End a reply whose turn has nothing to show.
-
-        A turn that finished without an answer says so where its placeholder stands, because hidden tool calls may
-        have run; any other reply ends as a suppressed answer does.
-        """
-        ending = Failed(cause)
+        """End a stream whose final delivery failed while it showed only its placeholder; the placeholder goes."""
         handle = self._live_span()
         if handle is not None:
-            reply = await self.deps.outbox.replies.load(handle.reply_id)
-            assert reply is not None, "a span's reply exists while the span ends"
-            # The span's latest progress edit counts, though its confirmation is not in the records yet.
-            shown = rl.confirm_progress(reply, handle.unconfirmed_progress)
-            if cause is FailureCause.NOTHING_TO_SHOW and shown.event_id is not None and shown.placeholder_only:
-                noted = await self.end_interrupted_span(handle, target, ending=ending, delivery_started=True)
-                assert noted is not None, "a failure always ends with its note"
-                return noted
             await self.end_reply_span(handle, suppress_decision(handle))
         return FinalDeliveryOutcome(
-            ending=ending,
+            ending=Failed(FailureCause.DELIVERY_FAILED),
             tool_trace=tuple(tool_trace or ()),
             extra_content=extra_content,
         )
@@ -1720,11 +1705,10 @@ class DeliveryGateway:
             state=ReplyState.COMPLETED,
         )
         if reply_write.placeholder_only:
-            # A reply with nothing to show ends as a stream that showed only its placeholder does.
-            return await self._end_without_answer(
-                request.target,
-                cause=FailureCause.NOTHING_TO_SHOW,
-                tool_trace=draft.tool_trace,
+            # Nothing to show: the span's end notes that the turn finished without a reply, as a stream's does.
+            return FinalDeliveryOutcome(
+                ending=Failed(FailureCause.NOTHING_TO_SHOW),
+                tool_trace=tuple(draft.tool_trace or ()),
                 extra_content=draft.extra_content,
             )
         # What the reply shows is what its outcome reports and freezes, earlier spans' work included.
@@ -2093,7 +2077,7 @@ class DeliveryGateway:
             )
 
         # A stream writes a terminal update only once it finished, so the update is the reply's answer; one that
-        # showed only its placeholder answered nothing, and its finalization ends the placeholder.
+        # showed only its placeholder answered nothing, and the span's end notes that.
 
         def terminal(progress: ProgressState) -> ReplyWrite:
             if progress.untransformed_text is None:
@@ -2345,10 +2329,8 @@ class DeliveryGateway:
                     ),
                 )
 
-            if stream_outcome.visible_body_state == "placeholder_only":
-                return await self._end_without_answer(
-                    request.target,
-                    cause=FailureCause.DELIVERY_FAILED if stream_outcome.failed else FailureCause.NOTHING_TO_SHOW,
+            if stream_outcome.visible_body_state == "placeholder_only" and stream_outcome.failed:
+                return await self._drop_placeholder_after_failed_delivery(
                     tool_trace=request.tool_trace,
                     extra_content=request.extra_content,
                 )
@@ -2382,7 +2364,8 @@ class DeliveryGateway:
                 )
 
             if stream_outcome.visible_body_state != "visible_body":
-                # An edited stream that showed nothing below an answer already returned above.
+                # An edited stream that showed nothing below an answer already returned above; the span's end notes
+                # that this one finished without a reply.
                 return FinalDeliveryOutcome(
                     ending=Failed(FailureCause.NOTHING_TO_SHOW),
                     tool_trace=tuple(request.tool_trace or ()),
