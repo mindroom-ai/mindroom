@@ -734,7 +734,7 @@ async def test_matrix_api_put_state_happy_path() -> None:
     [("cleanup", "cleanup"), ("  cleanup  ", "cleanup"), ("   ", None)],
 )
 async def test_matrix_api_redact_happy_path(reason: str, expected_reason: str | None) -> None:
-    """Threaded redactions should call room_redact after proving the target's thread, with a stripped reason."""
+    """Threaded redactions call room_redact after proving the target's thread, with a stripped reason, for two units."""
     tool = MatrixApiTools()
     ctx = _make_context(threads={"$target:localhost": "$thread:localhost"})
     ctx.client.room_get_event.return_value = _event_response(
@@ -773,6 +773,7 @@ async def test_matrix_api_redact_happy_path(reason: str, expected_reason: str | 
         event_id="$target:localhost",
         reason=expected_reason,
     )
+    assert sum(map(len, MatrixApiTools._recent_write_units.values())) == 2
 
 
 @pytest.mark.asyncio
