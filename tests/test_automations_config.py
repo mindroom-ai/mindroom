@@ -72,7 +72,7 @@ def test_both_built_ins_can_run_for_one_agent() -> None:
 def test_a_mapping_overrides_fields() -> None:
     """A mapping entry overrides only the fields it sets."""
     entry = {"name": "prompt_curation", "cron": "30 2 * * 1", "room": "personal", "trigger_tokens": 30_000}
-    (automation,) = _config(mind=_mind(automations=[entry])).resolve_agent("mind").automations
+    (automation,) = _config(mind=_mind(rooms=["personal"], automations=[entry])).resolve_agent("mind").automations
 
     assert (automation.cron, automation.room, automation.trigger_tokens) == ("30 2 * * 1", "personal", 30_000)
     assert automation.max_content_loss == 0.05
@@ -110,6 +110,20 @@ def test_an_agent_cannot_list_automations_it_cannot_run(agent: AgentConfig, mess
         _config(mind=agent)
 
 
+def test_a_shared_agent_posts_only_in_its_own_rooms_or_a_room_id() -> None:
+    """The agent's own bot posts the prompt, so a room it does not join refuses its own entry and drops a default."""
+    with pytest.raises(ValidationError, match="posts prompt_curation in ideas, which is not one of its rooms"):
+        _config(mind=_mind(rooms=["lobby"], automations=[{"name": "prompt_curation", "room": "ideas"}]))
+    entry = {"name": "prompt_curation", "room": "!ideas:example.org"}
+    (automation,) = _config(mind=_mind(rooms=["lobby"], automations=[entry])).resolve_agent("mind").automations
+    assert automation.room == "!ideas:example.org"
+
+    config = _config([{"name": "dreaming", "room": "lobby"}], member=_mind(rooms=["lobby"]), other=_mind(rooms=["ops"]))
+
+    assert [entry.name for entry in config.resolve_agent("member").automations] == ["dreaming"]
+    assert config.resolve_agent("other").automations == ()
+
+
 def test_the_personal_rooms_private_agent_can_list_automations() -> None:
     """Each requester's runs post in their personal room, so the agent that owns personal rooms may run automations."""
     config = _personal_rooms_config(mind=_private_mind(automations=["prompt_curation", "dreaming"]))
@@ -137,7 +151,7 @@ def test_the_personal_rooms_private_agent_inherits_defaults_without_a_room() -> 
     config = _personal_rooms_config(
         ["prompt_curation", {"name": "dreaming", "room": "lobby"}],
         mind=_private_mind(),
-        shared=_mind(),
+        shared=_mind(rooms=["lobby"]),
     )
 
     assert [entry.name for entry in config.resolve_agent("mind").automations] == ["prompt_curation"]

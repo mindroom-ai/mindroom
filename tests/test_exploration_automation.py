@@ -35,6 +35,7 @@ def _config(*, graph_edits: bool = False, **entry: object) -> Config:
         agents={
             "mind": AgentConfig(
                 display_name="Mind",
+                rooms=["lab"],
                 knowledge_graph=True,
                 knowledge_graph_edits=graph_edits,
                 tools=["github", "duckduckgo"],

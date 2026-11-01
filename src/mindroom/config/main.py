@@ -130,6 +130,7 @@ from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     is_managed_room_key,
+    managed_room_alias,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
@@ -983,9 +984,7 @@ class Config(BaseModel):
             return self
         domain = self.get_domain(runtime_paths)
         room_keys = self.managed_room_keys()
-        named_rooms = room_keys | {
-            f"#{managed_room_alias_localpart(room_key, runtime_paths=runtime_paths)}:{domain}" for room_key in room_keys
-        }
+        named_rooms = room_keys | {managed_room_alias(room_key, domain, runtime_paths) for room_key in room_keys}
         references = [
             *(("rooms", room) for room in self.rooms),
             *((f"agents.{name}.rooms", room) for name, agent in self.agents.items() for room in agent.rooms),
@@ -994,11 +993,6 @@ class Config(BaseModel):
                 (f"agents.{name}.room_thread_modes", room)
                 for name, agent in self.agents.items()
                 for room in agent.room_thread_modes
-            ),
-            *(
-                (f"agents.{name}.automations.{automation.name}.room", automation.room)
-                for name, agent in self.agents.items()
-                for automation in agent.automations or ()
             ),
             *(
                 (f"defaults.automations.{automation.name}.room", automation.room)

@@ -338,18 +338,6 @@ _MODELS = {"default": {"provider": "openai", "id": "test-model"}}
         ),
         (
             {
-                "agents": {
-                    "general": {
-                        **_FILE_MEMORY_AGENT,
-                        "automations": [{"name": "prompt_curation", "room": _OUTSIDE_ALIAS}],
-                    },
-                },
-            },
-            "agents.general.automations.prompt_curation.room",
-            _OUTSIDE_ALIAS,
-        ),
-        (
-            {
                 "defaults": {"automations": [{"name": "prompt_curation", "room": "ideas"}]},
                 "agents": {"general": _FILE_MEMORY_AGENT},
             },
@@ -357,7 +345,7 @@ _MODELS = {"default": {"provider": "openai", "id": "test-model"}}
             "ideas",
         ),
     ],
-    ids=["agent-rooms", "team-rooms", "top-level-rooms", "room-thread-modes", "agent-automation", "unlisted-key"],
+    ids=["agent-rooms", "team-rooms", "top-level-rooms", "room-thread-modes", "unlisted-key"],
 )
 def test_a_room_reference_that_names_no_room_fails_naming_where(
     tmp_path: Path,
@@ -429,7 +417,7 @@ def test_a_room_mindroom_recorded_keeps_its_alias_and_key_after_its_key_leaves_t
             "general": {
                 **_FILE_MEMORY_AGENT,
                 "rooms": ["#lobby:localhost"],
-                "automations": [{"name": "prompt_curation", "room": "lobby"}],
+                "room_thread_modes": {"lobby": "room"},
             },
         },
     }
