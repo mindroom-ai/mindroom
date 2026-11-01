@@ -239,6 +239,7 @@ class _MovableAuthorizationServerDiscoveryClient(_FakeDiscoveryClient):
     authorization_server: ClassVar[str] = "https://auth.example.test"
     supports_registration: ClassVar[bool] = False
     refuses_registration: ClassVar[bool] = False
+    refusal_status: ClassVar[int] = 400
 
     async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> _FakeDiscoveryResponse:
         del headers
@@ -268,7 +269,7 @@ class _MovableAuthorizationServerDiscoveryClient(_FakeDiscoveryClient):
         self.posts.append((url, json))
         assert url == f"{self.authorization_server}/register"
         if self.refuses_registration:
-            return _FakeDiscoveryResponse({"error": "invalid_redirect_uri"}, status_code=400)
+            return _FakeDiscoveryResponse({"error": "invalid_redirect_uri"}, status_code=self.refusal_status)
         return _FakeDiscoveryResponse(
             {"client_id": f"client-of-{urlparse(url).netloc}", "redirect_uris": json["redirect_uris"]},
             status_code=201,
@@ -881,7 +882,7 @@ async def test_mcp_oauth_keeps_the_client_when_the_server_refuses_a_moved_callba
     assert str(refused.value) == (
         "The Example MCP authorization server refused to register MindRoom's new callback "
         "https://acme.mindroom.chat/api/oauth/mcp_demo/callback. Existing connections keep working; to connect, set "
-        "MINDROOM_PUBLIC_URL to an address it accepts, such as an HTTPS one, or save an OAuth client for Example MCP."
+        "MINDROOM_PUBLIC_URL to an address it accepts or save an OAuth client for Example MCP."
     )
     assert [entry["event"] for entry in logs if entry["log_level"] == "warning"] == [
         "oauth_dynamic_client_callback_refused",
@@ -890,6 +891,29 @@ async def test_mcp_oauth_keeps_the_client_when_the_server_refuses_a_moved_callba
     assert _stored_mcp_client(moved_paths) == registered
     assert refreshed is not None
     assert grants == ["client-of-auth.example.test"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [429, 503], ids=["rate-limited", "unavailable"])
+async def test_mcp_oauth_reports_a_failed_moved_callback_registration_as_no_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    """Only the registration endpoint's 400 refuses the callback; a busy or broken server keeps the stored client too."""
+    _serve_movable_discovery(monkeypatch)
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+    await provider.client_config_resolution_async(_runtime_paths(tmp_path))
+    registered = _stored_mcp_client(_runtime_paths(tmp_path))
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "refuses_registration", True)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "refusal_status", status_code)
+    moved_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
+
+    with pytest.raises(OAuthProviderError) as failed:
+        await provider.client_config_resolution_async(moved_paths)
+
+    assert not isinstance(failed.value, OAuthCallbackRefusedError)
+    assert _stored_mcp_client(moved_paths) == registered
 
 
 @pytest.mark.asyncio

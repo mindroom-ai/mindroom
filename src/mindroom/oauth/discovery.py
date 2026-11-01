@@ -495,7 +495,7 @@ async def _register_client(
             msg = (
                 f"The {provider.display_name} authorization server refused to register MindRoom's new callback "
                 f"{redirect_uri}. Existing connections keep working; to connect, set MINDROOM_PUBLIC_URL to an address "
-                f"it accepts, such as an HTTPS one, or save an OAuth client for {provider.display_name}."
+                f"it accepts or save an OAuth client for {provider.display_name}."
             )
             raise OAuthCallbackRefusedError(msg) from exc
         await run_blocking_until_complete(
