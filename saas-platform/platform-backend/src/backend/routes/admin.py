@@ -27,7 +27,6 @@ from backend.models import (
     SyncResult,
     UpdateAccountStatusResponse,
 )
-from backend.pricing import PRICING_CONFIG_MODEL
 from backend.services import instance_lifecycle, instances_data, provisioner_service
 from backend.utils.audit import create_audit_log
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
@@ -54,15 +53,10 @@ def audit_log_entry(
     )
 
 
-def _monthly_plan_prices_usd() -> dict[str, int]:
-    """Return configured monthly prices in dollars for automatic MRR estimates."""
-    prices: dict[str, int] = {}
-    for tier, plan in PRICING_CONFIG_MODEL.plans.items():
-        if isinstance(plan.price_monthly, int):
-            prices[tier] = plan.price_monthly // 100
-        else:
-            prices[tier] = 0
-    return prices
+def _monthly_revenue_usd(subscription: dict[str, Any]) -> float:
+    """Return the monthly revenue of a subscription's recorded Stripe price, or 0 before a price is recorded."""
+    months = 12 if subscription["billing_cycle"] == "yearly" else 1
+    return (subscription["price_cents"] or 0) / months / 100
 
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
@@ -370,9 +364,14 @@ async def get_dashboard_metrics(
             .execute()
         )
 
-        subs_data = sb.table("subscriptions").select("tier").eq("status", "active").neq("tier", "free").execute()
-        tier_prices = _monthly_plan_prices_usd()
-        mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
+        subs_data = (
+            sb.table("subscriptions")
+            .select("tier,billing_cycle,price_cents")
+            .eq("status", "active")
+            .neq("tier", "free")
+            .execute()
+        )
+        mrr = sum(_monthly_revenue_usd(sub) for sub in (subs_data.data or []))
 
         all_instances = instances_data.list_instances(sb, columns="status")
         status_counts: dict[str, int] = {}

@@ -102,6 +102,52 @@ async def test_subscription_projection_uses_the_live_tier(seam):
     assert row["stripe_price_id"] == "price_hobby"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seam", ["updated", "refresh"])
+@pytest.mark.parametrize(("billing_cycle", "unit_amount"), [("monthly", 1000), ("yearly", 9600)])
+async def test_subscription_records_the_price_it_pays(seam, billing_cycle, unit_amount):
+    db = database()
+    remote = subscription("active", "byok")
+    remote["items"]["data"][0]["price"] |= {
+        "unit_amount": unit_amount,
+        "metadata": {"tier": "byok", "billing_cycle": billing_cycle},
+    }
+    with (
+        patch.object(webhooks, "ensure_supabase", return_value=db),
+        patch.object(
+            instance_lifecycle, "stripe", Mock(api_key="test", Subscription=Mock(retrieve=Mock(return_value=remote)))
+        ),
+        patch.object(webhooks.stripe.Subscription, "retrieve", return_value=remote),
+    ):
+        if seam == "refresh":
+            await instance_lifecycle._refresh_status_from_stripe(db, "local_1")
+        else:
+            webhooks.handle_subscription_updated(remote)
+    row = db.row("subscriptions", id="local_1")
+    assert (row["billing_cycle"], row["price_cents"]) == (billing_cycle, unit_amount)
+
+
+@pytest.mark.asyncio
+async def test_refresh_logs_the_fields_it_corrected():
+    db = database()
+    db.row("subscriptions", id="local_1")["stripe_price_id"] = "price_pro"
+    remote = subscription("active", "pro")
+    remote["items"]["data"][0]["price"]["unit_amount"] = 20000
+    retrieve = Mock(return_value=remote)
+    with (
+        patch.object(instance_lifecycle, "stripe", Mock(api_key="test", Subscription=Mock(retrieve=retrieve))),
+        patch.object(instance_lifecycle, "logger") as logger,
+    ):
+        await instance_lifecycle._refresh_status_from_stripe(db, "local_1")
+
+    # A row stored before prices were recorded gets its price, and the warning says so instead of an unchanged status.
+    logger.warning.assert_called_once_with(
+        "Corrected subscription %s from Stripe: %s",
+        "local_1",
+        "billing_cycle None -> 'monthly', price_cents None -> 20000",
+    )
+
+
 def test_subscription_rebound_during_retrieve_is_not_overwritten():
     db = database()
     newer = {"stripe_subscription_id": "sub_new", "tier": "hobby", "status": "trialing"}

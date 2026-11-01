@@ -1,7 +1,7 @@
 """Shared projection of Stripe subscriptions into hosted billing records."""
 
 from datetime import UTC, datetime
-from typing import Any, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 from backend.entitlements import db_subscription_status
 from backend.pricing import get_stripe_price_match
@@ -37,12 +37,12 @@ def _get_tier_from_price(price: dict) -> str:
     raise PermanentEventError(msg)
 
 
-def _get_billing_cycle_from_price(price: dict) -> str:
+def _get_billing_cycle_from_price(price: dict) -> Literal["monthly", "yearly"]:
     """Extract the canonical billing cycle for a Stripe price."""
     if match := get_stripe_price_match(price.get("id")):
         return match.billing_cycle
 
-    if (metadata := price.get("metadata", {})) and (cycle := metadata.get("billing_cycle")):
+    if (metadata := price.get("metadata", {})) and (cycle := metadata.get("billing_cycle")) in ("monthly", "yearly"):
         return cycle
 
     msg = f"Unable to determine billing cycle from price. Price metadata: {price.get('metadata')}"
@@ -55,6 +55,8 @@ class _SubscriptionFields(TypedDict):
     stripe_subscription_id: str
     stripe_price_id: str | None
     tier: str
+    billing_cycle: Literal["monthly", "yearly"]
+    price_cents: int | None
     status: str
     trial_ends_at: str | None
     updated_at: str
@@ -68,13 +70,14 @@ def subscription_fields(sb: Any, subscription: dict) -> _SubscriptionFields:
     """Project the fields shared by subscription creation and update events."""
     item = subscription["items"]["data"][0] if subscription.get("items", {}).get("data") else {}
     price_data = item["price"] if item else {}
-    tier = _get_tier_from_price(price_data)
-    _get_billing_cycle_from_price(price_data)
 
     subscription_data: _SubscriptionFields = {
         "stripe_subscription_id": subscription["id"],
         "stripe_price_id": price_data.get("id"),
-        "tier": tier,
+        "tier": _get_tier_from_price(price_data),
+        "billing_cycle": _get_billing_cycle_from_price(price_data),
+        # Amount Stripe bills each billing cycle, in cents; null only for tiered and pay-what-you-want prices.
+        "price_cents": price_data.get("unit_amount"),
         "status": subscription_status(sb, subscription["status"], subscription["id"]),
         "trial_ends_at": maybe_timestamp_to_iso(subscription.get("trial_end")),
         "updated_at": datetime.now(UTC).isoformat(),

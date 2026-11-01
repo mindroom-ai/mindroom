@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useSubscription } from '@/hooks/useSubscription'
+import { useSubscription, type Subscription } from '@/hooks/useSubscription'
 import { createPortalSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
 import Link from 'next/link'
@@ -10,9 +10,13 @@ import { currentPlanTier, planState } from '@/lib/plan-state'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, Check, RefreshCw } from 'lucide-react'
 
-function formatMonthlyPrice(price: string): string {
-  if (price === 'custom') return 'Custom'
-  return `${price}/month`
+/** What the subscription pays per billing cycle, or its plan's monthly price before Stripe records one. */
+function formatPrice(subscription: Subscription | null, plan: PricingConfig['plans'][string] | undefined): string {
+  if (subscription?.price_cents != null) {
+    return `$${subscription.price_cents / 100}/${subscription.billing_cycle === 'yearly' ? 'year' : 'month'}`
+  }
+  if (!plan) return '$0/month'
+  return plan.price_monthly === 'custom' ? 'Custom' : `${plan.price_monthly}/month`
 }
 
 export default function BillingPage() {
@@ -75,9 +79,7 @@ export default function BillingPage() {
   const features = currentPlan?.features || []
   const tierInfo = {
     name: currentPlan?.name || 'No plan',
-    price: currentPlan ?
-      formatMonthlyPrice(currentPlan.price_monthly) :
-      '$0/month',
+    price: formatPrice(subscription, currentPlan),
   }
 
   return (

@@ -46,6 +46,9 @@ class SubscriptionOut(BaseModel):
     ]
     stripe_subscription_id: str | None = None
     stripe_customer_id: str | None = None
+    # The Stripe price the subscription pays, in cents per billing cycle; None until a Stripe price is recorded.
+    billing_cycle: Literal["monthly", "yearly"] | None = None
+    price_cents: int | None = None
     current_period_start: str | None = None
     current_period_end: str | None = None
     trial_ends_at: str | None = None
@@ -175,14 +178,6 @@ class SubscriptionCancelResponse(BaseModel):
 
 
 # Pricing Models
-class StripePriceResponse(BaseModel):
-    """Stripe price ID response model."""
-
-    price_id: str
-    plan: str
-    billing_cycle: str
-
-
 class PublicPlan(BaseModel):
     """One plan as exposed by /pricing/config (prices formatted for display).
 

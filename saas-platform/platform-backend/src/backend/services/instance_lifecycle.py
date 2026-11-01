@@ -413,16 +413,17 @@ async def _refresh_status_from_stripe(sb: Client, subscription_id: str) -> dict[
                 "status": subscription_status(sb, remote["status"], stripe_subscription_id),
                 "trial_ends_at": maybe_timestamp_to_iso(remote.get("trial_end")),
             }
-        unchanged = all(
-            parse_timestamp(subscription.get(key)) == parse_timestamp(value)
-            if key in {"trial_ends_at", "current_period_start", "current_period_end"}
-            else subscription.get(key) == value
+        changed = {
+            key: value
             for key, value in fields.items()
-        )
+            if (
+                parse_timestamp(subscription.get(key)) != parse_timestamp(value)
+                if key in {"trial_ends_at", "current_period_start", "current_period_end"}
+                else subscription.get(key) != value
+            )
+        }
         query = sb.table("subscriptions")
-        query = (
-            query.select("*") if unchanged else query.update({**fields, "updated_at": datetime.now(UTC).isoformat()})
-        )
+        query = query.update({**fields, "updated_at": datetime.now(UTC).isoformat()}) if changed else query.select("*")
         current = (
             query.eq("id", subscription_id)
             .eq("stripe_subscription_id", stripe_subscription_id)
@@ -432,12 +433,11 @@ async def _refresh_status_from_stripe(sb: Client, subscription_id: str) -> dict[
             .data
         )
         if current:
-            if not unchanged:
+            if changed:
                 logger.warning(
-                    "Subscription %s was stored as %s but Stripe reports %s; corrected it",
+                    "Corrected subscription %s from Stripe: %s",
                     subscription_id,
-                    subscription.get("status"),
-                    fields["status"],
+                    ", ".join(f"{key} {subscription.get(key)!r} -> {value!r}" for key, value in changed.items()),
                 )
             return current[0]
         logger.info("Subscription %s changed while Stripe was queried; refreshing again", subscription_id)
