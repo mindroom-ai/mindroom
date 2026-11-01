@@ -1014,7 +1014,7 @@ def test_a_wrongly_typed_client_setting_fails_config_validation_at_the_model(
         Config.model_validate(data)
 
     assert iter_config_validation_messages(exc_info.value) == [
-        ("models → default → extra_kwargs", f"Value error, {error}"),
+        ("models → default → extra_kwargs", error),
     ]
 
 

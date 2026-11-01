@@ -217,15 +217,19 @@ CONFIG_LOAD_USER_ERROR_TYPES = (
 def config_validation_issues(
     exc: Exception,
 ) -> list[tuple[tuple[str | int, ...], str]]:
-    """Return the user-facing messages of one config validation exception, each with its config location."""
+    """Return the user-facing messages of one config validation exception, each with its config location.
+
+    An issue about the whole config is located at `config`, and a validator's issue shows the message it raised.
+    """
     if isinstance(exc, ValidationError):
         return [
             (
-                tuple(error["loc"]),
+                tuple(error["loc"]) or ("config",),
                 (
                     f"Unknown key '{error['loc'][-1]}': remove it or correct its spelling"
                     if error["type"] == "extra_forbidden"
-                    else error["msg"]
+                    # Pydantic writes a validator's raised message after this prefix.
+                    else error["msg"].removeprefix("Value error, ")
                 ),
             )
             for error in exc.errors(include_context=False)

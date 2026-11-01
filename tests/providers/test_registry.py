@@ -279,7 +279,7 @@ def test_config_load_rejects_an_unknown_provider_at_its_model() -> None:
     assert iter_config_validation_messages(info.value) == [
         (
             "models → default → provider",
-            "Value error, Unknown provider 'opneai': use one of anthropic, azure, bedrock_claude, cerebras, codex, "
+            "Unknown provider 'opneai': use one of anthropic, azure, bedrock_claude, cerebras, codex, "
             "deepseek, google, groq, kimi, llama_cpp, ollama, openai, openrouter, synthetic, vertexai_claude, zai",
         ),
     ]
@@ -296,7 +296,7 @@ def test_config_load_rejects_an_empty_model_name_or_one_its_dashboard_key_cannot
     assert iter_config_validation_messages(info.value) == [
         (
             "models",
-            "Value error, Model names can only include letters, numbers, colon, underscore, and hyphen; "
+            "Model names can only include letters, numbers, colon, underscore, and hyphen; "
             f"rename models.{name} and update every reference",
         ),
     ]
