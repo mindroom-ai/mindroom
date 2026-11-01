@@ -415,7 +415,7 @@ async def get_dashboard_metrics(
             "active_subscriptions": active_subs.count or 0,
             "total_instances": len(all_instances),
             "instances_by_status": instances_by_status,
-            "subscription_revenue": round(mrr, 2),
+            "subscription_revenue": float(round(mrr)),
             "subscriptions_by_tier": subscriptions_by_tier,
             "recent_signups": [],  # Not implemented yet
             "recent_instances": recent_activity if recent_activity else [],
