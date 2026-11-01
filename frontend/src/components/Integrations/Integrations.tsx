@@ -535,8 +535,7 @@ export function Integrations() {
 
   const runDisconnectOperation = async (
     integration: Integration,
-    disconnect: () => Promise<DisconnectToast | void>,
-    success?: DisconnectToast,
+    disconnect: () => Promise<DisconnectToast | undefined>,
   ) => {
     if (blocksScopedDashboardCredentials(integration)) {
       toast({
@@ -556,11 +555,10 @@ export function Integrations() {
       await refetchTools();
 
       toast(
-        result ??
-          success ?? {
-            title: "Disconnected",
-            description: `${integration.name} has been disconnected.`,
-          },
+        result ?? {
+          title: "Disconnected",
+          description: `${integration.name} has been disconnected.`,
+        },
       );
     } catch (error) {
       toast({
@@ -589,7 +587,7 @@ export function Integrations() {
       if (!response.ok) {
         throw new Error("Failed to disconnect");
       }
-      // The environment can still supply deleted credentials, so the server says what happened.
+      // The environment or a granted shared credential can still supply deleted credentials, so the server says what happened.
       const { message } = (await response.json()) as { message: string };
       return { title: integration.name, description: message };
     });
@@ -606,16 +604,15 @@ export function Integrations() {
     const provider = providerForIntegration(integration);
     const disconnectProvider = provider
       ? () =>
-          runDisconnectOperation(
-            integration,
-            () => provider.disconnect(scope),
-            integration.oauth_reset_required === true
+          runDisconnectOperation(integration, async () => {
+            await provider.disconnect(scope);
+            return integration.oauth_reset_required === true
               ? {
                   title: "Connection reset",
                   description: `${integration.name} OAuth has been reset.`,
                 }
-              : undefined,
-          )
+              : undefined;
+          })
       : undefined;
 
     const canConfigureOAuthClient =

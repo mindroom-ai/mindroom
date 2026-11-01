@@ -536,12 +536,10 @@ describe("Credentials", () => {
     const message =
       "Credentials for openai now come from the OPENAI_API_KEY environment variable; " +
       "to remove them, edit it in the environment or .env and restart MindRoom.";
-    let deleted = false;
     (global.fetch as any).mockImplementation(
       async (input: string, init?: RequestInit) => {
         const path = String(input);
         if (init?.method === "DELETE") {
-          deleted = true;
           return {
             ok: true,
             json: async () => ({ status: "success", message }),
@@ -574,7 +572,6 @@ describe("Credentials", () => {
         description: message,
       });
     });
-    expect(deleted).toBe(true);
     const listRequests = (global.fetch as any).mock.calls.filter(
       ([input]: [string]) => input === "/api/credentials/list",
     );

@@ -160,9 +160,8 @@ def reject_oauth_api_key_write_field(
 
 def reject_oauth_client_config_copy(source_service: str, destination_service: str) -> None:
     """Reject copying OAuth client config credentials between services."""
-    if not is_oauth_client_config_service(source_service) and not is_oauth_client_config_service(destination_service):
-        return
-    raise HTTPException(status_code=400, detail="OAuth client config credentials cannot be copied.")
+    if is_oauth_client_config_service(source_service) or is_oauth_client_config_service(destination_service):
+        raise HTTPException(status_code=400, detail="OAuth client config credentials cannot be copied.")
 
 
 def dashboard_credentials_for_save(

@@ -7507,7 +7507,6 @@ expose = [
     "resolve_agent_owned_path",
     "resolve_agent_state_storage_path",
     "resolve_unscoped_worker_key",
-    "resolve_worker_execution_scope",
     "resolve_worker_key",
     "resolve_worker_target",
     "resolved_worker_key_scope",

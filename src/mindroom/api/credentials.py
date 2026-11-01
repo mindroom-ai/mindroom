@@ -401,8 +401,7 @@ async def get_api_key(
         agent_name=agent_name,
         service_names=(service,),
     )
-    oauth_match = access.match(service)
-    reject_oauth_api_key_read_field(service, oauth_match, key_name=key_name)
+    reject_oauth_api_key_read_field(service, access.match(service), key_name=key_name)
     credential_service, credentials = _load_api_key_credentials(access, service, key_name)
     api_key = credentials.get(key_name)
     if is_oauth_client_config_service(service) and api_key is not None and not isinstance(api_key, str):

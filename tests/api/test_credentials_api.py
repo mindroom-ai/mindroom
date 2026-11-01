@@ -1947,7 +1947,7 @@ class TestCredentialsAPI:
             constants.resolve_primary_runtime_paths(
                 config_path=runtime_paths.config_path,
                 storage_path=runtime_paths.storage_root,
-                process_env={**dict(runtime_paths.process_env), "OPENAI_API_KEY": "sk-env-dummy"},
+                process_env={**runtime_paths.process_env, "OPENAI_API_KEY": "sk-env-dummy"},
             ),
         )
         bind_test_embedded_runtime(client.app)
