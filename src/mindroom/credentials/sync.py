@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.environment import EMBEDDER_CREDENTIAL_SERVICE, get_secret_from_env
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, OPENAI_BASE_URL_DEFAULT
+from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, OLLAMA_HOST_DEFAULT, OPENAI_BASE_URL_DEFAULT
 from mindroom.providers.names import provider_route
 
 if TYPE_CHECKING:
@@ -160,6 +160,15 @@ def get_openai_base_url(runtime_paths: RuntimePaths) -> str:
     Passing it explicitly keeps the SDK from reading the variable itself, which it does only from the process env.
     """
     return get_secret_from_env("OPENAI_BASE_URL", runtime_paths=runtime_paths) or OPENAI_BASE_URL_DEFAULT
+
+
+def get_anthropic_base_url(runtime_paths: RuntimePaths) -> str:
+    """Return the endpoint a direct Anthropic client without one of its own reaches: ``ANTHROPIC_BASE_URL``, else Anthropic's.
+
+    Passing it explicitly keeps the SDK from reading the variable itself, which it does only from the process env and
+    where it takes a blank export for an empty endpoint.
+    """
+    return get_secret_from_env("ANTHROPIC_BASE_URL", runtime_paths=runtime_paths) or ANTHROPIC_BASE_URL_DEFAULT
 
 
 def get_ollama_api_key(runtime_paths: RuntimePaths) -> str | None:
