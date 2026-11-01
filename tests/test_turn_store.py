@@ -2193,7 +2193,8 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         edited_timestamp=10,
     )
     if context_only:
-        runner = runner_for(MagicMock())
+        # The agent is no personal agent with contacts, so its turns are no contact turns.
+        runner = runner_for(MagicMock(agent_name="agent", runtime=MagicMock(config=Config())))
         request = ResponseRequest(
             sources=ResponseSources(
                 pending_event_ids=("$user_msg",),

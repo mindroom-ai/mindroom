@@ -233,7 +233,7 @@ Custom events default to 1000 ms.
   Once a streamed reply is visible it cannot be suppressed; use `message:final_response_transform` for one text-only replacement after a streamed reply succeeds.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
   A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
-- **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, or `empty_prompt` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
+- **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, `empty_prompt`, or `contact_turn` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.

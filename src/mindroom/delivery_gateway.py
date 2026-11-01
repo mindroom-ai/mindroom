@@ -19,6 +19,7 @@ from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
 from mindroom.cancellation import classify_cancel_source
 from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
+from mindroom.contacts.turns import contact_turn
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     MatrixDelivery,
@@ -55,6 +56,7 @@ from mindroom.final_delivery import (
     Owed,
     StreamTransportOutcome,
     Suppressed,
+    hook_failure_reason,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
@@ -1118,15 +1120,30 @@ class DeliveryGateway:
     ) -> FinalDeliveryOutcome | None:
         """End a span whose response was stopped, interrupted, or failed, as ``interrupted_end`` decides.
 
+        A contact turn shows nothing in its contact room, so its note is only logged and its reply ends unshown.
         Returns the outcome of the terminal row it wrote, or ``None`` when the span ended without one.
         """
         reply = await self.deps.outbox.replies.load(handle.reply_id)
         assert reply is not None, "a span's reply exists while the span ends"
         end = interrupted_end(reply, ending, delivery_started=delivery_started)
+        if end is not None and self._runs_contact_turns(target.room_id):
+            self.deps.logger.warning(
+                "contact_turn_ended_unshown",
+                reason=hook_failure_reason(ending),
+                **target.log_context,
+            )
+            await self.end_reply_span(handle, suppress_decision(handle))
+            return None
         if end is not None:
             return await self._end_reply_span_with_note(handle, target, state=end.state, note=end.note, ending=ending)
         await self.end_reply_span(handle, release_decision(handle))
         return None
+
+    def _runs_contact_turns(self, room_id: str) -> bool:
+        """Return whether this agent's turns in the room are contact turns, which show nothing there."""
+        return (
+            contact_turn(self.deps.runtime.config, self.deps.runtime_paths, room_id, self.deps.agent_name) is not None
+        )
 
     async def _end_reply_span_with_note(
         self,

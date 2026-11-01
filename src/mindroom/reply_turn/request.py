@@ -128,7 +128,7 @@ class ResponseRequest:
 
 
 def is_silent_schedule_response(request: ResponseRequest) -> bool:
-    """Return whether one response must avoid provisional Matrix activity."""
+    """Return whether one response answers a silent schedule, which shows only its findings."""
     return request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
 
 
@@ -161,10 +161,11 @@ async def response_typing_indicator(
     request: ResponseRequest,
     *,
     response_run_id: str | None,
+    quiet: bool,
     participation: ParticipationGate | None = None,
 ) -> AsyncIterator[None]:
-    """Expose typing only for response kinds whose progress may be visible."""
-    if is_silent_schedule_response(request):
+    """Expose typing only for a response whose progress may be visible, which a ``quiet`` one's never is."""
+    if quiet:
         yield
         return
 

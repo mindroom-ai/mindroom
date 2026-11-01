@@ -2593,6 +2593,7 @@ depends_on = [
     "mindroom.failure_text",
     "mindroom.response_lifecycle",
     "mindroom.constants",
+    "mindroom.contacts.turns",
     "mindroom.event_journal",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.room_history_reads",
@@ -3259,6 +3260,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.automations.steps",
     "mindroom.config.resolution",
+    "mindroom.contacts.turns",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
@@ -3302,6 +3304,7 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.approval.response",
     "mindroom.constants",
+    "mindroom.contacts.turns",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.history.storage",
@@ -3381,6 +3384,7 @@ path = "mindroom.response_lifecycle"
 depends_on = [
     "mindroom.cancellation",
     "mindroom.constants",
+    "mindroom.contacts.turns",
     "mindroom.tool_jobs.control",
     "mindroom.mid_turn",
     "mindroom.ai_runtime",
@@ -6033,6 +6037,7 @@ depends_on = [
 path = "mindroom.turn_policy"
 depends_on = [
     "mindroom.constants",
+    "mindroom.contacts.turns",
     "mindroom.entity_resolution",
     "mindroom.managed_room_notice",
     "mindroom.matrix.rooms",
@@ -9662,14 +9667,25 @@ depends_on = ["mindroom.hooks", "mindroom.judgment.evaluator", "mindroom.judgmen
 [[modules]]
 path = "mindroom.contacts.flow"
 depends_on = [
-    "mindroom.config.contacts",
-    "mindroom.config.resolution",
     "mindroom.constants",
     "mindroom.contacts.parties",
     "mindroom.contacts.policy",
     "mindroom.contacts.store",
+    "mindroom.contacts.turns",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
+]
+
+[[modules]]
+path = "mindroom.contacts.turns"
+depends_on = [
+    "mindroom.config.contacts",
+    "mindroom.config.resolution",
+    "mindroom.contacts.parties",
+    "mindroom.contacts.policy",
+    "mindroom.contacts.store",
+    "mindroom.delegation.state",
+    "mindroom.hooks",
     "mindroom.tool_system.registry",
 ]

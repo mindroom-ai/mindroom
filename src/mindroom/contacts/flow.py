@@ -14,12 +14,12 @@ from uuid import uuid4
 import yaml
 
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
-from mindroom.config.resolution import authored_tool_entries
 from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
 from mindroom.contacts.parties import (
     agent_party,
+    party_label,
     party_matrix_ids,
+    party_name,
     person_party,
     personal_room_agent,
     personal_room_of,
@@ -34,13 +34,13 @@ from mindroom.contacts.store import (
     read_contacts,
     update_contacts,
 )
+from mindroom.contacts.turns import contact_tool_choices
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import create_room, invite_to_room, leave_room
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
     import nio
@@ -80,20 +80,11 @@ def _own_party(context: ToolRuntimeContext, agent_name: str) -> ContactParty:
     return party
 
 
-def _refused_tool(name: str) -> bool:
-    """Return whether a contact never offers this tool: a control tool, or a Matrix room tool other than matrix_message."""
-    if name in CONTACT_CONTROL_TOOLS:
-        return True
-    metadata = builtin_tool_registry().get(name)
-    return name != "matrix_message" and metadata is not None and metadata.requires_room_context
-
-
 def validate_side_tools(config: Config, agent_name: str, tools: list[str] | None) -> list[str] | None:
     """Return the tools one side of a contact offers, refusing any the agent lacks or a contact may never offer."""
     if tools is None:
         return None
-    authored = config.expand_tool_names([entry.name for entry in authored_tool_entries(config, agent_name)])
-    allowed = [name for name in authored if not config.is_tool_preset(name) and not _refused_tool(name)]
+    allowed = contact_tool_choices(config, agent_name)
     if outside := [name for name in tools if name not in allowed]:
         msg = f"Not among the tools a contact may use: {', '.join(outside)}; allowed: {', '.join(allowed)}"
         raise ValueError(msg)
@@ -105,22 +96,11 @@ def _same_pair(record: ContactRecord, first: ContactParty, second: ContactParty)
     return ends == {(first.kind, first.id), (second.kind, second.id)}
 
 
-def _display(config: Config, party: ContactParty) -> str:
-    """Return how people see a party named: an agent's display name, or a person's Matrix ID."""
-    return party.id if party.kind == "person" else config.agents[party.id].display_name
-
-
-def _label(config: Config, party: ContactParty) -> str:
-    if party.kind == "person":
-        return party.id
-    return f"{_display(config, party)} ({party.id}), the agent of {party.owner}"
-
-
 def _notice_body(config: Config, record: ContactRecord) -> str:
     """Return the request as the target owner reads it, with the rules that would apply to their side."""
     target = record.target
-    asks = "you" if target.kind == "person" else f"your agent {_display(config, target)} ({target.id})"
-    lines = [f"{_label(config, record.requester)} asks to contact {asks}.", "", f"Reason: {record.reason}", ""]
+    asks = "you" if target.kind == "person" else f"your agent {party_name(config, target)} ({target.id})"
+    lines = [f"{party_label(config, record.requester)} asks to contact {asks}.", "", f"Reason: {record.reason}", ""]
     if target.kind == "agent":
         rules = effective_rules(config, target.id, record.target_side)
         lines += ["Rules that would apply to your agent by default:", rules or "None.", ""]
@@ -424,7 +404,7 @@ async def accept_contact(
     checked = validate_side_tools(config, target.id, tools) if target.kind == "agent" else None
     agents = _running_agents(context, record)
     _, client = agents[_room_creator(record)]
-    room_name = f"{_display(config, record.requester)} ↔ {_display(config, target)}"
+    room_name = f"{party_name(config, record.requester)} ↔ {party_name(config, target)}"
     room_id = await create_room(client, room_name, initial_state=_CONTACT_ROOM_STATE)
     if room_id is None:
         msg = "The contact room could not be created; accept again to retry"

@@ -17,6 +17,7 @@ from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import memory_backend
+from mindroom.contacts.turns import contact_turn
 from mindroom.conversation_state_writer import session_started_on_creation
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
+    from mindroom.contacts.store import ContactRecord, SideName
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter, ReplySession
     from mindroom.delivery_gateway import DeliveryGateway
@@ -141,6 +143,14 @@ class LockedTurns:
             msg = "Matrix client is not ready for response coordination"
             raise RuntimeError(msg)
         return client
+
+    def contact_turn(self, room_id: str) -> tuple[ContactRecord, SideName] | None:
+        """Return the contact and side of this agent's turns in the room, when it is the agent's contact room."""
+        return contact_turn(self.deps.runtime.config, self.deps.runtime_paths, room_id, self.deps.agent_name)
+
+    def is_quiet(self, request: ResponseRequest) -> bool:
+        """Return whether a turn shows no progress in its room: a silent schedule's turn, or a contact turn."""
+        return is_silent_schedule_response(request) or self.contact_turn(request.room_id) is not None
 
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
         """Return the runtime's knowledge refresh scheduler."""
@@ -395,7 +405,7 @@ class LockedTurns:
                 response_function=response_function,
                 existing_event_id=existing_event_id(request),
                 user_id=request.user_id,
-                show_stop_button=not is_silent_schedule_response(request),
+                show_stop_button=not self.is_quiet(request),
             )
         except ResponsePausedForApproval as error:
             if approval_suspension_handler is None:

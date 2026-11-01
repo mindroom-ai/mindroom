@@ -26,6 +26,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     TURN_INTENT_RUN_METADATA_KEY,
 )
+from mindroom.contacts.turns import contact_turn_instructions, contact_turn_persona
 from mindroom.conversation_state_writer import ReplySession
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.error_handling import get_user_friendly_error_message
@@ -82,7 +83,6 @@ from mindroom.reply_turn.request import (
     PreparedResponseRuntime,
     ResponseRequest,
     correlation_id_for_request,
-    is_silent_schedule_response,
     merge_response_extra_content,
     response_typing_indicator,
 )
@@ -564,7 +564,7 @@ class ResponseRunner:
                         target=target,
                         locked_operation=locked_operation,
                     ),
-                    signal_queued_message=signal_queued_message and not is_silent_schedule_response(request),
+                    signal_queued_message=signal_queued_message and not self.locked.is_quiet(request),
                 )
                 handle = current_span()
                 if handle is not None and not handle.exited:
@@ -651,6 +651,11 @@ class ResponseRunner:
             return
         if isinstance(error, _PostLockRequestPreparationError):
             cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
+            if self.locked.contact_turn(target.room_id) is not None:
+                # A contact turn shows nothing in its contact room, not even its failure.
+                self.deps.logger.warning("contact_turn_preparation_failed", error=str(cause), **target.log_context)
+                await gateway.end_reply_span(handle, suppress_decision(handle))
+                return
             confirms = handle.unconfirmed_progress
             now_ns = time.time_ns()
             error_text = get_user_friendly_error_message(
@@ -824,7 +829,7 @@ class ResponseRunner:
         request: ResponseRequest,
     ) -> MatrixCompactionLifecycle | None:
         """Build the ordered foreground compaction notice adapter for one response."""
-        if is_silent_schedule_response(request) or request.participation is not None:
+        if self.locked.is_quiet(request) or request.participation is not None:
             return None
         event_id, shows_placeholder = existing_event(request)
         reply_to_event_id = event_id if shows_placeholder else request.reply_to_event_id
@@ -889,13 +894,18 @@ class ResponseRunner:
             self.locked.bind_mid_turn_context(request)
             if request.pipeline_timing is not None:
                 request.pipeline_timing.mark("thread_refresh_ready")
-            request = replace(
-                request,
-                system_enrichment_items=with_silent_schedule_delivery(
-                    request.system_enrichment_items,
-                    request.response_envelope,
-                ),
+            system_enrichment_items = with_silent_schedule_delivery(
+                request.system_enrichment_items,
+                request.response_envelope,
             )
+            if (contact := self.locked.contact_turn(request.room_id)) is not None:
+                instructions = contact_turn_instructions(self.deps.runtime.config, self.deps.runtime_paths, *contact)
+                # The runtime owns these instructions; a hook's item under the same key never stands in for them.
+                system_enrichment_items = (
+                    *(item for item in system_enrichment_items if item.key != instructions.key),
+                    instructions,
+                )
+            request = replace(request, system_enrichment_items=system_enrichment_items)
             if request.payload_preparation is None:
                 return request
             return await self.deps.request_preparer.prepare(request)
@@ -941,7 +951,8 @@ class ResponseRunner:
                 ),
             ),
             system_enrichment_items=tuple(request.system_enrichment_items),
-            allow_no_report_response=is_silent_schedule_response(request),
+            # A quiet turn may end without an answer: an empty run is neither retried nor answered with a notice.
+            allow_no_report_response=self.locked.is_quiet(request),
             scheduled_history_budget=request.scheduled_history_budget,
             redacted_history_events=partial(self.deps.redacted_history_events, target),
             prompt=prompt,
@@ -966,7 +977,11 @@ class ResponseRunner:
         transient_enrichment_items: Sequence[EnrichmentItem],
         compaction_lifecycle: MatrixCompactionLifecycle | None,
     ) -> ResponseTurnContext:
-        """Build every input of one agent response turn."""
+        """Build every input of one agent response turn.
+
+        A contact turn offers only its contact's tools, and none that would show an approval card to the other side.
+        """
+        contact = self.locked.contact_turn(request.room_id)
         state_root = resolve_agent_storage(
             self.deps.agent_name,
             self.deps.runtime.config,
@@ -1000,7 +1015,8 @@ class ResponseRunner:
             compaction_lifecycle=compaction_lifecycle,
             refresh_scheduler=self.locked.knowledge_refresh_scheduler(),
             knowledge=knowledge,
-            supports_native_tool_approval=True,
+            supports_native_tool_approval=contact is None,
+            persona=None if contact is None else contact_turn_persona(self.deps.runtime.config, *contact),
         )
 
     async def _admit_locked_turn(
@@ -1436,7 +1452,7 @@ class ResponseRunner:
             execution_identity=execution_identity,
             placeholder_message=(
                 None
-                if is_silent_schedule_response(request) or request.participation is not None
+                if self.locked.is_quiet(request) or request.participation is not None
                 else AGENT_PLACEHOLDER
                 if team is None
                 else TEAM_PLACEHOLDER
@@ -1643,7 +1659,7 @@ class ResponseRunner:
         request = turn.request
         # A resumed reply is a stream, and a whole answer would replace what it already showed.
         use_streaming = _resumed_reply() is not None or (
-            not is_silent_schedule_response(request)
+            not self.locked.is_quiet(request)
             and await should_use_streaming(
                 self.locked.client(),
                 request.room_id,
@@ -1821,6 +1837,7 @@ class ResponseRunner:
                 self.locked.client(),
                 request,
                 response_run_id=turn.run_id,
+                quiet=self.locked.is_quiet(request),
                 participation=participation,
             ):
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
@@ -1914,6 +1931,7 @@ class ResponseRunner:
                 self.locked.client(),
                 request,
                 response_run_id=turn.run_id,
+                quiet=self.locked.is_quiet(request),
                 participation=runtime.participation,
             ):
                 with tool_runtime_context(runtime.tool_context):

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 CONTACT_RULES_QUESTION_ID = "contact_rules"
 
-_NO_RULES = "No extra rules; share only what the owner would expect."
+NO_CONTACT_RULES = "No extra rules; share only what the owner would expect."
 _HOOK_GAVE_NO_REASON = "A contact policy hook stopped this message without saying why."
 _UNCHECKED = "The message could not be checked; try again later."
 _BULLET = re.compile(r"^[-*]\s+")
@@ -106,7 +106,7 @@ async def check_contact_message(
             context.runtime_paths,
             agent_name=sender.id,
             owner=sender.owner,
-            rules=rules or _NO_RULES,
+            rules=rules or NO_CONTACT_RULES,
             text=final_text,
         )
         if refusal is not None:

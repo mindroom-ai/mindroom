@@ -53,6 +53,18 @@ def resolve_target(config: Config, runtime_paths: RuntimePaths, target: str) -> 
     return party
 
 
+def party_name(config: Config, party: ContactParty) -> str:
+    """Return how people see a party named: an agent's display name, or a person's Matrix ID."""
+    return party.id if party.kind == "person" else config.agents[party.id].display_name
+
+
+def party_label(config: Config, party: ContactParty) -> str:
+    """Return a party as an agent reads it: a person's Matrix ID, or an agent's name, ID, and owner."""
+    if party.kind == "person":
+        return party.id
+    return f"{party_name(config, party)} ({party.id}), the agent of {party.owner}"
+
+
 def party_matrix_ids(party: ContactParty, runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return the Matrix accounts that speak for a party: an agent's own account and its owner, or the person."""
     if party.kind == "person":
