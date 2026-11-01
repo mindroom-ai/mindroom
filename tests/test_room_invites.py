@@ -2326,11 +2326,11 @@ async def test_agent_leaves_unconfigured_rooms(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
+async def test_router_preserves_root_space_and_server_emoji_room_when_leaving_unconfigured_rooms(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The router should not leave the managed root Space during room cleanup."""
+    """The router should not leave the managed root Space or the server emoji room during room cleanup."""
     agent_user = AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
         user_id="@mindroom_router:localhost",
@@ -2363,18 +2363,20 @@ async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
 
     monkeypatch.setattr(
         "mindroom.bot_room_lifecycle.get_joined_rooms",
-        AsyncMock(return_value=["!room1:localhost", "!space:localhost", "!room2:localhost"]),
+        AsyncMock(return_value=["!room1:localhost", "!space:localhost", "!emoji:localhost", "!room2:localhost"]),
     )
     monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", mock_leave_non_dm_rooms)
     monkeypatch.setattr(
         "mindroom.bot_room_lifecycle.matrix_state_for_runtime",
-        lambda *_args, **_kwargs: MatrixState(space_room_id="!space:localhost"),
+        lambda *_args, **_kwargs: MatrixState(
+            space_room_id="!space:localhost",
+            server_emoji_room_id="!emoji:localhost",
+        ),
     )
 
     await bot.leave_unconfigured_rooms()
 
     assert set(left_room_ids) == {"!room2:localhost"}
-    assert "!space:localhost" not in left_room_ids
 
 
 @pytest.mark.asyncio

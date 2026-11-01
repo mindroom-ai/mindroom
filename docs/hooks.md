@@ -230,6 +230,7 @@ Custom events default to 1000 ms.
   The hook can run more than once for the same occurrence, so side-effecting hooks should use `ctx.correlation_id`, which is stable per occurrence, as an idempotency key.
 - **Room membership**: both events exclude configured agents, the internal `mindroom_user`, and `bot_accounts`.
   `room:member_joined` fires only for live joins, not for members already present at startup or for profile changes; `room:member_left` fires when a joined user leaves on their own, not when they are kicked or banned.
+  Once MindRoom has created the [server emoji room](custom-emoji.md#let-mindroom-create-the-room), `room:member_joined` also fires when MindRoom Chat joins a user to it, even after `server_emoji` is turned off, so filter on `ctx.room_id` if a handler should only react to joins in certain rooms.
   `room:member_left` reports the `display_name` and `avatar_url` the user had while joined.
   Either event can be delivered more than once for the same join or leave after a restart, so handlers that create rooms, send invites, or write state must be idempotent.
 
