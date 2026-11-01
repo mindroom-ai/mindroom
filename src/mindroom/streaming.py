@@ -265,7 +265,7 @@ class UnfinishedStreamedReply:
 
 @dataclass(frozen=True)
 class _CommittedDeliveryState:
-    """One frozen stream state that definitely reached Matrix."""
+    """The frozen stream state one delivery attempt carries; once that delivery lands, it is what reached Matrix."""
 
     accumulated_text: str
     tool_trace: list[ToolTraceEntry]
