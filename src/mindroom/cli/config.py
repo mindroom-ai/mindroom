@@ -640,9 +640,6 @@ def _prompt_provider_key(
             f"or add {env_key} to {runtime_paths.env_path} and restart `mindroom run`.",
         )
         return None
-    # Any exported value is blank or a template placeholder, and it would take precedence over
-    # the saved key when this process reloads its environment.
-    os.environ.pop(env_key, None)
     return value
 
 

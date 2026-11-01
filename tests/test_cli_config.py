@@ -3123,7 +3123,7 @@ class TestRunFirstRunSetup:
         assert result.exit_code == 0, result.output
         assert "OpenAI API key" in result.output
         assert "OPENAI_API_KEY=sk-typed\n" in (tmp_path / ".env").read_text(encoding="utf-8")
-        assert started[0].env_value("OPENAI_API_KEY") == "sk-typed"
+        assert get_secret_from_env("OPENAI_API_KEY", started[0]) == "sk-typed"
 
     def test_skipped_key_leaves_template_placeholder_unset(self, tmp_path: Path) -> None:
         """A skipped key leaves a leftover placeholder in `.env`, and it still never counts as a configured key."""
