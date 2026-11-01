@@ -247,7 +247,7 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
-            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
+            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default", rooms=["lobby"])},
             defaults=DefaultsConfig(tools=[]),
             room_models={"lobby": "large"},
             models={
@@ -282,7 +282,7 @@ async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_mo
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
-            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
+            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default", rooms=["lobby"])},
             defaults=DefaultsConfig(tools=[]),
             room_models={"lobby": "large"},
             models={

@@ -769,6 +769,7 @@ class TestDelegateKnowledge:
                     display_name="Worker",
                     role="Work",
                     model="default",
+                    rooms=["lobby"],
                 ),
             },
             defaults=DefaultsConfig(tools=[]),

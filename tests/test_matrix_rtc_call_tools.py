@@ -1099,7 +1099,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
-            agents={AGENT: AgentConfig(display_name="Helper", model="default")},
+            agents={AGENT: AgentConfig(display_name="Helper", model="default", rooms=["lobby"])},
             room_models={"lobby": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model"),

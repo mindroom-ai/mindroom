@@ -65,7 +65,10 @@ def _config(tmp_path: Path) -> Config:
     models["fb"] = ModelConfig(provider="openai", id="fb-id", pricing=ModelPricing(input=0.2, output=1))
     return bind_runtime_paths(
         Config(
-            agents={"a": AgentConfig(display_name="A", model="m1"), "b": AgentConfig(display_name="B", model="m2")},
+            agents={
+                "a": AgentConfig(display_name="A", model="m1", rooms=["lobby"]),
+                "b": AgentConfig(display_name="B", model="m2"),
+            },
             teams={"crew": TeamConfig(display_name="Crew", role="Work", agents=["a", "b"], model="mt")},
             room_models={"lobby": "m2"},
             models=models,
@@ -169,7 +172,11 @@ def test_a_team_must_name_a_model() -> None:
     ("raw", "reference"),
     [
         pytest.param({"agents": {"a": {"display_name": "A", "model": "gone"}}}, "agents.a.model: 'gone'", id="agent"),
-        pytest.param({"room_models": {"lobby": "gone"}}, "room_models.lobby: 'gone'", id="room-models"),
+        pytest.param(
+            {"rooms": {"lobby": {}}, "room_models": {"lobby": "gone"}},
+            "room_models.lobby: 'gone'",
+            id="room-models",
+        ),
     ],
 )
 def test_a_model_choice_naming_no_configured_model_fails_the_config_load(

@@ -919,6 +919,7 @@ def test_resolve_turn_model_uses_room_override_for_team(
                     role="Coordinate work",
                     agents=["test_agent"],
                     model="default",
+                    rooms=["lobby"],
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
@@ -950,7 +951,7 @@ def test_resolve_turn_model_uses_room_override_for_agent(
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
-            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
+            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default", rooms=["lobby"])},
             defaults=DefaultsConfig(tools=[]),
             room_models={"lobby": "large"},
             models={

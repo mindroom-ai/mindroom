@@ -2232,7 +2232,7 @@ class TestUserIdPassthrough:
         config, runtime_paths = _bound(
             tmp_path,
             Config(
-                agents={"general": AgentConfig(display_name="General", model="default")},
+                agents={"general": AgentConfig(display_name="General", model="default", rooms=["lobby"])},
                 room_models={"lobby": "large"},
                 models={
                     "default": ModelConfig(provider="openai", id="default-model", context_window=2000),

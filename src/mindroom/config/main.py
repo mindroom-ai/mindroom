@@ -991,6 +991,13 @@ class Config(BaseModel):
             (f"defaults.automations.{automation.name}.room", automation.room)
             for automation in self.defaults.automations
         ]
+        references += [("room_models", room) for room in self.room_models]
+        # A summary model may also be keyed by the responding agent or team, for rooms without a configured key.
+        references += [
+            ("room_thread_summary_models", room)
+            for room in self.room_thread_summary_models
+            if room not in self.agents and room not in self.teams
+        ]
         unknown_rooms = sorted(
             f"{location} -> {room}"
             for location, room in references

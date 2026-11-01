@@ -689,7 +689,7 @@ Setting and resetting require a Matrix room admin; other users get `❌ Room adm
 The new default applies to later turns; a turn in progress or waiting for approval keeps the model it started with.
 `!room_model reset` removes the runtime override so `room_models` or each entity's configured model applies again.
 
-To set an authored room default in `config.yaml`, map managed room names to model names with `room_models` (default `{}`):
+To set an authored room default in `config.yaml`, map room keys or Matrix room IDs to model names with `room_models` (default `{}`):
 
 ```yaml
 room_models:

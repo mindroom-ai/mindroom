@@ -211,7 +211,7 @@ def test_resolve_turn_model_thread_override_beats_room_override(
     """A thread override should beat the room_models override."""
     config = bind_runtime_paths(
         Config(
-            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
+            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default", rooms=["lobby"])},
             room_models={"lobby": "default"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),

@@ -1485,8 +1485,8 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `calls` | Agents joining Element Call voice calls | [Voice Calls](https://docs.mindroom.chat/voice-calls/#calls-configuration) |
 | `administrators`, `authorization`, `bot_accounts` | Platform administrators, command access, bridge aliases, and bridge bots | [Authorization](https://docs.mindroom.chat/authorization/) |
 | `room_defaults`, `rooms` | Managed room policy, invitations, and room admins | [Rooms & Spaces](https://docs.mindroom.chat/rooms/#room-policy) |
-| `room_models` | Map of managed room name to model name, the authored model default for a room | [Models](https://docs.mindroom.chat/configuration/models/#room_model) (`!room_model`) |
-| `room_thread_summary_models` | Map of room alias or Matrix room ID to automatic thread summary model | [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
+| `room_models` | Map of room key or Matrix room ID to model name, the authored model default for a room | [Models](https://docs.mindroom.chat/configuration/models/#room_model) (`!room_model`) |
+| `room_thread_summary_models` | Map of room key, Matrix room ID, or agent or team name to automatic thread summary model | [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](https://docs.mindroom.chat/rooms/#matrix-space) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
@@ -2618,7 +2618,7 @@ Setting and resetting require a Matrix room admin; other users get `❌ Room adm
 The new default applies to later turns; a turn in progress or waiting for approval keeps the model it started with.
 `!room_model reset` removes the runtime override so `room_models` or each entity's configured model applies again.
 
-To set an authored room default in `config.yaml`, map managed room names to model names with `room_models` (default `{}`):
+To set an authored room default in `config.yaml`, map room keys or Matrix room IDs to model names with `room_models` (default `{}`):
 
 ```yaml
 room_models:
@@ -11839,7 +11839,7 @@ For threads with more than 50 messages, the summary model sees only the first th
 
 The summary uses the first match of:
 
-1. `room_thread_summary_models`, keyed by managed room alias or Matrix room ID.
+1. `room_thread_summary_models`, keyed by room key or Matrix room ID.
 2. `room_thread_summary_models`, keyed by the responding agent or team name, which covers ad-hoc rooms without a managed alias.
 3. `defaults.thread_summary_model`.
 4. The `default` model.
@@ -22198,7 +22198,7 @@ Smaller changes that need operator action:
   Before upgrading, set again any such variable you removed after MindRoom imported it, or save that credential in the dashboard, or the key stops working; startup logs each removed service whose variable is no longer set.
 - **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
 - **Public address setting**: `MINDROOM_BASE_URL` is removed and `mindroom run` refuses to start while it is set, so before upgrading, move its value to `MINDROOM_PUBLIC_URL` unless that is already set, and delete it.
-- **Room references**: `rooms`, `room_thread_modes`, and an automation's `room` must name a room MindRoom can find, so a `#` alias of a room MindRoom did not create, or a room key no agent, team, or top-level `rooms` lists, now fails config load and `mindroom run` refuses to start.
+- **Room references**: `rooms`, `room_thread_modes`, an automation's `room`, and the keys of `room_models` and `room_thread_summary_models` (other than agent and team names) must name a room MindRoom can find, so a `#` alias of a room MindRoom did not create, or a room key no agent, team, or top-level `rooms` lists, now fails config load and `mindroom run` refuses to start.
   Run the new release's `mindroom config validate` and replace each reference it names with a room key or the room's `!` room ID, as [Rooms](https://docs.mindroom.chat/rooms/#configuration) describes.
 
 ### Compaction History

@@ -685,6 +685,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
                     role="Coordinate work",
                     agents=["test_agent"],
                     model="default",
+                    rooms=["lobby"],
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
@@ -739,6 +740,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
                 "test_agent": AgentConfig(
                     display_name="Test Agent",
                     model="default",
+                    rooms=["lobby"],
                 ),
             },
             defaults=DefaultsConfig(tools=[]),

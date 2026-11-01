@@ -1921,6 +1921,7 @@ def test_room_agent_participant_runs_as_that_agent_without_durable_state(
                 "specialist": AgentConfig(
                     display_name="Specialist Agent",
                     model="default",
+                    rooms=["lobby"],
                     tools=["memory"],
                     knowledge_bases=["reference"],
                 ),
