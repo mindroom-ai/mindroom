@@ -570,10 +570,18 @@ def test_a_photo_is_turned_upright_before_it_is_cropped() -> None:
 
 def test_an_image_with_too_many_pixels_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """An image that would decode to far more pixels than an avatar needs is refused before it is decoded."""
-    monkeypatch.setattr(managed_avatars, "_MAX_SOURCE_PIXELS", 100)
+    monkeypatch.setattr(managed_avatars, "MAX_DECODED_PIXELS", 100)
 
     with pytest.raises(ValueError, match="Avatar image exceeds the 100-pixel decoded limit"):
         managed_avatars.normalized_avatar_png(_image_bytes(size=(11, 10)))
+
+
+def test_postscript_is_refused_without_reaching_ghostscript() -> None:
+    """Pillow renders EPS through Ghostscript, so an avatar accepts only PNG, JPEG, GIF and WebP."""
+    eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 10 10\nshowpage\n"
+
+    with pytest.raises(ValueError, match="Undecodable avatar image: cannot identify image file"):
+        managed_avatars.normalized_avatar_png(eps)
 
 
 def test_a_transparent_logo_keeps_its_transparency() -> None:

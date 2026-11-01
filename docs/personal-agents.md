@@ -154,7 +154,7 @@ It calls `agent_settings` to read its current values and the tool names it may c
 - A change that the next config load would reject is refused with `The agent would not load with this change, so nothing was stored: <reason>`, and so is a new agent from `create_agent`.
 - A field with no edit follows its template or creator, so a later change to either reaches it.
 
-To change the agent's picture, attach an image in a conversation with the agent and ask it to use the image as its avatar.
+To change the agent's picture, attach a PNG, JPEG, GIF, or WebP image in a conversation with the agent and ask it to use the image as its avatar.
 It calls `set_avatar`, which crops the image to its center square, and the new picture applies without a reload.
 
 Only the agent's owners may ask, and anyone else is refused with `Only <owners> may change <agent>`.

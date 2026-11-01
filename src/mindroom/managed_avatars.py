@@ -18,6 +18,7 @@ from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import resolve_avatar_path
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import set_user_avatar_from_file, user_has_avatar
+from mindroom.media_delivery import MAX_DECODED_PIXELS, SUPPORTED_IMAGE_FORMATS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -64,8 +65,6 @@ _STOCK_POOL = tuple(name for name in _STOCK_AVATAR_NAMES if name not in _IDENTIT
 _MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024
 _DOWNLOAD_TIMEOUT_SECONDS = 20.0
 _AVATAR_SIZE = (256, 256)
-# Owners may send any image, and decoding one costs memory per pixel; a 256px avatar never needs more.
-_MAX_SOURCE_PIXELS = 40_000_000
 _FAILED_DOWNLOAD_RETRY_SECONDS = 24 * 60 * 60
 _FAILED_MARKER_SUFFIX = ".failed"
 
@@ -86,13 +85,13 @@ async def _download_stock_avatar(url: str) -> bytes:
 
 def _refuse_oversized(size: tuple[int, int]) -> None:
     width, height = size
-    if width * height > _MAX_SOURCE_PIXELS:
-        msg = f"Avatar image exceeds the {_MAX_SOURCE_PIXELS}-pixel decoded limit"
+    if width * height > MAX_DECODED_PIXELS:
+        msg = f"Avatar image exceeds the {MAX_DECODED_PIXELS}-pixel decoded limit"
         raise ValueError(msg)
 
 
 def normalized_avatar_png(data: bytes) -> bytes:
-    """Decode an untrusted image and re-encode its center square as a clean 256px PNG, RGBA only if it has transparency.
+    """Decode an untrusted PNG, JPEG, GIF or WebP and re-encode its center square as a 256px PNG, RGBA if transparent.
 
     Pillow decode failures are raised as ValueError, so callers never import Pillow for its exception types.
     Blocking; run it off the event loop.
@@ -103,10 +102,10 @@ def normalized_avatar_png(data: bytes) -> bytes:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as image:
+            with Image.open(io.BytesIO(data), formats=SUPPORTED_IMAGE_FORMATS) as image:
                 _refuse_oversized(image.size)
                 image.verify()
-            with Image.open(io.BytesIO(data)) as image:
+            with Image.open(io.BytesIO(data), formats=SUPPORTED_IMAGE_FORMATS) as image:
                 # A phone photo stores its rotation in EXIF, so turn it upright before cropping.
                 upright = ImageOps.exif_transpose(image)
                 assert upright is not None  # None only when transposing in place
