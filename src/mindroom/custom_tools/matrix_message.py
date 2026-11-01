@@ -110,7 +110,7 @@ class MatrixMessageTools(Toolkit):
             action: send, read, edit, or react.
             message: Text to send/edit, or reaction emoji.
             recipient: Agent/team name to request a response from; send only.
-            room_id: Room ID or configured room name; current room by default.
+            room_id: Room ID, alias, or configured room name; current room by default.
             thread_id: Thread root ID; current conversation by default, "room" for room timeline.
             new_thread: Start a separate thread; send only, cannot combine with thread_id.
             event_id: Message event ID to edit or react to.
