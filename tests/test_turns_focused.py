@@ -753,6 +753,7 @@ def _build_harness(
             logger=logger,
             runtime_paths=runtime_paths,
             agent_name=agent_name,
+            matrix_id=matrix_id,
             pending_turns=journal_principal,
             resolver=resolver,
             normalizer=normalizer,
@@ -1055,6 +1056,42 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
     assert harness.gateway.sent == []
     assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id) is False
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("newer_mentions", "answered"), [("research", True), ("general", False)])
+async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_turn(
+    config: Config,
+    tmp_path: Path,
+    newer_mentions: str,
+    answered: bool,
+) -> None:
+    """A newer requester message for another agent does not supersede the older turn.
+
+    This agent ignores that message and records no turn for it, so after a
+    restart nothing would ever answer the older message it supersedes.
+    """
+    newer_history = thread_history_result(
+        [
+            make_visible_message(
+                sender=_SENDER,
+                body="newer message from the same requester",
+                event_id="$newer:localhost",
+                timestamp=2_000_000,
+                content={"m.mentions": {"user_ids": [_entity_user_id(config, newer_mentions)]}},
+            ),
+        ],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=newer_history)
+    room = _room_with_members(config, "general", "research")
+    event = _text_event("older message for general", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
+    event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == (1 if answered else 0)
+    assert harness.ignored_dispatch_sources == ([] if answered else [(event.event_id,)])
 
 
 @pytest.mark.asyncio
