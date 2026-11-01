@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import os
+import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+import tiktoken
 
 import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
@@ -22,6 +24,7 @@ from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowled
 from mindroom.knowledge.read_protocol import DISTANCE_KEY, SearchHit
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.knowledge.vector_store import KnowledgeCollection, StoredRow
+from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.memory import ConversationRef, MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -35,6 +38,9 @@ from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
+from mindroom.token_counting import families
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import counter_for_model, load_o200k
 from mindroom.tool_system.runtime_context import current_execution_identity, detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -45,6 +51,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.fakes.knowledge import install_recording_refresh_scheduler
+from tests.fakes.token_counter import fake_token_counter
 from tests.knowledge_test_support import collection_meta
 from tests.memory_test_support import MockTeamConfig
 
@@ -170,6 +177,7 @@ async def build_memory_prompt_parts(
         config,
         runtime_paths_for(config),
         current_execution_identity(),
+        counter=fake_token_counter(),
     )
 
 
@@ -905,6 +913,7 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
             "general",
             config,
             runtime_paths_for(config),
+            counter=fake_token_counter(),
         )
 
     assert "Semantic memory search is unavailable this turn" in prompt_parts.transient_turn_context
@@ -1419,6 +1428,7 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
             runtime_paths_for(config),
             current_execution_identity(),
             conversation=conversation,
+            counter=fake_token_counter(),
         )
         return prompt_parts.session_preamble
 
@@ -1511,23 +1521,101 @@ async def test_file_backend_entrypoint_token_cap_keeps_whole_lines(
     assert str(memory_path) in prompt_parts.session_preamble
 
 
+def _fact_lines(storage_path: Path, config: Config, count_lines: int) -> list[str]:
+    """Write a MEMORY.md of ``count_lines`` 41-character facts under a 100-token cap, and return its lines."""
+    config.memory.file.max_entrypoint_lines = 500
+    config.memory.file.max_entrypoint_tokens = 100
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    lines = [f"fact {index:02} " + "z" * 32 for index in range(count_lines)]
+    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return lines
+
+
+async def _preloaded(lines: list[str], config: Config, counter: TokenCounter) -> list[str]:
+    parts = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
+    return [line for line in lines if line in parts.session_preamble]
+
+
+def _line_tokens(counter: TokenCounter, lines: list[str]) -> int:
+    return sum(count(counter, f"{line}\n", upper_bound=True) for line in lines)
+
+
 @pytest.mark.asyncio
-async def test_file_backend_entrypoint_token_cap_counts_newlines_across_many_short_lines(
+@pytest.mark.parametrize(
+    "identity",
+    [ModelIdentity(id="gpt-4o", provider="openai"), ModelIdentity(id="claude-opus-5-5", provider="anthropic")],
+    ids=["own-tokenizer", "family-estimate"],
+)
+async def test_file_backend_entrypoint_fills_the_token_cap_as_the_model_counts_it(
+    storage_path: Path,
+    config: Config,
+    identity: ModelIdentity,
+) -> None:
+    """The preload keeps as many whole lines as fit the cap, each counted with its newline, and the text fits it."""
+    load_o200k()
+    lines = _fact_lines(storage_path, config, 40)
+    counter = counter_for_model(identity, local_encoder=identity.provider == "openai")
+
+    kept = await _preloaded(lines, config, counter)
+
+    assert count(counter, "\n".join(kept)) <= _line_tokens(counter, kept) <= 100
+    assert _line_tokens(counter, lines[: len(kept) + 1]) > 100
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_fits_the_cap_before_the_vocabulary_loads(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before o200k_base loads, each line counts its UTF-8 bytes, which no model's tokenizer exceeds.
+
+    A quarter token per character would put the file at 420 tokens, under the 500-token cap.
+    """
+    lines = _fact_lines(storage_path, config, 40)
+    config.memory.file.max_entrypoint_tokens = 500
+    release = threading.Event()
+    real_get_encoding = tiktoken.get_encoding
+
+    def slow_get_encoding(name: str) -> tiktoken.Encoding:
+        release.wait()
+        return real_get_encoding(name)
+
+    monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
+    monkeypatch.setattr(tiktoken, "get_encoding", slow_get_encoding)
+    counter = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"))
+    try:
+        kept = await _preloaded(lines, config, counter)
+    finally:
+        release.set()
+
+    def utf8_bytes(chosen: list[str]) -> int:
+        return sum(len(f"{line}\n".encode()) for line in chosen)
+
+    assert utf8_bytes(kept) <= 500 < utf8_bytes(lines[: len(kept) + 1])
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_over_the_cap_keeps_the_head_and_the_newest_entries(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """The cap measures the joined text, so many short lines cannot each round down past it."""
-    config.memory.file.max_entrypoint_lines = 500
-    config.memory.file.max_entrypoint_tokens = 200
-
+    """A file over the cap keeps its curated head, then the newest entries that fit."""
+    config.memory.file.max_entrypoint_tokens = 120
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text("abcdef\n" * 200, encoding="utf-8")
+    entries = [f"- [id=m{index:02}] Entry {index:02} " + "w" * 24 for index in range(20)]
+    (workspace / "MEMORY.md").write_text("# Memory\nCurated fact.\n" + "\n".join(entries) + "\n", encoding="utf-8")
 
-    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
+    counter = TokenCounter(estimate=lambda text: len(text) // 2)
+    counted = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
 
-    # 114 lines join to 797 characters (199 tokens); 115 would be 804 (201 tokens).
-    assert "[Memory entrypoint truncated - showing 114 of 200 lines" in prompt_parts.session_preamble
+    kept = [entry for entry in entries if entry in counted.session_preamble]
+    assert "# Memory\nCurated fact." in counted.session_preamble
+    assert 0 < len(kept) < len(entries)
+    assert kept == entries[len(entries) - len(kept) :]
+    assert _line_tokens(counter, ["# Memory", "Curated fact.", *kept]) <= 120
 
 
 @pytest.mark.asyncio

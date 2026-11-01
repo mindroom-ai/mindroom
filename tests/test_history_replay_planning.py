@@ -40,10 +40,10 @@ from mindroom.history.types import (
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_budget import estimate_text_tokens
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.conftest import bind_runtime_paths, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import (
     ReplayEstimate,
     _completed_run,
@@ -72,15 +72,15 @@ def test_a_native_route_without_a_checkpoint_estimates_text_as_a_plain_request_d
     """One history gets one estimate: a native route rounds its canonical text the way a plain request does."""
     messages = [Message(role="user", content="a") for _ in range(4)]
 
-    assert estimate_request_messages_tokens(messages, replay_estimator=None, native_route="native-route") == 1
-    assert estimate_request_messages_tokens(messages, replay_estimator=None) == 1
+    assert estimate_request_messages_tokens(messages, counter=fake_token_counter(), native_route="native-route") == 1
+    assert estimate_request_messages_tokens(messages, counter=fake_token_counter()) == 1
 
 
 def test_an_empty_media_list_adds_nothing_to_a_message_estimate() -> None:
     """A message estimates by its text and tool calls; an empty media list carries neither."""
     with_empty_media = Message(role="user", content="abcdefg", images=[], files=[])
 
-    assert estimate_request_messages_tokens([with_empty_media], replay_estimator=None) == 1
+    assert estimate_request_messages_tokens([with_empty_media], counter=fake_token_counter()) == 1
 
 
 @pytest.mark.parametrize("native_route", [None, "native-route"])
@@ -94,7 +94,7 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
     estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=replay_settings(),
-        replay_estimator=replay_estimator,
+        counter=fake_token_counter(replay=replay_estimator),
         native_route=native_route,
     )
 
@@ -126,13 +126,13 @@ def test_history_estimate_charges_conservative_visual_cost_without_provider_esti
         session=without_image,
         history_settings=settings,
         native_route=native_route,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     visual_tokens = estimate_prompt_visible_history_tokens(
         session=with_image,
         history_settings=settings,
         native_route=native_route,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     assert 5_000 <= visual_tokens - text_tokens < 5_100
@@ -146,7 +146,7 @@ def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavail
     tokens = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=replay_settings(),
-        replay_estimator=ReplayEstimate(None, uses_visual_tokens=True),
+        counter=fake_token_counter(replay=ReplayEstimate(None, uses_visual_tokens=True)),
         native_route=native_route,
     )
 
@@ -173,13 +173,13 @@ def test_history_estimate_adds_visual_fallback_after_dominant_provider_text_esti
         session=without_image,
         history_settings=settings,
         native_route=native_route,
-        replay_estimator=replay_estimator,
+        counter=fake_token_counter(replay=replay_estimator),
     )
     visual_tokens = estimate_prompt_visible_history_tokens(
         session=with_image,
         history_settings=settings,
         native_route=native_route,
-        replay_estimator=replay_estimator,
+        counter=fake_token_counter(replay=replay_estimator),
     )
 
     assert visual_tokens - text_tokens >= 5_000
@@ -1216,9 +1216,9 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope() -> None:
         current_history_tokens=estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=history_settings,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         ),
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     assert replay_plan.mode == "limited"
@@ -1296,7 +1296,7 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
         estimated_tokens=estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=replay_settings(HistoryPolicy(mode="runs", limit=2)),
-            replay_estimator=None,
+            counter=fake_token_counter(),
         ),
         add_history_to_context=True,
         num_history_runs=2,
@@ -1428,7 +1428,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
     size = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     with pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"):
@@ -1437,7 +1437,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
             history_settings=settings,
             available_history_budget=500,
             current_history_tokens=size,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         )
 
     assert session.summary is summary
@@ -1449,7 +1449,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
         history_settings=settings,
         available_history_budget=10_000,
         current_history_tokens=size,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     assert recovered.mode == "configured"
     assert recovered.estimated_tokens <= 10_000
@@ -1470,9 +1470,9 @@ def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() ->
         current_history_tokens=estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=settings,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         ),
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     assert plan.mode == "disabled"
     assert 0 < plan.estimated_tokens <= 100
@@ -1480,7 +1480,7 @@ def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() ->
 
 
 def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> None:
-    available_history_budget = estimate_text_tokens("budget")
+    available_history_budget = quarter_tokens("budget")
     session = _session(
         "session-1",
         runs=[
@@ -1502,9 +1502,9 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
         current_history_tokens=estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=history_settings,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         ),
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     assert replay_plan.mode == "disabled"

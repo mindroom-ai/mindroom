@@ -17,15 +17,16 @@ from mindroom.history.types import (
     HistoryPolicy,
     ScopeSummary,
 )
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, stable_serialize
 from mindroom.llm.provider import ToolSpec
 from mindroom.session_storage.schema import TableNames
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import _completed_run, _session, replay_settings
 from tests.session_storage.agno_layout import SESSION_ID, converted_store
 
 if TYPE_CHECKING:
     from pathlib import Path
+
 
 _SYSTEM_MESSAGE = Message(role="system", content="You are a careful engineer.\n\nStay concise.")
 _SEARCH_PARAMETERS = {
@@ -54,17 +55,22 @@ _EXPORT_NOTES = ToolSpec(
 
 
 def test_static_estimate_counts_the_system_message_and_the_prompt() -> None:
-    estimator = build_static_token_estimator((_SYSTEM_MESSAGE,), (), frozenset())
+    estimator = build_static_token_estimator(fake_token_counter(), (_SYSTEM_MESSAGE,), (), frozenset())
 
-    assert estimator.non_prompt_tokens() == estimate_text_tokens(str(_SYSTEM_MESSAGE.content))
-    assert estimator.estimate("Current prompt") == estimate_text_tokens("Current prompt") + estimate_text_tokens(
+    assert estimator.non_prompt_tokens == quarter_tokens(str(_SYSTEM_MESSAGE.content))
+    assert estimator.estimate("Current prompt") == quarter_tokens("Current prompt") + quarter_tokens(
         str(_SYSTEM_MESSAGE.content),
     )
 
 
 def test_static_estimate_counts_each_offered_tool_definition_as_the_request_sends_it() -> None:
     """Tool definitions count with every field the tool set; fields it left unset are not sent, so they do not count."""
-    estimator = build_static_token_estimator((_SYSTEM_MESSAGE,), (_SEARCH_DOCS, _EXPORT_NOTES), frozenset())
+    estimator = build_static_token_estimator(
+        fake_token_counter(),
+        (_SYSTEM_MESSAGE,),
+        (_SEARCH_DOCS, _EXPORT_NOTES),
+        frozenset(),
+    )
 
     sent_definitions = [
         {
@@ -79,25 +85,32 @@ def test_static_estimate_counts_each_offered_tool_definition_as_the_request_send
             "strict": True,
         },
     ]
-    assert estimator.non_prompt_tokens() == (
-        estimate_text_tokens(str(_SYSTEM_MESSAGE.content)) + len(stable_serialize(sent_definitions)) // 4
+    assert estimator.non_prompt_tokens == (
+        quarter_tokens(str(_SYSTEM_MESSAGE.content)) + quarter_tokens(stable_serialize(sent_definitions))
     )
 
 
 def test_static_estimate_leaves_deferred_tools_out() -> None:
     """A tool that tool search keeps off the request until it is found costs nothing up front."""
+    counter = fake_token_counter()
     tools = (_SEARCH_DOCS, _EXPORT_NOTES)
-    nothing_deferred = build_static_token_estimator((_SYSTEM_MESSAGE,), tools, frozenset())
-    export_deferred = build_static_token_estimator((_SYSTEM_MESSAGE,), tools, frozenset({"export_notes"}))
-    all_deferred = build_static_token_estimator((_SYSTEM_MESSAGE,), tools, frozenset({"search_docs", "export_notes"}))
+    nothing_deferred = build_static_token_estimator(counter, (_SYSTEM_MESSAGE,), tools, frozenset())
+    export_deferred = build_static_token_estimator(counter, (_SYSTEM_MESSAGE,), tools, frozenset({"export_notes"}))
+    all_deferred = build_static_token_estimator(
+        counter,
+        (_SYSTEM_MESSAGE,),
+        tools,
+        frozenset({"search_docs", "export_notes"}),
+    )
 
-    assert export_deferred.non_prompt_tokens() < nothing_deferred.non_prompt_tokens()
+    assert export_deferred.non_prompt_tokens < nothing_deferred.non_prompt_tokens
     assert export_deferred.estimate("Current prompt") == build_static_token_estimator(
+        counter,
         (_SYSTEM_MESSAGE,),
         (_SEARCH_DOCS,),
         frozenset(),
     ).estimate("Current prompt")
-    assert all_deferred.non_prompt_tokens() == estimate_text_tokens(str(_SYSTEM_MESSAGE.content))
+    assert all_deferred.non_prompt_tokens == quarter_tokens(str(_SYSTEM_MESSAGE.content))
 
 
 def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages() -> None:
@@ -135,7 +148,7 @@ def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages()
     estimated_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     assert estimated_tokens > 0
@@ -165,11 +178,11 @@ def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt
     assert estimate_prompt_visible_history_tokens(
         session=contaminated_session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     ) == estimate_prompt_visible_history_tokens(
         session=clean_session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
 
@@ -205,14 +218,14 @@ def test_estimate_prompt_visible_history_tokens_drops_a_tool_result_whose_call_t
     estimated_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     expected_messages = [
         Message(role="user", content="new user"),
         Message(role="assistant", content="new assistant"),
     ]
-    assert estimated_tokens == estimate_request_messages_tokens(expected_messages, replay_estimator=None)
+    assert estimated_tokens == estimate_request_messages_tokens(expected_messages, counter=fake_token_counter())
 
 
 def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_removes_all_runs() -> None:
@@ -225,22 +238,23 @@ def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_
     estimated_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     expected_wrapper = str(compaction_summary_message("merged summary", run_local=False).content)
 
-    assert estimate_summary_tokens(session) == estimate_text_tokens(expected_wrapper)
-    assert estimated_tokens == estimate_text_tokens(expected_wrapper)
+    assert estimate_summary_tokens(session, fake_token_counter()) == quarter_tokens(expected_wrapper)
+    assert estimated_tokens == quarter_tokens(expected_wrapper)
     assert estimated_tokens > 0
 
 
 def test_summary_tokens_without_a_summary_are_zero() -> None:
-    assert estimate_summary_tokens(_session("session-1")) == 0
+    assert estimate_summary_tokens(_session("session-1"), fake_token_counter()) == 0
     for text in ("", "   "):
         assert (
             estimate_summary_tokens(
                 _session("session-1", summary=ScopeSummary(text=text, updated_at=datetime.now(UTC))),
+                fake_token_counter(),
             )
             == 0
         )

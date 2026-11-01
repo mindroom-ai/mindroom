@@ -17,10 +17,10 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.agent_loop.model_loop import SendRequest
-from mindroom.constants import PRIOR_USAGE_RUN_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.policy import context_budget_after_reserve
-from mindroom.history.prompt_tokens import tool_definition_tokens
+from mindroom.history.prompt_tokens import tool_definitions_text
 from mindroom.history.replay import HistorySummaryBudgetError, estimate_request_messages_tokens
 from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.runtime import (
@@ -45,7 +45,7 @@ from mindroom.providers.anthropic.prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.summary_rows import Fold, summarized_tool_call_ids
-from mindroom.token_budget import estimate_text_tokens
+from mindroom.token_counting.counts import count, fit_text, utf8_byte_bound
 from mindroom.tool_system.runtime_context import current_requester_id
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, message_request_snapshot
 
@@ -65,7 +65,7 @@ if TYPE_CHECKING:
         ResolvedReplayPlan,
     )
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelIdentity, ModelProvider, ToolSpec
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, TokenCounter, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.run_storage import RunStorage
@@ -101,6 +101,10 @@ class _MidTurnCompaction:
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None
     turn_recorder: TurnRecorder | None
+    # The size of the stored history the run replays, as the reply's preparation found it, and whether that size is
+    # the provider's reported request size.
+    prepared_history_tokens: int | None
+    prepared_history_reported: bool
     # Set when compaction failed or cannot bring the request under the limit; this run is not compacted again. An
     # approval resume builds a new hook, so it may try once more.
     stopped: bool = False
@@ -145,12 +149,15 @@ def mid_turn_compaction_hook(
     prompt_id: str | None,
     lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
+    prepared_history_tokens: int | None = None,
+    prepared_history_reported: bool = False,
 ) -> BeforeRequestHook:
     """Return the pre-request hook that compacts one run's long turn before a request that would exceed its window.
 
     A fold lands in the scope of ``storage`` when the run's requests replay its stored history under ``replay_plan``;
     ``lifecycle`` shows the fold through the reply's notices and ``turn_recorder`` records the folded calls for an
-    interrupted record.
+    interrupted record. ``prepared_history_tokens`` sizes the replayed history in the first request, from the
+    provider's reported request size when ``prepared_history_reported``.
     """
     compaction = _MidTurnCompaction(
         config=config,
@@ -164,6 +171,8 @@ def mid_turn_compaction_hook(
         prompt_id=prompt_id,
         lifecycle=lifecycle,
         turn_recorder=turn_recorder,
+        prepared_history_tokens=prepared_history_tokens,
+        prepared_history_reported=prepared_history_reported,
     )
 
     async def hook(state: LoopState) -> RequestDecision:
@@ -174,14 +183,18 @@ def mid_turn_compaction_hook(
 
 
 def without_run_usage(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return a run's metadata for seeding a new run, without the usage that belongs to that run.
+    """Return a run's metadata for seeding a new run, without the usage and prepared context that belong to that run.
 
-    That is the usage of the requests its mid-turn folds carried out of its messages, and the usage its turn spent
-    before it (``with_prior_usage``).
+    That is the usage of the requests its mid-turn folds carried out of its messages, the usage its turn spent before
+    it (``with_prior_usage``), and the prepared context it published, which the new run publishes for its own request.
     """
     if metadata is None:
         return None
-    return {key: value for key, value in metadata.items() if key not in _RUN_USAGE_METADATA_KEYS}
+    seeded = {key: value for key, value in metadata.items() if key not in _RUN_USAGE_METADATA_KEYS}
+    ai_run = seeded.get(AI_RUN_METADATA_KEY)
+    if isinstance(ai_run, dict):
+        seeded[AI_RUN_METADATA_KEY] = {key: value for key, value in ai_run.items() if key != "prepared_context"}
+    return seeded
 
 
 @dataclass(frozen=True)
@@ -204,6 +217,8 @@ class _Policy:
     native_route: str | None
     # The tools the request keeps off the provider until tool search loads them.
     deferred_tool_names: frozenset[str]
+    # How the model the request goes to counts tokens.
+    counter: TokenCounter
 
 
 async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> None:
@@ -237,7 +252,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
         state.record,
         scope_fold,
         request_tokens,
-        partial(_estimated_request_tokens, compaction, policy, messages, state.tools),
+        partial(_estimated_request_tokens, policy, messages, state.tools),
     )
     if fold is None:
         compaction.stopped = True
@@ -403,6 +418,7 @@ def _policy(compaction: _MidTurnCompaction, state: LoopState) -> _Policy | None:
         fit_limit=context_budget_after_reserve(model_window or plan.replay_window_tokens, plan.reserve_tokens),
         native_route=native.route if native is not None else None,
         deferred_tool_names=state.request_template.deferred_tools.names,
+        counter=compaction.model.token_counter,
     )
 
 
@@ -410,7 +426,7 @@ def _require_fit(policy: _Policy, tokens: int, summary_message: Message) -> None
     """Refuse to send a rewritten request whose kept messages and summary exceed the model's own window."""
     if tokens <= policy.fit_limit:
         return
-    summary_tokens = estimate_text_tokens(str(summary_message.content))
+    summary_tokens = count(policy.counter, str(summary_message.content))
     raise HistorySummaryBudgetError(
         summary_tokens=summary_tokens,
         available_tokens=max(0, policy.fit_limit - (tokens - summary_tokens)),
@@ -426,23 +442,11 @@ def _request_tokens(
 ) -> int:
     """Size the next request from the latest response this loop received, else by estimate.
 
-    A native response that created a checkpoint is billed for the transcript it replaced, so native routes always
-    estimate their projected request.
+    Before any response, the replayed history is as large as the reply's preparation found, from the provider's
+    reported size where one applied, which a padded estimate would exceed; the rest of the request is estimated. A
+    native response that created a checkpoint is billed for the transcript it replaced, so after one a native route
+    estimates its projected request.
     """
-    if policy.native_route is not None:
-        projected = native_replay_messages(messages, policy.native_route)
-        return (
-            estimate_request_messages_tokens(
-                messages,
-                replay_estimator=compaction.model.replay_estimator,
-                native_route=policy.native_route,
-            )
-            # Thinking before the latest checkpoint is part of that checkpoint, not of the request.
-            + _thinking_tokens(
-                [message for message in projected if not checkpoint_items(message, policy.native_route)],
-            )
-            + _tool_tokens(tools, projected, policy.deferred_tool_names)
-        )
     anchor = next(
         (
             index
@@ -451,7 +455,16 @@ def _request_tokens(
         ),
         None,
     )
-    if anchor is not None:
+    if anchor is None and compaction.prepared_history_tokens is not None:
+        return _prepared_request_tokens(
+            compaction.prepared_history_tokens,
+            reported=compaction.prepared_history_reported,
+            messages=messages,
+            tools=tools,
+            deferred=policy.deferred_tool_names,
+            counter=policy.counter,
+        )
+    if anchor is not None and not checkpoint_items(messages[anchor], policy.native_route):
         reported = reported_context_tokens(
             messages[anchor],
             model=compaction.model,
@@ -462,37 +475,76 @@ def _request_tokens(
             newer = messages[anchor:]
             return (
                 reported
-                + estimate_request_messages_tokens(newer, replay_estimator=compaction.model.replay_estimator)
-                + _thinking_tokens(newer)
+                + estimate_request_messages_tokens(newer, counter=policy.counter)
+                + _thinking_tokens(newer, policy.counter)
             )
-    return _estimated_request_tokens(compaction, policy, messages, tools)
+    if policy.native_route is not None:
+        projected = native_replay_messages(messages, policy.native_route)
+        return (
+            estimate_request_messages_tokens(messages, counter=policy.counter, native_route=policy.native_route)
+            # Thinking before the latest checkpoint is part of that checkpoint, not of the request.
+            + _thinking_tokens(
+                [message for message in projected if not checkpoint_items(message, policy.native_route)],
+                policy.counter,
+            )
+            + _tool_tokens(tools, projected, policy.deferred_tool_names, policy.counter)
+        )
+    return _estimated_request_tokens(policy, messages, tools)
 
 
-def _estimated_request_tokens(
-    compaction: _MidTurnCompaction,
-    policy: _Policy,
-    messages: list[Message],
+def _prepared_request_tokens(
+    history_tokens: int,
+    *,
+    reported: bool,
+    messages: Sequence[Message],
     tools: Sequence[ToolSpec],
+    deferred: frozenset[str],
+    counter: TokenCounter,
 ) -> int:
+    """Size a first request whose replayed history is ``history_tokens``, estimating the rest of what it sends.
+
+    A reported request size already holds the definitions Claude's tool search loaded, so with ``reported`` they are
+    not counted again; an estimated history leaves them to the tools.
+    """
+    fresh = [message for message in messages if not message.from_history]
+    tool_tokens = (
+        count(counter, tool_definitions_text(tools, deferred))
+        if reported
+        else _tool_tokens(tools, messages, deferred, counter)
+    )
     return (
-        estimate_request_messages_tokens(messages, replay_estimator=compaction.model.replay_estimator)
-        + _thinking_tokens(messages)
-        + _tool_tokens(tools, messages, policy.deferred_tool_names)
+        history_tokens
+        + estimate_request_messages_tokens(fresh, counter=counter)
+        + _thinking_tokens(fresh, counter)
+        + tool_tokens
     )
 
 
-def _tool_tokens(tools: Sequence[ToolSpec], messages: Sequence[Message], deferred: frozenset[str]) -> int:
-    """Estimate the tool definitions a request carries in full; tool search keeps ``deferred`` out until it loads them.
+def _estimated_request_tokens(policy: _Policy, messages: list[Message], tools: Sequence[ToolSpec]) -> int:
+    return (
+        estimate_request_messages_tokens(messages, counter=policy.counter)
+        + _thinking_tokens(messages, policy.counter)
+        + _tool_tokens(tools, messages, policy.deferred_tool_names, policy.counter)
+    )
+
+
+def _tool_tokens(
+    tools: Sequence[ToolSpec],
+    messages: Sequence[Message],
+    deferred: frozenset[str],
+    counter: TokenCounter,
+) -> int:
+    """Count the tool definitions a request carries in full; tool search keeps ``deferred`` out until it loads them.
 
     Claude expands a search's tool references into definitions; OpenAI replays them inside the search output, and
     portable tool search returns them as an ordinary tool result, both of which the message estimate already counts.
     """
     if deferred:
         deferred -= claude_loaded_tool_names(messages)
-    return tool_definition_tokens(tools, deferred)
+    return count(counter, tool_definitions_text(tools, deferred))
 
 
-def _thinking_tokens(messages: Sequence[Message]) -> int:
+def _thinking_tokens(messages: Sequence[Message], counter: TokenCounter) -> int:
     """Estimate this turn's thinking, which providers resend inside a tool loop but history estimates skip.
 
     Each of the turn's own model messages (``is_own_model_message``) counts. Encrypted or omitted thinking shows no
@@ -502,8 +554,9 @@ def _thinking_tokens(messages: Sequence[Message]) -> int:
     for message in messages:
         if not is_own_model_message(message):
             continue
-        text = estimate_text_tokens((message.reasoning_content or "") + (message.redacted_reasoning_content or ""))
-        visible = estimate_request_messages_tokens([message], replay_estimator=None)
+        text = count(counter, (message.reasoning_content or "") + (message.redacted_reasoning_content or ""))
+        # The visible part as canonical history counts it, not as the route replays it with its reasoning.
+        visible = estimate_request_messages_tokens([message], counter=replace(counter, replay=None))
         total += max(text, message.metrics.tokens.output_tokens - visible, 0)
     return total
 
@@ -617,14 +670,17 @@ def _snapshot_run(record: AnyRunRecord, messages: Sequence[Message], metadata: d
 def _prompt_context(prompt: Message, budget_tokens: int) -> Message:
     """Return a copy of the prompt for the summarizer's context, bounded so the message beside it always fits.
 
-    The prompt stays in the request verbatim, so the summary only needs enough of it to know what the work was for.
-    A quarter as many characters as budget tokens keeps it within a quarter of the input even when the summary
-    model counts bytes.
+    The prompt stays in the request verbatim, so the summary only needs enough of it to know what the work was for:
+    at most a quarter of the input, counted in UTF-8 bytes, which no summary model's tokenizer exceeds.
     """
     context = deepcopy(prompt)
-    limit = max(budget_tokens // 4, 1)
-    if isinstance(context.content, str) and len(context.content) > limit:
-        context.content = context.content[:limit] + "\n[The rest of this request is unchanged in the conversation.]"
+    if isinstance(context.content, str):
+        context.content = fit_text(
+            context.content,
+            max(budget_tokens // 4, 1),
+            utf8_byte_bound,
+            notice="\n[The rest of this request is unchanged in the conversation.]",
+        )
     return context
 
 

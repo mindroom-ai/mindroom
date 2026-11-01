@@ -29,6 +29,7 @@ from mindroom.providers.media_files import read_media_bytes
 from mindroom.providers.ollama.errors import provider_error
 from mindroom.providers.ollama.settings import OllamaSettings, ollama_client_options
 from mindroom.providers.tool_policy import disables_tools
+from mindroom.token_counting.families import counter_for_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.llm.media import Image
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, ToolSpec
+    from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, TokenCounter, ToolSpec
 
 
 @dataclass(slots=True)
@@ -74,12 +75,16 @@ class OllamaProvider:
     _client: AsyncClient | None = field(default=None, init=False, repr=False)
     # Ollama keeps no history of its own, and its replayed history is sized canonically.
     native_history_route: ClassVar[None] = None
-    replay_estimator: ClassVar[None] = None
 
     @property
     def model_params(self) -> dict[str, Any]:
         """The route's JSON-safe, non-secret settings."""
         return settings_params(self.settings)
+
+    @property
+    def token_counter(self) -> TokenCounter:
+        """Ollama serves models whose tokenizer does not run locally, so the route estimates."""
+        return counter_for_model(self.identity)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed chat request and yield its events."""

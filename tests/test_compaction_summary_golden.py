@@ -22,6 +22,7 @@ from mindroom.session_storage.types import ConversationSession
 from tests.agno_parity.golden_files import render
 from tests.agno_parity.prompt_scenarios import SCENARIOS, Recorder, call_dict, load_golden, normalize
 from tests.conftest import seed_session
+from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import _reported
 
 if TYPE_CHECKING:
@@ -91,7 +92,7 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
             resolved_inputs=inputs,
             history_budget=None,
             before_tokens=0,
-            replay_estimator=None,
+            counter=fake_token_counter(),
             config=turn.config,
             runtime_paths=turn.runtime_paths,
         )

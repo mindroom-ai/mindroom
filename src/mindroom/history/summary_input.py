@@ -13,8 +13,8 @@ from mindroom.constants import (
 )
 from mindroom.history.message_content import media_payload_snapshot, message_media_entries, render_message_content
 from mindroom.history.request_messages import filter_tool_calls, replayable_messages
+from mindroom.llm.messages import stable_serialize
 from mindroom.timing import timed
-from mindroom.token_budget import stable_serialize
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 
 if TYPE_CHECKING:
@@ -155,11 +155,13 @@ def _serialize_oversized_run_excerpt(
         return None
 
     full_run = _serialize_run(run, 0, history_settings)
-    if token_estimator(full_run) <= max_tokens:
+    full_tokens = token_estimator(full_run)
+    if full_tokens <= max_tokens:
         return full_run
 
     blocks = _excerpt_blocks(run, history_settings)
-    budget_chars = max_tokens * 4
+    # Start from as many characters as fit at this run's own rate of characters per token, then halve until one fits.
+    budget_chars = max_tokens * len(full_run) // full_tokens
     while budget_chars > 0:
         excerpt = _serialize_run_excerpt(run, blocks=blocks, content_budget_chars=budget_chars)
         if token_estimator(excerpt) <= max_tokens:

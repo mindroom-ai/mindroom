@@ -22,9 +22,9 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.schema import TableNames
 from mindroom.skill_learning.transcript import conversation_messages
-from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.agent_loop.helpers import collect, context, gated, spec
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.fakes.token_counter import quarter_tokens
 from tests.history_helpers import replay_settings, summary_tool_work
 from tests.session_storage.agno_layout import SESSION_ID, converted_store
 
@@ -186,7 +186,7 @@ def test_the_summary_input_leaves_out_placeholders_and_their_results(tmp_path: P
         compacted_runs=[_compacted_run(tmp_path)],
         max_input_tokens=100_000,
         history_settings=settings,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert len(included) == 1

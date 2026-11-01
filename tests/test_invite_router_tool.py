@@ -17,6 +17,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.custom_tools.invite_router import InviteRouterTools
+from mindroom.llm.messages import stable_serialize
 from mindroom.matrix.personal_room_store import (
     PersonalRoomAdoption,
     PersonalRoomRecord,
@@ -24,7 +25,6 @@ from mindroom.matrix.personal_room_store import (
     write_personal_room,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -38,6 +38,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.fakes.token_counter import quarter_tokens
 from tests.tool_approval_helpers import gated_functions
 from tests.turn_model_helpers import turn_model
 
@@ -139,7 +140,7 @@ def test_matrix_agents_get_zero_argument_invite_router_in_standard_tool_environm
     assert properties.pop(OUTPUT_PATH_ARGUMENT)["default"] is None
     own_parameters = {**function.parameters, "properties": properties}
     definition = {"name": function.name, "description": function.description, "parameters": own_parameters}
-    definition_tokens = estimate_text_tokens(stable_serialize([definition]))
+    definition_tokens = quarter_tokens(stable_serialize([definition]))
 
     assert properties == {}
     assert function.parameters.get("required", []) == []

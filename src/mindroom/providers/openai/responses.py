@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.provider import NativeCompactionReplay
+from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
@@ -28,6 +29,7 @@ from mindroom.providers.openai.responses_wire import (
     responses_stop_reason,
     usage_report,
 )
+from mindroom.token_counting.families import counter_for_model
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -41,8 +43,8 @@ if TYPE_CHECKING:
         ModelIdentity,
         ModelRequest,
         NativeHistoryRoute,
-        PortableReplayEstimator,
         StreamEvent,
+        TokenCounter,
     )
     from mindroom.providers.openai.settings import ResponsesSettings
 
@@ -65,14 +67,18 @@ class ResponsesAdapter:
         return self
 
     @property
-    def replay_estimator(self) -> PortableReplayEstimator:
-        """Responses sizes explicitly replayed history as its requests send it."""
-        return self
-
-    @property
     def model_params(self) -> dict[str, Any]:
         """The route's JSON-safe, non-secret settings."""
         return settings_params(self.settings)
+
+    @property
+    def token_counter(self) -> TokenCounter:
+        """OpenAI's own endpoint and Codex serve OpenAI's models, which tiktoken counts; a proxy may serve any model."""
+        return counter_for_model(
+            self.identity,
+            local_encoder=self.identity.endpoint == OPENAI_BASE_URL_DEFAULT or self.wire.route == "codex",
+            replay=self,
+        )
 
     def native_compaction_settings(
         self,
@@ -112,6 +118,7 @@ class ResponsesAdapter:
         try:
             return estimate_responses_replay_tokens(
                 messages,
+                counter=self.token_counter,
                 model_id=self.identity.id,
                 cache_system_prompt=self.settings.cache_system_prompt,
                 explicit_breakpoint=self.wire.explicit_breakpoint,

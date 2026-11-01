@@ -5,20 +5,24 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import prepare_agent_execution_context, prepare_bound_team_run_context
+from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_tokens
 from mindroom.history.runtime import (
     PreparedScopeHistory,
+    finalize_history_preparation,
     prepare_scope_history,
     resolve_entity_preparation_inputs,
 )
@@ -39,22 +43,26 @@ from mindroom.history.types import (
     CompactionOutcome,
     HistoryPolicy,
     HistoryScope,
+    NativeHistory,
+    PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
+    ResolvedReplayPlan,
     ScopeSummary,
 )
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, NativeCompactionReplay, PortableReplayEstimator
+from mindroom.llm.provider import Capabilities, ModelIdentity, NativeCompactionReplay, TokenCounter
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import delete_runs, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
@@ -86,7 +94,7 @@ def _included_run_count(
             compacted_runs=compacted_runs,
             max_input_tokens=budget,
             history_settings=_ALL_HISTORY_SETTINGS,
-            token_estimator=estimate_compaction_input_tokens,
+            token_estimator=quarter_tokens,
         )[1],
     )
 
@@ -578,13 +586,13 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     assert (
         estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=history_settings,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         )
         > replay_budget
     )
@@ -778,7 +786,7 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     summary = ScopeSummary(text="critical work detail " * 500, updated_at=datetime.now(UTC))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    summary_tokens = estimate_summary_tokens(_session("session-1", runs=[], summary=summary))
+    summary_tokens = estimate_summary_tokens(_session("session-1", runs=[], summary=summary), fake_token_counter())
     session = _session(
         "session-1",
         runs=[
@@ -885,7 +893,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     history_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=_ALL_HISTORY_SETTINGS,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     trigger_budget = history_tokens // 2
     hard_budget = history_tokens * 2
@@ -958,7 +966,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         estimate_prompt_visible_history_tokens(
             session=persisted,
             history_settings=_ALL_HISTORY_SETTINGS,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         )
         <= trigger_budget
     )
@@ -1004,7 +1012,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
                 compacted_runs=visible_runs,
                 history_settings=history_settings,
                 max_input_tokens=budget,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 9
@@ -1017,12 +1025,12 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     before_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     assert before_tokens > replay_budget
 
@@ -1078,7 +1086,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     outcome = completed_outcome(lifecycle)
     assert outcome.compacted_run_count == 23
     assert outcome.runs_after == 0
-    summary_only_tokens = estimate_summary_tokens(persisted)
+    summary_only_tokens = estimate_summary_tokens(persisted, fake_token_counter())
     assert outcome.after_tokens == summary_only_tokens
     assert outcome.after_tokens < replay_budget
     assert folded_run_ids(storage) == [f"run-{index:02}" for index in range(1, 24)]
@@ -1107,7 +1115,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         estimate_prompt_visible_history_tokens(
             session=current_run_session,
             history_settings=history_settings,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         )
         > summary_only_tokens
     )
@@ -1173,7 +1181,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
@@ -1282,7 +1290,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
                 compacted_runs=visible_runs,
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 1
@@ -1292,7 +1300,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
                 compacted_runs=visible_runs[1:],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 1
@@ -1870,9 +1878,15 @@ def _reported_run(
     created_at: int = _SUMMARY_WRITTEN_AT + 1,
     images: list[Image] | None = None,
     reasoning_tokens: int | None = None,
+    plan_mode: Literal["configured", "limited"] = "configured",
+    native_checkpoint: bool = False,
+    non_prompt_tokens: int | None = 400,
 ) -> RunRecord:
     """Return a completed run whose answer carries the request size its provider reported and the model's stamp.
 
+    The run publishes the replay plan ``plan_mode`` its request was sent with and, when not None, the
+    ``non_prompt_tokens`` of system prompt and tools it was sized with, which a run records only when its request
+    replayed the whole history; with ``native_checkpoint`` the answer holds a native compaction checkpoint.
     By default the answer's request starts the second after any summary a test writes. With ``reasoning_tokens``
     the answer also stores one encrypted reasoning item, as a Responses route records it, and reports that much
     reasoning.
@@ -1896,10 +1910,21 @@ def _reported_run(
                 },
             ],
         }
+    if native_checkpoint:
+        checkpoint = {"route": "checkpoints", "items": [{"type": "compaction", "encrypted_content": "gAAAA"}]}
+        answer.provider_data = {**(answer.provider_data or {}), NATIVE_CHECKPOINT_KEY: checkpoint}
     stamp_model(answer, ModelIdentity(id=model, provider="fake"))
     run = _completed_run(run_id, messages=[Message(role="user", content="u" * 2_000, images=images), answer])
     run.model = model
     run.model_provider = "fake"
+    run.metadata = build_prepared_history_metadata_content(
+        PreparedHistoryState(
+            replay_plan=ResolvedReplayPlan(mode=plan_mode, estimated_tokens=600, add_history_to_context=True),
+            prepared_context_tokens=1_000,
+            non_prompt_tokens=non_prompt_tokens,
+            native_history=None,
+        ),
+    )
     return run
 
 
@@ -1909,14 +1934,17 @@ async def _prepare_with_reported_usage(
     *,
     history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
     folded_run_ids: tuple[str, ...] = (),
-    replay_estimator: PortableReplayEstimator | None = None,
+    counter: TokenCounter | None = None,
+    non_prompt_tokens: int = 400,
 ) -> tuple[PreparedScopeHistory, int, RecordingCompactionLifecycle]:
     """Prepare a reply after three runs; return it, the chars / 4 history estimate, and the compaction notices.
 
     ``latest`` configures the newest run, and a summary folding ``folded_run_ids`` is stored as written at
-    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, 400 are the system prompt and tools. The
-    answering model sizes replayed history with ``replay_estimator``, canonically when it is None.
+    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, ``non_prompt_tokens`` are today's system prompt
+    and tools, while each run records the 400 its request was sized with. The answering model counts with
+    ``counter``, a quarter token per character when it is None.
     """
+    counter = counter or fake_token_counter()
     runs = [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", **latest)]
     config, runtime_paths = _make_config(
         tmp_path,
@@ -1932,7 +1960,7 @@ async def _prepare_with_reported_usage(
     estimate = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
@@ -1962,10 +1990,10 @@ async def _prepare_with_reported_usage(
             model=ScriptedModel(
                 [],
                 identity=ModelIdentity(id="fake-model", provider="fake"),
-                replay_estimator=replay_estimator,
+                token_counter=counter,
             ),
             resolved_inputs=resolved_inputs,
-            non_prompt_tokens=400,
+            non_prompt_tokens=non_prompt_tokens,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(
@@ -2018,12 +2046,204 @@ async def test_the_reported_request_size_counts_its_answer_as_the_answering_rout
     prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 8_000},
-        replay_estimator=ReplayEstimate(1_200),
+        counter=fake_token_counter(replay=ReplayEstimate(1_200)),
     )
 
     # The route sizes the 500-token answer at 1,200 tokens; the whole history it sizes no higher than chars / 4.
     assert estimate < 4_000
     assert prepared.compaction_decision.current_history_tokens == 8_000 + 1_200 - 400
+
+
+@pytest.mark.asyncio
+async def test_history_preparation_counts_off_the_event_loop(tmp_path: Path) -> None:
+    """Sizing the latest answer and the summary encodes them, which must never stall the replies sharing the loop."""
+    loop_thread = threading.get_ident()
+    counted_on: set[int] = set()
+
+    def estimate(text: str) -> int:
+        counted_on.add(threading.get_ident())
+        return len(text) // 4
+
+    await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 8_000},
+        folded_run_ids=("run-0",),
+        counter=TokenCounter(estimate=estimate),
+    )
+
+    assert counted_on
+    assert loop_thread not in counted_on
+
+
+@pytest.mark.asyncio
+async def test_the_reported_request_size_decides_over_an_estimate_that_overcounts(tmp_path: Path) -> None:
+    """One ratio per route cannot fit every conversation's content, so the provider's count of the history wins.
+
+    An estimate that counts a conversation a third too high would otherwise compact it early.
+    """
+    one_per_character = TokenCounter(estimate=len)
+    prepared, _estimate, lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 1_000},
+        counter=one_per_character,
+    )
+
+    # The reported request plus the 2,000-character answer it did not hold, minus the system prompt and tools; the
+    # estimate counts the three runs' 12,000 characters.
+    assert prepared.compaction_decision.current_history_tokens == 1_000 + 2_000 - 400
+    assert prepared.compaction_decision.reason == "under_trigger"
+    assert lifecycle.events == []
+
+
+def _finalize_with_history_budget(
+    tmp_path: Path,
+    prepared: PreparedScopeHistory,
+    history_budget: int,
+    policy: HistoryPolicy | None = None,
+) -> PreparedHistoryState:
+    """Finalize ``prepared`` under the agent's own settings, with a static prompt that leaves ``history_budget``.
+
+    ``policy`` replaces the settings' replay policy when given.
+    """
+    config, _paths = _make_config(tmp_path, compaction=CompactionOverrideConfig(enabled=True), context_window=64_000)
+    # The agent's own settings, which bound replay by the context window.
+    history_settings = config.resolve_scope("test_agent").history_settings
+    if policy is not None:
+        history_settings = replace(history_settings, policy=policy)
+    resolved_inputs = replace(prepared.resolved_inputs, history_settings=history_settings, active_context_window=64_000)
+    unloaded = resolve_history_execution_plan(
+        config=config,
+        history_settings=history_settings,
+        active_model_name=resolved_inputs.active_model_name,
+        active_context_window=64_000,
+        static_prompt_tokens=0,
+    )
+    assert unloaded.hard_replay_budget_tokens is not None
+    return finalize_history_preparation(
+        prepared_scope_history=replace(prepared, resolved_inputs=resolved_inputs),
+        config=config,
+        static_prompt_tokens=unloaded.hard_replay_budget_tokens - history_budget,
+        pipeline_timing=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_path: Path) -> None:
+    """A history the reported size kept below the trigger replays whole, not trimmed by an estimate that overcounts."""
+    one_per_character = TokenCounter(estimate=len)
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 1_000},
+        counter=one_per_character,
+    )
+    reported = 1_000 + 2_000 - 400
+    assert prepared.compaction_decision.current_history_tokens == reported
+
+    # A budget between the reported size and the 12,000-character estimate.
+    state = _finalize_with_history_budget(tmp_path, prepared, (reported + 12_000) // 2)
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode != "limited"
+    assert state.replay_plan.estimated_tokens == reported
+
+
+@pytest.mark.asyncio
+async def test_the_replay_plan_trims_by_the_reported_size_over_the_final_budget(tmp_path: Path) -> None:
+    """A reported size over the final budget trims history even where the estimate alone would fit it.
+
+    The final prompt can leave less room than the check had, and nothing compacts when automatic compaction is off.
+    """
+    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 3_500})
+    reported = 3_500 + 500 - 400
+    assert prepared.compaction_decision.current_history_tokens == reported
+    assert estimate < 3_200 < reported
+
+    state = _finalize_with_history_budget(tmp_path, prepared, 3_200)
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode == "limited"
+    assert state.replay_plan.num_history_runs == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("today", "taken_off"),
+    [
+        # Minus today's 7,000, history would show 1,500 tokens, under the 4,000-token trigger, as does the estimate.
+        pytest.param(7_000, 400, id="grown"),
+        pytest.param(100, 100, id="shrunk"),
+    ],
+)
+async def test_the_reported_request_size_takes_off_the_smaller_system_prompt(
+    tmp_path: Path,
+    today: int,
+    taken_off: int,
+) -> None:
+    """The reported request carried the 400-token system prompt and tools its run recorded, not today's.
+
+    A prompt grown since, such as after more tools or longer context files, counts in today's static estimate, not as
+    history that shrank. A prompt that shrank stays counted as history until the next run records it, because taking
+    off an estimate's margin with it could undercount the history.
+    """
+    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 8_000},
+        non_prompt_tokens=today,
+    )
+
+    assert estimate < 4_000
+    assert prepared.compaction_decision.current_history_tokens == 8_000 + 500 - taken_off
+    assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
+
+
+@pytest.mark.asyncio
+async def test_history_never_sizes_below_zero(tmp_path: Path) -> None:
+    """A short conversation's reported request can be smaller than the padded estimate of its system prompt and tools."""
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 200, "non_prompt_tokens": 5_000},
+        non_prompt_tokens=5_000,
+    )
+
+    assert prepared.compaction_decision.current_history_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_trimming_by_the_reported_size_turns_native_compaction_off(tmp_path: Path) -> None:
+    """A provider's checkpoint of a trimmed request would replace history it never held, so trimming turns it off."""
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 3_500})
+    native = NativeHistory(
+        native_compaction=NativeCompactionReplay(route="checkpoints", threshold=None),
+        portable_replay=True,
+    )
+
+    state = _finalize_with_history_budget(tmp_path, replace(prepared, native_history=native), 3_200)
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode == "limited"
+    assert state.native_history is not None
+    assert state.native_history.native_compaction is None
+
+
+@pytest.mark.asyncio
+async def test_trimming_never_widens_the_budget_by_an_estimate_that_overcounts(tmp_path: Path) -> None:
+    """An estimate's ratio to the reported size fits the whole history, not the newest runs trimming keeps.
+
+    Widening the budget by it could keep newer runs that overcount less, past the real budget.
+    """
+    # Each run's 4,000 characters estimate at 2,000 tokens; the answer the request did not hold at 1,000.
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 2_000},
+        counter=TokenCounter(estimate=lambda text: len(text) // 2),
+    )
+    assert prepared.compaction_decision.current_history_tokens == 2_000 + 1_000 - 400
+
+    state = _finalize_with_history_budget(tmp_path, prepared, 2_500)
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode == "limited"
+    assert state.replay_plan.estimated_tokens <= 2_500
 
 
 @pytest.mark.asyncio
@@ -2036,7 +2256,7 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
         prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
             root,
             {"input_tokens": 8_000, "reasoning_tokens": reasoning_tokens},
-            replay_estimator=responses_adapter(root, store=False),
+            counter=responses_adapter(root, store=False).token_counter,
         )
         sized[reasoning_tokens] = prepared.compaction_decision.current_history_tokens
 
@@ -2049,7 +2269,12 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
     ("latest", "setup"),
     [
         pytest.param({}, {}, id="no-reported-usage"),
-        pytest.param({"input_tokens": 2_000}, {}, id="below-the-estimate"),
+        # A request whose replay plan cut the history reported the size of the part it sent.
+        pytest.param({"input_tokens": 8_000, "plan_mode": "limited"}, {}, id="partial-replay"),
+        # A request under an authored replay limit, since removed, records nothing to take off its size.
+        pytest.param({"input_tokens": 8_000, "non_prompt_tokens": None}, {}, id="authored-limit-since-removed"),
+        # A native checkpoint replays differently on each route, and its response was billed for the transcript it replaced.
+        pytest.param({"input_tokens": 8_000, "native_checkpoint": True}, {}, id="native-checkpoint"),
         pytest.param({"input_tokens": 8_000, "model": "other-model"}, {}, id="another-model-answered"),
         pytest.param(
             {"input_tokens": 8_000, "images": [Image(url="https://example.com/chart.png")]},

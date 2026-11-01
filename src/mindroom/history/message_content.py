@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
-from mindroom.token_budget import stable_serialize
+from mindroom.llm.messages import stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

@@ -189,6 +189,7 @@ from mindroom.session_storage.store import (
 from mindroom.thread_summary import schedule as thread_summary_schedule
 from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.thread_utils import decide_agent_response
+from mindroom.token_counting.families import load_o200k
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system import registry as tool_registry_module
@@ -743,7 +744,8 @@ async def prepare_history_for_run_for_test(
     ``model`` is the provider the run's requests go to; without one, history is sized by estimate alone.
     """
     resolved_scope = scope or HistoryScope(kind="agent", scope_id=agent_name)
-    static_token_estimator = build_static_token_estimator((), (), frozenset())
+    model = model or estimate_only_model()
+    static_token_estimator = build_static_token_estimator(model.token_counter, (), (), frozenset())
     if static_prompt_tokens is None:
         static_prompt_tokens = static_token_estimator.estimate(full_prompt)
     resolved_inputs = resolve_entity_preparation_inputs(
@@ -768,9 +770,9 @@ async def prepare_history_for_run_for_test(
             ),
         )
     scope_history_kwargs = {
-        "model": model or estimate_only_model(),
+        "model": model,
         "resolved_inputs": resolved_inputs,
-        "non_prompt_tokens": static_token_estimator.non_prompt_tokens(),
+        "non_prompt_tokens": static_token_estimator.non_prompt_tokens,
         "runtime_paths": runtime_paths,
         "config": config,
         "compaction_lifecycle": compaction_lifecycle,
@@ -3759,6 +3761,12 @@ def _homeserver_without_live_frames(monkeypatch: pytest.MonkeyPatch) -> None:
 def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a conversation's kept MEMORY.md copy from leaking into later tests."""
     monkeypatch.setattr(memory_entrypoint_snapshots_module, "_snapshots", {})
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _loaded_o200k() -> None:
+    """Load the token encoder once, so no test's estimates depend on how far its background load has come."""
+    load_o200k()
 
 
 @pytest.fixture(autouse=True)

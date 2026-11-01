@@ -1,7 +1,7 @@
 """The prompt_curation automation: when an agent's always-loaded files grow too large, ask it to condense them.
 
 The check measures `MEMORY.md` and the always-loaded context files in the workspace it maintains (`private.context_files`
-for a private agent) with the estimate behind `static_prompt_tokens`.
+for a private agent) with the agent's model's token counter.
 When they exceed the trigger, or `MEMORY.md` has more lines than the preload keeps, the prompt asks the agent for a
 bounded cut in a normal visible run.
 Agents told to "clean up" tend to cut most of a file, so verify measures the files again once the run ends and, when
@@ -12,23 +12,28 @@ Files are read through no-follow descriptor walks, because worker code writes th
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.automations.registry import automation
 from mindroom.automations.steps import Ask, AutomationContext, Done, workspace_context_files
 from mindroom.config.automations import MAX_FILE_SHRINK, PromptCurationAutomation
+from mindroom.config.resolution import entity_model_name
 from mindroom.logging_config import get_logger
-from mindroom.memory import entrypoint_withholds_lines, read_scope_memory_files
+from mindroom.memory import entrypoint_tokens, entrypoint_withholds_lines, read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.token_budget import estimate_text_tokens
+from mindroom.providers.registry import model_token_counter
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import load_o200k
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.llm.provider import TokenCounter
 
 logger = get_logger(__name__)
 
@@ -49,12 +54,16 @@ class _CurationPlan:
     # Every memory/ topic file the scan read at fire time, so verify can tell detail moved from detail deleted.
     memory_tokens: int
     curated: Mapping[str, int]
-    # MEMORY.md lines at fire time; the preload withholds lines beyond either memory.file.max_entrypoint_* cap.
+    # MEMORY.md lines and tokens at fire time, the tokens as the preload counts them; the preload withholds lines beyond
+    # either memory.file.max_entrypoint_* cap.
     memory_lines: int
+    entrypoint_tokens: int
     max_entrypoint_lines: int
     max_entrypoint_tokens: int
     upper_tokens: int
     floor_tokens: int
+    # How the agent's model counts tokens; verify measures the files again with it.
+    counter: TokenCounter
 
     @property
     def measured_tokens(self) -> int:
@@ -78,18 +87,18 @@ def _read(root: Path, path: str) -> bytes | None:
         return None
 
 
-def _tokens(payload: bytes) -> int:
-    return estimate_text_tokens(payload.decode("utf-8"))
+def _tokens(counter: TokenCounter, payload: bytes) -> int:
+    return count(counter, payload.decode("utf-8"))
 
 
-def _memory_dir_tokens(root: Path, exclude: Iterable[str]) -> int:
+def _memory_dir_tokens(root: Path, exclude: Iterable[str], counter: TokenCounter) -> int:
     """Return the estimated tokens of the memory/ topic files, except ``exclude``.
 
     Curated files are excluded even under memory/, so their content is counted once.
     """
     excluded = set(exclude)
     return sum(
-        estimate_text_tokens(memory_file.text)
+        count(counter, memory_file.text)
         for memory_file in read_scope_memory_files(root)
         if memory_file.relative_path.startswith(_MEMORY_DIR_PREFIX) and memory_file.relative_path not in excluded
     )
@@ -104,6 +113,7 @@ def _plan_curation(
     root: Path,
     agent_name: str,
     settings: PromptCurationAutomation,
+    counter: TokenCounter,
 ) -> _CurationPlan | None:
     """Return the plan for a due prompt over the file memory at ``root``, or None while the files are within the limits.
 
@@ -112,25 +122,27 @@ def _plan_curation(
     curated_payloads = {
         path: payload for path in _curated_paths(config, agent_name) if (payload := _read(root, path)) is not None
     }
-    curated = {path: _tokens(payload) for path, payload in curated_payloads.items()}
+    curated = {path: _tokens(counter, payload) for path, payload in curated_payloads.items()}
     measured = sum(curated.values())
     memory_text = curated_payloads.get(_ENTRYPOINT, b"").decode("utf-8")
     memory_lines = len(memory_text.splitlines())
-    # Lines the preload withholds never reach the prompt, at any token count.
-    if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(memory_text, config):
+    # Lines the preload withholds never reach the prompt, at any token count; judged as a reply's preload judges them.
+    if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(memory_text, config, counter):
         return None
     return _CurationPlan(
         agent_name=agent_name,
         root=root,
         settings=settings,
         snapshot=curated_payloads,
-        memory_tokens=_memory_dir_tokens(root, exclude=curated_payloads),
+        memory_tokens=_memory_dir_tokens(root, curated_payloads, counter),
         curated=curated,
         memory_lines=memory_lines,
+        entrypoint_tokens=entrypoint_tokens(memory_text, counter),
         max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
         max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
         upper_tokens=round(measured * (1 - settings.min_reduction)),
         floor_tokens=round(measured * (1 - settings.max_reduction)),
+        counter=counter,
     )
 
 
@@ -141,7 +153,7 @@ def _curation_prompt(config: Config, plan: _CurationPlan) -> str:
         measured_tokens=plan.measured_tokens,
         trigger_tokens=plan.settings.trigger_tokens,
         memory_lines=plan.memory_lines,
-        entrypoint_tokens=plan.curated.get(_ENTRYPOINT, 0),
+        entrypoint_tokens=plan.entrypoint_tokens,
         max_entrypoint_lines=plan.max_entrypoint_lines,
         max_entrypoint_tokens=plan.max_entrypoint_tokens,
         file_sizes=", ".join(f"{path} ({tokens} tokens)" for path, tokens in plan.curated.items()),
@@ -172,7 +184,7 @@ def _findings(
             unreadable.append(f"{path} cannot be read ({payload})")
             continue
         try:
-            after[path] = _tokens(payload or b"")
+            after[path] = _tokens(plan.counter, payload or b"")
         except UnicodeDecodeError:
             unreadable.append(f"{path} is no longer valid UTF-8")
     if unreadable:
@@ -203,7 +215,8 @@ def _findings(
 
 def _content_loss(plan: _CurationPlan, curated_tokens: int) -> str | None:
     """Describe memory content deleted rather than moved beyond the allowance, or return None."""
-    lost = plan.measured_tokens + plan.memory_tokens - (curated_tokens + _memory_dir_tokens(plan.root, plan.snapshot))
+    memory_tokens = _memory_dir_tokens(plan.root, plan.snapshot, plan.counter)
+    lost = plan.measured_tokens + plan.memory_tokens - (curated_tokens + memory_tokens)
     if lost <= (max_loss := round(plan.settings.max_content_loss * plan.measured_tokens)):
         return None
     return f"about {lost} tokens of memory were deleted rather than moved to memory/ (at most {max_loss})"
@@ -229,6 +242,19 @@ def _curation_notice(config: Config, plan: _CurationPlan, result: _CurationResul
     return f"✅ Prompt files condensed from {plan.measured_tokens} to {result.tokens_after} tokens."
 
 
+def _stable_counter(counter: TokenCounter) -> TokenCounter:
+    """Return ``counter`` once it counts with a loaded vocabulary, else the stand-in, so verify counts as the plan did.
+
+    Without network access and a cached vocabulary, loading fails on every run, and an older OpenAI model's own
+    encoding may still be loading in the background.
+    """
+    with suppress(OSError, ValueError):
+        load_o200k()
+    if counter.estimate("a") is None:
+        return replace(counter, estimate=lambda _text: None)
+    return counter
+
+
 @automation("prompt_curation", requires_file_memory=True)
 def check_curation(ctx: AutomationContext) -> Ask | None:
     """Return the prompt asking for a cut, or None while the files are within the limits."""
@@ -236,8 +262,16 @@ def check_curation(ctx: AutomationContext) -> Ask | None:
         msg = f"prompt_curation cannot run the {ctx.entry.name} entry"
         raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
     config, agent_name = ctx.config, ctx.agent_name
+    counter = _stable_counter(
+        model_token_counter(
+            config,
+            ctx.runtime_paths,
+            entity_model_name(config, agent_name),
+            execution_identity=ctx.execution_identity,
+        ),
+    )
     # The workspace of an agent with file memory, which this automation requires, is its file-memory root.
-    plan = _plan_curation(config, ctx.workspace, agent_name, ctx.entry)
+    plan = _plan_curation(config, ctx.workspace, agent_name, ctx.entry, counter)
     if plan is None:
         return None
     logger.info(

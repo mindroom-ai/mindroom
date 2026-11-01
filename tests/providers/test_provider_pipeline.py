@@ -62,13 +62,14 @@ from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.fakes.scripted_model import Await, scripted_body
+from tests.fakes.token_counter import fake_token_counter
 from tests.providers.golden_support import pipeline_provider
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.llm.provider import ModelProvider, StreamEvent
+    from mindroom.llm.provider import ModelProvider, StreamEvent, TokenCounter
 
 _PROMPT = "Use the attached image."
 _FALLBACK_PROMPT = "Media was not inspected."
@@ -92,7 +93,7 @@ class _ScriptedProvider:
     identity: ModelIdentity = _IDENTITY
     capabilities: Capabilities = _CAPABILITIES
     native_history_route: None = None
-    replay_estimator: None = None
+    token_counter: TokenCounter = field(default_factory=fake_token_counter)
     model_params: dict[str, object] = field(default_factory=dict)
     requests: list[ModelRequest] = field(default_factory=list)
     closed: int = 0

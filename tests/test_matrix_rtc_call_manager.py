@@ -101,10 +101,12 @@ from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.registry import build_model_provider
 from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision
-from mindroom.token_budget import approximate_o200k_tokens
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import openai_model_counter
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import test_runtime_paths
+from tests.fakes.token_counter import fake_token_counter
 from tests.matrix_state_helpers import save_matrix_state
 from tests.providers.bare_adapter import bare_adapter
 
@@ -206,6 +208,13 @@ class RecoveringKeyTransport(FakeKeyTransport):
             return []
         self.delivered.set()
         return targets
+
+
+_VOICE = openai_model_counter("gpt-realtime")
+
+
+def _voice_tokens(text: str) -> int:
+    return count(_VOICE, text)
 
 
 def _client() -> AsyncMock:
@@ -997,7 +1006,7 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
 
 def _assert_safe_oversized_live_instructions(instructions: str) -> None:
     """Check the strict fallback without duplicating the backend-selection test."""
-    assert approximate_o200k_tokens(instructions) <= 16_384
+    assert _voice_tokens(instructions) <= 16_384
     assert instructions.startswith("You are speaking as Helper 🌿, the configured agent in a live voice call.")
     assert "## Your Identity" not in instructions
     assert "FINAL SAFETY" not in instructions
@@ -2763,7 +2772,7 @@ async def test_preload_builds_the_token_encoder_off_the_event_loop(monkeypatch: 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.matrix_calls_dependencies_available", lambda: True)
     encoder_threads: list[int] = []
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_manager.o200k_encoding",
+        "mindroom.matrix_rtc.call_manager.load_o200k",
         lambda: encoder_threads.append(threading.get_ident()),
     )
 
@@ -2790,7 +2799,7 @@ async def test_preload_matches_the_configured_call_backends(monkeypatch: pytest.
 
     monkeypatch.setitem(sys.modules, "livekit.plugins", RecordingPlugins("livekit.plugins"))
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.matrix_calls_dependencies_available", lambda: True)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.o200k_encoding", lambda: None)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.load_o200k", lambda: None)
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.prewarm_call_audio_process", lambda: prewarms.append(None))
 
     await preload_matrix_call_dependencies(_config())
@@ -2884,7 +2893,7 @@ def test_build_live_instructions_preserves_prompt_that_fits() -> None:
     """A normal prompt keeps all caller context before the fixed voice rules."""
     system_prompt = "## Your Identity\nYou are Helper.\n\nAlways respect caller authorization."
 
-    text = _build_live_instructions(system_prompt, agent_display_name="Helper")
+    text = _build_live_instructions(system_prompt, agent_display_name="Helper", counter=_VOICE)
 
     assert text.startswith(f"{system_prompt}\n\n")
     assert "context was omitted" not in text
@@ -3017,7 +3026,7 @@ async def test_cascaded_call_without_origin_asks_the_caller_where_to_start_work(
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert isinstance(bridge.agent_options, CascadedVoiceAgentOptions)
-    note = cast("str", tooling_kwargs["origin_brief"])
+    note = tooling_kwargs["origin_brief"](fake_token_counter())
     assert note.startswith("## Starting work from this call")
     assert "ask which one" in note
     await manager.shutdown()
@@ -3178,7 +3187,7 @@ async def test_cascaded_delegate_receives_origin_brief(
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert isinstance(bridge.agent_options, CascadedVoiceAgentOptions)
-    assert "Book the 9am train" in cast("str", tooling_kwargs["origin_brief"])
+    assert "Book the 9am train" in tooling_kwargs["origin_brief"](fake_token_counter())
     await manager.shutdown()
 
 
@@ -3218,22 +3227,27 @@ async def test_live_call_instructions_and_delegate_include_origin_brief(
     assert live_instructions.startswith("You are Helper.\n\n")
     assert "Book the 9am train" in live_instructions
     assert live_instructions.endswith(_LIVE_VOICE_INSTRUCTIONS)
-    assert "Book the 9am train" in cast("str", tooling_kwargs["origin_brief"])
+    assert "Book the 9am train" in tooling_kwargs["origin_brief"](fake_token_counter())
     await manager.shutdown()
 
 
 def test_live_instructions_include_origin_brief_within_limit() -> None:
     """The live brief fits between prompt and voice rules without exceeding the instruction limit."""
-    text = _build_live_instructions("You are Helper.", agent_display_name="Helper", origin_context=_ORIGIN_CONTEXT)
+    text = _build_live_instructions(
+        "You are Helper.",
+        agent_display_name="Helper",
+        counter=_VOICE,
+        origin_context=_ORIGIN_CONTEXT,
+    )
 
     assert text.startswith("You are Helper.\n\n")
     assert "Book the 9am train" in text
     assert text.endswith(_LIVE_VOICE_INSTRUCTIONS)
-    assert approximate_o200k_tokens(text) <= 16_000
+    assert _voice_tokens(text) <= 16_000
 
     # A large prompt makes the remaining instruction budget, not the brief cap, the binding limit.
     large_prompt = "You are Helper. Caller-scoped background context for this agent.\n" * 900
-    assert 9_000 < approximate_o200k_tokens(large_prompt) < 14_000
+    assert 9_000 < _voice_tokens(large_prompt) < 14_000
     long_context = CallOriginContext(
         origin=_ORIGIN_CONTEXT.origin,
         caller_id=_ORIGIN_CONTEXT.caller_id,
@@ -3244,18 +3258,26 @@ def test_live_instructions_include_origin_brief_within_limit() -> None:
             for index in range(2_000)
         ),
     )
-    text = _build_live_instructions(large_prompt, agent_display_name="Helper", origin_context=long_context)
+    text = _build_live_instructions(
+        large_prompt,
+        agent_display_name="Helper",
+        counter=_VOICE,
+        origin_context=long_context,
+    )
 
-    assert approximate_o200k_tokens(text) <= 16_000
+    assert _voice_tokens(text) <= 16_000
     assert "Note 1999:" in text
     assert "earlier messages omitted" in text
     assert text.endswith(_LIVE_VOICE_INSTRUCTIONS)
 
     # A prompt that leaves no room for a useful brief keeps today's output exactly.
     full_prompt = "Caller-scoped background context. " * 2_640
-    no_brief = _build_live_instructions(full_prompt, agent_display_name="Helper")
-    assert 15_700 < approximate_o200k_tokens(no_brief) <= 16_000
-    assert _build_live_instructions(full_prompt, agent_display_name="Helper", origin_context=long_context) == no_brief
+    no_brief = _build_live_instructions(full_prompt, agent_display_name="Helper", counter=_VOICE)
+    assert 15_700 < _voice_tokens(no_brief) <= 16_000
+    assert (
+        _build_live_instructions(full_prompt, agent_display_name="Helper", counter=_VOICE, origin_context=long_context)
+        == no_brief
+    )
 
 
 def test_build_call_instructions_places_origin_brief_before_voice_guidance() -> None:

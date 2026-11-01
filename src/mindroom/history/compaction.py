@@ -48,11 +48,7 @@ from mindroom.providers.names import provider_route
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import runs_without
 from mindroom.timing import timed
-from mindroom.token_budget import (
-    CompactionEstimateKind,
-    compaction_estimate_kind,
-    estimate_compaction_input_tokens,
-)
+from mindroom.token_counting.counts import count
 from mindroom.tool_system.runtime_context import (
     current_requester_id,
     get_tool_runtime_context,
@@ -65,7 +61,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.summary_call import SummaryRetryDecision
-    from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, TokenCounter
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
@@ -326,7 +322,7 @@ async def compact_scope_history(
     threshold_tokens: int | None,
     progress: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
-    replay_estimator: PortableReplayEstimator | None,
+    counter: TokenCounter,
 ) -> CompactionOutcome | None:
     """Compact the scope owning ``session`` by appending summary rows that fold its oldest runs, chunk by chunk.
 
@@ -365,7 +361,7 @@ async def compact_scope_history(
             estimate_prompt_visible_history_tokens,
             session=working_session,
             history_settings=history_settings,
-            replay_estimator=replay_estimator,
+            counter=counter,
         )
         await progress(
             CompactionLifecycleProgress(
@@ -415,7 +411,7 @@ async def compact_scope_history(
             estimate_prompt_visible_history_tokens,
             session=session,
             history_settings=history_settings,
-            replay_estimator=replay_estimator,
+            counter=counter,
         )
         outcome = CompactionOutcome(
             mode=mode,
@@ -671,17 +667,9 @@ async def _report_committed(
     return await complete(outcome)
 
 
-def _compaction_sizing(summary_model: ModelProvider) -> tuple[Callable[[str], int], CompactionEstimateKind]:
-    """Resolve one estimator together with the kind describing its arithmetic."""
-    model_id = summary_model.identity.id
-    conservative_fallback = summary_model.capabilities.conservative_token_estimates
-    estimator = partial(
-        estimate_compaction_input_tokens,
-        model_id=model_id,
-        conservative_fallback=conservative_fallback,
-    )
-    kind = compaction_estimate_kind(model_id, conservative_fallback=conservative_fallback)
-    return estimator, kind
+def _summary_input_tokens(summary_model: ModelProvider) -> Callable[[str], int]:
+    """Return the summary model's count of summary input text, an upper bound: an input that undercounts fails."""
+    return partial(count, summary_model.token_counter, upper_bound=True)
 
 
 def _after_native_checkpoint(previous_summary: str | None, runs: Sequence[AnyRunRecord]) -> _SummarySource | None:
@@ -719,7 +707,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
     summary_model = summarizer.model
     fallback_model = summarizer.fallback
     shrunk_budget = summarizer.shrunk_budget_tokens
-    token_estimator, estimate_kind = _compaction_sizing(summary_model.model)
+    token_estimator = _summary_input_tokens(summary_model.model)
     original = _SummarySource([], previous_summary, list(runs))
     sources = [source for source in (_after_native_checkpoint(previous_summary, runs), original) if source is not None]
 
@@ -774,7 +762,6 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
             "candidate_runs": len(source.runs),
             "included_runs": len(included_runs),
             "summary_input_estimate": summary_input_estimate,
-            "summary_input_estimate_kind": estimate_kind,
             "summary_input_budget_tokens": budget,
             "timeout_seconds": summarizer.timeout_seconds,
         }
@@ -804,7 +791,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 and attempt < retry_policy.max_attempts
                 and isinstance(exc, ModelSafeguardRefusal)
             ):
-                fallback_token_estimator, fallback_estimate_kind = _compaction_sizing(fallback_model.model)
+                fallback_token_estimator = _summary_input_tokens(fallback_model.model)
                 fits_fallback = (
                     await asyncio.to_thread(fallback_token_estimator, summary_input)
                     <= fallback_model.input_budget_tokens
@@ -832,7 +819,6 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 budget = fallback_model.input_budget_tokens
                 shrunk_budget = None
                 token_estimator = fallback_token_estimator
-                estimate_kind = fallback_estimate_kind
                 fallback_model = None
                 attempt += 1
                 continue

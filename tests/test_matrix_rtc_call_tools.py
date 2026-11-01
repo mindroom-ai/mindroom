@@ -77,6 +77,7 @@ from tests.authorization_helpers import (
 from tests.budget_helpers import budget_monitor_with_spend, set_month_spend
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import replay_settings
 from tests.turn_model_helpers import turn_model
 
@@ -85,6 +86,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import TokenCounter
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.invocation import ToolMiddleware, ToolNext
@@ -1887,6 +1889,7 @@ async def test_call_responder_adds_origin_brief_enrichment(
     )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.model_token_counter", lambda *_a, **_k: fake_token_counter())
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
@@ -1897,7 +1900,7 @@ async def test_call_responder_adds_origin_brief_enrichment(
         authorize_operation=_authorized_call_operation,
         enable_responder=True,
         voice_instructions="Speak briefly.",
-        origin_brief=origin_brief,
+        origin_brief=None if origin_brief is None else lambda _counter: origin_brief,
     )
     assert tooling.responder is not None
 
@@ -1907,6 +1910,58 @@ async def test_call_responder_adds_origin_brief_enrichment(
         EnrichmentItem(key="voice_call", text="Speak briefly.", cache_policy="stable"),
         *expected_origin_items,
     )
+
+
+@pytest.mark.asyncio
+async def test_call_responder_sizes_the_origin_brief_with_its_own_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The brief goes to the responder's model, so that model's counter fits it, not the default model's."""
+    config = Config(
+        agents={AGENT: AgentConfig(display_name="Helper", model="thinker")},
+        models={"thinker": ModelConfig(provider="openai", id="gpt-4o")},
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    counters: dict[str, TokenCounter] = {}
+    brief_counters: list[TokenCounter] = []
+
+    def brief(counter: TokenCounter) -> str:
+        brief_counters.append(counter)
+        return "brief text"
+
+    async def fake_ai_response(_turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        return TurnResult("answer")
+
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable={})),
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.model_token_counter",
+        lambda _config, _paths, model_name, **_kwargs: counters.setdefault(model_name, fake_token_counter()),
+    )
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+        voice_instructions="Speak briefly.",
+        origin_brief=brief,
+    )
+    assert tooling.responder is not None
+
+    await tooling.responder("What did we decide?", None)
+
+    assert list(counters) == ["thinker"]
+    assert len(brief_counters) == 1
+    assert brief_counters[0] is counters["thinker"]
 
 
 @pytest.mark.asyncio

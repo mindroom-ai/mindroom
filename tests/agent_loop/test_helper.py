@@ -27,9 +27,12 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from tests.agno_parity.golden_files import turn_message
+from tests.fakes.token_counter import fake_token_counter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from mindroom.llm.provider import TokenCounter
 
 IDENTITY = ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic")
 LUNA = ModelIdentity(id="gpt-6-luna", provider="OpenAI")
@@ -44,7 +47,7 @@ class _RecordingProvider:
     capabilities: Capabilities = field(default_factory=Capabilities)
     identity: ModelIdentity = IDENTITY
     native_history_route: None = None
-    replay_estimator: None = None
+    token_counter: TokenCounter = field(default_factory=fake_token_counter)
     model_params: dict[str, object] = field(default_factory=dict)
     finish: bool = True
     sums_attempts: bool = False

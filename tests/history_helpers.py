@@ -71,7 +71,6 @@ from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, quote_identifier
 from mindroom.session_storage.types import ConversationSession
-from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -84,6 +83,7 @@ from tests.conftest import (
     seed_session_row,
 )
 from tests.fakes.summary_model import summary_model
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -143,7 +143,7 @@ def summary_tool_work(
         compacted_runs=runs,
         max_input_tokens=100_000,
         history_settings=history_settings,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
     calls = [call for block in re.findall(r"<tool_calls>\n(.*?)\n</tool_calls>", text) for call in json.loads(block)]
     results = re.findall(r'<message role="tool"[^>]*? tool_call_id="([^"]*)"[^>]*>\n(.*?)\n</message>', text, re.DOTALL)
@@ -676,7 +676,7 @@ class ToolLoopModel:
         self.identity = _TEST_MODEL
         self.capabilities = Capabilities()
         self.native_history_route = None
-        self.replay_estimator = None
+        self.token_counter = fake_token_counter()
         self.model_params: dict[str, Any] = {}
         self.tool_rounds = tool_rounds
         self.calls_per_round = calls_per_round

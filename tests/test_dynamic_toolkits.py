@@ -42,6 +42,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit, toolkit_offers
 from tests.conftest import test_runtime_paths
+from tests.fakes.token_counter import fake_token_counter
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_generated_agents import _created, _load, _personal, _with_template
 from tests.turn_model_helpers import turn_model
@@ -1859,10 +1860,11 @@ def test_static_prompt_estimate_leaves_out_hidden_deferred_definitions(
         config = _validated_config(tmp_path, raw)
         agent = _code_agent(config, tmp_path)
         return build_static_token_estimator(
+            fake_token_counter(),
             prompt_for_turn(agent),
             PreparedTools(functions=agent.spec.functions).specs(),
             agent.request_template.deferred_tools.names,
-        ).non_prompt_tokens()
+        ).non_prompt_tokens
 
     base = estimate(["sleep"])
     eager = estimate(["sleep", "github"])

@@ -56,15 +56,18 @@ from mindroom.history.types import (
 )
 from mindroom.llm.errors import ContextWindowExceeded, ModelSafeguardRefusal, ProviderError
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
-from mindroom.token_budget import estimate_compaction_input_tokens
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import counter_for_model, load_o200k
 from tests.conftest import bind_runtime_paths, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model, summary_turn
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import (
     _reported,
     _runtime_paths,
@@ -183,7 +186,7 @@ async def _compact(
         before_tokens=0,
         progress=None,
         complete=_reported,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
 
@@ -794,10 +797,7 @@ async def test_summary_chunk_shrinks_around_a_large_durable_summary() -> None:
         side_effect=[CompactionSummaryOutputLimitError("renamed owned output-limit signal"), recovered_summary],
     )
 
-    with (
-        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
-        patch("mindroom.history.compaction._compaction_sizing", return_value=(_chars_per_token_estimator, "chars")),
-    ):
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary):
         generated = await _summarize_chunk(
             _summarizer(summary_model(), summary_input_budget),
             previous_summary,
@@ -832,7 +832,6 @@ async def test_summary_chunk_propagates_error_when_no_smaller_progress_input_exi
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
-        patch("mindroom.history.compaction._compaction_sizing", return_value=(_chars_per_token_estimator, "chars")),
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _summarize_chunk(
@@ -887,24 +886,6 @@ def test_retry_policy_shrinks_budget_for_empty_result() -> None:
     )
 
 
-def test_compaction_input_estimate_uses_tiktoken() -> None:
-    assert estimate_compaction_input_tokens("structured: true") == 3
-    assert estimate_compaction_input_tokens("☃☃") == 4
-
-
-def test_compaction_input_estimate_uses_conservative_claude_fallback() -> None:
-    assert estimate_compaction_input_tokens(
-        "structured: true",
-        model_id="claude-sonnet-5",
-        conservative_fallback=True,
-    ) == len(b"structured: true")
-    assert estimate_compaction_input_tokens("☃☃", model_id="claude-sonnet-5", conservative_fallback=True) == 6
-
-
-def test_compaction_input_estimate_keeps_known_model_encoding() -> None:
-    assert estimate_compaction_input_tokens("structured: true", model_id="gpt-4o", conservative_fallback=True) == 3
-
-
 @pytest.mark.asyncio
 async def test_claude_compaction_splits_dense_preserved_metadata_before_the_input_limit(tmp_path: Path) -> None:
     """Regression for the production request that tiktoken underestimated by 1.63x."""
@@ -935,6 +916,8 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
         return f"summary chunk {len(summary_inputs)}"
 
     summary_input_limit = 167_232
+    claude = counter_for_model(ModelIdentity(id="claude-sonnet-5", provider="anthropic"))
+    load_o200k()
     with patch(
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(side_effect=record_summary),
@@ -942,20 +925,17 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
         outcome = await _compact(
             storage,
             session,
-            _summarizer(summary_model(model_id="claude-sonnet-5", claude=True), summary_input_limit),
+            _summarizer(summary_model(model_id="claude-sonnet-5", token_counter=claude), summary_input_limit),
             replay_window_tokens=200_000,
         )
 
     assert outcome is not None
     assert outcome.compacted_run_count == 20
-    assert len(summary_inputs) == 2
-    assert all(len(summary_input.encode("utf-8")) <= summary_input_limit for summary_input in summary_inputs)
-    assert (
-        estimate_compaction_input_tokens(
-            summary_inputs[0],
-            model_id="claude-sonnet-5",
-        )
-        < summary_input_limit
+    # Claude counted that request at 1.63 times its o200k count, which every chunk must leave room for.
+    o200k = load_o200k()
+    assert all(
+        len(o200k.encode(summary_input)) * 1.63 <= count(claude, summary_input) <= summary_input_limit
+        for summary_input in summary_inputs
     )
 
 
@@ -995,7 +975,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
     assert outcome is not None
     # Chunk 1 fails empty, is rebuilt smaller, then chunk 2 compacts run-2.
     assert len(attempts) == 3
-    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
+    assert quarter_tokens(attempts[1]) < quarter_tokens(attempts[0])
     assert attempts[2] != attempts[1]
     persisted = storage.load_session("session-1")
     assert persisted is not None
@@ -1205,7 +1185,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
         )
 
     refuse_summary.assert_awaited_once()
-    assert estimate_compaction_input_tokens(refuse_summary.await_args.kwargs["summary_input"]) < 1_000
+    assert quarter_tokens(refuse_summary.await_args.kwargs["summary_input"]) < 1_000
     persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
@@ -1252,7 +1232,7 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
     build_budgets = [call.kwargs["max_input_tokens"] for call in build_summary_input_spy.call_args_list]
     assert build_budgets[0] == summary_input_budget
     assert build_budgets[1] < build_budgets[0]
-    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
+    assert quarter_tokens(attempts[1]) < quarter_tokens(attempts[0])
     persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is not None
@@ -1356,7 +1336,7 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
 
     attempts = [call.kwargs["summary_input"] for call in time_out_summary.await_args_list]
     assert len(attempts) == 2
-    assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
+    assert quarter_tokens(attempts[1]) < quarter_tokens(attempts[0])
     assert prepared.compaction_reply_outcome == "timeout"
     persisted = storage.load_session("session-1")
     assert persisted is not None

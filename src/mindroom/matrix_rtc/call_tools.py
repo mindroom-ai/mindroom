@@ -47,6 +47,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
 from mindroom.providers.names import ROUTE_PROVIDERS
+from mindroom.providers.registry import model_token_counter
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
+    from mindroom.llm.provider import TokenCounter
     from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.events import ToolTraceEntry
@@ -465,9 +467,12 @@ async def build_call_tools(
     reconcile_spoken_response: bool = True,
     voice_instructions: str | None = None,
     active_model_name: str | None = None,
-    origin_brief: str | None = None,
+    origin_brief: Callable[[TokenCounter], str] | None = None,
 ) -> CallAgentTooling:
-    """Materialize the agent for the selected voice backend."""
+    """Materialize the agent for the selected voice backend.
+
+    ``origin_brief`` renders the call's origin for the responder, sized as the responder's model counts tokens.
+    """
     session_id = session_id or create_session_id(room_id, None)
     scope = ModelScope(entity=agent_name, room_id=room_id, explicit=active_model_name)
     requested_model_name = (await asyncio.to_thread(resolve_turn_model, config, runtime_paths, scope, None)).model_name
@@ -509,10 +514,21 @@ async def build_call_tools(
         voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
             voice_enrichment_items = (EnrichmentItem(key="voice_call", text=voice_instructions, cache_policy="stable"),)
-        if origin_brief:
+        brief = ""
+        if origin_brief is not None:
+            counter = await asyncio.to_thread(
+                model_token_counter,
+                config,
+                runtime_paths,
+                active_model_name,
+                execution_identity=execution_identity,
+            )
+            # Fitting the brief counts it several times, which stays off the event loop.
+            brief = await asyncio.to_thread(origin_brief, counter)
+        if brief:
             voice_enrichment_items = (
                 *voice_enrichment_items,
-                EnrichmentItem(key="call_origin", text=origin_brief, cache_policy="stable"),
+                EnrichmentItem(key="call_origin", text=brief, cache_policy="stable"),
             )
         response_tracker = _CallResponseTracker(
             agent_name=agent_name,

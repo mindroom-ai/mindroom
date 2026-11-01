@@ -19,6 +19,7 @@ import pytest
 import structlog
 from agno.tools import Toolkit
 
+import mindroom.skill_learning.reviewer as reviewer_module
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, LoopState, SendRequest
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.agent_loop.run import run_agent
@@ -36,6 +37,7 @@ from mindroom.llm.provider import (
     DeferredTools,
     ModelIdentity,
     ModelRequest,
+    TokenCounter,
     TurnCompleted,
     UsageReported,
 )
@@ -60,6 +62,8 @@ from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, count_model_replies, render_transcript
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import openai_model_counter
 from mindroom.tool_jobs.execution import project_definitions
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -72,6 +76,7 @@ from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec
 from tests.conftest import delete_runs, install_model_providers, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.token_counter import fake_token_counter
 from tests.providers.golden_support import SentRequest, httpx2_transport, streamed_reply
 
 if TYPE_CHECKING:
@@ -114,7 +119,7 @@ class _ScriptedModel:
     identity: ModelIdentity = _SCRIPTED
     capabilities: Capabilities = field(default_factory=Capabilities)
     native_history_route: None = None
-    replay_estimator: None = None
+    token_counter: TokenCounter = field(default_factory=fake_token_counter)
     model_params: dict[str, Any] = field(default_factory=dict)
     received: list[ModelRequest] = field(default_factory=list)
     requests: list[list[str]] = field(default_factory=list)
@@ -593,6 +598,54 @@ def _transcript(*runs: RunRecord, summary: str | None = None, budget_chars: int)
         summary=summary,
         budget_chars=budget_chars,
     )
+
+
+def test_the_transcript_budget_is_the_review_model_s_tokens_of_this_conversation() -> None:
+    """The review's token budget becomes characters at the rate the review model counts this very conversation."""
+    run = _run("r1", Message(role="user", content="Deploy the web service " * 40))
+    run.user_id = "@alice:x"
+    messages = conversation_messages(_stored("session", run))
+
+    one_per_character = TokenCounter(estimate=len)
+    assert reviewer_module._transcript_budget_chars(one_per_character, messages, 1_000) == 1_000
+    assert 3_900 < reviewer_module._transcript_budget_chars(fake_token_counter(), messages, 1_000) <= 4_100
+
+
+def test_the_review_transcript_fits_its_token_budget_as_rendered() -> None:
+    """Older turns are digested and the newest kept whole, so the conversation's average rate cannot size the result."""
+    older = [
+        Message(role="user", content=f"An older request in plain English, number {index}. " * 6) for index in range(60)
+    ]
+    recent = [
+        Message(role="user", content=f"最近のメッセージ {index} " + "東京で会議の議事録をまとめました。" * 40)
+        for index in range(30)
+    ]
+    run = _run("r1", *older, *recent)
+    run.user_id = "@alice:x"
+    messages = conversation_messages(_stored("session", run))
+    counter = openai_model_counter("gpt-4o")
+
+    transcript = reviewer_module._review_transcript(messages, None, counter, 3_000)
+
+    assert count(counter, transcript) <= 3_000
+    assert "最近のメッセージ 29 " in transcript
+
+
+def test_a_small_review_budget_still_fits_keeping_the_newest_messages() -> None:
+    """The renderer keeps whole recent messages up to a floor, so a small budget is met by cutting from the start."""
+    recent = [
+        Message(role="user", content=f"最近のメッセージ {index} " + "東京で会議の議事録をまとめました。" * 80)
+        for index in range(5)
+    ]
+    run = _run("r1", *recent)
+    run.user_id = "@alice:x"
+    messages = conversation_messages(_stored("session", run))
+    counter = openai_model_counter("gpt-4o")
+
+    transcript = reviewer_module._review_transcript(messages, "An earlier summary. " * 200, counter, 768)
+
+    assert count(counter, transcript) <= 768
+    assert transcript.rstrip().endswith("東京で会議の議事録をまとめました。")
 
 
 def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> None:

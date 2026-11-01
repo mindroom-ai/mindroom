@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
@@ -12,10 +14,12 @@ from mindroom import execution_preparation
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
+from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
@@ -44,6 +48,7 @@ from mindroom.execution_preparation import (
     render_prepared_messages_text,
 )
 from mindroom.history import runtime as history_runtime
+from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
@@ -54,11 +59,12 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import TokenCounter
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.types import ConversationSession
 from mindroom.timestamp_formatting import format_timestamp_ms
-from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
@@ -70,6 +76,7 @@ from tests.conftest import (
     unstored_team_scope_context,
 )
 from tests.fakes.scripted_model import ScriptedModel
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import replay_settings
 from tests.turn_model_helpers import turn_model
 
@@ -226,8 +233,35 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         ),
         compaction_decision=CompactionDecision(mode="none", reason="auto_disabled"),
         native_history=None,
-        replay_estimator=None,
+        counter=fake_token_counter(),
+        non_prompt_tokens=0,
     )
+
+
+def test_thread_fallback_finds_the_newest_messages_that_fit_in_few_counts() -> None:
+    """Each count encodes the whole turn, so fitting a long thread searches instead of adding one message at a time."""
+    counted: list[str] = []
+
+    def estimate(text: str) -> int:
+        counted.append(text)
+        return len(text) // 4
+
+    history = [
+        make_visible_message(sender="@alice:localhost", body=f"message {index} " + "x" * 200, event_id=f"$e{index}")
+        for index in range(400)
+    ]
+    turn = _build_thread_history_messages_for_test(
+        "Current prompt",
+        history,
+        response_sender_id="@mindroom_test_agent:localhost",
+        config=_config(),
+        static_token_budget=5_000,
+        estimate_static_tokens_fn=estimate,
+    )
+
+    assert len(counted) < 20
+    assert estimate(render_prepared_messages_text(turn.in_request_order())) <= 5_000
+    assert "message 399" in render_prepared_messages_text(turn.in_request_order())
 
 
 def test_fallback_static_token_budget_preserves_context_window_bounds() -> None:
@@ -522,6 +556,29 @@ def test_scheduled_limit_caps_larger_plans_only() -> None:
 
     no_plan = PreparedHistoryState(native_history=None)
     assert _prepared_history_with_scheduled_limit(no_plan, 2) is no_plan
+
+
+@pytest.mark.parametrize("limit", [0, 2])
+def test_a_scheduled_limit_leaves_nothing_to_size_the_next_reply_by(limit: int) -> None:
+    """A scheduled run replays at most its limit, so the size its provider reports cannot size the whole history."""
+    prepared = PreparedHistoryState(
+        replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=500, add_history_to_context=True),
+        replays_persisted_history=True,
+        prepared_context_tokens=1_500,
+        non_prompt_tokens=1_000,
+        native_history=None,
+    )
+    published = build_prepared_history_metadata_content(prepared)[AI_RUN_METADATA_KEY]["prepared_context"]
+    assert published["non_prompt_tokens"] == 1_000
+
+    capped = _prepared_history_with_scheduled_limit(prepared, limit)
+
+    # The run records no system prompt and tools, even over metadata seeded from a paused run that recorded some, so
+    # the next reply sizes its history by estimate.
+    seed = build_prepared_history_metadata_content(prepared)
+    merged = deep_merge_metadata(without_run_usage(seed), build_prepared_history_metadata_content(capped))
+    assert merged is not None
+    assert "non_prompt_tokens" not in merged[AI_RUN_METADATA_KEY]["prepared_context"]
 
 
 def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:
@@ -836,16 +893,65 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
 
     tools = PreparedTools(functions=build.spec.functions).specs()
     assert tools
-    estimator = build_static_token_estimator(system_messages, tools, build.request_template.deferred_tools.names)
+    counter = build.spec.model.token_counter
+    estimator = build_static_token_estimator(
+        counter,
+        system_messages,
+        tools,
+        build.request_template.deferred_tools.names,
+    )
     assert prepared.prepared_history.prepared_context_tokens == estimator.estimate(
         render_prepared_messages_text(prepared.turn.in_request_order()),
     )
     assert prepare_scope_history.await_count == 1
-    assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens()
+    assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens
     assert (
-        estimator.non_prompt_tokens()
-        > build_static_token_estimator(system_messages, (), frozenset()).non_prompt_tokens()
+        estimator.non_prompt_tokens
+        > build_static_token_estimator(counter, system_messages, (), frozenset()).non_prompt_tokens
     )
+
+
+@pytest.mark.asyncio
+async def test_reply_preparation_counts_tokens_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counting a long system prompt or thread can take a while, which must never stall the replies sharing the loop."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_estimate(text: str) -> int:
+        entered.set()
+        assert release.wait(5), "the count ran on the event loop, which the test needed to release it"
+        return len(text) // 4
+
+    config, runtime_paths = _bound_agent_config(tmp_path, tools=("calculator",))
+    build = _build(config, runtime_paths)
+    counter = TokenCounter(estimate=slow_estimate)
+    build = replace(build, spec=replace(build.spec, model=ScriptedModel([], token_counter=counter)))
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
+    )
+    preparation = asyncio.create_task(
+        _prepare_agent_execution_context_for_test(
+            make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
+            scope_context=None,
+            build=build,
+            system_messages=prompt_for_turn(build),
+            prompt="Current request",
+            thread_history=[make_visible_message(sender="@alice:localhost", body="Earlier", event_id="$older")],
+            runtime_paths=runtime_paths,
+            config=config,
+            resolved_runtime_model=resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent"), None),
+        ),
+    )
+
+    assert await asyncio.to_thread(entered.wait, 5)
+    release.set()
+    await preparation
 
 
 @pytest.mark.asyncio
@@ -897,7 +1003,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     )
 
     assert [message.role for message in prepared.turn.context] == ["user", "assistant"]
-    estimator = build_static_token_estimator(leader_system_messages, (), frozenset())
+    estimator = build_static_token_estimator(fake_token_counter(), leader_system_messages, (), frozenset())
     # Persisted replay is budgeted around the turn's estimate; fallback replay records the estimate of its own turn.
     sized = static_prompt_tokens[0] if replays_persisted_history else prepared.prepared_history.prepared_context_tokens
     assert sized == estimator.estimate(render_prepared_messages_text(prepared.turn.in_request_order()))
@@ -1112,7 +1218,7 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         max_message_length=200,
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -1189,7 +1295,7 @@ def test_fallback_thread_history_keeps_full_history_that_fits_without_a_marker()
             history,
             response_sender_id="@mindroom_code:localhost",
             config=_config(),
-            estimate_static_tokens_fn=estimate_text_tokens,
+            estimate_static_tokens_fn=quarter_tokens,
         ).in_request_order(),
     )
     messages = _build_thread_history_messages_for_test(
@@ -1240,7 +1346,7 @@ def test_thread_history_and_current_message_carry_member_display_names() -> None
         current_event_id="$current",
         member_display_names={"@alice:localhost": "Banana Man"},
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -1384,7 +1490,7 @@ def test_fallback_thread_history_keeps_attachment_ids_without_inline_media(tmp_p
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 3
@@ -1434,7 +1540,7 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_pat
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1482,7 +1588,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1511,7 +1617,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment
         ],
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1548,7 +1654,7 @@ def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_pa
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1583,7 +1689,7 @@ def test_fallback_thread_history_drops_cross_room_attachments(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1633,7 +1739,7 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1672,7 +1778,7 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1703,7 +1809,7 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1724,7 +1830,7 @@ def test_fallback_thread_history_drops_marker_only_messages_from_context() -> No
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 1
@@ -1744,7 +1850,7 @@ def test_fallback_thread_history_preserves_user_authored_tool_marker_text() -> N
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -1772,7 +1878,7 @@ def test_fallback_thread_history_strips_structured_tool_markers_from_labeled_con
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -2073,7 +2179,7 @@ def test_fallback_thread_history_keeps_hook_output_out_of_assistant_turns() -> N
         [reply, _hook_message("deep_research done · confident · 2 rounds", "$done")],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert [(message.role, message.content) for message in messages[:2]] == [

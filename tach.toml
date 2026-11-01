@@ -751,6 +751,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.metadata_merge",
     "mindroom.pre_model_preparation",
+    "mindroom.providers.registry",
     "mindroom.response_turn",
     "mindroom.run_storage",
     "mindroom.tool_jobs.notices",
@@ -2714,6 +2715,7 @@ visibility = [
     "mindroom.providers.anthropic.legacy_stored_turns",
     "mindroom.history.replay",
     "mindroom.history.native",
+    "mindroom.history.runtime",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.compaction",
     "mindroom.providers.openai",
@@ -2884,6 +2886,8 @@ visibility = [
 [[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
+    "mindroom.native_compaction",
+    "mindroom.constants",
     "mindroom.session_storage.lanes",
     "mindroom.history.compaction",
     "mindroom.history.native",
@@ -4527,6 +4531,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.call_tools"
 depends_on = [
+    "mindroom.providers.registry",
     "mindroom.session_storage.agent_storage",
     "mindroom.agent_loop.build",
     "mindroom.agent_run_context",
@@ -6503,6 +6508,7 @@ expose = [
     "build_memory_prompt_parts",
     "conversation_entrypoint_preamble",
     "delete_agent_memory",
+    "entrypoint_tokens",
     "entrypoint_withholds_lines",
     "get_agent_memory",
     "list_all_agent_memories",
@@ -7708,6 +7714,7 @@ visibility = [
 path = "mindroom.history.replay"
 depends_on = [
     "mindroom.history.message_content",
+    "mindroom.llm",
     "mindroom.history.summary_message",
     "mindroom.history.types",
     "mindroom.history.run_visibility",
@@ -7770,6 +7777,7 @@ path = "mindroom.history.summary_input"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.message_content",
+    "mindroom.llm",
     "mindroom.usage.storage",
     "mindroom.history.request_messages",
 ]
@@ -9081,8 +9089,10 @@ depends_on = [
     "mindroom.automations.registry",
     "mindroom.automations.steps",
     "mindroom.config.automations",
+    "mindroom.config.resolution",
     "mindroom.memory",
     "mindroom.path_confinement",
+    "mindroom.providers.registry",
 ]
 visibility = ["mindroom.automations.registry"]
 

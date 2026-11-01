@@ -385,4 +385,18 @@ class PreparedHistoryState:
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     prepared_context_tokens: int | None = None
+    # The system prompt and tools tokens the run's requests were sized with, when its settings replay the scope's whole
+    # history; a run whose final plan replays all of it publishes them, so a later reply can take them off the request
+    # size the provider reports.
+    non_prompt_tokens: int | None = None
+    # Whether the replayed history was sized from the provider's reported request size, which already holds the tool
+    # definitions tool search loaded.
+    reported_history: bool = False
     native_history: NativeHistory | None
+
+    @property
+    def replayed_history_tokens(self) -> int | None:
+        """Return the size of the stored history the run's requests replay, as preparation found it, if they replay any."""
+        if not self.replays_persisted_history or self.replay_plan is None:
+            return None
+        return self.replay_plan.estimated_tokens

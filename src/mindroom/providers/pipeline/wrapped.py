@@ -44,8 +44,8 @@ if TYPE_CHECKING:
         ModelProvider,
         ModelRequest,
         NativeHistoryRoute,
-        PortableReplayEstimator,
         StreamEvent,
+        TokenCounter,
     )
     from mindroom.llm.usage import MessageMetrics
 
@@ -77,9 +77,9 @@ class WrappedProvider:
         return self.inner.native_history_route
 
     @property
-    def replay_estimator(self) -> PortableReplayEstimator | None:
-        """The wrapped provider's replay estimator."""
-        return self.inner.replay_estimator
+    def token_counter(self) -> TokenCounter:
+        """The wrapped provider's token counter."""
+        return self.inner.token_counter
 
     @property
     def model_params(self) -> dict[str, Any]:

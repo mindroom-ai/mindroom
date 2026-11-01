@@ -305,18 +305,25 @@ def _messages_with_capped_context(
     def fits(turn: TurnMessages) -> bool:
         return estimate_static_tokens_fn(render_prepared_messages_text(turn.in_request_order())) <= static_token_budget
 
+    def newest_from(start: int) -> TurnMessages:
+        # Tell the agent older messages were dropped; the marker counts against the same budget.
+        marker = config.render_prompt("THREAD_HISTORY_OMITTED_MARKER_TEMPLATE", omitted_count=start)
+        return with_context([thread_context_note(marker), *context_messages[start:]])
+
     full_messages = with_context(context_messages)
     if fits(full_messages):
         return full_messages
-    selected_messages = with_context(())
-    for start in range(len(context_messages), 0, -1):
-        # Tell the agent older messages were dropped; the marker counts against the same budget.
-        marker = config.render_prompt("THREAD_HISTORY_OMITTED_MARKER_TEMPLATE", omitted_count=start)
-        messages = with_context([thread_context_note(marker), *context_messages[start:]])
-        if not fits(messages):
-            break
-        selected_messages = messages
-    return selected_messages
+    if not fits(newest_from(len(context_messages))):
+        return with_context(())
+    # Binary search the oldest start that fits; every start ``high`` takes was measured to fit.
+    low, high = 1, len(context_messages)
+    while low < high:
+        middle = (low + high) // 2
+        if fits(newest_from(middle)):
+            high = middle
+        else:
+            low = middle + 1
+    return newest_from(high)
 
 
 def _messages_with_current_prompt(
@@ -759,7 +766,10 @@ async def _prepare_execution_context_common(
         else set(),
     )
 
-    final_static_tokens = estimate_static_tokens_fn(render_prepared_messages_text(final_messages.in_request_order()))
+    final_static_tokens = await asyncio.to_thread(
+        estimate_static_tokens_fn,
+        render_prepared_messages_text(final_messages.in_request_order()),
+    )
     prepared_history = await _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
         config=config,
@@ -782,7 +792,9 @@ async def _prepare_execution_context_common(
                 active_event_ids=active_event_ids,
             )
         render_limits = thread_history_render_limits or ThreadHistoryRenderLimits()
-        final_messages = _build_thread_history_messages(
+        # Fitting the thread to the budget counts it repeatedly, so it runs in a worker thread.
+        final_messages = await asyncio.to_thread(
+            _build_thread_history_messages,
             prompt,
             fallback_thread_history,
             transient_context_messages=transient_context_messages,
@@ -801,7 +813,8 @@ async def _prepare_execution_context_common(
             attachment_context=attachment_context,
             member_display_names=member_display_names,
         )
-        fallback_context_tokens = estimate_static_tokens_fn(
+        fallback_context_tokens = await asyncio.to_thread(
+            estimate_static_tokens_fn,
             render_prepared_messages_text(final_messages.in_request_order()),
         )
         if prepared_history.replay_plan is not None:
@@ -848,7 +861,10 @@ async def prepare_agent_execution_context(
     if not include_openai_compat_guidance:
         response_sender_id = entity_identity_registry(config, runtime_paths).current_ids.get(agent_name)
         response_sender = response_sender_id.full_id if response_sender_id is not None else None
-    static_token_estimator = build_static_token_estimator(
+    # Encoding a long prompt would stall the replies sharing the event loop.
+    static_token_estimator = await asyncio.to_thread(
+        build_static_token_estimator,
+        build.spec.model.token_counter,
         system_messages,
         PreparedTools(functions=build.spec.functions).specs(),
         build.request_template.deferred_tools.names,
@@ -864,12 +880,12 @@ async def prepare_agent_execution_context(
             history_settings=build.history_settings,
             active_model_name=resolved_runtime_model.model_name,
             active_context_window=resolved_runtime_model.context_window,
-            static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
+            static_prompt_tokens=await asyncio.to_thread(static_token_estimator.estimate, prepared_prompt),
         )
         return await prepare_scope_history(
             model=build.spec.model,
             resolved_inputs=resolved_inputs,
-            non_prompt_tokens=static_token_estimator.non_prompt_tokens(),
+            non_prompt_tokens=static_token_estimator.non_prompt_tokens,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,
@@ -939,7 +955,13 @@ async def prepare_bound_team_run_context(
     the run adds is among them. ``history_settings`` are the built team's, whose replay policy and compaction config
     the scope follows.
     """
-    static_token_estimator = build_static_token_estimator(leader_system_messages, leader_tools, frozenset())
+    static_token_estimator = await asyncio.to_thread(
+        build_static_token_estimator,
+        model.token_counter,
+        leader_system_messages,
+        leader_tools,
+        frozenset(),
+    )
     team_compaction_config = history_settings.compaction_config
 
     async def _prepare_team_scope_history(
@@ -951,12 +973,12 @@ async def prepare_bound_team_run_context(
             history_settings=history_settings,
             active_model_name=active_model_name,
             active_context_window=active_context_window,
-            static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
+            static_prompt_tokens=await asyncio.to_thread(static_token_estimator.estimate, prepared_prompt),
         )
         return await prepare_scope_history(
             model=model,
             resolved_inputs=resolved_inputs,
-            non_prompt_tokens=static_token_estimator.non_prompt_tokens(),
+            non_prompt_tokens=static_token_estimator.non_prompt_tokens,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextvars import ContextVar
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -29,8 +30,15 @@ from mindroom.llm.provider import ModelRequest
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.timing import DispatchPipelineTiming
-from tests.conftest import bind_runtime_paths, make_turn_context, prepare_agent_and_prompt_for_test, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    make_turn_context,
+    prepare_agent_and_prompt_for_test,
+    test_runtime_paths,
+)
 from tests.fakes.scripted_model import ScriptedModel
+from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import replay_settings
 
 if TYPE_CHECKING:
@@ -202,6 +210,12 @@ def _prompt_preparation_config(memory_backend: str = "mem0") -> Config:
     return Config.model_validate(
         {"agents": {"general": {"display_name": "General", "role": "test", "memory_backend": memory_backend}}},
     )
+
+
+@pytest.fixture(autouse=True)
+def _scripted_turn_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These turns build a fake agent for a config without models, so the turn's model is scripted too."""
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
 
 
 def _build(turn_context: str | None = None) -> AgentBuild:
@@ -652,3 +666,35 @@ async def test_file_memory_keyword_search_runs_off_event_loop(
 
     gate.set()
     assert (await search_task).results == []
+
+
+@pytest.mark.asyncio
+async def test_the_memory_preload_counts_tokens_as_the_turn_s_model_does(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn on another model than the agent's authored one sizes its MEMORY.md preload with that model's counter."""
+    turn_counter = fake_token_counter()
+    install_model_providers(monkeypatch, {"other": ScriptedModel([], token_counter=turn_counter)})
+    memory = AsyncMock(return_value=MemoryPromptParts())
+    monkeypatch.setattr(ai_module, "build_memory_prompt_parts", memory)
+    monkeypatch.setattr(ai_module, "create_agent", lambda *_args, **_kwargs: _build())
+    monkeypatch.setattr(ai_module, "prepare_agent_execution_context", AsyncMock(return_value=_prepared_execution("hi")))
+    config = Config.model_validate(
+        {
+            "agents": {"general": {"display_name": "General", "role": "test", "memory_backend": "file"}},
+            "models": {
+                "default": {"provider": "openai", "id": "authored"},
+                "other": {"provider": "openai", "id": "chosen"},
+            },
+        },
+    )
+
+    await prepare_agent_and_prompt_for_test(
+        replace(make_turn_context("general"), active_model_name="other"),
+        prompt="hi",
+        runtime_paths=test_runtime_paths(tmp_path),
+        config=config,
+    )
+
+    assert memory.await_args.kwargs["counter"] is turn_counter

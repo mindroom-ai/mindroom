@@ -18,7 +18,7 @@ from structlog.testing import capture_logs
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.history.policy import classify_compaction_decision
-from mindroom.history.replay import estimate_prompt_visible_history_tokens
+from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_tokens
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
@@ -27,14 +27,15 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Image
-from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message, stable_serialize
 from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_estimated_tokens
 from mindroom.providers.openai.responses_wire import responses_input, responses_replay
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
+from mindroom.token_counting.counts import count
 from tests.conftest import seed_session
+from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import _completed_run, _make_config, _session, record_native_checkpoint, replay_settings
 from tests.providers.golden_support import pipeline_provider
 from tests.providers.openai_family_support import responses_adapter
@@ -124,7 +125,7 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
         tokens = estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=resolved.history_settings,
-            replay_estimator=adapter,
+            counter=adapter.token_counter,
         )
         decision = classify_compaction_decision(
             plan=resolved.execution_plan,
@@ -134,7 +135,8 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
             summary_tokens=0,
         )
         assert decision.mode == "none", (tokens, decision.reason)
-        assert 77 < tokens < 2000
+        # The summary plus the image's visual cost, never its encoded bytes.
+        assert estimate_summary_tokens(session, adapter.token_counter) < tokens < 2000
     monkeypatch.undo()
     assert serialized_sizes
     # Estimation must not serialize image transport even for a discarded fallback.
@@ -158,7 +160,6 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
     if floor == "canonical":
         block = {"type": "input_image", "image_url": "data:image/png;base64," + b64encode(buffer.getvalue()).decode()}
         message = Message(role="user", content=[block])
-        expected_tokens = len(stable_serialize(block)) // 4
     else:
         message = Message(
             role="user",
@@ -166,10 +167,12 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
             images=[Image(id="mindroom_viewed_fixture", content=buffer.getvalue(), format="png")],
         )
     adapter = responses_adapter(tmp_path, "unrecognized-image-model")
+    counter = adapter.token_counter
     request_before = _replayed_input(adapter, [message])
-    provider_tokens = approximate_o200k_tokens(stable_serialize(request_before))
+    provider_tokens = count(counter, stable_serialize(request_before))
     if floor == "canonical":
-        assert expected_tokens > provider_tokens
+        # The content block's transport counts as text, by whichever of the two counts is larger.
+        expected_tokens = max(count(counter, stable_serialize(block)), provider_tokens)
     else:
         # Historical viewed images use a bounded visual fallback rather than encoded transport text.
         assert provider_tokens > 100_000
@@ -177,26 +180,22 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
     messages = [message]
     route = "unknown-image-route" if native else None
     if native:
+        items = [{"type": "compaction", "encrypted_content": "checkpoint"}]
         messages.insert(
             0,
             Message(
                 role="assistant",
-                provider_data={
-                    "mindroom_native_compaction": {
-                        "route": route,
-                        "items": [{"type": "compaction", "encrypted_content": "checkpoint"}],
-                    },
-                },
+                provider_data={"mindroom_native_compaction": {"route": route, "items": items}},
             ),
         )
-        expected_tokens += 15  # Serialized checkpoint is 59 characters, rounded up.
+        expected_tokens += checkpoint_estimated_tokens(items, counter)
     session = _session("session", runs=[_completed_run("recent", messages=messages)])
     before = deepcopy(session)
     tokens = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=_ALL_HISTORY,
         native_route=route,
-        replay_estimator=adapter,
+        counter=adapter.token_counter,
     )
     assert tokens == expected_tokens
     assert session == before
@@ -284,11 +283,8 @@ def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(
     native = adapter.native_compaction_settings(threshold=1024, history_generation="", allow_authored=False)
     assert native is not None
     checkpoint = Message(role="assistant", content="Ready")
-    record_native_checkpoint(
-        checkpoint,
-        [{"type": "compaction", "id": "cmp", "encrypted_content": "opaque-checkpoint" * 100}],
-        native,
-    )
+    items = [{"type": "compaction", "id": "cmp", "encrypted_content": "opaque-checkpoint" * 100}]
+    record_native_checkpoint(checkpoint, items, native)
     estimates = []
     for compression in (0, 9):
         tail = Message(
@@ -306,11 +302,11 @@ def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(
                 session=session,
                 history_settings=_ALL_HISTORY,
                 native_route=native.route,
-                replay_estimator=adapter,
+                counter=adapter.token_counter,
             ),
         )
     assert estimates[0] == estimates[1]
-    assert 500 < estimates[0] < 2000
+    assert checkpoint_estimated_tokens(items, adapter.token_counter) < estimates[0] < 2000
 
 
 @pytest.mark.parametrize(
@@ -505,7 +501,8 @@ def test_responses_budget_preserves_literal_data_urls_files_and_tool_arguments(t
         Message(role="tool", tool_call_id="call_example", content=literal),
     ]
     adapter = responses_adapter(tmp_path, store=False)
-    assert adapter.estimate_portable_replay_tokens(messages) == approximate_o200k_tokens(
+    assert adapter.estimate_portable_replay_tokens(messages) == count(
+        adapter.token_counter,
         stable_serialize(_replayed_input(adapter, messages)),
     )
 
@@ -517,7 +514,8 @@ def test_models_without_a_patch_budget_count_the_replayed_input_as_text(tmp_path
 
     assert adapter.portable_replay_uses_visual_tokens() is False
     assert responses_adapter(tmp_path).portable_replay_uses_visual_tokens() is True
-    assert adapter.estimate_portable_replay_tokens(messages) == approximate_o200k_tokens(
+    assert adapter.estimate_portable_replay_tokens(messages) == count(
+        adapter.token_counter,
         stable_serialize(_replayed_input(adapter, messages)),
     )
 
@@ -543,13 +541,13 @@ def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced() -> 
         session=_session("session", runs=runs),
         history_settings=_ALL_HISTORY,
         native_route=route,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     with_summary = estimate_prompt_visible_history_tokens(
         session=_session("session", runs=runs, summary=ScopeSummary(text="S" * 400, updated_at=datetime.now(UTC))),
         history_settings=_ALL_HISTORY,
         native_route=route,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     assert with_summary == without_summary
@@ -575,7 +573,7 @@ def test_provider_compaction_logs_once_per_checkpoint(items: list[dict[str, Any]
         "event": "Native compaction checkpoint",
         "log_level": "info",
         "threshold_tokens": 60_000,
-        "checkpoint_tokens": checkpoint_estimated_tokens(items[:1]),
+        "checkpoint_chars": len(json.dumps(items[:1], ensure_ascii=False)),
     }
     assert events == ([expected] if logged else [])
 
@@ -605,12 +603,12 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
     route_estimate = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=inputs.history_settings,
-        replay_estimator=adapter,
+        counter=adapter.token_counter,
     )
     canonical_estimate = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=inputs.history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     prepared = await prepare_scope_history(

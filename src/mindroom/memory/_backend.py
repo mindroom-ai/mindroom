@@ -121,7 +121,7 @@ class ResolvedMemoryBackend(Protocol):
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryEntrypointContext:
-        """Return the stable session preamble context for an agent, if any."""
+        """Return the stable session preamble context for an agent whole, if any; ``cap_entrypoint`` cuts it."""
 
 
 def resolve_memory_backend(
