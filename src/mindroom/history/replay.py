@@ -172,6 +172,11 @@ def estimate_summary_tokens(session: ConversationSession) -> int:
     summary = current_summary_text(session)
     if summary is None:
         return 0
+    return estimate_summary_text_tokens(summary)
+
+
+def estimate_summary_text_tokens(summary: str) -> int:
+    """Estimate the tokens the summary message holding ``summary`` adds to a request."""
     return estimate_text_tokens(str(compaction_summary_message(summary, run_local=False).content))
 
 

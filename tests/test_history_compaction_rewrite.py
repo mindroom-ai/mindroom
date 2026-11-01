@@ -24,7 +24,7 @@ from mindroom.history.compaction import (
     compact_scope_history,
     summarize_runs,
 )
-from mindroom.history.replay import estimate_prompt_visible_history_tokens
+from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_text_tokens
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.history.storage import (
     append_compaction_chunk,
@@ -144,6 +144,7 @@ async def _rewrite_single_run(
             session_id=working_session.session_id,
         ),
         runs=[run for run in working_session.runs if run.run_id in selected_run_ids],
+        max_summary_tokens=None,
         before_persist=AsyncMock(),
         after_persist=after_persist,
     )
@@ -1251,6 +1252,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             state=HistoryScopeState(),
             summarizer=_summarizer(input_budget_tokens=summary_input_budget, history_settings=history_settings),
             available_history_budget=1,
+            max_summary_tokens=None,
             before_tokens=2,
             replay_window_tokens=16_000,
             threshold_tokens=1,
@@ -1267,6 +1269,75 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         ("compaction:before", ["run-2"], ["v" * 200, "b" * 200]),
         ("compaction:after", [] if second_chunk_stored else ["run-2"], stored_lines),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_chunk_fits", [True, False])
+async def test_compact_scope_history_stores_no_summary_the_reply_cannot_replay(
+    tmp_path: Path,
+    *,
+    first_chunk_fits: bool,
+) -> None:
+    """Replay never drops a saved summary, so a chunk whose summary exceeds the history budget is not stored.
+
+    Earlier chunks stand; without one, compaction fails and the reply fits raw runs instead.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    runs = [_filler_run(f"run-{index}", words=200) for index in (1, 2)]
+    session = _session("session-1", runs=runs)
+    seed_session(storage, session)
+    short_summary = "short summary"
+    long_summary = "long " * 400
+    summary_input_budget = next(
+        budget
+        for budget in range(1, 5_000)
+        if all(
+            len(
+                build_summary_input(
+                    previous_summary=previous_summary,
+                    compacted_runs=candidate_runs,
+                    max_input_tokens=budget,
+                    history_settings=_ALL_HISTORY_SETTINGS,
+                    token_estimator=estimate_compaction_input_tokens,
+                )[1],
+            )
+            == 1
+            for previous_summary, candidate_runs in ((None, runs), (short_summary, runs[1:]))
+        )
+    )
+    summary_mock = AsyncMock(side_effect=[short_summary if first_chunk_fits else long_summary, long_summary])
+
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+        compaction = compact_scope_history(
+            storage=storage,
+            session=session,
+            state=HistoryScopeState(),
+            summarizer=_summarizer(input_budget_tokens=summary_input_budget),
+            available_history_budget=1,
+            max_summary_tokens=estimate_summary_text_tokens(short_summary),
+            before_tokens=2,
+            replay_window_tokens=16_000,
+            threshold_tokens=1,
+            progress=None,
+            complete=_reported,
+            replay_estimator=None,
+        )
+        if not first_chunk_fits:
+            with pytest.raises(RuntimeError, match=r"^The summary exceeds the history budget \(\d+ estimated tokens; "):
+                await compaction
+            assert summary_rows_of(storage, "agent:test_agent") == []
+            return
+        outcome = await compaction
+
+    assert summary_mock.await_count == 2
+    assert outcome is not None
+    assert outcome.summary == short_summary
+    assert outcome.compacted_run_count == 1
+    assert [row.summary for row in summary_rows_of(storage, "agent:test_agent")] == [short_summary]
+    persisted = storage.load_session("session-1")
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs] == ["run-2"]
 
 
 @pytest.mark.asyncio
@@ -1733,6 +1804,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
             working_session=working_session,
             summarizer=_summarizer(input_budget_tokens=summary_input_budget),
             runs=list(working_session.runs),
+            max_summary_tokens=None,
             before_persist=AsyncMock(),
             after_persist=AsyncMock(),
         )
@@ -1832,6 +1904,7 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
             state=HistoryScopeState(),
             summarizer=_summarizer(input_budget_tokens=summary_input_budget),
             available_history_budget=1,
+            max_summary_tokens=None,
             before_tokens=2,
             replay_window_tokens=16_000,
             threshold_tokens=1,
@@ -1925,6 +1998,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
             summarizer=_summarizer(input_budget_tokens=summary_input_budget, history_settings=history_settings),
             state=HistoryScopeState(),
             available_history_budget=1,
+            max_summary_tokens=None,
             before_tokens=estimate_prompt_visible_history_tokens(
                 session=working_session,
                 history_settings=history_settings,
@@ -2047,6 +2121,7 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
             state=HistoryScopeState(force_compact_before_next_run=True),
             summarizer=_summarizer(input_budget_tokens=6_000, fallback=fallback),
             available_history_budget=None,
+            max_summary_tokens=None,
             before_tokens=0,
             replay_window_tokens=None,
             threshold_tokens=None,
@@ -2083,6 +2158,7 @@ async def test_compact_scope_history_skips_unforced_history_that_fits(
             state=HistoryScopeState(),
             summarizer=_summarizer(),
             available_history_budget=available_history_budget,
+            max_summary_tokens=None,
             before_tokens=before_tokens,
             replay_window_tokens=None,
             threshold_tokens=None,

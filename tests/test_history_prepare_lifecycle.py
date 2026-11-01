@@ -16,7 +16,11 @@ import pytest
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import prepare_agent_execution_context, prepare_bound_team_run_context
-from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_tokens
+from mindroom.history.replay import (
+    estimate_prompt_visible_history_tokens,
+    estimate_summary_text_tokens,
+    estimate_summary_tokens,
+)
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     prepare_scope_history,
@@ -702,7 +706,8 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         reserve_tokens=0,
         static_prompt_tokens=0,
         replay_budget_tokens=1,
-        hard_replay_budget_tokens=1,
+        # Holds each summary message but not the raw history.
+        hard_replay_budget_tokens=100,
         summary_input_budget_tokens=summary_input_budget,
         compaction_timeout_seconds=600.0,
     )
@@ -962,6 +967,86 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         )
         <= trigger_budget
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("run_chars", "summary_words", "stored"),
+    [
+        # History over the hard budget, and a summary that would not fit it either.
+        (4_000, 2_000, False),
+        # History over the trigger only, and a summary above the trigger that still fits the hard budget.
+        (2_400, 1_200, True),
+    ],
+)
+async def test_compaction_stores_no_summary_the_reply_cannot_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    run_chars: int,
+    summary_words: int,
+    stored: bool,
+) -> None:
+    """Replay never drops a saved summary, so compaction stores none the reply's history budget cannot hold.
+
+    Without it the reply fits raw runs instead of failing.
+    """
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, replay_window_tokens=4_000, threshold_tokens=1_000),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    half = run_chars // 2
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                f"run-{index}",
+                messages=[Message(role="user", content="u" * half), Message(role="assistant", content="a" * half)],
+            )
+            for index in range(3)
+        ],
+    )
+    seed_session(storage, session)
+    summary = " ".join(["fact"] * summary_words)
+    lifecycle = RecordingCompactionLifecycle()
+    install_model_providers(monkeypatch, {"default": summary_model()})
+
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value=summary)):
+        prepared = await prepare_history_for_run_for_test(
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            compaction_lifecycle=lifecycle,
+        )
+
+    decision = prepared.compaction_decision
+    assert decision.hard_budget_tokens is not None
+    assert decision.trigger_budget_tokens is not None
+    summary_tokens = estimate_summary_text_tokens(summary)
+    persisted = storage.load_session("session-1")
+    assert persisted is not None
+    if stored:
+        assert decision.reason == "over_trigger_native_disabled"
+        assert decision.trigger_budget_tokens < summary_tokens <= decision.hard_budget_tokens
+        assert prepared.compaction_reply_outcome == "success"
+        assert persisted.summary is not None
+        assert persisted.summary.text == summary
+        return
+    assert decision.reason == "history_exceeds_hard_budget"
+    assert summary_tokens > decision.hard_budget_tokens
+    assert prepared.compaction_reply_outcome == "failed"
+    [failure] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
+    assert failure.failure_reason.startswith("The summary exceeds the history budget")
+    assert persisted.summary is None
+    assert len(persisted.runs) == 3
+    assert prepared.replay_plan.mode == "limited"
 
 
 @pytest.mark.asyncio
@@ -1307,7 +1392,8 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         reserve_tokens=0,
         static_prompt_tokens=0,
         replay_budget_tokens=1,
-        hard_replay_budget_tokens=1,
+        # Holds each summary message.
+        hard_replay_budget_tokens=100,
         summary_input_budget_tokens=summary_input_budget,
         compaction_timeout_seconds=600.0,
         compaction_fallback_model_name="fallback-model",
@@ -1385,7 +1471,8 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
         reserve_tokens=0,
         static_prompt_tokens=0,
         replay_budget_tokens=1,
-        hard_replay_budget_tokens=1,
+        # Holds the summary message.
+        hard_replay_budget_tokens=100,
         summary_input_budget_tokens=16_000,
         compaction_timeout_seconds=600.0,
         compaction_fallback_model_name="fallback-model",

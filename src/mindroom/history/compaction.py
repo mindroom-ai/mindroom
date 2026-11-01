@@ -13,7 +13,12 @@ from uuid import uuid4
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.failure_text import failure_text
 from mindroom.history.conversation_text import utterances
-from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
+from mindroom.history.replay import (
+    current_summary_text,
+    estimate_prompt_visible_history_tokens,
+    estimate_summary_text_tokens,
+    scope_visible_runs,
+)
 from mindroom.history.storage import (
     FoldBasis,
     append_compaction_chunk,
@@ -321,6 +326,7 @@ async def compact_scope_history(
     state: HistoryScopeState,
     summarizer: Summarizer,
     available_history_budget: int | None,
+    max_summary_tokens: int | None,
     before_tokens: int,
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
@@ -330,6 +336,7 @@ async def compact_scope_history(
 ) -> CompactionOutcome | None:
     """Compact the scope owning ``session`` by appending summary rows that fold its oldest runs, chunk by chunk.
 
+    ``max_summary_tokens`` is the most history the reply can replay; no chunk whose summary exceeds it is stored.
     ``progress`` receives the progress after each stored chunk that leaves runs to replay, and ``complete`` the
     outcome after the last stored chunk.
     """
@@ -390,6 +397,7 @@ async def compact_scope_history(
             working_session=working_session,
             summarizer=summarizer,
             runs=runs,
+            max_summary_tokens=max_summary_tokens,
             before_persist=before_persist,
             after_persist=after_persist,
         )
@@ -452,10 +460,15 @@ async def _rewrite_working_session_for_compaction(
     working_session: ConversationSession,
     summarizer: Summarizer,
     runs: Sequence[AnyRunRecord],
+    max_summary_tokens: int | None,
     before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
     after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
 ) -> _CompactionRewriteResult | None:
-    """Fold ``runs``, oldest first, into one appended summary row per chunk, stopping when the conversation changes."""
+    """Fold ``runs``, oldest first, into one appended summary row per chunk.
+
+    Stops when the conversation changes or a chunk's summary exceeds ``max_summary_tokens``; with nothing stored yet,
+    an oversized summary fails the compaction.
+    """
     scope = owner_scope(persisted_session)
     summary_text: str | None = None
     compacted_run_count = 0
@@ -482,6 +495,25 @@ async def _rewrite_working_session_for_compaction(
                 scope=scope.key,
                 candidate_runs=len(remaining),
                 summary_input_budget_tokens=summarizer.model.input_budget_tokens,
+            )
+            break
+        summary_tokens = estimate_summary_text_tokens(chunk.summary)
+        if max_summary_tokens is not None and summary_tokens > max_summary_tokens:
+            # Replay never drops a saved summary, so storing this one would fail a reply that can still fit raw runs.
+            if compacted_run_count == 0:
+                msg = (
+                    f"The summary exceeds the history budget ({summary_tokens} estimated tokens; "
+                    f"{max_summary_tokens} available)."
+                )
+                raise RuntimeError(msg)
+            # Earlier chunks stand.
+            logger.warning(
+                "Compaction stopped because a summary exceeds the history budget",
+                session_id=persisted_session.session_id,
+                scope=scope.key,
+                compacted_runs=compacted_run_count,
+                summary_tokens=summary_tokens,
+                max_summary_tokens=max_summary_tokens,
             )
             break
         await before_persist(chunk.included_runs)
