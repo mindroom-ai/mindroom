@@ -662,9 +662,11 @@ _EXPECTED_GOOD_PROMPT_EXAMPLES = (
     "\U0001f9ea Attachment cache live test",
     "\U0001f9ea ISSUE-083 thread-goal plugin end-to-end test",
     "\U0001f501 Bot echo/reply verification test",
+    "\U0001f4dd Saving meeting notes to a file",
 )
 _TRANSIENT_STATUS_TERMS = (
     "approved",
+    "denied",
     "merged",
     "round",
     "retry",
