@@ -172,7 +172,6 @@ class FakeClient:
     endless_relations: bool = False
     endless_relation_edits: int = 0
     history_pages: int = 0
-    history_end_token: str | None = None
     # A room whose history outlives any startup walk, which is what a
     # long-lived room actually looks like.
     endless_history: bool = False
@@ -339,7 +338,7 @@ class FakeClient:
         direction: object = None,
         limit: int = 10,
     ) -> nio.RoomMessagesResponse | nio.RoomMessagesError:
-        """Return one page of history, then successful exhaustion."""
+        """Return the explicit pages, an endless room, or the whole history as one last page."""
         del room_id, start, direction, limit
         self.history_pages += 1
         if self.pages is not None:
@@ -353,14 +352,7 @@ class FakeClient:
                 "start",
                 f"token-{self.history_pages}",
             )
-        if self.history_pages > 1:
-            return nio.RoomMessagesResponse(ROOM, [], "start", self.history_end_token)
-        return nio.RoomMessagesResponse(
-            ROOM,
-            [parse(source) for source in self.history],
-            "start",
-            self.history_end_token,
-        )
+        return nio.RoomMessagesResponse(ROOM, [parse(source) for source in self.history], "start", None)
 
     def _endless_page(self, page: int) -> list[nio.Event]:
         """Return one page of an inexhaustible room."""
@@ -1341,6 +1333,7 @@ class TestRoomHydration:
 
         assert client.history_pages == 2
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
         assert await bodies(alice) == ["first"]
 
     async def test_hydration_stops_once_the_prompt_window_is_full(
