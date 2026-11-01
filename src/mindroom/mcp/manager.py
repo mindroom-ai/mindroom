@@ -1159,7 +1159,13 @@ class MCPServerManager:
             )
         except Exception as exc:
             self._raise_runtime_exception(state.server_id, exc)
-        return tool_value_from_call_result(state.server_id, result)
+        try:
+            return tool_value_from_call_result(state.server_id, result)
+        except MCPToolCallError as exc:
+            # The failure may be about the arguments, so it carries the schema the call was sent against.
+            tools = state.catalog.tools if state.catalog is not None else ()
+            exc.input_schema = next((tool.input_schema for tool in tools if tool.remote_name == remote_tool_name), None)
+            raise
 
     async def _record_catalog_refresh_error(
         self,
