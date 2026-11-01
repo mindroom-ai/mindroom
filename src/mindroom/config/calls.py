@@ -72,8 +72,11 @@ class CallsConfig(BaseModel):
     )
     agents: dict[str, str] = Field(
         default_factory=dict,
-        description="Call profile name by agent name (at most one agent per room)",
-        json_schema_extra=dashboard_hint(key_reference="agent"),
+        description=(
+            "Call profile name by agent name, or by personal_agents template key for every user's agent from that "
+            "template (at most one agent per room)"
+        ),
+        json_schema_extra=dashboard_hint(key_reference="personal_room_agent"),
     )
     livekit_service_url: str | None = Field(
         default=None,

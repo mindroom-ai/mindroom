@@ -208,6 +208,16 @@ def test_get_secret_from_env_resolves_relative_file_paths_from_config_dir(tmp_pa
     assert get_secret_from_env("OPENAI_API_KEY", _runtime_paths(tmp_path, {})) == "sk-relative"
 
 
+def test_a_secret_file_saved_with_a_byte_order_mark_reads_as_its_value(tmp_path: Path) -> None:
+    """A `<NAME>_FILE` saved as UTF-8 with a BOM supplies the key without the BOM, as the `.env` beside it reads."""
+    secret_file = tmp_path / "openai.key"
+    secret_file.write_text("sk-bom\n", encoding="utf-8-sig")
+
+    runtime_paths = _runtime_paths(tmp_path, {"OPENAI_API_KEY_FILE": str(secret_file)})
+
+    assert get_secret_from_env("OPENAI_API_KEY", runtime_paths) == "sk-bom"
+
+
 def test_a_valid_name_ignores_an_unresolvable_file_variable(tmp_path: Path) -> None:
     """A non-empty NAME supplies the key without resolving a broken NAME_FILE path."""
     runtime_paths = _runtime_paths(

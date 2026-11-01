@@ -2130,7 +2130,7 @@ ZAI_API_KEY=...
 For Amazon Bedrock Claude, use standard AWS credential resolution:
 
 ```bash
-AWS_REGION=us-east-1          # AWS_DEFAULT_REGION is used when AWS_REGION is unset
+AWS_REGION=us-east-1          # or AWS_DEFAULT_REGION; either one exported in the process environment wins over the .env
 # Optional static credentials:
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
@@ -2179,7 +2179,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key
 ```
 
-This works for every model provider key and every variable a tool's settings read (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
+This works for every model provider key and every endpoint, project, region, Azure, and CLI login home variable MindRoom reads for model providers, every variable a tool's settings read, `TYPESAFE_API_KEY`, and the variables a skill's `requires.env` names (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
 The plain variable wins when the process environment or the `.env` beside `config.yaml` sets it, and a blank value or an unedited starter-template placeholder counts as unset, so an exported blank variable does not hide the `.env` value.
 
 ## OpenAI API Models
@@ -4368,7 +4368,7 @@ If `metadata.openclaw` is present, MindRoom loads the skill only when these rule
 
 - `os: ["linux", "darwin", "windows"]`: the current OS must be listed
 - `always: true` bypasses `requires`, but not an OS mismatch
-- `requires.env`: each environment variable is set, or a stored credential with that key exists
+- `requires.env`: each environment variable is set, directly or through its [`_FILE` variant](https://docs.mindroom.chat/configuration/models/#file-based-secrets), or a stored credential with that key exists
 - `requires.config`: each config path is truthy, for example `agents.code.tools`
 - `requires.bins`: all binaries exist in `PATH`
 - `requires.anyBins`: at least one binary exists in `PATH`
@@ -5348,7 +5348,7 @@ A calls-enabled agent shows `📞 Voice calls` in its Matrix presence status whe
 |-------|------|---------|-------------|
 | `calls.enabled` | bool | `false` | Lets agents join voice calls. |
 | `calls.profiles` | map of name to profile | `{}` | Reusable, complete voice pipelines; each has a `backend` and the fields below. |
-| `calls.agents` | map of agent name to profile name | `{}` | Each calls-enabled agent uses exactly one profile. |
+| `calls.agents` | map of agent name to profile name | `{}` | Each calls-enabled agent uses exactly one profile. A [`personal_agents`](https://docs.mindroom.chat/personal-agents/#voice-calls) template key gives every user's agent from that template the profile. |
 | `calls.livekit_service_url` | string | discovered | MatrixRTC authorization service URL to use instead of discovering it from the agent homeserver's `.well-known/matrix/client`. |
 
 `enabled` and `livekit_service_url` are global and cannot be set per agent.
@@ -5360,6 +5360,7 @@ Configuration loading fails with one of these errors when references are wrong:
 - `calls.agents references unknown profile(s): ...`
 - `calls.agents references unknown agent(s): ...`
 - `calls.agents configures multiple agents for room(s): ...`, because a room can have at most one calls-enabled agent.
+- `calls.agents names personal_agents.<key>, whose agent lists rooms in the template or a user's override; ...`, because a room takes only one calls-enabled agent.
 - `calls.profiles references unknown cascaded model(s): ...` or `calls.profiles references unknown Live agent model(s): ...`, when a profile's model alias is not in the top-level `models` mapping.
 
 ### Realtime profile fields
@@ -5538,9 +5539,9 @@ Different agents can use different profiles, for example one agent on `realtime`
 
 ## When an agent joins a call
 
-An agent joins a call when it starts in one of the agent's configured rooms, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting.
+An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](https://docs.mindroom.chat/personal-rooms/) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting.
 Ad-hoc rooms let a Matrix client create a private voice room and invite one agent without adding the room to `config.yaml`.
-A configured room assignment wins over invites; if several calls-enabled agents were only invited to the same room, none of them answers calls there.
+A configured room assignment wins over personal rooms and invites; if several calls-enabled agents are in the same room only through those, none of them answers calls there.
 
 The agent stays in a call only while one Matrix user is in it (that user may join from several devices) and only while that user passes the normal room and per-agent reply permissions.
 That user is the requester for tools, and requester-private agents use that user's workspace, memory, credentials, history, and knowledge.
@@ -7214,6 +7215,28 @@ With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onb
 > Anyone the template's `access` admits can work with the owner's agent, including its memory, its files, and its shared credentials.
 > That includes the admitted person's own agent acting for them, because an agent mentioned in a reply acts for the person who requested that reply (see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents)).
 > Admit only people you would trust with everything an owner gives their agent.
+
+## Voice Calls
+
+Name the template key in [`calls.agents`](https://docs.mindroom.chat/voice-calls/#calls-configuration) to let every user call their own agent:
+
+```yaml
+calls:
+  enabled: true
+  profiles:
+    openai-live:
+      backend: live
+      model: gpt-live-1
+      credentials_service: openai-live
+      voice: marin
+  agents:
+    mind: openai-live
+```
+
+Each generated agent then uses that profile in its owner's personal room, including agents of people onboarded after the config was loaded.
+The saved config keeps `mind`, not the generated agent names.
+A generated agent that `calls.agents` also names directly keeps the profile given there.
+Neither the template's `agent` nor its `users` overrides may list `rooms`, because a room takes only one calls-enabled agent; config loading fails with `calls.agents names personal_agents.mind, whose agent lists rooms in the template or a user's override`.
 
 ## Onboarding Behavior
 
@@ -8941,7 +8964,7 @@ Only the same requester with the same agent can confirm or use the pairing.
 Until pairing is confirmed, `desktop` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
 
 Repeating setup for the same controller keeps saved browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
-Setup for a different controller starts without saved folders or shell access.
+Setup for a different controller starts without saved folders or shell access; after the bridge has started once, see **Change the cloud controller** under [Operations](#operations).
 If the saved session belongs to a different homeserver or Matrix user than the setup command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace`.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 
@@ -9064,7 +9087,7 @@ Wait for `Desktop bridge online` before sending work when you need confirmation 
 
 Flags override saved settings for one run without changing them; [`mindroom desktop run`](https://docs.mindroom.chat/cli/#desktop-run) lists every option.
 `--allow-requester`, `--allow-agent`, and `--allow-app` take exact Matrix user IDs, agent names, and app IDs, can be repeated, and do not accept wildcards.
-Changing the controller requires `--controller-user-id`, `--controller-device-id`, `--controller-ed25519`, and all three allowlist options, and such a run starts without saved folders or shell access.
+Changing the controller requires `--controller-user-id`, `--controller-device-id`, `--controller-ed25519`, and all three allowlist options, and such a run starts without saved folders or shell access; after the bridge has started once, see **Change the cloud controller** under [Operations](#operations).
 The `!desktop confirm` reply prints a `mindroom desktop run` command with these values filled in except the app ID.
 
 ### Grant Application Control
@@ -9305,7 +9328,7 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
 - **Rotate the local device**: Run `mindroom desktop login --replace`, revoke the old device in your Matrix account settings, then run `!desktop rotate` in the agent chat and follow its pairing command.
   `--replace` does not revoke the old device by itself.
   If a `browser` tool uses the desktop target, update its `device_id` and `device_ed25519` settings to the new device, or its calls fail.
-- **Change the cloud controller**: Once the bridge has a command history, saving a different controller identity is rejected.
+- **Change the cloud controller**: Once the bridge has started, setup, the macOS app, and `mindroom desktop run` refuse a different controller identity with `Desktop journal belongs to a different controller.`
   Use `--storage-path` with a new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`; the new setup does not carry over pending commands or outcomes, and the macOS app has no migration action.
 - **Identity mismatch**: A device ID or Ed25519 mismatch is a hard failure; treat it as a rotation or possible substitution and do not bypass it.
 - **Stop**: `Ctrl+C` in the terminal or **Stop Access** in the macOS app stops the bridge and its shell commands.

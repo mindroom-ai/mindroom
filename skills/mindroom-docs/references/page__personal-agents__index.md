@@ -91,6 +91,28 @@ With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onb
 > That includes the admitted person's own agent acting for them, because an agent mentioned in a reply acts for the person who requested that reply (see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents)).
 > Admit only people you would trust with everything an owner gives their agent.
 
+## Voice Calls
+
+Name the template key in [`calls.agents`](https://docs.mindroom.chat/voice-calls/#calls-configuration) to let every user call their own agent:
+
+```yaml
+calls:
+  enabled: true
+  profiles:
+    openai-live:
+      backend: live
+      model: gpt-live-1
+      credentials_service: openai-live
+      voice: marin
+  agents:
+    mind: openai-live
+```
+
+Each generated agent then uses that profile in its owner's personal room, including agents of people onboarded after the config was loaded.
+The saved config keeps `mind`, not the generated agent names.
+A generated agent that `calls.agents` also names directly keeps the profile given there.
+Neither the template's `agent` nor its `users` overrides may list `rooms`, because a room takes only one calls-enabled agent; config loading fails with `calls.agents names personal_agents.mind, whose agent lists rooms in the template or a user's override`.
+
 ## Onboarding Behavior
 
 The router handles a join, a `commands` entry, or a `backfill` hit in an onboarding room like any [personal-room](https://docs.mindroom.chat/personal-rooms/#onboarding-behavior) trigger, with these differences:
