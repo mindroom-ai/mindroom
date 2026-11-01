@@ -42,12 +42,10 @@ def _stop_test_config(tmp_path: Path, *, include_helper: bool = False) -> Config
     }
     if include_helper:
         agents["helper"] = {"display_name": "Helper Agent", "rooms": ["!test:example.com"]}
-    config = bind_runtime_paths(
+    return bind_runtime_paths(
         with_current_room_member_access(Config(agents=agents, authorization={})),
         test_runtime_paths(tmp_path),
     )
-    persist_entity_accounts(config, runtime_paths_for(config))
-    return config
 
 
 def _stop_test_agent_user(config: Config) -> AgentMatrixUser:

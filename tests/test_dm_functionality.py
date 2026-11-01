@@ -26,16 +26,14 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def _bind_runtime_paths(config: Config, path: Path) -> Config:
-    bound_config = bind_runtime_paths(config, test_runtime_paths(path))
-    persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
-    return bound_config
+    return bind_runtime_paths(config, test_runtime_paths(path))
 
 
 def _config(path: Path, **kwargs: object) -> Config:

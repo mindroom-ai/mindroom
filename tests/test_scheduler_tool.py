@@ -38,14 +38,12 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
 
 
 def _bind_runtime_paths(config: Config) -> Config:
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    bound = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound, runtime_paths)
-    return bound
+    return bind_runtime_paths(config, runtime_paths)
 
 
 def _general_config() -> Config:

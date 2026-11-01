@@ -27,7 +27,6 @@ from tests.conftest import (
     published_config_load,
     runtime_paths_for,
 )
-from tests.identity_helpers import persist_entity_accounts
 from tests.matrix_state_helpers import save_matrix_state
 
 
@@ -36,12 +35,10 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
         tmp_path,
         config_path=tmp_path / "config.yaml",
     )
-    bound_config = bind_runtime_paths(
+    return bind_runtime_paths(
         config,
         runtime_paths,
     )
-    persist_entity_accounts(bound_config, runtime_paths)
-    return bound_config
 
 
 @pytest.fixture

@@ -55,9 +55,7 @@ if TYPE_CHECKING:
 
 def _bind_runtime_config(config: Config) -> Config:
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    bound_config = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
-    return bound_config
+    return bind_runtime_paths(config, runtime_paths)
 
 
 def _message(
@@ -1369,7 +1367,6 @@ class TestAgentResponseLogic:
             bot_accounts=["@telegram:localhost"],
         )
         config = bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         room = create_mock_room("!room:localhost", ["calculator"], config)
 

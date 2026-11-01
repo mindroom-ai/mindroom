@@ -42,7 +42,7 @@ from tests.conftest import (
     sync_bot_runtime_state,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
 from tests.reply_span_helpers import reply_span
 
 if TYPE_CHECKING:
@@ -122,7 +122,6 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
         Config(agents={"email_agent": AgentConfig(display_name="Email Agent")}),
         test_runtime_paths(tmp_path),
     )
-    persist_entity_accounts(config, runtime_paths_for(config))
     bot = _context_bot(tmp_path, config)
 
     # Mock the format_message_with_mentions to return a dict we can check
@@ -288,7 +287,6 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock]:
         test_runtime_paths(tmp_path),
     )
     runtime_paths = runtime_paths_for(config)
-    persist_entity_accounts(config, runtime_paths)
     before_hooks = AsyncMock()
     response_hooks = MagicMock()
     response_hooks.apply_before_response = before_hooks
