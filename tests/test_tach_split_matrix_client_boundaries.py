@@ -52,8 +52,6 @@ RUNTIME_PROTOCOL_IMPORTERS = {
 BOT_RUNTIME_VIEW_ALLOWED_IMPORTERS = {
     "mindroom.bot",
     "mindroom.reply_turn.inbox",
-    "mindroom.response_runner",
-    "mindroom.tool_system.runtime_context",
     "mindroom.turns.dispatch",
 }
 
@@ -265,7 +263,7 @@ def test_runtime_protocol_interface_matches_public_symbols() -> None:
 
 
 def test_bot_runtime_view_visibility_is_limited_to_owner_and_protocol_facade() -> None:
-    """Only the bot shell, the protocol facade, core runtime-heavy modules, and run-phase readers may import the view."""
+    """Only the bot shell and the run-phase readers may import the view at runtime; the protocol facade does not."""
     module_entries = _module_entries_by_path()
     entry = module_entries[BOT_RUNTIME_VIEW_MODULE]
     visibility = entry.get("visibility")
