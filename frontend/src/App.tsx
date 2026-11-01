@@ -116,6 +116,13 @@ function AppContent() {
     NAV_ITEMS.find((item) => item.value === currentTab) || NAV_ITEMS[0];
   const previousSelectedRoomIdRef = useRef(selectedRoomId);
   const validationIssues = getConfigValidationIssues(diagnostics);
+  const validationIssueItems = validationIssues.map((issue, index) => (
+    <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
+      <span className="font-medium">{issue.loc.join(" → ")}</span>
+      {": "}
+      {issue.msg}
+    </li>
+  ));
   const globalDiagnostics = getGlobalConfigDiagnostics(diagnostics);
   const blockingDiagnostic =
     globalDiagnostics.find(
@@ -224,15 +231,7 @@ function AppContent() {
               <p className="font-medium">{blockingDiagnostic.message}</p>
               {validationIssues.length > 0 && (
                 <ul className="mt-3 list-disc space-y-1 pl-5">
-                  {validationIssues.map((issue, index) => (
-                    <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
-                      <span className="font-medium">
-                        {issue.loc.join(" → ")}
-                      </span>
-                      {": "}
-                      {issue.msg}
-                    </li>
-                  ))}
+                  {validationIssueItems}
                 </ul>
               )}
             </div>
@@ -292,13 +291,7 @@ function AppContent() {
                 referenced plugin manifests, then retry loading the dashboard.
               </p>
               <ul className="mt-3 list-disc space-y-1 pl-5">
-                {validationIssues.map((issue, index) => (
-                  <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
-                    <span className="font-medium">{issue.loc.join(" → ")}</span>
-                    {": "}
-                    {issue.msg}
-                  </li>
-                ))}
+                {validationIssueItems}
               </ul>
             </div>
           )}
@@ -438,13 +431,7 @@ function AppContent() {
                 replace <code>config.yaml</code>.
               </p>
               <ul className="list-disc space-y-1 pl-5">
-                {validationIssues.map((issue, index) => (
-                  <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
-                    <span className="font-medium">{issue.loc.join(" → ")}</span>
-                    {": "}
-                    {issue.msg}
-                  </li>
-                ))}
+                {validationIssueItems}
               </ul>
             </div>
           </div>

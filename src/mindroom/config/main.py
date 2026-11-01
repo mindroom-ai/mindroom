@@ -233,7 +233,7 @@ def config_validation_issues(
     """
     if isinstance(exc, ValidationError):
         return [
-            (tuple(error["loc"]) or ("config",), validation_issue_message(error))
+            (error["loc"] or ("config",), validation_issue_message(error))
             for error in exc.errors(include_context=False)
         ]
     if isinstance(exc, (ConfigRuntimeValidationError, ConfigIncludeError)):
