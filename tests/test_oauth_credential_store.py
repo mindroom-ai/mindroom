@@ -859,28 +859,6 @@ async def test_database_directory_permission_failure_uses_oauth_error_boundary(
 
 
 @pytest.mark.asyncio
-async def test_committed_snapshot_clears_unreadable_adoption_flag_once_payload_decodes(tmp_path: Path) -> None:
-    """A store adopted from an undecodable credential file is marked readable once its retained payload decodes."""
-    context = _context(tmp_path)
-    generations = await _publish(context, "adopted")
-    database_path = _oauth_credential_database_path(context)
-    with sqlite3.connect(database_path) as connection:
-        connection.execute("UPDATE oauth_credential_state SET credential_unreadable = 1 WHERE singleton = 1")
-
-    async with oauth_credential_transaction(context) as transaction:
-        snapshot = await transaction.snapshot()
-        await transaction.commit()
-
-    assert snapshot.credentials == {"token": "adopted", "refresh_token": "refresh-adopted"}
-    assert (snapshot.generation, snapshot.connection_generation) == generations
-    with sqlite3.connect(database_path) as connection:
-        row = connection.execute(
-            "SELECT credential_unreadable FROM oauth_credential_state WHERE singleton = 1",
-        ).fetchone()
-    assert row == (0,)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("encrypted", [False, True])
 async def test_json_only_credentials_and_sidecars_are_ignored(tmp_path: Path, encrypted: bool) -> None:
     """A JSON-only connection requires reconnect while obsolete files remain inert."""

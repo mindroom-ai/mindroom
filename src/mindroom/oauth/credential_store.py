@@ -133,16 +133,7 @@ class _OAuthCredentialReader:
 
     async def snapshot(self) -> _OAuthStoredCredentialSnapshot:
         """Read credentials without blocking the OAuth event loop."""
-        return await self._database.run(self._snapshot)
-
-    def _snapshot(self) -> _OAuthStoredCredentialSnapshot:
-        """Decode the last committed credential snapshot without rewriting it."""
-        row = _state_row(self._connection)
-        return _OAuthStoredCredentialSnapshot(
-            credentials=_decode_credentials(self._context, row),
-            generation=str(row["generation"]),
-            connection_generation=str(row["connection_generation"]),
-        )
+        return await self._database.run(_stored_snapshot, self._context, self._connection)
 
     async def reset_operation_result(self, operation_id: str) -> bool | None:
         """Read a reset receipt without blocking the OAuth event loop."""
@@ -171,17 +162,7 @@ class OAuthCredentialTransaction:
 
     async def snapshot(self) -> _OAuthStoredCredentialSnapshot:
         """Read credentials without blocking the OAuth event loop."""
-        return await self._database.run(self._snapshot)
-
-    def _snapshot(self) -> _OAuthStoredCredentialSnapshot:
-        """Read and decode the current credential snapshot."""
-        row = _state_row(self._connection)
-        credentials = self._decode_credentials(row)
-        return _OAuthStoredCredentialSnapshot(
-            credentials=credentials,
-            generation=str(row["generation"]),
-            connection_generation=str(row["connection_generation"]),
-        )
+        return await self._database.run(_stored_snapshot, self._context, self._connection)
 
     async def publish(
         self,
@@ -265,28 +246,6 @@ class OAuthCredentialTransaction:
             database=self._database,
         )
 
-    def _decode_credentials(self, row: sqlite3.Row) -> dict[str, Any] | None:
-        credentials = _decode_credentials(self._context, row)
-        # LEGACY_COMPAT: OAuth stores adopted from undecodable credential files.
-        # Legacy format: `credential_unreadable = 1` with the retained file payload, written when adoption failed to decode it.
-        # Last legacy release: v2026.9.48; v2026.9.49 removed credential-file adoption, and current writers store 0.
-        # Handling: a write transaction that now decodes the payload re-encodes it and clears the flag.
-        # Coverage: tests/test_oauth_credential_store.py::test_committed_snapshot_clears_unreadable_adoption_flag_once_payload_decodes.
-        if credentials is not None and bool(row["credential_unreadable"]):
-            encoded = self._context.credentials_manager.encode_credentials(
-                self._context.provider.credential_service,
-                credentials,
-            )
-            self._connection.execute(
-                """
-                UPDATE oauth_credential_state
-                SET credential_payload = ?, credential_unreadable = 0
-                WHERE singleton = 1
-                """,
-                (encoded,),
-            )
-        return credentials
-
 
 def _state_row(connection: sqlite3.Connection) -> sqlite3.Row:
     row = connection.execute(
@@ -313,11 +272,24 @@ def _reset_operation_result(connection: sqlite3.Connection, operation_id: str) -
     return None if row is None else bool(row["credential_existed"])
 
 
+def _stored_snapshot(
+    context: OAuthCredentialStoreContext,
+    connection: sqlite3.Connection,
+) -> _OAuthStoredCredentialSnapshot:
+    """Decode the credential snapshot this connection sees."""
+    row = _state_row(connection)
+    return _OAuthStoredCredentialSnapshot(
+        credentials=_decode_credentials(context, row),
+        generation=str(row["generation"]),
+        connection_generation=str(row["connection_generation"]),
+    )
+
+
 def _decode_credentials(
     context: OAuthCredentialStoreContext,
     row: sqlite3.Row,
 ) -> dict[str, Any] | None:
-    """Decode one stored payload without mutating its transaction."""
+    """Decode one stored payload."""
     if not bool(row["credential_present"]):
         return None
     payload = row["credential_payload"]
