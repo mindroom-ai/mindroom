@@ -437,7 +437,8 @@ async def _register_client(
         lock = _DYNAMIC_CLIENT_REGISTRATION_LOCKS.setdefault(provider.id, threading.Lock())
     async with _cross_loop_lock(lock):
         resolution = await asyncio.to_thread(provider.client_config_resolution, runtime_paths)
-        if not _registration_needed(resolution, config, metadata):
+        callback_moved = resolution is not None and provider.dynamic_client_callback_moved(resolution, runtime_paths)
+        if not callback_moved and not _registration_needed(resolution, config, metadata):
             return
         if not provider.client_config_services:
             msg = f"{config.error_label} dynamic client registration requires a provider-specific client config service"
@@ -446,15 +447,16 @@ async def _register_client(
         if credentials_manager.current_worker_key is not None:
             msg = f"{config.error_label} dynamic client registration must run in the primary runtime"
             raise OAuthProviderError(msg)
-        if resolution is not None and resolution.registered_token_url is None:
+        if resolution is not None and resolution.registered_token_url is None and not callback_moved:
             # LEGACY_COMPAT: Dynamic client registrations without a recorded token endpoint.
             # Legacy format: a dynamically registered client config without `OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY`.
             # Last legacy release: v2026.9.361, for records written since v2026.8.37 (earlier records lack the
             # runtime-bootstrap flag and already resolve as operator-configured clients); the replacement, v2026.9.362,
             # records the token endpoint with every registration.
             # Handling: bind the registration once to the token endpoint resolved at first use after upgrade, keeping
-            # its client ID and the tokens issued to it; later endpoint changes re-register.
+            # its client ID and the tokens issued to it; later endpoint changes, or a moved callback, re-register.
             # Coverage: tests/test_mcp_oauth.py::test_mcp_oauth_binds_legacy_dynamic_registration_to_current_token_endpoint
+            #   and tests/test_mcp_oauth.py::test_mcp_oauth_replaces_legacy_dynamic_registration_whose_callback_moved
             stored = await asyncio.to_thread(credentials_manager.load_credentials, resolution.service)
             await run_blocking_until_complete(
                 credentials_manager.save_credentials,
@@ -463,7 +465,7 @@ async def _register_client(
             )
             return
         if not config.dynamic_client_registration or metadata.registration_url is None:
-            msg = f"{config.error_label} dynamic client registration belongs to a different token endpoint"
+            msg = f"{config.error_label} dynamic client registration belongs to a different token endpoint or callback"
             raise OAuthProviderError(msg)
         registration = await _post_registration(provider, config, metadata.registration_url, runtime_paths)
         await run_blocking_until_complete(
@@ -477,6 +479,8 @@ async def _register_client(
                 provider_id=provider.id,
                 previous_token_endpoint_origin=token_endpoint_origin(resolution.registered_token_url),
                 current_token_endpoint_origin=token_endpoint_origin(metadata.token_url),
+                previous_redirect_uri=resolution.config.redirect_uri,
+                current_redirect_uri=provider.default_redirect_uri(runtime_paths),
             )
 
 

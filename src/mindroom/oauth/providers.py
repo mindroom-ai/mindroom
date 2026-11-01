@@ -741,14 +741,24 @@ class OAuthProvider:
         self,
         runtime_paths: RuntimePaths,
     ) -> OAuthClientConfigResolution | None:
-        """Return stored client settings, after any lazy runtime bootstrap."""
+        """Return stored client settings, after any lazy runtime bootstrap, which also replaces a moved registration."""
         resolution = await asyncio.to_thread(self.client_config_resolution, runtime_paths)
-        if resolution is not None:
+        if self.runtime_bootstrapper is None or (
+            resolution is not None and not self.dynamic_client_callback_moved(resolution, runtime_paths)
+        ):
             return resolution
-        if self.runtime_bootstrapper is None:
-            return None
         await self.runtime_endpoints(runtime_paths)
         return await asyncio.to_thread(self.client_config_resolution, runtime_paths)
+
+    def dynamic_client_callback_moved(
+        self,
+        resolution: OAuthClientConfigResolution,
+        runtime_paths: RuntimePaths,
+    ) -> bool:
+        """Return whether a dynamic registration names another callback than this runtime's, as when the public URL moved."""
+        return resolution.dynamically_registered and resolution.config.redirect_uri != self.default_redirect_uri(
+            runtime_paths,
+        )
 
     def _stored_client_config_from_service(
         self,
