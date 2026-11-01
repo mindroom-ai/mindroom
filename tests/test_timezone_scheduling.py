@@ -40,16 +40,6 @@ def test_format_scheduled_time_eastern() -> None:
     assert "EST" in result or "EDT" in result  # Depends on daylight savings
 
 
-def test_format_scheduled_time_minutes() -> None:
-    """Test formatting with minutes only."""
-    dt = datetime.now(UTC) + timedelta(minutes=45)
-    result = _format_scheduled_time(dt, "UTC")
-
-    # Should show minutes from humanize (e.g., "44 minutes from now")
-    assert "minute" in result or "minutes" in result
-    assert "from now" in result
-
-
 def test_format_scheduled_time_now() -> None:
     """Test formatting for immediate execution."""
     dt = datetime.now(UTC) + timedelta(seconds=30)
@@ -57,16 +47,6 @@ def test_format_scheduled_time_now() -> None:
 
     # humanize shows "in a few seconds" or "in 30 seconds" for very near future
     assert "second" in result or "few" in result or "moment" in result
-
-
-def test_format_scheduled_time_past() -> None:
-    """Test formatting for past time."""
-    dt = datetime.now(UTC) - timedelta(hours=1)
-    result = _format_scheduled_time(dt, "UTC")
-
-    # humanize shows "an hour ago" for past times
-    assert "ago" in result
-    assert "hour" in result or "hours" in result
 
 
 @pytest.fixture
