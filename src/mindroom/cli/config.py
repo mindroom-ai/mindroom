@@ -222,7 +222,7 @@ def _config_init_owner_user_id(runtime_paths: RuntimePaths) -> str | None:
     if raw_owner_user_id and owner_user_id is None:
         source = (
             "the environment"
-            if constants.OWNER_MATRIX_USER_ID_ENV in runtime_paths.process_env
+            if runtime_paths.process_env.get(constants.OWNER_MATRIX_USER_ID_ENV, "").strip()
             else str(runtime_paths.env_path)
         )
         _err_console.print(
@@ -1430,11 +1430,13 @@ def worker_dashboard_api_key_needed(runtime_paths: constants.RuntimePaths) -> bo
     """Return whether dedicated workers could reach the dashboard API while `MINDROOM_API_KEY` is unset.
 
     Worker shells keep network access to the primary, so an open API would hand them
-    MindRoom's configuration. An explicitly empty key keeps open access.
+    MindRoom's configuration. An explicitly empty key, exported or in the `.env`, keeps open access, so this
+    checks whether the variable is present, not whether it has a value.
     """
     from mindroom.workers.backend_kinds import worker_backend_kind  # noqa: PLC0415
 
-    return runtime_paths.env_value("MINDROOM_API_KEY") is None and worker_backend_kind(runtime_paths).dedicated
+    key_present = "MINDROOM_API_KEY" in runtime_paths.process_env or "MINDROOM_API_KEY" in runtime_paths.env_file_values
+    return not key_present and worker_backend_kind(runtime_paths).dedicated
 
 
 def ensure_worker_dashboard_api_key(runtime_paths: constants.RuntimePaths, *, dashboard_has_credential: bool) -> bool:

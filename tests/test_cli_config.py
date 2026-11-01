@@ -801,10 +801,12 @@ class TestConfigInit:
     def test_init_mindroom_chat_warns_about_a_saved_owner_it_cannot_use(
         self,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A saved owner outside the current Matrix grammar is reported, not silently dropped."""
+        """A saved owner outside the current Matrix grammar is reported, under a blank export too, not dropped."""
         target = tmp_path / "config.yaml"
         (tmp_path / ".env").write_text(f"{OWNER_MATRIX_USER_ID_ENV}=@Alice:selfhosted.example\n", encoding="utf-8")
+        monkeypatch.setenv(OWNER_MATRIX_USER_ID_ENV, "")
 
         result = runner.invoke(
             app,
@@ -1428,10 +1430,16 @@ class TestConfigInit:
             ("OPENAI_API_KEY=sk-existing\n", {"MINDROOM_WORKER_BACKEND": "docker"}, False, True),
             (None, {"MINDROOM_WORKER_BACKEND": "docker"}, False, True),
             ("MINDROOM_API_KEY=\n", {"MINDROOM_WORKER_BACKEND": "docker"}, False, False),
+            (
+                "OPENAI_API_KEY=sk-existing\n",
+                {"MINDROOM_WORKER_BACKEND": "docker", "MINDROOM_API_KEY": ""},
+                False,
+                False,
+            ),
             ("OPENAI_API_KEY=sk-existing\n", {}, False, False),
             ("OPENAI_API_KEY=sk-existing\n", {"MINDROOM_WORKER_BACKEND": "docker"}, True, False),
         ],
-        ids=["docker", "docker-without-env-file", "explicit-open", "local-tools", "platform-auth"],
+        ids=["docker", "docker-without-env-file", "explicit-open", "exported-open", "local-tools", "platform-auth"],
     )
     def test_run_protects_the_dashboard_api_from_dedicated_workers(
         self,

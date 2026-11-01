@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
-from typing import TypeGuard, cast
+from typing import TypeGuard, cast, overload
 
 from dotenv import dotenv_values
 
@@ -158,19 +158,25 @@ class RuntimePaths:
     process_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     env_file_values: Mapping[str, str] = field(default_factory=dict, repr=False)
 
+    @overload
+    def env_value(self, name: str, *, default: str) -> str: ...
+
+    @overload
+    def env_value(self, name: str, *, default: None = None) -> str | None: ...
+
     def env_value(self, name: str, *, default: str | None = None) -> str | None:
-        """Resolve one env value against this runtime context."""
+        """Resolve one env value against this runtime context, read as ``plain_env_value`` reads it, else ``default``.
+
+        The runtime's own config, storage, and control-state paths answer for their variables.
+        """
         if name == "MINDROOM_CONFIG_PATH":
             return str(self.config_path)
         if name == "MINDROOM_STORAGE_PATH":
             return str(self.storage_root)
         if name == CONTROL_STATE_PATH_ENV:
             return str(self.control_state_root) if self.control_state_root is not None else default
-        if name in self.process_env:
-            return self.process_env[name]
-        if name in self.env_file_values:
-            return self.env_file_values[name]
-        return default
+        plain = self.plain_env_value((name,))
+        return default if plain is None else plain[0]
 
     def plain_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
         """Return the first usable value of ``names`` in the process env, then the `.env`, and the variable that set it.
@@ -224,7 +230,7 @@ class RuntimePaths:
 def resolve_session_state_root(state_root: Path, runtime_paths: RuntimePaths) -> Path:
     """Map a canonical state root into optional dedicated session storage."""
     configured_root = runtime_paths.env_value(runtime_env_policy.SESSION_STORAGE_PATH_ENV)
-    if configured_root is None or not configured_root.strip():
+    if configured_root is None:
         return state_root
 
     session_storage_root = Path(configured_root).expanduser()
@@ -822,13 +828,13 @@ def read_secret_file(path: Path) -> str:
 
 
 def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
-    """Resolve one runtime env var, read as ``RuntimePaths.plain_env_value`` reads it, as a filesystem path.
+    """Resolve one runtime env var, read as ``RuntimePaths.env_value`` reads it, as a filesystem path.
 
     Relative paths are interpreted relative to the runtime config directory.
     """
-    if (plain := runtime_paths.plain_env_value((name,))) is None:
+    if (value := runtime_paths.env_value(name)) is None:
         return None
-    return _resolve_runtime_relative_path(plain[0], base_dir=runtime_paths.config_dir)
+    return _resolve_runtime_relative_path(value, base_dir=runtime_paths.config_dir)
 
 
 def secret_path_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
@@ -837,19 +843,6 @@ def secret_path_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
     if runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS") is not None:
         names.add("GOOGLE_APPLICATION_CREDENTIALS")
     return frozenset(names)
-
-
-def runtime_env_flag(
-    name: str,
-    runtime_paths: RuntimePaths,
-    *,
-    default: bool = False,
-) -> bool:
-    """Read a boolean runtime env flag with config-adjacent `.env` fallback."""
-    value = runtime_paths.env_value(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def is_hosted_matrix_homeserver(homeserver: str) -> bool:
@@ -870,7 +863,7 @@ def runtime_matrix_homeserver(runtime_paths: RuntimePaths) -> str:
 
 def runtime_matrix_ssl_verify(runtime_paths: RuntimePaths) -> bool:
     """Return whether Matrix HTTPS requests should verify certificates."""
-    return runtime_env_flag("MATRIX_SSL_VERIFY", default=True, runtime_paths=runtime_paths)
+    return runtime_paths.env_flag("MATRIX_SSL_VERIFY", default=True)
 
 
 def runtime_matrix_server_name(runtime_paths: RuntimePaths) -> str | None:
@@ -881,10 +874,7 @@ def runtime_matrix_server_name(runtime_paths: RuntimePaths) -> str | None:
 def runtime_mindroom_namespace(runtime_paths: RuntimePaths) -> str | None:
     """Return the optional installation namespace for one runtime context."""
     value = runtime_paths.env_value("MINDROOM_NAMESPACE")
-    if value is None:
-        return None
-    normalized = value.strip().lower()
-    return normalized or None
+    return None if value is None else value.strip().lower()
 
 
 def matrix_state_file(runtime_paths: RuntimePaths) -> Path:

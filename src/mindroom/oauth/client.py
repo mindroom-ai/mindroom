@@ -163,9 +163,9 @@ class ScopedOAuthClientMixin:
             if service_account_path is not None:
                 kwargs["service_account_path"] = str(service_account_path)
         if not kwargs.get("delegated_user"):
-            delegated_user = self._runtime_paths.plain_env_value(("GOOGLE_DELEGATED_USER",))
+            delegated_user = self._runtime_paths.env_value("GOOGLE_DELEGATED_USER")
             if delegated_user is not None:
-                kwargs["delegated_user"] = delegated_user[0]
+                kwargs["delegated_user"] = delegated_user
         return bool(kwargs.get("service_account_path"))
 
     def _initialize_oauth_client(

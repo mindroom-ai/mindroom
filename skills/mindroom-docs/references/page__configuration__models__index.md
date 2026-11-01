@@ -251,7 +251,7 @@ ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key
 ```
 
 This works for every model provider key and every endpoint, project, region, Azure, and CLI login home variable MindRoom reads for model providers, every variable a tool's settings read, `TYPESAFE_API_KEY`, and the variables a skill's `requires.env` names (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
-The plain variable wins when the process environment or the `.env` beside `config.yaml` sets it, and a blank value or an unedited starter-template placeholder counts as unset, so an exported blank variable does not hide the `.env` value.
+The plain variable wins when the process environment or the `.env` beside `config.yaml` [sets it](https://docs.mindroom.chat/configuration/#environment-variables).
 
 ## OpenAI API Models
 

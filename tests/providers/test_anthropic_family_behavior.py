@@ -60,7 +60,13 @@ from tests.providers.anthropic_family_support import (
     route_provider,
     sse_reply,
 )
-from tests.providers.golden_support import Wire, claude_stream_events, pipeline_provider, sse_response
+from tests.providers.golden_support import (
+    Wire,
+    claude_stream_events,
+    hide_provider_environment,
+    pipeline_provider,
+    sse_response,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1661,6 +1667,63 @@ def test_anthropic_base_url_sets_the_direct_endpoint_only_where_client_params_se
     assert from_env.identity.endpoint == "https://env-gateway.example"
     assert configured.identity.endpoint == "https://own-gateway.example"
     assert configured.settings.client_params == own["client_params"]
+
+
+def test_a_blank_exported_anthropic_base_url_keeps_the_direct_route_on_anthropics_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK reads ``ANTHROPIC_BASE_URL`` itself when given none, and would take a blank export as its endpoint."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_BASE_URL": ""},
+    )
+    hide_provider_environment(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
+    own = {"client_params": {"base_url": "https://own-gateway.example"}}
+    default = build_provider(ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k"), runtime_paths)
+    configured = build_provider(
+        ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=own),
+        runtime_paths,
+    )
+
+    assert str(default._client().base_url).rstrip("/") == "https://api.anthropic.com"
+    assert str(configured._client().base_url).rstrip("/") == "https://own-gateway.example"
+
+
+@pytest.mark.parametrize(
+    ("name", "setting", "value"),
+    [
+        ("ANTHROPIC_VERTEX_BASE_URL", "base_url", "https://vertex.example/v1"),
+        ("CLOUD_ML_REGION", "region", "europe-west1"),
+    ],
+)
+def test_a_blank_exported_vertex_endpoint_or_region_fails_the_build_and_names_the_variable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    setting: str,
+    value: str,
+) -> None:
+    """The Vertex SDK reads these itself when given none, and would build every request URL from a blank export."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    env = {"ANTHROPIC_VERTEX_PROJECT_ID": "p", "CLOUD_ML_REGION": "us-east5", name: ""}
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
+    hide_provider_environment(monkeypatch)
+    model = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5")
+
+    with pytest.raises(ValueError, match=f"{name} is exported blank"):
+        build_provider(model, runtime_paths)
+    # A value the model or the `.env` sets reaches the SDK, which then reads nothing from the environment.
+    for extra_kwargs in ({setting: value}, {"client_params": {setting: value}}):
+        build_provider(model.model_copy(update={"extra_kwargs": extra_kwargs}), runtime_paths)
+    (tmp_path / ".env").write_text(f"{name}={value}\n", encoding="utf-8")
+    env_file_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
+    assert getattr(build_provider(model, env_file_paths).settings, setting) == value
 
 
 @pytest.mark.asyncio

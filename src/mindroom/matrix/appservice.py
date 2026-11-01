@@ -36,8 +36,7 @@ class _ConfiguredToken(NamedTuple):
 
 
 def _appservice_token_from_env(runtime_paths: RuntimePaths) -> _ConfiguredToken | None:
-    plain = runtime_paths.plain_env_value((MATRIX_APPSERVICE_TOKEN_ENV,))
-    token = plain[0].strip() if plain else ""
+    token = (runtime_paths.env_value(MATRIX_APPSERVICE_TOKEN_ENV) or "").strip()
     file_path = runtime_env_path(runtime_paths, MATRIX_APPSERVICE_TOKEN_FILE_ENV)
     if token and file_path is not None:
         msg = f"Set only one of {MATRIX_APPSERVICE_TOKEN_ENV} or {MATRIX_APPSERVICE_TOKEN_FILE_ENV}"
@@ -59,8 +58,7 @@ def _appservice_token_from_env(runtime_paths: RuntimePaths) -> _ConfiguredToken 
 
 def resolve_managed_account_auth(runtime_paths: RuntimePaths) -> ManagedAccountAuth:
     """Resolve explicit password or application-service account authentication."""
-    mode = runtime_paths.plain_env_value((MATRIX_MANAGED_ACCOUNT_AUTH_ENV,))
-    raw_mode = (mode[0] if mode else "password").strip().lower()
+    raw_mode = runtime_paths.env_value(MATRIX_MANAGED_ACCOUNT_AUTH_ENV, default="password").strip().lower()
     if raw_mode not in {"password", "appservice"}:
         msg = f"{MATRIX_MANAGED_ACCOUNT_AUTH_ENV} must be 'password' or 'appservice', got {raw_mode!r}"
         raise matrix_startup_error(msg, permanent=True)

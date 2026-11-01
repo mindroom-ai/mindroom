@@ -751,41 +751,20 @@ def _credentials_base_path(storage_root: Path) -> Path:
 
 
 def _runtime_shared_credentials_base_path(runtime_paths: RuntimePaths, base_path: Path) -> Path:
-    shared_storage_path = (
-        runtime_paths.env_value(
-            _runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV,
-            default="",
-        )
-        or ""
-    )
-    if shared_storage_path.strip():
-        return Path(shared_storage_path).expanduser().resolve()
-    return base_path
+    shared_storage_path = runtime_paths.env_value(_runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV)
+    if shared_storage_path is None:
+        return base_path
+    return Path(shared_storage_path).expanduser().resolve()
 
 
 def _runtime_dedicated_worker_key(runtime_paths: RuntimePaths) -> str | None:
-    raw_worker_key = (
-        runtime_paths.env_value(
-            _runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
-            default="",
-        )
-        or ""
-    )
-    normalized = raw_worker_key.strip()
-    return normalized or None
+    raw_worker_key = runtime_paths.env_value(_runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"])
+    return None if raw_worker_key is None else raw_worker_key.strip()
 
 
 def _runtime_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
-    raw_worker_root = (
-        runtime_paths.env_value(
-            _runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"],
-            default="",
-        )
-        or ""
-    )
-    if not raw_worker_root.strip():
-        return None
-    return Path(raw_worker_root).expanduser().resolve()
+    raw_worker_root = runtime_paths.env_value(_runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"])
+    return None if raw_worker_root is None else Path(raw_worker_root).expanduser().resolve()
 
 
 def runtime_credentials_manager_key(runtime_paths: RuntimePaths) -> _CredentialsManagerKey:

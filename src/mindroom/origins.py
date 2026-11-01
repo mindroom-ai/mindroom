@@ -67,7 +67,7 @@ def is_local_origin(origin: str | None) -> bool:
 
 def local_api_origin(paths: RuntimePaths) -> str:
     """Return MindRoom's own API origin on this machine, which links, callbacks, and token audiences use by default."""
-    return f"http://localhost:{paths.env_value('MINDROOM_PORT', default='8765') or '8765'}"
+    return f"http://localhost:{paths.env_value('MINDROOM_PORT', default='8765')}"
 
 
 def configured_public_url(paths: RuntimePaths) -> str | None:
@@ -111,7 +111,7 @@ def dashboard_origin(paths: RuntimePaths) -> str | None:
 def allowed_client_origins(paths: RuntimePaths, env_name: str) -> tuple[str, ...]:
     """Read a JSON list of exact web and bundled iOS app origins from `env_name`; invalid configuration fails closed."""
     try:
-        origins = json.loads(paths.env_value(env_name, default="[]") or "[]")
+        origins = json.loads(paths.env_value(env_name, default="[]"))
         if not isinstance(origins, list) or not all(isinstance(origin, str) for origin in origins):
             return ()
         # The bundled iOS app has a fixed custom-scheme origin. Accept only

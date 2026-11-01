@@ -552,6 +552,33 @@ def test_google_oauth_provider_bootstraps_client_for_paired_install(
     assert resolution.config.redirect_uri == "http://localhost:8765/api/oauth/google_drive/callback"
 
 
+def test_google_oauth_provider_reads_the_pairing_as_matrix_registration_does(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blank exports do not hide the `.env` pairing, and without a provisioning URL the hosted service pairs it."""
+    requests = _install_provisioning_transport(monkeypatch, "https://mindroom.chat")
+    (tmp_path / ".env").write_text(
+        "MINDROOM_LOCAL_CLIENT_ID=local-client\nMINDROOM_LOCAL_CLIENT_SECRET=local-secret\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_PROVISIONING_URL": "",
+            "MINDROOM_LOCAL_CLIENT_ID": "",
+            "MINDROOM_LOCAL_CLIENT_SECRET": "",
+        },
+    )
+
+    resolution = asyncio.run(google_oauth_provider("google_drive").client_config_resolution_async(runtime_paths))
+
+    assert resolution is not None
+    assert resolution.config.client_id == PROVISIONED_CLIENT_ID
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize(
     "process_env",
     [{}, {"MINDROOM_PROVISIONING_URL": "https://provisioning.example"}],
@@ -772,7 +799,7 @@ def test_google_oauth_provider_refuses_a_partial_pairing(tmp_path: Path, monkeyp
         process_env={"MINDROOM_LOCAL_CLIENT_ID": "local-client"},
     )
 
-    with pytest.raises(OAuthProviderError, match="Run `mindroom connect` to restore pairing"):
+    with pytest.raises(OAuthProviderError, match="Provisioning credentials are incomplete"):
         asyncio.run(google_oauth_provider("google_drive").client_config_resolution_async(runtime_paths))
     assert requests == []
 

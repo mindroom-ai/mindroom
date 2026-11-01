@@ -37,15 +37,15 @@ def provisioning_url_from_env(runtime_paths: RuntimePaths) -> str | None:
 
 def registration_token_from_env(runtime_paths: RuntimePaths) -> str | None:
     """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
-    token = runtime_paths.plain_env_value(("MATRIX_REGISTRATION_TOKEN",))
-    return token[0].strip() if token else None
+    token = runtime_paths.env_value("MATRIX_REGISTRATION_TOKEN")
+    return None if token is None else token.strip()
 
 
 def registration_shared_secret_from_env(runtime_paths: RuntimePaths) -> str | None:
     """Get Synapse shared-secret registration credentials from env or file."""
-    secret = runtime_paths.plain_env_value(("MATRIX_REGISTRATION_SHARED_SECRET",))
+    secret = runtime_paths.env_value("MATRIX_REGISTRATION_SHARED_SECRET")
     if secret is not None:
-        return secret[0].strip()
+        return secret.strip()
 
     file_path = runtime_env_path(runtime_paths, "MATRIX_REGISTRATION_SHARED_SECRET_FILE")
     if file_path is None:

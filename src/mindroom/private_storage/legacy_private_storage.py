@@ -89,7 +89,7 @@ def _directory(path: Path) -> os.stat_result | None:
 
 def _roots(runtime_paths: RuntimePaths) -> tuple[Path, Path]:
     configured = runtime_paths.env_value("MINDROOM_SESSION_STORAGE_PATH")
-    sessions = Path(configured).expanduser() if configured and configured.strip() else runtime_paths.storage_root
+    sessions = runtime_paths.storage_root if configured is None else Path(configured).expanduser()
     if not sessions.is_absolute():
         sessions = runtime_paths.config_dir / sessions
     roots = runtime_paths.storage_root.absolute(), sessions.absolute()
