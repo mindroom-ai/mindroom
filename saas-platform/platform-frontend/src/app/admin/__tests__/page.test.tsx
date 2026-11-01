@@ -54,9 +54,21 @@ describe('AdminDashboard', () => {
     expect(card('Active Subscriptions').getByText('1200')).toBeInTheDocument()
     expect(card('Running Instances').getByText('1100')).toBeInTheDocument()
     expect(card('MRR (est.)').getByText('$199')).toBeInTheDocument()
-    expect(card('System Health').getByText('Supabase: ✓ Healthy | Stripe: ✓ Healthy')).toBeInTheDocument()
+    expect(card('System Health').getByText('Supabase: ✓ Healthy | Stripe: ✓ Healthy')).toHaveClass('text-green-600')
     expect(screen.getAllByText('1500')).toHaveLength(1)
     expect(screen.queryByText(/%/)).not.toBeInTheDocument()
+  })
+
+  it('marks the system degraded when the health check fails', async () => {
+    mockApiCall.mockResolvedValue({ ok: false })
+
+    render(<AdminDashboard />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Degraded')).toBeInTheDocument()
+    })
+
+    expect(card('System Health').getByText('Supabase: ✗ Error | Stripe: ✗ Error')).toHaveClass('text-red-600')
   })
 
   it('renders partial metrics responses without crashing', async () => {
