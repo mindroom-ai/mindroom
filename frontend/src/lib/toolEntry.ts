@@ -1,5 +1,3 @@
-import { isPlainObject } from "@/lib/configSchema";
-
 export type ToolOverrides = Record<string, unknown>;
 
 /**
@@ -7,7 +5,7 @@ export type ToolOverrides = Record<string, unknown>;
  * compact `{name: overrides}` mapping. Entries are immutable values; edits
  * return new entries.
  */
-export type ToolEntry = string | Record<string, ToolOverrides | null>;
+export type ToolEntry = string | Record<string, ToolOverrides>;
 
 function parseToolEntry(entry: ToolEntry): {
   name: string;
@@ -21,10 +19,7 @@ function parseToolEntry(entry: ToolEntry): {
   if (typeof name !== "string") {
     throw new Error("Structured tool entries must include a tool name");
   }
-  return {
-    name,
-    overrides: isPlainObject(overrides) ? overrides : null,
-  };
+  return { name, overrides: overrides ?? null };
 }
 
 export function toolEntryName(entry: ToolEntry): string {

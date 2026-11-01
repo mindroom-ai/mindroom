@@ -146,12 +146,6 @@ describe("toolEntry", () => {
     ).toEqual(["shell"]);
   });
 
-  it("reads overrides that are not a mapping as none", () => {
-    const entries = [{ shell: ["sandbox"] }] as unknown as ToolEntry[];
-
-    expect(getToolOverrides("shell", entries)).toBeNull();
-  });
-
   it("keeps the entries of listed tools and adds new names bare", () => {
     const entries: ToolEntry[] = [
       { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
