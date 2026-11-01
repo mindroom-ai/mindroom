@@ -108,6 +108,26 @@ const readsOf = (path: string) =>
       input === path && init?.method === undefined,
   ).length;
 
+/** Opens service_a, types a draft into the raw editor, and returns the editor. */
+async function draftForServiceA(names: string[]) {
+  serveServices(names, () => undefined);
+  renderOpen();
+  await showsTokenOf("service_a");
+  const editor = screen.getByPlaceholderText(
+    '{"api_key":"..."}',
+  ) as HTMLTextAreaElement;
+  fireEvent.change(editor, { target: { value: '{"token":"draft"}' } });
+  return editor;
+}
+
+/** Types a service name into the new-service field and presses Add. */
+const addService = (name: string) => {
+  fireEvent.change(screen.getByPlaceholderText("new_service_name"), {
+    target: { value: name },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add" }));
+};
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -468,10 +488,7 @@ describe("Credentials", () => {
     await waitFor(() => {
       expect((global.fetch as any).mock.calls).toHaveLength(1);
     });
-    fireEvent.change(screen.getByPlaceholderText("new_service_name"), {
-      target: { value: "ANTHROPIC_API_KEY" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    addService("ANTHROPIC_API_KEY");
     fireEvent.change(screen.getByPlaceholderText('{"api_key":"..."}'), {
       target: { value: '{"api_key":"sk-ant-dashboard"}' },
     });
@@ -801,10 +818,7 @@ describe("Credentials", () => {
       expect((global.fetch as any).mock.calls).toHaveLength(1);
     });
 
-    fireEvent.change(screen.getByPlaceholderText("new_service_name"), {
-      target: { value: "bad/name" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    addService("bad/name");
 
     await waitFor(() => {
       expect(
@@ -944,71 +958,16 @@ describe("Credentials", () => {
 
   it("prompts before switching services with unsaved changes", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const editor = await draftForServiceA(["service_a", "service_b"]);
 
-    (global.fetch as any)
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ["service_a", "service_b"],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "service_a",
-          has_credentials: false,
-          key_names: [],
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "service_b",
-          has_credentials: false,
-          key_names: [],
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "service_a",
-          credentials: {},
-        }),
-      });
-
-    renderOpen();
-
-    await waitFor(() => {
-      expect((global.fetch as any).mock.calls).toHaveLength(4);
-    });
-
-    fireEvent.change(screen.getByPlaceholderText('{"api_key":"..."}'), {
-      target: { value: '{"token":"draft"}' },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /service_b/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^service_b/ }));
 
     expect(confirmSpy).toHaveBeenCalledWith(
       "Discard unsaved changes for 'service_a'?",
     );
-    expect((global.fetch as any).mock.calls).toHaveLength(4);
+    expect(readsOf("/api/credentials/service_b")).toBe(0);
+    expect(editor.value).toBe('{"token":"draft"}');
   });
-
-  /** Opens service_a, types a draft into the raw editor, and returns the editor. */
-  async function draftForServiceA(names: string[]) {
-    serveServices(names, () => undefined);
-    renderOpen();
-    await showsTokenOf("service_a");
-    const editor = screen.getByPlaceholderText(
-      '{"api_key":"..."}',
-    ) as HTMLTextAreaElement;
-    fireEvent.change(editor, { target: { value: '{"token":"draft"}' } });
-    return editor;
-  }
-
-  const addService = (name: string) => {
-    fireEvent.change(screen.getByPlaceholderText("new_service_name"), {
-      target: { value: name },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
-  };
 
   it("prompts before Add discards unsaved changes, and keeps them when declined", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
@@ -1047,7 +1006,8 @@ describe("Credentials", () => {
     expect(confirmSpy).toHaveBeenCalledWith(
       "Discard unsaved changes for 'service_a'?",
     );
-    expect(readsOf("/api/credentials/list")).toBe(1);
+    // Refresh reads the service's credentials first, so a reload would show here at once.
+    expect(readsOf("/api/credentials/service_a")).toBe(1);
     expect(editor.value).toBe('{"token":"draft"}');
   });
 

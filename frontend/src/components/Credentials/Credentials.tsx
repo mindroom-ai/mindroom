@@ -228,7 +228,7 @@ export function Credentials() {
     void loadCredentials(selectedService);
   }, [loadCredentials, selectedService]);
 
-  // Every action that would replace the editor's unsaved draft asks here first.
+  // Selecting, adding, and refreshing ask here before they replace the editor's unsaved draft.
   const confirmDiscard = useCallback(
     () =>
       !hasUnsavedChanges ||
