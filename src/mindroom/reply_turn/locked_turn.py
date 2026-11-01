@@ -160,17 +160,27 @@ class LockedTurns:
             membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
             queue_skill_review=queue_skill_review,
-            notify_response_finished=self.response_finished_notifier(request.sources.logical_source_event_ids),
+            notify_response_finished=self.response_finished_notifier(
+                request.sources.logical_source_event_ids,
+                request.user_id,
+            ),
             persist_response_event_id=persist_response_event_id,
         )
 
-    def response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None]:
-        """Return the callback that lets automations verify their runs and budgets count the new spend."""
+    def response_finished_notifier(
+        self,
+        source_event_ids: Sequence[str],
+        requester_id: str | None,
+    ) -> Callable[[float | None], None]:
+        """Return the callback that lets automations verify their runs and budgets add the reply's cost.
+
+        ``requester_id`` is the requester the turn ran for, which its stored run names and whose spend the cost adds to.
+        """
         orchestrator = self.deps.runtime.orchestrator
 
-        def notify() -> None:
-            orchestrator.budgets.response_finished()
+        def notify(cost_usd: float | None) -> None:
             orchestrator.automations.response_finished(source_event_ids)
+            orchestrator.budgets.response_finished(requester_id, cost_usd)
 
         return notify
 

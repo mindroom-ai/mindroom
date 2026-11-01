@@ -152,6 +152,14 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
     return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
+def reply_cost_usd(content: Mapping[str, Any] | None) -> float | None:
+    """Return the USD cost a reply's AI run metadata reports, or None when it reports none."""
+    ai_run_metadata = (content or {}).get(AI_RUN_METADATA_KEY)
+    cost = ai_run_metadata.get("cost") if isinstance(ai_run_metadata, dict) else None
+    usd = cost.get("usd") if isinstance(cost, dict) else None
+    return float(usd) if isinstance(usd, str) else None
+
+
 def _reply_context_tokens(
     run: AnyRunRecord | None,
     prepared_history: PreparedHistoryState | None,

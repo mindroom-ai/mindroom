@@ -1089,6 +1089,7 @@ class ApprovalContinuationRunner:
             # A continuation keeps its turn's source events, so a run paused for approval is verified when it ends.
             notify_response_finished=self.locked.response_finished_notifier(
                 continuation.sources.logical_source_event_ids,
+                continuation.requester_id,
             ),
             persist_response_event_id=self._approval_response_event_persistence(continuation),
         )
