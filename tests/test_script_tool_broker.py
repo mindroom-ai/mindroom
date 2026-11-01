@@ -668,12 +668,16 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_script_broker_receipt_carries_the_sdk_argument_digest(tmp_path: Path) -> None:
-    """A receipt carries the digest the SDK computes for the same JSON-wire arguments, which the SDK requires."""
+    """A receipt carries the digest the SDK computes for the same JSON-wire arguments, which the SDK requires.
+
+    Unsorted keys and non-ASCII text make any other encoding of these arguments miss that digest.
+    """
     broker, token = _broker(tmp_path, events=[])
+    request = replace(_request(), arguments={"b": 2, "a": 1, "note": "héllo ✓"})
 
-    receipt = await _call_through_gateway(broker, _request(), token)
+    receipt = await _call_through_gateway(broker, request, token)
 
-    assert receipt.arguments_digest == digest_arguments({"a": 1, "b": 2})
+    assert receipt.arguments_digest == digest_arguments({"a": 1, "b": 2, "note": "héllo ✓"})
 
 
 @pytest.mark.asyncio
