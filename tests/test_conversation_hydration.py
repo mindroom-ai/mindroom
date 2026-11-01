@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
+import aiohttp
 import nio
 import pytest
 from structlog.testing import capture_logs
@@ -34,16 +35,17 @@ from mindroom.matrix.conversation_hydration import (
     _UNREADABLE_EDIT_NOTICE,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
     ConversationHydrator,
-    _HydrationError,
+    ConversationReadError,
     _projected_from_event,
     _reduce_current_revision,
 )
 from mindroom.matrix.conversation_reads import (
     _LATEST_SENDER_MESSAGE_WINDOW_MESSAGES,
     ConversationReader,
-    _StaleConversationError,
+    complete_thread_history,
     latest_agent_message_snapshot,
     projected_thread_history,
+    refetched_thread_history,
 )
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
@@ -51,7 +53,7 @@ from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_dow
 from tests.journal_helpers import record_room_history_recovery
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
     from pathlib import Path
 
     from nio.api import RelationshipType
@@ -776,7 +778,7 @@ class TestThreadHydration:
             reported_depth=None,
         )
 
-        with pytest.raises(_HydrationError, match="recursion depth"):
+        with pytest.raises(ConversationReadError, match="recursion depth"):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
@@ -803,7 +805,7 @@ class TestThreadHydration:
         """A failed hydration is retried not cached."""
         client = FakeClient(events={}, relations={})
 
-        with pytest.raises(_HydrationError):
+        with pytest.raises(ConversationReadError):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         client.events["$root"] = raw("$root", "root")
@@ -1452,7 +1454,7 @@ class TestRoomHydration:
         """
         client = FakeClient(pages=[([], "same"), ([], "same")], repeat_last=True)
 
-        with pytest.raises(_HydrationError):
+        with pytest.raises(ConversationReadError):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
@@ -2022,13 +2024,25 @@ class DeepestEventDepthPages(FakeClient):
 
 
 @dataclass
-class FailsAfterTheWalk(FakeClient):
-    """A homeserver that answers the thread walk and then fails every recursive request.
+class BrokenOffClient(FakeClient):
+    """A homeserver whose responses break off mid-body, which nio raises instead of returning an error response."""
+
+    async def room_get_event(self, room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+        """Fail every event read the way a truncated response body does."""
+        del room_id, event_id
+        msg = "Response payload is not completed"
+        raise aiohttp.ClientPayloadError(msg)
+
+
+@dataclass
+class FailingRecursiveRelations(FakeClient):
+    """A homeserver that answers the first ``answered`` recursive relations requests and fails every later one.
 
     nio reports a relations request that comes back as an error response by
     raising a plain ``RemoteProtocolError`` from the iterator.
     """
 
+    answered: int = 1
     recursive_requests: int = 0
 
     async def room_get_event_relations(
@@ -2041,10 +2055,10 @@ class FailsAfterTheWalk(FakeClient):
         recurse: bool = False,
         minimum_recursion_depth: int | None = None,
     ) -> AsyncIterator[nio.Event]:
-        """Yield the first recursive walk, and fail the ones after it."""
+        """Yield the answered recursive walks, and fail the ones after them."""
         if recurse:
             self.recursive_requests += 1
-            if self.recursive_requests > 1:
+            if self.recursive_requests > self.answered:
                 msg = "M_UNKNOWN: the homeserver could not answer"
                 raise nio.RemoteProtocolError(msg)
         async for event in super().room_get_event_relations(
@@ -2099,22 +2113,28 @@ class TestAWalkThatStoppedAboveTheReplyEdits:
         assert await bodies(alice, "$root") == ["the question, clarified", "second wording"]
         assert client.relation_calls == 3
 
-    async def test_a_depth_check_the_server_fails_fails_the_read(self, alice: PrincipalStore) -> None:
-        """Only a server saying it stopped above the edits sends the replies to their lookups.
+    @pytest.mark.parametrize("answered", [0, 1], ids=["thread walk", "depth check"])
+    async def test_a_relations_request_the_server_fails_fails_the_read(
+        self,
+        alice: PrincipalStore,
+        answered: int,
+    ) -> None:
+        """A failed thread walk, or a failed depth check after it, fails the read with the reason.
 
-        Any other failure of the request is a failure to answer, which fails
-        the read and leaves the thread for the next read, like a failed walk.
+        Only a server saying it stopped above the edits sends the replies to
+        their lookups; any other failure of the request is a failure to answer,
+        which leaves the thread for the next read.
         """
-        client = FailsAfterTheWalk(
+        client = FailingRecursiveRelations(
             events={"$root": raw("$root", "the question")},
             relations={"$root": [raw("$reply", "a reply", sender=BOB, ts=2_000, thread_id="$root")]},
+            answered=answered,
         )
 
-        with pytest.raises(nio.RemoteProtocolError) as failure:
+        with pytest.raises(ConversationReadError, match=r"Could not fetch the relations of '\$root'.*M_UNKNOWN"):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
-        assert type(failure.value) is nio.RemoteProtocolError
-        assert client.recursive_requests == 2
+        assert client.recursive_requests == answered + 1
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
     async def test_pages_reporting_varying_depths_hydrate_normally(self, alice: PrincipalStore) -> None:
@@ -2981,7 +3001,7 @@ class TestEncryptedRelations:
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
-        with pytest.raises(_HydrationError, match="unreadable events remain"):
+        with pytest.raises(ConversationReadError, match="unreadable events remain"):
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=None)
 
     async def test_an_export_reads_a_thread_past_an_unreadable_event_outside_it(
@@ -3041,7 +3061,7 @@ class TestEncryptedRelations:
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$other")
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
         for thread_id in (None, "$root"):
-            with pytest.raises(_HydrationError, match="unreadable events remain"):
+            with pytest.raises(ConversationReadError, match="unreadable events remain"):
                 await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=thread_id)
 
     @pytest.mark.parametrize("thread_id", [None, "$root"])
@@ -3059,7 +3079,7 @@ class TestEncryptedRelations:
             olm=object(),
         )
 
-        with pytest.raises(_HydrationError, match="unreadable events remain") as failure:
+        with pytest.raises(ConversationReadError, match="unreadable events remain") as failure:
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=thread_id)
 
         diagnostic = str(failure.value)
@@ -3098,7 +3118,7 @@ class TestEncryptedRelations:
         decrypt = Mock(return_value=decrypted)
         monkeypatch.setattr(client, "decrypt_event", decrypt)
 
-        with pytest.raises(_HydrationError, match="unreadable events remain") as failure:
+        with pytest.raises(ConversationReadError, match="unreadable events remain") as failure:
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=thread_id)
 
         diagnostic = str(failure.value)
@@ -3125,7 +3145,7 @@ class TestEncryptedRelations:
             olm=object(),
         )
 
-        with pytest.raises(_HydrationError) as failure:
+        with pytest.raises(ConversationReadError) as failure:
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         diagnostic = str(failure.value)
@@ -3307,7 +3327,7 @@ class TestEncryptedRelations:
             hidden_events={"$root": "M_LIMIT_EXCEEDED"},
         )
 
-        with pytest.raises(_HydrationError, match="Could not fetch thread root"):
+        with pytest.raises(ConversationReadError, match="Could not fetch thread root"):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
@@ -3456,8 +3476,29 @@ class TestReadModes:
         )
         reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
 
-        with pytest.raises(_StaleConversationError):
+        with pytest.raises(ConversationReadError, match="awaiting a server refetch"):
             await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            lambda reader: complete_thread_history(reader, ROOM, "$root"),
+            lambda reader: refetched_thread_history(reader, ROOM, "$root", unreadable_is_missing=True),
+        ],
+        ids=["strict", "rewalk"],
+    )
+    async def test_a_response_that_broke_off_fails_the_read(
+        self,
+        alice: PrincipalStore,
+        read: Callable[[ConversationReader], Awaitable[object]],
+    ) -> None:
+        """Nio raises a response whose body broke off, and the read fails with the conversation layer's own error."""
+        client = BrokenOffClient(events={"$root": raw("$root", "the question")}, relations={"$root": []})
+
+        with pytest.raises(ConversationReadError, match="could not be read from the homeserver: ClientPayloadError"):
+            await read(conversation_reader(alice, client))
+
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
 
 class TestUnreadHistory:
