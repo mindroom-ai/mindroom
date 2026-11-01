@@ -13,7 +13,6 @@ from backend.pricing import (
     get_stripe_price_match,
     get_trial_days,
     is_trial_enabled_for_plan,
-    load_pricing_config,
     load_pricing_config_model,
 )
 from backend.services.provisioner_service import _RESOURCE_PROFILE_HELM_VALUES
@@ -57,13 +56,6 @@ def fixture_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 class TestPricingConfig:
     """Test pricing configuration loading and validation."""
 
-    def test_load_pricing_config(self) -> None:
-        """Test loading pricing configuration from YAML."""
-        config = load_pricing_config()
-
-        assert set(config) == {"product", "plans", "trial", "discounts"}
-        assert set(config["plans"]) == {"free", "byok", "hobby", "pro", "enterprise"}
-
     def test_load_pricing_config_model(self) -> None:
         """Test loading pricing configuration as Pydantic model."""
         model = load_pricing_config_model()
@@ -72,12 +64,7 @@ class TestPricingConfig:
         assert model.product.name == "MindRoom Subscription"
         assert model.product.metadata.platform == "mindroom"
 
-        # Check plans
-        assert "byok" in model.plans
-        assert "hobby" in model.plans
-        assert "pro" in model.plans
-        assert "free" in model.plans
-        assert "enterprise" in model.plans
+        assert set(model.plans) == {"free", "byok", "hobby", "pro", "enterprise"}
 
         # Check trial configuration
         assert model.trial.enabled is True
@@ -176,16 +163,11 @@ class TestPricingConfig:
         )
 
         with patch("backend.pricing.config_path", mock_path):
-            # Should raise FileNotFoundError when config file is missing
             with pytest.raises(FileNotFoundError) as exc_info:
-                load_pricing_config()
+                load_pricing_config_model()
 
             assert "Pricing configuration file not found" in str(exc_info.value)
             assert "This file is required for the application to run" in str(exc_info.value)
-
-            # Model should also fail without valid config
-            with pytest.raises(FileNotFoundError):
-                load_pricing_config_model()
 
 
 class TestPricingHelperFunctions:
@@ -328,6 +310,5 @@ class TestPricingIntegration:
         with config_path.open() as f:
             yaml_data = yaml.safe_load(f)
 
-        assert load_pricing_config() == yaml_data
         assert load_pricing_config_model().model_dump(exclude_unset=True) == yaml_data
         assert get_stripe_price_id("byok", "monthly") == yaml_data["plans"]["byok"]["stripe_price_id_monthly"]
