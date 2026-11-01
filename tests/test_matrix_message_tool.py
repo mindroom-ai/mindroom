@@ -7,7 +7,7 @@ import json
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
@@ -53,10 +53,12 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     delivered_matrix_side_effect,
+    event_serving_client,
     make_conversation_reader_mock,
     make_latest_thread_event_id_mock,
     make_matrix_client_mock,
     make_relation_lookup,
+    make_thread_reply_lookup,
     make_visible_message,
     runtime_paths_for,
     serve_conversation_reader,
@@ -540,6 +542,8 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
     assert "m.relates_to" not in sent_content
+    # The sentinel is not an event ID, so nothing looks it up as one.
+    cast("AsyncMock", ctx.relations.runtime.client.room_get_event).assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1598,7 +1602,7 @@ async def test_matrix_message_read_returns_thread_messages() -> None:
     assert payload["thread_id"] == "$thread-other:localhost"
     assert payload["messages"] == [thread_messages[-1].to_dict()]
     assert payload["edit_options"][0]["event_id"] == "$two"
-    ctx.conversation_reader.read_strict.assert_awaited_once_with(
+    ctx.conversation_reader.read_strict.assert_awaited_with(
         room_id=ctx.room_id,
         thread_id="$thread-other:localhost",
         limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
@@ -1634,7 +1638,7 @@ async def test_matrix_message_read_preserves_notice_messages() -> None:
     assert payload["status"] == "ok"
     assert payload["messages"] == [message.to_dict() for message in thread_messages]
     assert payload["messages"][1]["msgtype"] == "m.notice"
-    ctx.conversation_reader.read_strict.assert_awaited_once_with(
+    ctx.conversation_reader.read_strict.assert_awaited_with(
         room_id=ctx.room_id,
         thread_id="$thread-other:localhost",
         limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
@@ -2038,12 +2042,92 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
     assert payload["action"] == "read"
     assert payload["thread_id"] == "$thread-other:localhost"
     assert payload["messages"] == [thread_messages[-1].to_dict()]
-    ctx.conversation_reader.read_strict.assert_awaited_once_with(
+    ctx.conversation_reader.read_strict.assert_awaited_with(
         room_id=ctx.room_id,
         thread_id="$thread-other:localhost",
         limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
     )
     ctx.client.room_messages.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_to_a_thread_reply_posts_in_its_thread() -> None:
+    """A reply event ID as thread_id sends into that reply's thread, since Matrix rejects a reply as a thread root."""
+    tool = MatrixMessageTools()
+    ctx = replace(
+        _make_context(thread_id=None),
+        relations=make_thread_reply_lookup("$reply-in-thread:localhost", "$root:localhost"),
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$send_evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(action="send", message="hello", thread_id="$reply-in-thread:localhost"),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] == "$root:localhost"
+    relates_to = mock_send.await_args.args[2]["m.relates_to"]
+    assert relates_to["rel_type"] == "m.thread"
+    assert relates_to["event_id"] == "$root:localhost"
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_keeps_a_thread_id_whose_lookup_fails() -> None:
+    """A thread_id whose thread cannot be looked up is sent as given instead of failing the tool."""
+    tool = MatrixMessageTools()
+    rich_reply = {
+        "msgtype": "m.text",
+        "body": "reply",
+        "m.relates_to": {"m.in_reply_to": {"event_id": "$parent:localhost"}},
+    }
+    relations = make_relation_lookup(
+        client=event_serving_client("$rich-reply:localhost", content=rich_reply),
+        failure=RuntimeError("journal unavailable"),
+    )
+    ctx = replace(_make_context(thread_id=None), relations=relations)
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$send_evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(action="send", message="hello", thread_id="$rich-reply:localhost"),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] == "$rich-reply:localhost"
+    assert mock_send.await_args.args[2]["m.relates_to"]["event_id"] == "$rich-reply:localhost"
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_of_a_thread_reply_reads_its_thread() -> None:
+    """A reply event ID as thread_id reads the whole thread the reply belongs to."""
+    tool = MatrixMessageTools()
+    ctx = replace(
+        _make_context(thread_id=None),
+        relations=make_thread_reply_lookup("$reply-in-thread:localhost", "$root:localhost"),
+    )
+    serve_conversation_reader(ctx.conversation_reader, [make_visible_message(event_id="$root:localhost", body="root")])
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(action="read", thread_id="$reply-in-thread:localhost"))
+
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] == "$root:localhost"
+    ctx.conversation_reader.read_strict.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        thread_id="$root:localhost",
+        limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
+    )
 
 
 @pytest.mark.asyncio
