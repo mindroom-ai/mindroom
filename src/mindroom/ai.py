@@ -504,6 +504,7 @@ def _agent_loop_hooks(
             lifecycle=ctx.compaction_lifecycle,
             turn_recorder=run_context.turn_recorder,
             prepared_history_tokens=prepared.prepared_history.replayed_history_tokens,
+            prepared_history_reported=prepared.prepared_history.reported_history,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,

@@ -87,6 +87,32 @@ def test_estimates_wait_for_the_encoder_without_blocking(monkeypatch: pytest.Mon
     assert count(counter, text) == math.ceil(_o200k(text) * 1.8)
 
 
+def test_a_failed_vocabulary_load_retries_after_a_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A network blip at startup must not leave the process on the stand-in until it restarts.
+
+    A download has no timeout, so the retry waits rather than starting with every count.
+    """
+
+    def offline(_name: str) -> tiktoken.Encoding:
+        msg = "no network"
+        raise OSError(msg)
+
+    monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
+    monkeypatch.setattr(tiktoken, "get_encoding", offline)
+    families._load_in_background("o200k_base")
+    encoder = families._encoders["o200k_base"]
+    loads: list[str] = []
+    monkeypatch.setattr(families, "_load_in_background", loads.append)
+
+    assert families._loaded("o200k_base") is None
+    assert not encoder.started, "the pause after a failure has not passed"
+
+    monkeypatch.setattr(families.time, "monotonic", lambda: encoder.retry_at)
+    families._loaded("o200k_base")
+
+    assert encoder.started
+
+
 def test_without_its_vocabulary_a_size_that_must_not_undercount_counts_bytes() -> None:
     """Compaction input still has an upper bound when o200k_base cannot load, while history keeps the quarter token.
 

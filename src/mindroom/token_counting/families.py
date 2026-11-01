@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
@@ -38,6 +39,8 @@ _OPENAI_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-", "codex-")
 # tiktoken's cost grows with the square of a run without whitespace, so text is encoded in pieces of at most this many
 # characters, each cut after a newline or before a word where one is near; a hard cut can add a token.
 _PIECE_CHARS = 8_192
+# A failed load starts again only after this pause: a download has no timeout, and counts would otherwise retry it.
+_RETRY_SECONDS = 300.0
 
 
 @dataclass
@@ -46,6 +49,8 @@ class _Encoder:
 
     value: tiktoken.Encoding | None = None
     started: bool = False
+    # When a failed background load may start again.
+    retry_at: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -81,16 +86,23 @@ def _load_in_background(name: str) -> None:
     try:
         _load(name)
     except Exception:
+        encoder = _encoder(name)
+        encoder.retry_at = time.monotonic() + _RETRY_SECONDS
+        encoder.started = False
         logger.warning(
-            f"{name} did not load; token estimates use a quarter token per character, and compaction input its bytes",
+            f"{name} did not load; token estimates use a quarter token per character, and compaction input its bytes, "
+            "until a retry in five minutes loads it",
             exc_info=True,
         )
 
 
 def _loaded(name: str) -> tiktoken.Encoding | None:
-    """Return the encoder once loaded; the first call starts its load in a background thread and returns None."""
+    """Return the encoder once loaded; the first call starts its load in a background thread and returns None.
+
+    After a failed load, a call starts another once the pause has passed.
+    """
     encoder = _encoder(name)
-    if encoder.value is None and not encoder.started:
+    if encoder.value is None and not encoder.started and time.monotonic() >= encoder.retry_at:
         encoder.started = True
         threading.Thread(target=_load_in_background, args=(name,), name=f"{name}-loader", daemon=True).start()
     return encoder.value

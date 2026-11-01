@@ -477,7 +477,7 @@ export function MemoryConfig() {
               <NumberField
                 id="entrypoint-max-tokens"
                 label="Entrypoint Max Tokens"
-                helperText="Maximum estimated tokens (characters / 4) of whole lines preloaded from the entrypoint file."
+                helperText="Maximum tokens, as the turn's model counts them, of whole lines preloaded from the entrypoint file."
                 min={1}
                 value={memory.file?.max_entrypoint_tokens}
                 fallback={50000}

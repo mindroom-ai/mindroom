@@ -101,8 +101,10 @@ class _MidTurnCompaction:
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None
     turn_recorder: TurnRecorder | None
-    # The size of the stored history the run replays, as the reply's preparation found it.
+    # The size of the stored history the run replays, as the reply's preparation found it, and whether that size is
+    # the provider's reported request size.
     prepared_history_tokens: int | None
+    prepared_history_reported: bool
     # Set when compaction failed or cannot bring the request under the limit; this run is not compacted again. An
     # approval resume builds a new hook, so it may try once more.
     stopped: bool = False
@@ -148,12 +150,14 @@ def mid_turn_compaction_hook(
     lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
     prepared_history_tokens: int | None = None,
+    prepared_history_reported: bool = False,
 ) -> BeforeRequestHook:
     """Return the pre-request hook that compacts one run's long turn before a request that would exceed its window.
 
     A fold lands in the scope of ``storage`` when the run's requests replay its stored history under ``replay_plan``;
     ``lifecycle`` shows the fold through the reply's notices and ``turn_recorder`` records the folded calls for an
-    interrupted record. ``prepared_history_tokens`` sizes the replayed history in the first request.
+    interrupted record. ``prepared_history_tokens`` sizes the replayed history in the first request, from the
+    provider's reported request size when ``prepared_history_reported``.
     """
     compaction = _MidTurnCompaction(
         config=config,
@@ -168,6 +172,7 @@ def mid_turn_compaction_hook(
         lifecycle=lifecycle,
         turn_recorder=turn_recorder,
         prepared_history_tokens=prepared_history_tokens,
+        prepared_history_reported=prepared_history_reported,
     )
 
     async def hook(state: LoopState) -> RequestDecision:
@@ -451,12 +456,13 @@ def _request_tokens(
         None,
     )
     if anchor is None and compaction.prepared_history_tokens is not None:
-        fresh = [message for message in messages if not message.from_history]
-        return (
-            compaction.prepared_history_tokens
-            + estimate_request_messages_tokens(fresh, counter=policy.counter)
-            + _thinking_tokens(fresh, policy.counter)
-            + _tool_tokens(tools, messages, policy.deferred_tool_names, policy.counter)
+        return _prepared_request_tokens(
+            compaction.prepared_history_tokens,
+            reported=compaction.prepared_history_reported,
+            messages=messages,
+            tools=tools,
+            deferred=policy.deferred_tool_names,
+            counter=policy.counter,
         )
     if anchor is not None and not checkpoint_items(messages[anchor], policy.native_route):
         reported = reported_context_tokens(
@@ -484,6 +490,34 @@ def _request_tokens(
             + _tool_tokens(tools, projected, policy.deferred_tool_names, policy.counter)
         )
     return _estimated_request_tokens(policy, messages, tools)
+
+
+def _prepared_request_tokens(
+    history_tokens: int,
+    *,
+    reported: bool,
+    messages: Sequence[Message],
+    tools: Sequence[ToolSpec],
+    deferred: frozenset[str],
+    counter: TokenCounter,
+) -> int:
+    """Size a first request whose replayed history is ``history_tokens``, estimating the rest of what it sends.
+
+    A reported request size already holds the definitions Claude's tool search loaded, so with ``reported`` they are
+    not counted again; an estimated history leaves them to the tools.
+    """
+    fresh = [message for message in messages if not message.from_history]
+    tool_tokens = (
+        count(counter, tool_definitions_text(tools, deferred))
+        if reported
+        else _tool_tokens(tools, messages, deferred, counter)
+    )
+    return (
+        history_tokens
+        + estimate_request_messages_tokens(fresh, counter=counter)
+        + _thinking_tokens(fresh, counter)
+        + tool_tokens
+    )
 
 
 def _estimated_request_tokens(policy: _Policy, messages: list[Message], tools: Sequence[ToolSpec]) -> int:

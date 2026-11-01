@@ -594,6 +594,41 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
     assert 15_000 < total < 30_000
 
 
+@pytest.mark.parametrize("reported", [True, False], ids=["reported-history", "estimated-history"])
+def test_the_first_request_counts_loaded_tool_definitions_once(*, reported: bool) -> None:
+    """A reported request size already holds the definitions Claude's tool search loaded; an estimate leaves them out."""
+    search = [
+        {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
+        {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srv_1",
+            "content": {
+                "type": "tool_search_tool_search_result",
+                "tool_references": [{"type": "tool_reference", "tool_name": "big_tool"}],
+            },
+        },
+    ]
+    history = [
+        Message(role="user", content="Use the big tool", from_history=True),
+        Message(role="assistant", provider_data={"claude_blocks": search}, from_history=True),
+    ]
+    counter = fake_token_counter()
+
+    total = mid_turn_compaction._prepared_request_tokens(
+        1_000,
+        reported=reported,
+        messages=[*history, Message(role="user", content="Go on")],
+        tools=[BIG_TOOL],
+        deferred=frozenset({"big_tool"}),
+        counter=counter,
+    )
+
+    if reported:
+        assert total < 2_000
+    else:
+        assert total > 15_000
+
+
 def test_aggregate_usage_of_retried_requests_never_anchors_sizing() -> None:
     """A response whose counters sum several retried attempts describes no single request's context."""
     message = Message(

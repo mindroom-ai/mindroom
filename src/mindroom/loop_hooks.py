@@ -57,7 +57,7 @@ class HookTurn:
     itself. ``model_name`` is the configured name of the model the run resolved, and ``prompt_id`` the turn's prompt;
     ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and recorder, which a resume and a team
     member lack; ``prepared_history_tokens`` is the size of the stored history the run replays, as the turn's
-    preparation found it.
+    preparation found it, from the provider's reported request size when ``prepared_history_reported``.
     """
 
     config: Config
@@ -69,6 +69,7 @@ class HookTurn:
     lifecycle: CompactionLifecycle | None = None
     turn_recorder: TurnRecorder | None = None
     prepared_history_tokens: int | None = None
+    prepared_history_reported: bool = False
 
 
 def agent_loop_hooks(
@@ -172,6 +173,7 @@ def _loop_hooks(
             lifecycle=turn.lifecycle,
             turn_recorder=turn.turn_recorder,
             prepared_history_tokens=turn.prepared_history_tokens,
+            prepared_history_reported=turn.prepared_history_reported,
         ),
     )
     before_request.append(approval_receipt_hook)

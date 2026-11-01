@@ -389,6 +389,9 @@ class PreparedHistoryState:
     # history; a run whose final plan replays all of it publishes them, so a later reply can take them off the request
     # size the provider reports.
     non_prompt_tokens: int | None = None
+    # Whether the replayed history was sized from the provider's reported request size, which already holds the tool
+    # definitions tool search loaded.
+    reported_history: bool = False
     native_history: NativeHistory | None
 
     @property
