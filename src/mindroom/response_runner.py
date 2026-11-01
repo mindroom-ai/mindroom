@@ -26,7 +26,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     TURN_INTENT_RUN_METADATA_KEY,
 )
-from mindroom.contacts.turns import contact_turn_instructions, contact_turn_tools
+from mindroom.contacts.turns import contact_room, contact_turn_instructions, contact_turn_tools
 from mindroom.conversation_state_writer import ReplySession
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.error_handling import get_user_friendly_error_message
@@ -306,18 +306,6 @@ class _PostLockRequestPreparationError(RuntimeError):
 
     def __init__(self, message: str = "Post-lock request preparation failed") -> None:
         super().__init__(message)
-
-
-def _runs_nothing(request: ResponseRequest) -> Suppression | None:
-    """Return why a turn ends unanswered without running: an empty prompt, or a room whose contact was removed.
-
-    A removed contact's room takes no more turns, even one admitted before the removal.
-    """
-    if not request.prompt.strip():
-        return Suppression.EMPTY_PROMPT
-    if request.contact is not None and request.contact[0].status != "active":
-        return Suppression.CONTACT_TURN
-    return None
 
 
 def _raise_if_process_shutdown() -> None:
@@ -1408,6 +1396,19 @@ class ResponseRunner:
         await self._generate_and_settle(prepared)
         return Owned()
 
+    def _runs_nothing(self, request: ResponseRequest) -> Suppression | None:
+        """Return why a locked turn ends unanswered without running: an empty prompt, or a contact no longer active.
+
+        A contact turn read its contact before it waited for the conversation, so it reads the store again once it holds
+        it: a removed contact's room takes no more turns, even one admitted or queued before the removal.
+        """
+        if not request.prompt.strip():
+            return Suppression.EMPTY_PROMPT
+        if request.contact is None:
+            return None
+        current = contact_room(self.deps.runtime.config, self.deps.runtime_paths, request.room_id, self.deps.agent_name)
+        return None if current is not None and current[0].status == "active" else Suppression.CONTACT_TURN
+
     async def _prepare_locked_turn(
         self,
         request: ResponseRequest,
@@ -1435,7 +1436,7 @@ class ResponseRunner:
                 requester_user_id=execution_identity.requester_id,
             )
         )
-        if (suppression := _runs_nothing(request)) is not None:
+        if (suppression := self._runs_nothing(request)) is not None:
             return await self._finalize_empty_prompt_locked(
                 request,
                 resolved_target=resolved_target,

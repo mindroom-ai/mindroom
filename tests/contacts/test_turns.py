@@ -791,3 +791,35 @@ async def test_a_turn_in_a_removed_contacts_room_runs_nothing_and_shows_nothing(
     reply = await bot._reply_runtime.store.replies.for_sources((EVENT_ID,))
     assert reply is not None
     assert reply.terminal
+
+
+@pytest.mark.asyncio
+async def test_a_queued_turn_whose_contact_is_removed_before_its_lock_runs_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn reads its contact before it waits for the conversation, so it checks again once it holds it."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    model = ScriptedModel([answer("Private line for Bob.")])
+    install_model_providers(monkeypatch, {"default": model})
+    bot = _bot(config, paths)
+    read_contact = LockedTurns.with_contact
+
+    def read_then_remove(locked: LockedTurns, request: ResponseRequest) -> ResponseRequest:
+        snapshot = read_contact(locked, request)
+
+        def remove(book: Any) -> None:  # noqa: ANN401
+            book.contacts[0].status = "removed"
+
+        update_contacts(paths, remove)
+        return snapshot
+
+    with patch.object(LockedTurns, "with_contact", read_then_remove):
+        turn = await _run(bot, CONTACT_ROOM)
+
+    [delivery] = turn.ended
+    assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
+    assert model.requests == []
+    assert turn.contexts == []
+    bot.client.room_send.assert_not_awaited()
