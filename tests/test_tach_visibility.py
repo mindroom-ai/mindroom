@@ -1,9 +1,10 @@
 """Keep every Tach `visibility` entry naming a declared module that imports the granting module.
 
-Tach checks no import made by a module that `tach.toml` does not declare, and it has no exact mode for `visibility`.
-With `exact = true`, a declared module's `depends_on` lists exactly the declared modules it imports at runtime.
-So a `visibility` entry restricts something only when it names a declared module whose `depends_on` lists the
-granting module, and this test fails on every other entry.
+Tach checks each import as made by the nearest declared module that contains the importing file, and it has no exact
+mode for `visibility`, so an entry naming an undeclared module matches nothing.
+A grant to a declared module whose `depends_on` lacks the granting module pre-approves an import that no code makes,
+because `exact = true` keeps every `depends_on` list equal to the module's runtime imports.
+This test fails on both, so a module's `visibility` list names exactly the declared modules that import it.
 """
 
 from __future__ import annotations

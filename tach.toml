@@ -7,9 +7,11 @@
 #   importer-specific enforcement.
 # - Use module `visibility` to restrict which modules may import a module.
 #   A module's `visibility` list names exactly the declared modules that
-#   import it at runtime, because Tach checks no import from an undeclared
-#   module; `tests/test_tach_visibility.py` fails on any module or interface
-#   `visibility` entry that names no such importer.
+#   import it at runtime. Tach checks each import as made by the nearest
+#   declared module containing the importing file, so an entry naming an
+#   undeclared module matches nothing; `tests/test_tach_visibility.py` fails
+#   on such an entry, and on a grant to a module whose `depends_on` lacks
+#   the granting module, in module and interface `visibility` lists alike.
 # - Use `[[interfaces]]` only for symbol-level public APIs.
 # - Do not rely on interface `visibility` as a substitute for module
 #   dependency rules.
