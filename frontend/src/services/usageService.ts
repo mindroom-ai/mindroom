@@ -1,3 +1,4 @@
+import { isPlainObject } from "@/lib/configSchema";
 import type { TokenTotals, UsagePollResult, UsageReport } from "@/types/usage";
 
 const DEFAULT_RETRY_AFTER_MS = 5_000;
@@ -18,23 +19,19 @@ const TOKEN_FIELDS = [
   "audio_total_tokens",
 ] as const satisfies readonly (keyof TokenTotals)[];
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value != null && typeof value === "object" && !Array.isArray(value);
-}
-
 function isCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isTokenTotals(value: unknown): value is TokenTotals {
   return (
-    isRecord(value) && TOKEN_FIELDS.every((field) => isCount(value[field]))
+    isPlainObject(value) && TOKEN_FIELDS.every((field) => isCount(value[field]))
   );
 }
 
 function isCoverage(value: unknown): boolean {
   return (
-    isRecord(value) &&
+    isPlainObject(value) &&
     isCount(value.scanned_sources) &&
     isCount(value.unavailable_sources) &&
     typeof value.note === "string"
@@ -46,7 +43,7 @@ function isUsageRow(
   count: "session_count" | "run_count",
 ): value is Record<string, unknown> {
   return (
-    isRecord(value) && isTokenTotals(value.totals) && isCount(value[count])
+    isPlainObject(value) && isTokenTotals(value.totals) && isCount(value[count])
   );
 }
 
@@ -107,7 +104,7 @@ function isEntityRow(value: unknown): boolean {
 }
 
 function isUsageReport(value: unknown): value is UsageReport {
-  if (!isRecord(value)) return false;
+  if (!isPlainObject(value)) return false;
 
   return (
     value.schema_version === 1 &&
@@ -146,7 +143,7 @@ function retryAfterMs(response: Response): number {
 }
 
 function isAbortError(error: unknown): boolean {
-  return isRecord(error) && error.name === "AbortError";
+  return isPlainObject(error) && error.name === "AbortError";
 }
 
 export async function fetchUsage(
