@@ -1147,7 +1147,7 @@ async def test_script_broker_offloads_blocking_sync_toolkit_connect(
             # The loop runs this callback during the connect only when the connect leaves the loop free.
             loop_kept_running = threading.Event()
             loop.call_soon_threadsafe(loop_kept_running.set)
-            connect_saw_loop_running.append(loop_kept_running.wait(timeout=5))
+            connect_saw_loop_running.append(loop_kept_running.wait(timeout=SETTLE_TIMEOUT_SECONDS))
 
     _replace_calculator_toolkit(monkeypatch, BlockingConnectToolkit)
     broker, token = _broker(tmp_path, events=[])
@@ -1271,7 +1271,7 @@ async def test_script_broker_offloads_blocking_sync_toolkit_close(
             # The loop runs this callback during the close only when the close leaves the loop free.
             loop_kept_running = threading.Event()
             loop.call_soon_threadsafe(loop_kept_running.set)
-            close_saw_loop_running.append(loop_kept_running.wait(timeout=5))
+            close_saw_loop_running.append(loop_kept_running.wait(timeout=SETTLE_TIMEOUT_SECONDS))
 
         async def add(self, a: int, b: int) -> int:
             return a + b

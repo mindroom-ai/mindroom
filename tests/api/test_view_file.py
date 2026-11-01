@@ -22,6 +22,7 @@ from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ViewFileRequest
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 TOKEN = "view-file-test-token"  # noqa: S105
 HEADERS = {"x-mindroom-sandbox-token": TOKEN}
@@ -176,7 +177,7 @@ async def test_view_file_endpoint_keeps_event_loop_responsive_during_decode(
         # The loop runs this callback during the view only when the view leaves the loop free.
         loop_kept_running = threading.Event()
         loop.call_soon_threadsafe(loop_kept_running.set)
-        view_saw_loop_running.append(loop_kept_running.wait(timeout=5))
+        view_saw_loop_running.append(loop_kept_running.wait(timeout=SETTLE_TIMEOUT_SECONDS))
         return ToolValue(content="decoded")
 
     monkeypatch.setattr(sandbox_runner, "view_agent_image", blocking_view)

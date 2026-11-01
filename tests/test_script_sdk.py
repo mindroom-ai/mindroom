@@ -92,6 +92,16 @@ def test_script_sdk_polls_the_same_accepted_call_id_until_completed(
     assert all(request.headers["Authorization"] == "Bearer secret-token" for request in requests)
 
 
+def test_argument_digest_encoding_stays_stable_across_versions() -> None:
+    """A script adopted across a primary upgrade digests its calls with its own, older SDK.
+
+    Changing this value is a script SDK gateway contract change: bump ``SCRIPT_PROTOCOL_VERSION`` with it.
+    """
+    arguments: dict[str, object] = {"text": "héllo ✓", "nested": {"z": [1.5, None, True], "a": 10**20}, "count": -3}
+
+    assert digest_arguments(arguments) == "dedbd5720dd68915a037c21e8e520036d4e60d7c139ccdbdf672580300819346"
+
+
 def test_script_sdk_digests_the_json_wire_argument_representation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
