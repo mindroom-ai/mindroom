@@ -188,7 +188,7 @@ class RuntimePaths:
         for name in names:
             path = runtime_env_path(self, f"{name}_FILE")
             try:
-                value = "" if path is None else path.read_text(encoding="utf-8").strip()
+                value = "" if path is None else path.read_text(encoding="utf-8-sig").strip()
             except (OSError, UnicodeDecodeError):
                 value = ""
             if not runtime_env_policy.is_unset_env_value(name, value):
