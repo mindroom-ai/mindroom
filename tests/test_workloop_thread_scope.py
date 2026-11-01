@@ -177,18 +177,6 @@ def _todo_titles(state: dict[str, object]) -> list[str]:
     return titles
 
 
-def _registry_callbacks(registry: HookRegistry) -> list[object]:
-    callbacks: list[object] = []
-    seen_callbacks: set[object] = set()
-    for hooks in registry._hooks_by_event.values():
-        for registered_hook in hooks:
-            if registered_hook.callback in seen_callbacks:
-                continue
-            seen_callbacks.add(registered_hook.callback)
-            callbacks.append(registered_hook.callback)
-    return callbacks
-
-
 def _tool_context(
     loaded: _LoadedWorkloop,
     *,

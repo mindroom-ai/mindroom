@@ -41,7 +41,6 @@ class TestTeamRoomUpdates:
     """Test team room configuration updates."""
 
     @pytest.mark.asyncio
-    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     async def test_team_room_change_reconciles_live_bot(self, tmp_path: Path) -> None:
         """Changing a team's rooms should preserve bots and reconcile memberships live."""
         # Create initial config

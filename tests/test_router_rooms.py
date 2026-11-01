@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock
 
@@ -228,13 +227,10 @@ async def test_router_joins_rooms_on_start(
 @pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 async def test_orchestrator_creates_router_with_all_rooms(
     config_with_rooms: Config,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Test that the orchestrator properly initializes the router with all rooms."""
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
-
-    monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
     # Create orchestrator
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=config_with_rooms)
@@ -295,13 +291,8 @@ async def test_router_updates_rooms_on_config_change(
 
     setup_rooms = AsyncMock()
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", setup_rooms)
-
-    # Create orchestrator with initial config
-    # Mock start/sync_forever at class level so newly created bots in update_config don't perform real login/sync
+    # The agent the update adds starts without logging in.
     monkeypatch.setattr("mindroom.bot.AgentBot.start", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.AgentBot.join_configured_rooms", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.AgentBot.leave_unconfigured_rooms", AsyncMock())
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=initial_config)
     monkeypatch.setattr(orchestrator.config_reload, "load_config", lambda: published_config_load(updated_config))
@@ -320,20 +311,11 @@ async def test_router_updates_rooms_on_config_change(
         setup_rooms.reset_mock()
         setup_rooms.side_effect = reconcile_room_aliases
 
-        # Mock bot operations using monkeypatch to avoid method assignment errors
         async def mock_stop(*, shutdown_intent: object | None = None) -> None:
             del shutdown_intent
 
-        async def mock_start() -> None:
-            pass
-
-        async def mock_sync_forever() -> None:
-            raise asyncio.CancelledError
-
         for bot in orchestrator.agent_bots.values():
             monkeypatch.setattr(bot, "stop", mock_stop)
-            monkeypatch.setattr(bot, "start", mock_start)
-            monkeypatch.setattr(bot, "sync_forever", mock_sync_forever)
             # A reload reconciles the rooms of running bots only.
             bot.running = True
 
