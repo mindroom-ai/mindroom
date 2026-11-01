@@ -6,8 +6,9 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -15,26 +16,32 @@ from fastapi.testclient import TestClient
 
 from mindroom.ai import TurnResult
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing, RouterConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
 from mindroom.dynamic_workflows.spec import RoomAgentParticipant
+from mindroom.final_delivery import Cancelled, Completed, Failed, FailureCause, FinalDeliveryOutcome, Owed, TurnEnding
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
 from mindroom.llm.messages import Message
+from mindroom.memory import MemoryPromptParts
+from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
+from mindroom.providers.identity import model_identity
 from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.turn_model import TeamTurnModelSelection
 from tests.api.conftest import publish_api_config
-from tests.budget_helpers import budget_monitor_with_spend
+from tests.approval_continuation_helpers import approval_continuation
+from tests.budget_helpers import budget_monitor_with_spend, set_month_spend
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     completed_ai_response_mock,
@@ -42,7 +49,7 @@ from tests.conftest import (
     patch_response_runner_module,
     unwrap_extracted_collaborator,
 )
-from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
@@ -58,9 +65,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.constants import RuntimePaths
+    from mindroom.response_runner import ResponseRunner
     from mindroom.teams.members import BuiltTeam
+
+_ALICE = "@alice:localhost"
 
 
 def _budget(config: Config, *, monthly_limit_usd: float | None = 0) -> None:
@@ -110,27 +119,120 @@ async def test_scheduled_model_is_budgeted_too(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_completed_response_asks_budgets_to_count_the_new_spend(
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_a_completed_reply_adds_its_cost_for_its_requester(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
 ) -> None:
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    _budget(config, monthly_limit_usd=None)
     assert bot.client is not None
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     response_finished = MagicMock()
     monkeypatch.setattr(bot.orchestrator.budgets, "response_finished", response_finished)
-    model = ScriptedModel([answer("Done.")])
+    model = ScriptedModel([answer("Done.", usage(1_000, 100))], identity=model_identity(config.models["default"]))
 
     install_model_providers(monkeypatch, {"default": model})
     with patch_response_runner_module(
         typing_indicator=_noop_typing,
-        should_use_streaming=AsyncMock(return_value=False),
+        should_use_streaming=AsyncMock(return_value=streaming),
     ):
-        await coordinator.generate_response(_plain_request(_target()))
+        request = _plain_request(_target())
+        await coordinator.generate_response(request)
         assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS, owner=coordinator.deps.runtime)
 
-    response_finished.assert_called_once_with()
+    # 1,000 input tokens at $5 and 100 output tokens at $30 per million, dated by when the turn was requested.
+    response_finished.assert_called_once_with("@user:localhost", pytest.approx(0.008), request.requested_at)
+
+
+def _budgets_with_spend(
+    coordinator: ResponseRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    spend_usd: float,
+) -> BudgetMonitor:
+    """Install an idle budget monitor whose latest scan of this month charged Alice ``spend_usd``."""
+    config = coordinator.deps.runtime.config
+    _budget(config, monthly_limit_usd=None)
+    monitor = BudgetMonitor(runtime_paths=coordinator.deps.runtime_paths, config_provider=lambda: config)
+    set_month_spend(monitor, {_ALICE: spend_usd})
+    monkeypatch.setattr(coordinator.deps.runtime.orchestrator, "_budgets", monitor)
+    return monitor
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ending", "extra_content", "spend_usd", "scan_requested"),
+    [
+        (Completed(), {AI_RUN_METADATA_KEY: {"run_id": "run-1", "cost": {"usd": "0.25"}}}, 23.25, False),
+        (Completed(), {AI_RUN_METADATA_KEY: {"run_id": "run-1"}}, 23.0, False),
+        (Cancelled("user_stop"), None, 23.0, True),
+        (Failed(FailureCause.ERROR), None, 23.0, True),
+        (Owed(), None, 23.0, True),
+    ],
+    ids=["priced", "unpriced", "stopped", "failed", "owed"],
+)
+async def test_a_finished_reply_adds_its_known_cost_or_requests_a_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: TurnEnding,
+    extra_content: dict[str, object] | None,
+    spend_usd: float,
+    scan_requested: bool,
+) -> None:
+    """A stopped, failed, or owed reply reports no cost, though its run's usage is stored, so budgets recount."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    monitor = _budgets_with_spend(coordinator, monkeypatch, 23.0)
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(ending=ending, extra_content=extra_content),
+        ResponseOutcome(),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            notify_response_finished=coordinator.locked.response_finished_notifier(
+                ("$event",),
+                _ALICE,
+                datetime.now(UTC),
+            ),
+        ),
+    )
+
+    assert monitor._spend_usd(_ALICE) == spend_usd
+    assert monitor._wake.is_set() is scan_requested
+
+
+def test_a_finished_approval_continuation_recounts_instead_of_adding_its_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The latest scan may already hold the usage the run stored before its pause, so the turn's cost is not added."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    monitor = _budgets_with_spend(coordinator, monkeypatch, 23.0)
+
+    deps = coordinator.approvals._approval_post_response_deps(approval_continuation(requester_id=_ALICE))
+    assert deps.notify_response_finished is not None
+    deps.notify_response_finished(4.0)
+
+    assert monitor._spend_usd(_ALICE) == 23.0
+    assert monitor._wake.is_set()
+
+
+def test_budgets_hear_of_a_finished_reply_when_automations_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    monitor = _budgets_with_spend(coordinator, monkeypatch, 23.0)
+    automations = MagicMock()
+    automations.response_finished.side_effect = RuntimeError("automation store unavailable")
+    monkeypatch.setattr(coordinator.deps.runtime.orchestrator, "_automations", automations)
+
+    with pytest.raises(RuntimeError, match="automation store unavailable"):
+        coordinator.locked.response_finished_notifier(("$event",), _ALICE, datetime.now(UTC))(0.5)
+
+    assert monitor._spend_usd(_ALICE) == 23.5
 
 
 def _spent(runtime_paths: RuntimePaths, spend_usd: float) -> BudgetMonitor:
@@ -361,10 +463,10 @@ def test_openai_compat_agent_completion_budgets_mapped_requesters(
     assert response.await_args.args[0].active_model_name == expected
 
 
-def _memberless_team() -> BuiltTeam:
+def _memberless_team(leader: ScriptedModel | None = None) -> BuiltTeam:
     """Return what ``_build_team`` builds for a team whose leader answers on its own: no members materialized."""
-    spec = team_spec("super-team", "Super Team", ScriptedModel([answer("Team answer")]), "You lead the team.", ())
-    return built_team(spec)
+    model = leader or ScriptedModel([answer("Team answer")])
+    return built_team(team_spec("super-team", "Super Team", model, "You lead the team.", ()))
 
 
 def _prepared_team_turn() -> PreparedTeamExecution:
@@ -447,14 +549,23 @@ async def test_dynamic_workflow_subagent_participant_uses_fallback(
     assert workflow.models_loaded == ["luna"]
 
 
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("model", ["general", "team/super_team"])
-def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: Path, model: str) -> None:
+def test_openai_compat_completion_adds_its_cost_for_its_requester(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    stream: bool,
+) -> None:
+    config = _openai_config()
+    luna = ScriptedModel([answer("Hi", usage(1_000, 100))], identity=model_identity(config.models["luna"]))
+    install_model_providers(monkeypatch, {"luna": luna})
     monitor = budget_monitor_with_spend(_runtime_paths(tmp_path), {})
     with (
-        _openai_client(tmp_path, _openai_config(), authenticated=True) as client,
+        _openai_client(tmp_path, config, authenticated=True) as client,
         patch.object(monitor, "response_finished") as response_finished,
-        patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock, return_value="Hi"),
-        patch("mindroom.api.openai_compat._build_team", return_value=_memberless_team()),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch("mindroom.api.openai_compat._build_team", return_value=_memberless_team(luna)),
         patch(
             "mindroom.api.openai_compat._prepare_openai_team_execution",
             new=AsyncMock(return_value=_prepared_team_turn()),
@@ -464,11 +575,13 @@ def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: 
         reply = client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer alice-key"},
-            json={"model": model, "messages": [{"role": "user", "content": "Hello"}]},
+            json={"model": model, "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
         )
 
     assert reply.status_code == 200
-    response_finished.assert_called_once_with()
+    # Alice is over her zero cap, so the reply runs on luna: 1,000 input tokens at $0.20 and 100 at $1.25 per million.
+    response_finished.assert_called_once_with("@alice:localhost", pytest.approx(0.000325), ANY)
+    assert response_finished.call_args.args[2] <= datetime.now(UTC)
 
 
 async def _run_workflow_as(workflow: _SubagentWorkflow, active_model_name: str) -> dict[str, object]:

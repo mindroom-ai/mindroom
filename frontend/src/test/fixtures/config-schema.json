@@ -3944,7 +3944,7 @@
         },
         "agent": {
           "$ref": "#/$defs/AgentConfig",
-          "description": "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, {username}, and {user_display_name}, and the template key in delegate_to names each user's own agent. Only the owner and administrators may use each agent unless access admits others, and the owner is always added to access.users and credential_managers"
+          "description": "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, {username}, {user_display_name}, and {user_first_name}, and the template key in delegate_to names each user's own agent. Only the owner and administrators may use each agent unless access admits others, and the owner is always added to access.users and credential_managers"
         },
         "users": {
           "additionalProperties": {

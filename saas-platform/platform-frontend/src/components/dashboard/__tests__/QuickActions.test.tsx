@@ -60,4 +60,10 @@ describe('QuickActions', () => {
 
     expect(screen.getByRole('link', { name: /Documentation/ })).toHaveAttribute('href', 'https://docs.mindroom.chat/')
   })
+
+  it('links support to the support email address', () => {
+    render(<QuickActions subscription={subscription('hobby')} subscriptionLoading={false} />)
+
+    expect(screen.getByRole('link', { name: /Get Support/ })).toHaveAttribute('href', 'mailto:support@mindroom.chat')
+  })
 })

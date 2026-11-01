@@ -2609,9 +2609,7 @@ describe("a popup that closes without answering", () => {
   it("counts a connection that completed before the answer was read, once the listing says so", async () => {
     answerWith(true);
     const onChanged = await connectAndClose();
-    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1), {
-      timeout: 2000,
-    });
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("alert")).toBeNull();
     expect(reads(listingPath)).toHaveLength(1);
     expect(
@@ -2622,9 +2620,9 @@ describe("a popup that closes without answering", () => {
   it("says cancelled when the listing shows nothing was connected, after one read", async () => {
     answerWith(false);
     const onChanged = await connectAndClose();
-    expect(
-      await screen.findByRole("alert", {}, { timeout: 2000 }),
-    ).toHaveTextContent("Authorization was cancelled.");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Authorization was cancelled.",
+    );
     expect(onChanged).not.toHaveBeenCalled();
     expect(reads(listingPath)).toHaveLength(1);
   });
@@ -2632,9 +2630,9 @@ describe("a popup that closes without answering", () => {
   it("says cancelled when the listing cannot be read", async () => {
     answerWith("fails");
     const onChanged = await connectAndClose();
-    expect(
-      await screen.findByRole("alert", {}, { timeout: 2000 }),
-    ).toHaveTextContent("Authorization was cancelled.");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Authorization was cancelled.",
+    );
     expect(onChanged).not.toHaveBeenCalled();
   });
 });

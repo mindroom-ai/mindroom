@@ -6659,9 +6659,10 @@ A realtime voice call's speech tokens are charged at the prices of an `openai` m
 Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
-Spend updates within about a minute of a chat reply finishing and within five minutes of other usage, such as voice calls, so a user can go slightly over their cap before the fallback applies.
-With a lot of retained usage, recounting spend takes longer, and updates wait about ten times that long so the recount does not slow replies.
-A reply that already started finishes on its model.
+A completed agent or team reply's cost counts as soon as the reply finishes, in chat and on the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/).
+A reply that is stopped, fails, or finishes after a tool approval counts once spend is recounted from recorded usage, which such a reply starts soon after it ends.
+Other usage, such as delegated agents, voice calls, and helper work, counts at the next recount: at startup, after a config change, when the month starts, and about every six hours.
+A reply that already started finishes on its model, so the reply that reaches the cap still uses its model and the user's next reply uses the fallback.
 
 ## Over-Budget Replies
 
@@ -7155,7 +7156,7 @@ personal_agents:
     name: "{username}_mind"
     matrix_username: "{username}.mind"
     agent:
-      display_name: "{user_display_name}'s Mind"
+      display_name: "{user_first_name}'s Mind"
       role: Personal assistant for {user}.
       model: sonnet
       memory_backend: file
@@ -7191,6 +7192,7 @@ Placeholders are replaced as exact tokens, so other braces in prompts stay liter
 | `{user}` | The user's full Matrix ID. | `display_name`, `role`, and each `instructions` item |
 | `{username}` | The localpart lowercased, every character outside `[a-z0-9_]` replaced by `_`, cut to 40 characters, or `user` when empty. | `display_name`, `role`, each `instructions` item, `name`, and `matrix_username`; in the last two it is the only placeholder |
 | `{user_display_name}` | The user's Matrix display name at onboarding, without control characters, cut to 100 characters, or the localpart when unset. | `display_name`, `role`, and each `instructions` item |
+| `{user_first_name}` | The first word of `{user_display_name}`, so `Bas Nijholt` gives `Bas`, or the localpart when the display name is blank. | `display_name`, `role`, and each `instructions` item |
 
 If the rendered `name` or Matrix account is already taken, `{username}` becomes the slug plus `_` and the first 6 hex characters of the SHA-256 of the user ID, for example `alice_86f01a` for `@alice:example.org`.
 Taken means an authored agent, team, or template key, including one saved but not yet reloaded, `router`, `user`, `_shared`, another generated agent, or an account MindRoom already manages.
@@ -7212,7 +7214,7 @@ Generated agents are ordinary agents in the running config, and workers receive 
 They never appear in the saved config file, and the dashboard and `config_manager` edit only what you authored.
 
 - Editing the template changes every user's agent at the next reload.
-  The name, Matrix account, and `{user_display_name}` stay fixed at what onboarding stored.
+  The name, Matrix account, `{user_display_name}`, and `{user_first_name}` stay fixed at what onboarding stored.
   A field its owner changed with [`update_agent`](#updating-a-generated-agent) keeps the owner's value until the owner restores it.
 - An authored agent or team that uses a generated agent's name fails validation with an error such as `agents.mind_alice collides with the agent generated from personal_agents.mind for @alice:example.org`.
   The same error rejects a dashboard or `config_manager` save that edits a generated agent in place, so use `personal_agents.<key>.users` for per-user changes.
@@ -15779,6 +15781,8 @@ It is on by default, and users open it from MindRoom Chat.
 ## Open It From MindRoom Chat
 
 In MindRoom Chat, the user opens **Connections** in Settings, General, which opens `/connections/` in a new window and signs them in with the account Chat is signed in to.
+Visiting `/connections` on MindRoom Chat's own address, such as `https://chat.example.org/connections`, does the same without the button when Chat finds exactly one MindRoom server: Chat signs the browser in and opens the portal in that tab.
+An HTTPS Chat with an HTTP server, such as `http://localhost:8765`, shows the button there instead, because browsers send that cross-site post without its origin.
 On a homeserver that binds tokens to one deployment (MindRoom's Tuwunel fork with `mindroom_openid_audience` on, see [Token Binding](#token-binding)), MindRoom needs no settings for this when Chat opens it at `http://localhost:<MINDROOM_PORT>`, such as MindRoom on the user's own machine beside MindRoom's hosted Chat at `https://chat.mindroom.chat`, or a Docker stack opened on the machine it runs on.
 For any other address, such as a public one or a LAN address like `http://192.168.1.10:8765`, set `MINDROOM_PUBLIC_URL` to the origin Chat opens, so the homeserver accepts the tokens and OAuth callbacks come back to MindRoom.
 On a homeserver that does not bind tokens, list the Chat origins in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which accepts the replay risk described under [Token Binding](#token-binding).
@@ -16302,6 +16306,7 @@ The model sees the effective file access and the unconfined tools in its tool ex
 This section holds the mechanics behind [opening Connections from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat).
 The portal asks the window that opened it for a Matrix OpenID token over `postMessage`, waiting up to 30 seconds.
 It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
+Chat's `/connections` page instead submits the token as a form to `POST /api/connections/session/handoff`, a top-level cross-origin post whose `Origin` header the browser sets, and MindRoom checks that header the same way before redirecting to `/connections/`; the token travels in the form body, never in a URL.
 MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which defaults to MindRoom's hosted Chat plus, for a portal on a local address, any Chat on a local address; under that default, MindRoom also reads `/_matrix/client/versions` and refuses sign-in unless the homeserver binds tokens.
 It verifies the token at the configured homeserver through `/_matrix/federation/v1/openid/userinfo` and accepts only users of that homeserver.
 MindRoom also sends the normalized origin of `MINDROOM_PUBLIC_URL`, or `http://localhost:<MINDROOM_PORT>` when it is unset, as the audience, so a homeserver that binds tokens accepts only a token that Chat requested for that origin; other homeservers ignore it.
