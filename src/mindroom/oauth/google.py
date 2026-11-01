@@ -193,13 +193,8 @@ async def _google_runtime_bootstrapper(
 
     provisioning_credentials = _provisioning_client_credentials(runtime_paths)
     if provisioning_credentials is None:
-        if existing:
-            return _google_runtime_endpoints()
-        msg = (
-            "Google OAuth is not configured. Pair this local install with `mindroom connect`, "
-            "or save a custom Google OAuth client in the dashboard."
-        )
-        raise OAuthProviderError(msg)
+        # Unpaired: nothing to fetch, so only a client already stored can serve.
+        return _google_runtime_endpoints()
 
     provisioning_url, local_client_id, local_client_secret = provisioning_credentials
     headers = local_client_headers(local_client_id, local_client_secret)

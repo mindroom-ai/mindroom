@@ -6263,6 +6263,29 @@ def test_google_status_reports_connected_with_service_account(tmp_path: Path) ->
     assert status_response.json()["connected"] is True
 
 
+def test_google_status_and_connect_on_unpaired_install_without_client(tmp_path: Path) -> None:
+    """A fresh unpaired install reports a missing client, so the dashboard offers client setup instead of an error."""
+    runtime_paths = _runtime_paths(tmp_path, {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"})
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = google_oauth_provider("google_drive")
+
+    with TestClient(api_app, base_url="http://localhost:8765") as client:
+        login_with_api_key(client)
+        status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+        connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["has_client_config"] is False
+    assert status_response.json()["has_custom_client_config"] is False
+    assert status_response.json()["client_config_service"] == "google_drive_oauth_client"
+    assert status_response.json()["has_service_account_config"] is False
+    assert status_response.json()["connected"] is False
+    assert connect_response.status_code == 503
+    assert connect_response.json()["detail"] == (
+        "Google Drive needs its OAuth client saved in the MindRoom dashboard before it can connect."
+    )
+
+
 def test_google_docs_status_reports_capabilities_with_service_account(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,

@@ -59,8 +59,10 @@ See the [Privacy Policy](https://docs.mindroom.chat/privacy/#google-api-services
 
 ## Troubleshooting
 
-- **`OAuth client configuration could not be resolved`**: MindRoom could not get a Google OAuth client, usually because the install is not paired or its pairing was revoked.
+- **`<Google service> needs its OAuth client saved in the MindRoom dashboard before it can connect`**: the install is not paired and has no custom client.
   Run `mindroom connect`, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).
+- **`OAuth client configuration could not be resolved`**: MindRoom could not fetch its Google OAuth client, usually because the pairing was revoked or the provisioning service is unreachable.
+  Run `mindroom connect` again, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).
 - **Google shows an unverified-app warning or blocks the Google Cloud connection**: `cloud-platform.read-only` is a sensitive scope, so an OAuth client that Google has not verified for it can be limited to test users.
   The provisioned client is not yours to change, so use a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup) instead, ideally one whose consent screen is Internal to your Google Workspace organization.
   On your own custom client, you can also add your account as a test user; see [Production Verification Follow-up](https://docs.mindroom.chat/deployment/google-services-oauth/#production-verification-follow-up).

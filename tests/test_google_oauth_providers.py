@@ -535,30 +535,28 @@ def test_google_oauth_provider_bootstraps_client_for_paired_install(
     assert resolution.config.redirect_uri == "http://localhost:8765/api/oauth/google_drive/callback"
 
 
-def test_google_oauth_provider_requires_pairing_or_custom_client_on_fresh_install(tmp_path: Path) -> None:
-    """An unpaired runtime fails before sending users through a broken public-client flow."""
+@pytest.mark.parametrize(
+    "process_env",
+    [{}, {"MINDROOM_PROVISIONING_URL": "https://provisioning.example"}],
+    ids=["fresh-install", "seeded-provisioning-url"],
+)
+def test_google_oauth_provider_leaves_unpaired_install_unconfigured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_env: dict[str, str],
+) -> None:
+    """An unpaired runtime with no stored client has no client yet, which is not a bootstrap failure."""
+    requests = _install_provisioning_transport(monkeypatch)
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
-        process_env={},
+        process_env=process_env,
     )
-    provider = google_oauth_provider("google_drive")
 
-    resolution = provider.client_config_resolution(runtime_paths)
+    resolution = asyncio.run(google_oauth_provider("google_drive").client_config_resolution_async(runtime_paths))
 
     assert resolution is None
-
-
-def test_google_oauth_provider_explains_unpaired_public_profile(tmp_path: Path) -> None:
-    """A seeded provisioning URL without pairing credentials uses the fresh-install guidance."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={"MINDROOM_PROVISIONING_URL": "https://provisioning.example"},
-    )
-
-    with pytest.raises(OAuthProviderError, match=r"Pair this local install.*custom Google OAuth client"):
-        asyncio.run(google_oauth_provider("google_drive").client_config_resolution_async(runtime_paths))
+    assert requests == []
 
 
 @pytest.mark.parametrize("service", ["google_drive_oauth_client", "google_oauth_client"])
