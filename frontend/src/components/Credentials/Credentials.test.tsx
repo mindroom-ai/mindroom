@@ -609,7 +609,9 @@ describe("Credentials", () => {
     );
     renderOpen();
 
-    fireEvent.click(await screen.findByRole("button", { name: /^openai/ }));
+    // The page selects the first service itself, and a click made before that runs is overridden.
+    await screen.findByText("Active: anthropic");
+    fireEvent.click(screen.getByRole("button", { name: /^openai/ }));
     await screen.findByText("Active: openai");
     await waitFor(() => {
       expect(readsOf("/api/credentials/openai")).toBe(1);
