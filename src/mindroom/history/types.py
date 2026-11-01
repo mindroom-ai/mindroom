@@ -389,4 +389,7 @@ class PreparedHistoryState:
     # history; a run whose final plan replays all of it publishes them, so a later reply can take them off the request
     # size the provider reports.
     non_prompt_tokens: int | None = None
+    # Whether history was sized from the latest answer's reported request size, which then sizes the run's first
+    # request too.
+    reported_history: bool = False
     native_history: NativeHistory | None

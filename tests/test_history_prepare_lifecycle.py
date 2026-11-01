@@ -43,6 +43,7 @@ from mindroom.history.types import (
     CompactionOutcome,
     HistoryPolicy,
     HistoryScope,
+    NativeHistory,
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
@@ -2193,6 +2194,23 @@ async def test_the_reported_request_size_takes_off_the_smaller_system_prompt(
     assert estimate < 4_000
     assert prepared.compaction_decision.current_history_tokens == 8_000 + 500 - taken_off
     assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
+
+
+@pytest.mark.asyncio
+async def test_trimming_by_the_reported_size_turns_native_compaction_off(tmp_path: Path) -> None:
+    """A provider's checkpoint of a trimmed request would replace history it never held, so trimming turns it off."""
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 3_500})
+    native = NativeHistory(
+        native_compaction=NativeCompactionReplay(route="checkpoints", threshold=None),
+        portable_replay=True,
+    )
+
+    state = _finalize_with_history_budget(tmp_path, replace(prepared, native_history=native), 3_200)
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode == "limited"
+    assert state.native_history is not None
+    assert state.native_history.native_compaction is None
 
 
 @pytest.mark.asyncio

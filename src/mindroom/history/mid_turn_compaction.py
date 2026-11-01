@@ -101,8 +101,8 @@ class _MidTurnCompaction:
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None
     turn_recorder: TurnRecorder | None
-    # The size the reply's preparation gave the run's first request, from the provider's reported size where one applied.
-    prepared_context_tokens: int | None
+    # Whether the reply's preparation found the latest answer's reported request size still describes the history.
+    reported_history: bool
     # Set when compaction failed or cannot bring the request under the limit; this run is not compacted again. An
     # approval resume builds a new hook, so it may try once more.
     stopped: bool = False
@@ -147,13 +147,13 @@ def mid_turn_compaction_hook(
     prompt_id: str | None,
     lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
-    prepared_context_tokens: int | None = None,
+    reported_history: bool = False,
 ) -> BeforeRequestHook:
     """Return the pre-request hook that compacts one run's long turn before a request that would exceed its window.
 
     A fold lands in the scope of ``storage`` when the run's requests replay its stored history under ``replay_plan``;
     ``lifecycle`` shows the fold through the reply's notices and ``turn_recorder`` records the folded calls for an
-    interrupted record. ``prepared_context_tokens`` sizes the first request, which no response has sized yet.
+    interrupted record. With ``reported_history``, the latest answer the requests replay sizes the first of them.
     """
     compaction = _MidTurnCompaction(
         config=config,
@@ -167,7 +167,7 @@ def mid_turn_compaction_hook(
         prompt_id=prompt_id,
         lifecycle=lifecycle,
         turn_recorder=turn_recorder,
-        prepared_context_tokens=prepared_context_tokens,
+        reported_history=reported_history,
     )
 
     async def hook(state: LoopState) -> RequestDecision:
@@ -431,22 +431,22 @@ def _request_tokens(
     tools: Sequence[ToolSpec],
     loaded_ids: frozenset[str],
 ) -> int:
-    """Size the next request from the latest response this loop received, else as the reply's preparation sized it.
+    """Size the next request from the latest response it carries and estimates of what follows, else by estimate.
 
-    That preparation sized history from the provider's reported size where one applied, which a padded estimate of the
-    same history would exceed. A run without it estimates; a native response that created a checkpoint is billed for
-    the transcript it replaced, so after one a native route estimates its projected request.
+    Before any response in this loop, that is the latest answer the request replays when the reply's preparation found
+    its reported size still describes the history, which a padded estimate would exceed. A native response that created
+    a checkpoint is billed for the transcript it replaced, so after one a native route estimates its projected request.
     """
+    # A replayed answer sizes the request only when the reply's preparation found its reported size still current.
     anchor = next(
         (
             index
             for index in range(len(messages) - 1, -1, -1)
-            if messages[index].role == "assistant" and messages[index].id not in loaded_ids
+            if messages[index].role == "assistant"
+            and (compaction.reported_history or messages[index].id not in loaded_ids)
         ),
         None,
     )
-    if anchor is None and compaction.prepared_context_tokens is not None:
-        return compaction.prepared_context_tokens
     if anchor is not None and not checkpoint_items(messages[anchor], policy.native_route):
         reported = reported_context_tokens(
             messages[anchor],

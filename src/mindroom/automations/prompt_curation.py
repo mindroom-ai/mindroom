@@ -12,7 +12,7 @@ Files are read through no-follow descriptor walks, because worker code writes th
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -241,6 +241,18 @@ def _curation_notice(config: Config, plan: _CurationPlan, result: _CurationResul
     return f"✅ Prompt files condensed from {plan.measured_tokens} to {result.tokens_after} tokens."
 
 
+def _stable_counter(counter: TokenCounter) -> TokenCounter:
+    """Return ``counter`` once the vocabulary has loaded, else the stand-in, so verify counts on the plan's basis.
+
+    Without network access and a cached vocabulary, loading fails on every run.
+    """
+    try:
+        load_o200k()
+    except (OSError, ValueError):
+        return replace(counter, estimate=lambda _text: None)
+    return counter
+
+
 @automation("prompt_curation", requires_file_memory=True)
 def check_curation(ctx: AutomationContext) -> Ask | None:
     """Return the prompt asking for a cut, or None while the files are within the limits."""
@@ -248,15 +260,15 @@ def check_curation(ctx: AutomationContext) -> Ask | None:
         msg = f"prompt_curation cannot run the {ctx.entry.name} entry"
         raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
     config, agent_name = ctx.config, ctx.agent_name
-    # Verification compares its sizes with this plan's, so both count after the vocabulary has loaded.
-    load_o200k()
-    # The workspace of an agent with file memory, which this automation requires, is its file-memory root.
-    counter = model_token_counter(
-        config,
-        ctx.runtime_paths,
-        entity_model_name(config, agent_name),
-        execution_identity=ctx.execution_identity,
+    counter = _stable_counter(
+        model_token_counter(
+            config,
+            ctx.runtime_paths,
+            entity_model_name(config, agent_name),
+            execution_identity=ctx.execution_identity,
+        ),
     )
+    # The workspace of an agent with file memory, which this automation requires, is its file-memory root.
     plan = _plan_curation(config, ctx.workspace, agent_name, ctx.entry, counter)
     if plan is None:
         return None

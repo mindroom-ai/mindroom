@@ -693,6 +693,7 @@ def finalize_history_preparation(
     counter = prepared_scope_history.counter
     if session is None:
         replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
+        reported_history = False
         replays_persisted_history = False
     else:
         estimate_history_tokens = partial(
@@ -713,9 +714,9 @@ def finalize_history_preparation(
                 # to undercount by reported / estimated, so the budget shrinks into the estimate's units. It never
                 # widens: that ratio fits the whole history, and the newest runs trimming keeps may overcount less.
                 fitting_budget = min(history_budget, history_budget * current_history_tokens // reported_history_tokens)
-            elif native_history is not None:
-                # Never trim a native checkpoint by run/message count. Fall back to the
-                # existing canonical guard if the final dynamic prompt exhausts its room.
+            if native_history is not None:
+                # Never trim a native checkpoint by run/message count, and never let the provider checkpoint a trimmed
+                # request, which would replace history it never held. Fall back to the canonical guard.
                 native_history = native_history.without_native_compaction()
         if fitting_budget is not None:
             replay_plan = plan_replay_that_fits(
@@ -737,6 +738,7 @@ def finalize_history_preparation(
                 estimated_tokens=current_history_tokens,
             )
         replays_persisted_history = has_effective_persisted_replay(session=session, replay_plan=replay_plan)
+        reported_history = reported_history_tokens is not None and replay_plan.mode == "configured"
 
     prepared_context_tokens = static_prompt_tokens + replay_plan.estimated_tokens
     if pipeline_timing is not None:
@@ -753,6 +755,7 @@ def finalize_history_preparation(
         compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
         prepared_context_tokens=prepared_context_tokens,
         non_prompt_tokens=prepared_scope_history.non_prompt_tokens if history_settings.replays_whole_history else None,
+        reported_history=reported_history,
         native_history=native_history,
     )
 

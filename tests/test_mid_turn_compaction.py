@@ -61,6 +61,7 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
 from mindroom.model_usage import message_context_tokens
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.providers.assistant_turn import stamp_model
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
@@ -177,8 +178,8 @@ class _Agent:
     max_tool_calls_per_turn: int | None = None
     before_request: tuple[BeforeRequestHook, ...] = ()
     records: list[RunRecord] = field(default_factory=list)
-    # The size the reply's preparation gave its first request.
-    prepared_context_tokens: int | None = None
+    # Whether the reply's preparation sized history from the latest answer's reported request size.
+    reported_history: bool = False
 
     def spec(self) -> AgentSpec:
         return AgentSpec(
@@ -217,6 +218,7 @@ async def _run(
     session_id: str = "session-1",
     metadata: dict[str, Any] | None = None,
     user_id: str | None = None,
+    media: MediaInputs | None = None,
 ) -> RunRecord:
     turn = _turn(prompt)
     store = agent.store
@@ -250,7 +252,7 @@ async def _run(
         prompt_id=turn.prompt.id,
         lifecycle=agent.lifecycle,
         turn_recorder=agent.turn_recorder,
-        prepared_context_tokens=agent.prepared_context_tokens,
+        reported_history=agent.reported_history,
     )
     store_persist = persist_to(store, session) if store is not None else None
 
@@ -265,7 +267,7 @@ async def _run(
             summary=session.summary if agent.replays_history else None,
             history=history,
             turn=turn,
-            media=MediaInputs(),
+            media=media or MediaInputs(),
         ),
         ctx=RunContext(run_id=str(uuid4()), session=UnstoredSession(session_id), user_id=user_id, metadata=metadata),
         hooks=LoopHooks(before_request=(*agent.before_request, compaction_hook)),
@@ -713,26 +715,49 @@ async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("prepared", [None, 1_000], ids=["estimated", "prepared-from-a-reported-size"])
-async def test_the_first_request_is_sized_as_the_reply_prepared_it(
+@pytest.mark.parametrize(
+    ("reported_history", "images", "folds"),
+    [
+        pytest.param(False, 0, True, id="estimated"),
+        pytest.param(True, 0, False, id="from-the-reported-size"),
+        pytest.param(True, 2, True, id="reported-size-plus-new-images"),
+    ],
+)
+async def test_the_first_request_is_sized_from_the_reported_size_the_reply_checked(
     tmp_path: Path,
     summary_calls: SummaryCalls,
-    prepared: int | None,
+    *,
+    reported_history: bool,
+    images: int,
+    folds: bool,
 ) -> None:
-    """Until a response arrives, the hook sizes the request as the reply's preparation did.
+    """Before any response, the latest answer the request replays sizes it, when the reply's preparation found it does.
 
-    That preparation sized the history from the provider's reported size where one applied, which a padded estimate
-    of the same history would exceed, folding a conversation that fits.
+    Its reported size covers the history, which a padded estimate would exceed, folding a conversation that fits;
+    everything after that answer, the prompt's images included, is estimated on top.
     """
-    config, paths = _config(tmp_path)
+    config, paths = _config(tmp_path, context_window=12_000)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
-    old = [Message(role="user", content="h" * 8_000), Message(role="assistant", content="a" * 8_000)]
-    seed_session(storage, _session("session-1", runs=[_completed_run("old", messages=old)]))
     model = ToolLoopModel(tool_rounds=0)
+    answer = Message(
+        role="assistant",
+        content="a" * 8_000,
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=500)),
+    )
+    stamp_model(answer, model.identity)
+    old = [Message(role="user", content="h" * 40_000), answer]
+    seed_session(storage, _session("session-1", runs=[_completed_run("old", messages=old)]))
+    media = MediaInputs(
+        images=[Image(id=f"photo-{index}", content=b"\x89PNG", mime_type="image/png") for index in range(images)],
+    )
 
-    await _run(_scoped_agent(model, config, paths, storage, prepared_context_tokens=prepared), "Do the task")
+    await _run(
+        _scoped_agent(model, config, paths, storage, reported_history=reported_history),
+        "Do the task",
+        media=media,
+    )
 
-    assert bool(summary_calls.inputs) is (prepared is None)
+    assert bool(summary_calls.inputs) is folds
 
 
 @pytest.mark.asyncio

@@ -263,7 +263,7 @@ def _leader_run(
                 prompt_id=prepared.turn.prompt.id,
                 lifecycle=compaction_lifecycle,
                 turn_recorder=turn_recorder,
-                prepared_context_tokens=history.prepared_context_tokens,
+                reported_history=history.reported_history,
             ),
         ),
         request_template=with_native_history(ModelRequest(messages=()), history.native_history),

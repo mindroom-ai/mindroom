@@ -56,7 +56,8 @@ class HookTurn:
     history under, so a fold lands in the scope when they replay some; a run without a scope or a plan compacts within
     itself. ``model_name`` is the configured name of the model the run resolved, and ``prompt_id`` the turn's prompt;
     ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and recorder, which a resume and a team
-    member lack, and ``prepared_context_tokens`` the size the turn's preparation gave its first request.
+    member lack; ``reported_history`` says the turn's preparation sized history from the latest answer's reported
+    request size.
     """
 
     config: Config
@@ -67,7 +68,7 @@ class HookTurn:
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None = None
     turn_recorder: TurnRecorder | None = None
-    prepared_context_tokens: int | None = None
+    reported_history: bool = False
 
 
 def agent_loop_hooks(
@@ -170,7 +171,7 @@ def _loop_hooks(
             prompt_id=turn.prompt_id,
             lifecycle=turn.lifecycle,
             turn_recorder=turn.turn_recorder,
-            prepared_context_tokens=turn.prepared_context_tokens,
+            reported_history=turn.reported_history,
         ),
     )
     before_request.append(approval_receipt_hook)

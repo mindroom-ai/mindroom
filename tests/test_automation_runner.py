@@ -491,6 +491,27 @@ async def test_disabling_an_automation_on_reload_stops_it(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_prompt_curation_still_asks_when_its_token_vocabulary_cannot_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An installation without network access and without a cached vocabulary sizes the files by the stand-in."""
+
+    def offline() -> None:
+        msg = "no network"
+        raise OSError(msg)
+
+    monkeypatch.setattr("mindroom.automations.prompt_curation.load_o200k", offline)
+    _config, _paths, runner, bot = _setup(tmp_path)
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    (prompt,) = bot.sent
+    assert prompt["body"].startswith("@mind 🧹 Prompt maintenance: the files loaded into every one of your prompts")
+
+
+@pytest.mark.asyncio
 async def test_a_check_that_cannot_read_its_files_posts_a_visible_notice(tmp_path: Path) -> None:
     """A failed check tells the room instead of only logging, and ends the chain."""
     _config, _paths, runner, bot = _setup(tmp_path)
