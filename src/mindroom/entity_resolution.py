@@ -9,7 +9,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
-from mindroom.matrix_identifiers import managed_room_alias, room_alias_identifier_candidates
+from mindroom.matrix_identifiers import managed_room_key_for_alias
 from mindroom.requester_identity import INTERNAL_USER_ENTITY_NAME, mindroom_user_id, runtime_matrix_domain
 
 if TYPE_CHECKING:
@@ -30,12 +30,12 @@ class DuplicateManagedEntityIdentityError(RuntimeError):
     """Raised when persisted managed Matrix accounts are ambiguous."""
 
 
-def call_room_ownership_key(room_ref: str, runtime_paths: RuntimePaths) -> str:
-    """Normalize a call-room reference before live Matrix state is available."""
+def canonical_room_reference(room_ref: str, runtime_paths: RuntimePaths) -> str:
+    """Return a configured room reference's room ID in MindRoom's record, else the room key its alias names, else itself."""
     resolved = matrix_state.resolve_room_id(room_ref, runtime_paths)
     if resolved != room_ref:
         return resolved
-    return room_alias_identifier_candidates(room_ref, runtime_paths)[-1]
+    return managed_room_key_for_alias(room_ref, runtime_matrix_domain(runtime_paths), runtime_paths) or room_ref
 
 
 def names_room(config: Config, room_ref: str, runtime_paths: RuntimePaths) -> bool:
@@ -43,13 +43,8 @@ def names_room(config: Config, room_ref: str, runtime_paths: RuntimePaths) -> bo
 
     A configured room key and the alias MindRoom gives it name a room before the room is created and recorded.
     """
-    room_keys = config.managed_room_keys()
-    domain = runtime_matrix_domain(runtime_paths)
-    return (
-        room_ref in room_keys
-        or room_ref in {managed_room_alias(room_key, domain, runtime_paths) for room_key in room_keys}
-        or matrix_state.resolve_room_id(room_ref, runtime_paths).startswith("!")
-    )
+    room = canonical_room_reference(room_ref, runtime_paths)
+    return room.startswith("!") or room in config.managed_room_keys()
 
 
 def configured_call_agent_name_for_room(
@@ -168,39 +163,18 @@ def _room_reference_identifiers(
     *,
     room_aliases: Iterable[str] = (),
 ) -> set[str]:
-    """Return room ID, alias, and managed key identifiers for one live room."""
-    identifiers: list[str] = []
+    """Return room ID, alias, and managed key identifiers for one live room.
 
-    def add(identifier: str | None) -> None:
-        if identifier:
-            identifiers.append(identifier)
-
-    add(room_id)
-    if room_id.startswith("#"):
-        _add_room_alias_identifiers(identifiers, room_id, runtime_paths)
-    for room_alias in room_aliases:
-        _add_room_alias_identifiers(identifiers, room_alias, runtime_paths)
-
-    matched_identifiers = set(identifiers)
-    state = matrix_state.matrix_state_for_runtime(runtime_paths)
-    for room_key, room in state.rooms.items():
-        persisted_identifiers = {room_key, room.room_id, room.alias}
-        if not matched_identifiers.intersection(persisted_identifiers):
-            continue
-        add(room_key)
-        add(room.room_id)
-        _add_room_alias_identifiers(identifiers, room.alias, runtime_paths)
-        matched_identifiers = set(identifiers)
-
-    return set(identifiers)
-
-
-def _add_room_alias_identifiers(
-    identifiers: list[str],
-    room_alias: str,
-    runtime_paths: RuntimePaths,
-) -> None:
-    identifiers.extend(room_alias_identifier_candidates(room_alias, runtime_paths))
+    An alias names a managed room key only when it is exactly the alias MindRoom gives that room.
+    ``_room_refs_match`` maps configured refs through MindRoom's record, so a recorded room matches by its room ID.
+    """
+    domain = runtime_matrix_domain(runtime_paths)
+    room_refs = (room_id, *room_aliases)
+    identifiers = set(room_refs)
+    for room_ref in room_refs:
+        if managed_key := managed_room_key_for_alias(room_ref, domain, runtime_paths):
+            identifiers.add(managed_key)
+    return identifiers
 
 
 def configured_routable_entity_ids_for_room(
@@ -433,13 +407,11 @@ def resolve_room_scoped_model_override(
     overrides: Mapping[str, str],
     room_id: str | None,
     runtime_paths: RuntimePaths,
-    *,
-    allow_raw_room_id: bool = False,
 ) -> str | None:
-    """Return a model override keyed by persisted room key or alias."""
+    """Return a model override keyed by Matrix room ID, or by persisted room key or alias."""
     if room_id is None or not overrides:
         return None
-    if allow_raw_room_id and room_id in overrides:
+    if room_id in overrides:
         return overrides[room_id]
     room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
     if room_alias and room_alias in overrides:

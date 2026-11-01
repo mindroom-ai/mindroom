@@ -28,4 +28,13 @@ describe('AccountDetailsPage', () => {
     expect(await screen.findByText(shown)).toBeInTheDocument()
     expect(screen.getByText('owner@example.com')).toBeInTheDocument()
   })
+
+  it('offers no account actions, which live on the accounts list', async () => {
+    ;(apiCall as jest.Mock).mockResolvedValue({ ok: true, json: async () => details({ tier: 'free' }) })
+
+    render(<AccountDetailsPage />)
+
+    expect(await screen.findByText('owner@example.com')).toBeInTheDocument()
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Back to Accounts'])
+  })
 })

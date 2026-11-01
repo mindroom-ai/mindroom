@@ -92,6 +92,8 @@ describe('Admin Accounts Page', () => {
       await waitFor(() => {
         expect(screen.getByText('No accounts found')).toBeInTheDocument()
       })
+      // Every action belongs to an account row.
+      expect(screen.queryAllByRole('button')).toEqual([])
     })
 
     it('should handle fetch error gracefully', async () => {
