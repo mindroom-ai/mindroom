@@ -29,7 +29,7 @@ from collections.abc import (
     Sequence,
 )
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from itertools import count
@@ -3696,7 +3696,13 @@ SETTLE_TIMEOUT_SECONDS = 30.0
 
 
 def loop_runs_while_blocked(loop: asyncio.AbstractEventLoop) -> bool:
-    """From inside a blocking call, return whether ``loop`` runs a callback meanwhile, as it can only when the call runs off the loop."""
+    """From inside a blocking call, return whether ``loop`` runs a callback meanwhile, as it can only when the call runs off the loop.
+
+    A call on the loop's own thread gets False at once, so a test whose calls moved onto the loop fails without waiting.
+    """
+    with suppress(RuntimeError):
+        if asyncio.get_running_loop() is loop:
+            return False
     loop_ran = threading.Event()
     loop.call_soon_threadsafe(loop_ran.set)
     return loop_ran.wait(timeout=SETTLE_TIMEOUT_SECONDS)

@@ -1642,6 +1642,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.helper_usage",
     "mindroom.llm",
+    "mindroom.origins",
     "mindroom.response_turn",
     "mindroom.run_storage",
     "mindroom.tool_system",
@@ -3080,6 +3081,7 @@ path = "mindroom.orchestration.script_runtime"
 depends_on = [
     "mindroom.approval.manager",
     "mindroom.orchestration.runtime",
+    "mindroom.origins",
     "mindroom.response_activity",
     "mindroom.script_runs.recovery",
     "mindroom.script_runs.worker_client",

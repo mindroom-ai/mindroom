@@ -7,6 +7,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import ParseResult, urlparse, urlunparse
 
@@ -22,6 +23,7 @@ from mindroom.credentials.policy import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import (
+    OAuthCallbackRefusedError,
     OAuthClientConfigResolution,
     OAuthProvider,
     OAuthProviderError,
@@ -407,8 +409,12 @@ async def _post_registration(
     config: OAuthDiscoveryConfig,
     registration_url: str,
     runtime_paths: RuntimePaths,
+    *,
+    callback_moved: bool,
 ) -> dict[str, Any]:
+    """Register a client; the server refusing a moved callback raises `OAuthCallbackRefusedError` naming it."""
     await _validate_url(registration_url, config, runtime_paths)
+    refused = False
     try:
         async with _http_client(config, runtime_paths) as client:
             response = await client.post(
@@ -416,11 +422,22 @@ async def _post_registration(
                 json=_registration_payload(provider, runtime_paths),
                 headers={"Accept": _JSON_CONTENT_TYPE, "Content-Type": _JSON_CONTENT_TYPE},
             )
+            # RFC 7591 answers 400 to client metadata the server refuses, such as a callback it does not accept.
+            refused = callback_moved and response.status_code == 400
             response.raise_for_status()
             registration = response.json()
     except Exception as exc:
-        msg = f"{config.error_label} dynamic client registration failed"
-        raise OAuthProviderError(msg) from exc
+        if not refused:
+            msg = f"{config.error_label} dynamic client registration failed"
+            raise OAuthProviderError(msg) from exc
+        redirect_uri = provider.default_redirect_uri(runtime_paths)
+        logger.warning("oauth_dynamic_client_callback_refused", provider_id=provider.id, redirect_uri=redirect_uri)
+        msg = (
+            f"The {provider.display_name} authorization server refused to register MindRoom's new callback "
+            f"{redirect_uri}. Existing connections keep working; to connect, set MINDROOM_PUBLIC_URL to an address "
+            f"it accepts or save an OAuth client for {provider.display_name}."
+        )
+        raise OAuthCallbackRefusedError(msg) from exc
     if not isinstance(registration, dict):
         msg = f"{config.error_label} dynamic client registration response is not a JSON object"
         raise OAuthProviderError(msg)
@@ -432,12 +449,24 @@ async def _register_client(
     config: OAuthDiscoveryConfig,
     metadata: _DiscoveredOAuthMetadata,
     runtime_paths: RuntimePaths,
+    *,
+    for_moved_callback: bool = False,
 ) -> None:
+    """Register a client when none is stored or the stored one belongs to another token endpoint.
+
+    `for_moved_callback` also replaces a dynamic registration for another callback. The server refusing that one
+    keeps the stored client, whose tokens still refresh, and raises `OAuthCallbackRefusedError` naming the callback.
+    """
     with _DYNAMIC_CLIENT_REGISTRATION_LOCKS_GUARD:
         lock = _DYNAMIC_CLIENT_REGISTRATION_LOCKS.setdefault(provider.id, threading.Lock())
     async with _cross_loop_lock(lock):
         resolution = await asyncio.to_thread(provider.client_config_resolution, runtime_paths)
-        if not _registration_needed(resolution, config, metadata):
+        callback_moved = (
+            for_moved_callback
+            and resolution is not None
+            and provider.dynamic_client_callback_moved(resolution, runtime_paths)
+        )
+        if not callback_moved and not _registration_needed(resolution, config, metadata):
             return
         if not provider.client_config_services:
             msg = f"{config.error_label} dynamic client registration requires a provider-specific client config service"
@@ -463,9 +492,15 @@ async def _register_client(
             )
             return
         if not config.dynamic_client_registration or metadata.registration_url is None:
-            msg = f"{config.error_label} dynamic client registration belongs to a different token endpoint"
+            msg = f"{config.error_label} dynamic client registration belongs to a different token endpoint or callback"
             raise OAuthProviderError(msg)
-        registration = await _post_registration(provider, config, metadata.registration_url, runtime_paths)
+        registration = await _post_registration(
+            provider,
+            config,
+            metadata.registration_url,
+            runtime_paths,
+            callback_moved=callback_moved,
+        )
         await run_blocking_until_complete(
             credentials_manager.save_credentials,
             provider.client_config_services[0],
@@ -477,6 +512,8 @@ async def _register_client(
                 provider_id=provider.id,
                 previous_token_endpoint_origin=token_endpoint_origin(resolution.registered_token_url),
                 current_token_endpoint_origin=token_endpoint_origin(metadata.token_url),
+                previous_redirect_uri=resolution.config.redirect_uri,
+                current_redirect_uri=provider.default_redirect_uri(runtime_paths),
             )
 
 
@@ -499,6 +536,14 @@ def oauth_runtime_bootstrapper(
             token_url=metadata.token_url,
             token_endpoint_auth_method=metadata.token_endpoint_auth_method,
             token_fetch_allow_private_networks=runtime_paths.env_flag(config.allow_private_env),
+            register_moved_callback=partial(
+                _register_client,
+                provider,
+                config,
+                metadata,
+                runtime_paths,
+                for_moved_callback=True,
+            ),
         )
 
     return bootstrap
