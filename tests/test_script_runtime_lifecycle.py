@@ -189,6 +189,10 @@ def _plan(current: Config, updated: Config) -> ConfigUpdatePlan:
     )
 
 
+# A pass deadline that the work before a test's blocking step meets even on a loaded host, far below the outer wait.
+_LOADED_HOST_PASS_TIMEOUT_SECONDS = 1.0
+
+
 async def _reconcile_once(runtime: ScriptRuntimeLifecycle) -> None:
     with suppress(TimeoutError):
         await asyncio.wait_for(runtime._reconcile_pass(), timeout=runtime.pass_timeout_seconds)
@@ -2556,7 +2560,7 @@ async def test_reconciliation_pass_has_one_overall_deadline(tmp_path: Path) -> N
         runtime_paths,
         store=store,
         manager=_manager_stub(reconcile_durable=reconcile_durable),
-        pass_timeout_seconds=0.1,
+        pass_timeout_seconds=_LOADED_HOST_PASS_TIMEOUT_SECONDS,
     )
 
     # Far above the pass deadline, so only the pass's own deadline lets this return in time.
@@ -3300,7 +3304,7 @@ async def test_blocking_retired_lease_release_cannot_stall_reconciliation(tmp_pa
         runtime_paths,
         manager=_manager_stub(reconcile_durable=AsyncMock()),
         worker_lease_provider=lambda _locator: _Lease(_Backend([])),
-        pass_timeout_seconds=0.02,
+        pass_timeout_seconds=_LOADED_HOST_PASS_TIMEOUT_SECONDS,
     )
     runtime._publish_worker_lease(retired)
     # The pass that finishes startup cleanup retires the lease no adopted run needs.
@@ -3478,7 +3482,7 @@ async def test_startup_pruning_is_inside_one_complete_pass_deadline(tmp_path: Pa
         manager=_manager_stub(gateway_url="", reconcile_durable=AsyncMock()),
         resolver=SimpleNamespace(is_authorized=MagicMock(return_value=True), prune_approvals=prune_approvals),
         retention_seconds=0.001,
-        pass_timeout_seconds=0.02,
+        pass_timeout_seconds=_LOADED_HOST_PASS_TIMEOUT_SECONDS,
     )
     runtime.bind_api("http://primary.test/api/script-gateway")
     runtime._startup_cleanup_pending = True
@@ -3511,7 +3515,7 @@ async def test_pruning_has_an_overall_deadline(tmp_path: Path) -> None:
         manager=_manager_stub(),
         resolver=SimpleNamespace(is_authorized=MagicMock(return_value=True), prune_approvals=prune_approvals),
         retention_seconds=0.001,
-        pass_timeout_seconds=0.02,
+        pass_timeout_seconds=_LOADED_HOST_PASS_TIMEOUT_SECONDS,
     )
 
     # Far above the pass deadline, so only the pass's own deadline lets this return in time.
