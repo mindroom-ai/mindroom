@@ -155,7 +155,7 @@ def _build_auth_settings(runtime_paths: RuntimePaths) -> _ApiAuthSettings:
     # LEGACY_COMPAT: Retired MINDROOM_BASE_URL public origin.
     # Legacy format: `MINDROOM_BASE_URL` named MindRoom's public origin for OAuth links and callbacks when
     #   `MINDROOM_PUBLIC_URL` was unset, and its host answered requests without a credential.
-    # Last legacy release: v2026.10.784; replacement: v2026.10.785 reads only `MINDROOM_PUBLIC_URL`.
+    # Last legacy release: v2026.11.1; replacement: v2026.11.2 reads only `MINDROOM_PUBLIC_URL`.
     # Handling: refuse to start while it is set and name `MINDROOM_PUBLIC_URL`, so a deployment that still sets it
     #   never silently moves its OAuth callbacks to localhost.
     # Coverage: tests/api/test_api.py::test_retired_base_url_fails_startup.
