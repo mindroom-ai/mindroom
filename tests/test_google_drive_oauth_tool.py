@@ -1171,30 +1171,67 @@ def test_google_drive_large_file_error_names_exposed_download_function(tmp_path:
     assert service.files_resource.get_media_kwargs is None
 
 
+_MIB = 1024 * 1024
+
+
 @pytest.mark.parametrize(
-    ("mime_type", "downloadable"),
+    ("metadata", "refusal", "downloadable"),
     [
-        ("application/vnd.google-apps.drawing", True),
-        ("application/vnd.google-apps.folder", False),
-        ("application/vnd.google-apps.vid", False),
+        pytest.param(
+            {"name": "Architecture", "mimeType": "application/vnd.google-apps.drawing"},
+            "Cannot read application/vnd.google-apps.drawing as text.",
+            True,
+            id="drawing",
+        ),
+        pytest.param(
+            {"name": "Q3 plans", "mimeType": "application/vnd.google-apps.folder"},
+            "Cannot read application/vnd.google-apps.folder as text.",
+            False,
+            id="folder",
+        ),
+        pytest.param(
+            {"name": "Launch video", "mimeType": "application/vnd.google-apps.vid"},
+            "Cannot read application/vnd.google-apps.vid as text.",
+            False,
+            id="vids",
+        ),
+        pytest.param(
+            {"name": "Budget 2025/26.pdf", "mimeType": "application/pdf", "size": "9"},
+            "Cannot read application/pdf as text.",
+            False,
+            id="unsafe-name",
+        ),
+        pytest.param(
+            {"name": "scan.pdf", "mimeType": "application/pdf", "size": str(50 * _MIB)},
+            f"File is {50 * _MIB} bytes, exceeds max_read_size ({10 * _MIB}).",
+            True,
+            id="over-read-size",
+        ),
+        pytest.param(
+            {"name": "recording.mp4", "mimeType": "video/mp4", "size": str(200 * _MIB)},
+            f"File is {200 * _MIB} bytes, exceeds max_read_size ({10 * _MIB}).",
+            False,
+            id="over-download-size",
+        ),
     ],
 )
-def test_google_drive_read_refusal_advises_download_only_for_downloadable_workspace_types(
+def test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mime_type: str,
+    metadata: dict[str, object],
+    refusal: str,
     *,
     downloadable: bool,
 ) -> None:
-    """A refused Workspace file read names the download function only for a type that function exports."""
+    """A refused read names the download function only for a file that function saves."""
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
-    service.files_resource.file_metadata = {"name": "Untitled", "mimeType": mime_type}
+    service.files_resource.file_metadata = metadata
+    tool._download_bytes = lambda _request: b"%PDF-1.7\n"
 
     result = json.loads(tool.read_file("shared-drive-file-id"))
 
     advice = "Use google_drive_download_file instead." if downloadable else "It cannot be downloaded either."
-    assert result["error"] == f"Cannot read {mime_type} as text. {advice}"
-    assert service.files_resource.get_media_kwargs is None
+    assert result["error"] == f"{refusal} {advice}"
     assert ("error" not in json.loads(tool.download_file("shared-drive-file-id"))) is downloadable
 
 

@@ -165,7 +165,7 @@ class GoogleDriveTools(
     # Upstream issue: Tracking gap; no matching issue identified.
     # Upstream PR: None identified.
     # Remove when: Agno's `DOWNLOAD_EXPORT_TYPES` no longer maps Google Vids to a `files.export` format.
-    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_downloadable_workspace_types.
+    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves.
     DOWNLOAD_EXPORT_TYPES: ClassVar[dict[str, tuple[str, str]]] = {
         mime_type: export
         for mime_type, export in AgnoGoogleDriveTools.DOWNLOAD_EXPORT_TYPES.items()
@@ -334,8 +334,13 @@ class GoogleDriveTools(
         """Return whether `download_file` saves this type without an explicit export format."""
         return mime_type in self.DOWNLOAD_EXPORT_TYPES or not mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX)
 
-    def _download_guidance(self) -> str:
-        """Name the download function, while this toolkit offers it, as the way past a read it refuses."""
+    def _download_advice(self, metadata: dict[str, Any]) -> str:
+        """Advise the download function after a refused read, while offered, only for a file `download_file` saves."""
+        if not self._downloadable(metadata.get("mimeType", "")) or _download_metadata_error(
+            metadata,
+            self.max_download_size,
+        ):
+            return " It cannot be downloaded either."
         if "google_drive_download_file" in toolkit_function_names(self):
             return " Use google_drive_download_file instead."
         return ""
@@ -489,8 +494,9 @@ class GoogleDriveTools(
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
     def _text_read_refusal(self, mime_type: str, metadata: dict[str, Any]) -> str:
-        guidance = self._download_guidance() if self._downloadable(mime_type) else " It cannot be downloaded either."
-        return json.dumps({"error": f"Cannot read {mime_type} as text.{guidance}", "file": metadata})
+        return json.dumps(
+            {"error": f"Cannot read {mime_type} as text.{self._download_advice(metadata)}", "file": metadata},
+        )
 
     # AGNO_COMPAT: Drive `read_file` refuses text by MIME type and names a download function that may not exist.
     # Reason: Agno 3.0.9 refuses every `application/octet-stream` file, including text MindRoom's own uploads
@@ -508,7 +514,7 @@ class GoogleDriveTools(
     # keep MindRoom's function aliases.
     # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refuses_binary_content_and_names_enabled_download_function;
     # tests/test_google_drive_oauth_tool.py::test_google_drive_read_names_no_download_function_its_filters_leave_out;
-    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_downloadable_workspace_types;
+    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves;
     # tests/test_google_drive_oauth_tool.py::test_google_drive_read_returns_text_without_nul_bytes.
     @authenticate
     def read_file(self, file_id: str) -> str:
@@ -534,7 +540,7 @@ class GoogleDriveTools(
                     return json.dumps(
                         {
                             "error": f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size})."
-                            f"{self._download_guidance()}",
+                            f"{self._download_advice(metadata)}",
                             "file": metadata,
                         },
                     )
