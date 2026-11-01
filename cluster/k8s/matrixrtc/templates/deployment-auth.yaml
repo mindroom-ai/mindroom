@@ -44,6 +44,8 @@ spec:
               value: {{ join "," .Values.auth.fullAccessHomeservers | quote }}
             - name: LIVEKIT_JWT_BIND
               value: {{ printf ":%v" .Values.auth.port | quote }}
+            - name: LIVEKIT_LOG_LEVEL
+              value: {{ .Values.auth.logLevel | quote }}
             {{- with .Values.auth.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
