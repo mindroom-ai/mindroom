@@ -1045,7 +1045,7 @@ class _MultiAgentOrchestrator:
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_client)
         self.turn_recovery.schedule()
-        await self.agent_reply_membership_sync.apply_authoritative_refresh(config)
+        await self.agent_reply_membership_sync.apply_grant_change()
 
     async def _end_unconfigured_entity_replies(self, config: Config) -> None:
         """End the replies of entities removed while MindRoom was stopped; no bot finishes them."""
