@@ -33,6 +33,7 @@ from mindroom.delivery_gateway import (
     DeliveryGatewayDeps,
     DeliveryStage,
     FinalDeliveryRequest,
+    FinalizeStreamedResponseRequest,
     ResponseIdentity,
     SendTextRequest,
     StreamingDeliveryRequest,
@@ -49,7 +50,15 @@ from mindroom.event_journal.matrix_delivery import (
     RecoveryOutcome,
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
-from mindroom.final_delivery import Cancelled, Completed, Failed, FailureCause, Suppressed, Suppression
+from mindroom.final_delivery import (
+    Cancelled,
+    Completed,
+    Failed,
+    FailureCause,
+    StreamTransportOutcome,
+    Suppressed,
+    Suppression,
+)
 from mindroom.history.types import CompactionLifecycleFailure, CompactionLifecycleStart, CompactionOutcome
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
@@ -664,21 +673,107 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.event_id == "$sent"
         send.assert_awaited_once()
 
-    async def test_an_ordinary_response_with_nothing_to_show_ends_without_an_answer(
+    async def test_an_empty_answer_ends_the_placeholder_it_showed_with_a_note(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
     ) -> None:
-        """An ordinary empty response is not suppressed: it ends like a stream that showed only its placeholder."""
+        """A turn that wrote no answer, as one whose tool calls are hidden can, says so where its placeholder stood."""
         gateway = _gateway(tmp_path, alice)
-        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": ""}))
+        client = self._redactable_client(gateway)
+        send = AsyncMock(side_effect=delivered_matrix_side_effect("$note"))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
-            outcome = await final_in_span(gateway, alice, self._final_request("", source_kind=MESSAGE_SOURCE_KIND))
+            outcome = await final_in_span(
+                gateway,
+                alice,
+                replace(self._final_request("", source_kind=MESSAGE_SOURCE_KIND), existing_event_id="$placeholder"),
+            )
+
+        client.room_redact.assert_not_awaited()
+        assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
+        assert outcome.final_visible_event_id == "$placeholder"
+        content = send.await_args.args[2]
+        assert content["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$placeholder"}
+        assert content["m.new_content"]["body"] == note_segment(NoteKind.NOTHING_TO_SHOW).text
+        reply = await alice.replies.for_sources(("$cause",))
+        assert reply is not None
+        assert reply.state is rl.ReplyState.FAILED
+
+    @pytest.mark.parametrize("regenerates", [False, True], ids=["no_placeholder", "kept_answer"])
+    async def test_an_empty_answer_that_replaced_nothing_shown_writes_nothing(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        regenerates: bool,
+    ) -> None:
+        """With no placeholder in the room, or an earlier answer a regeneration keeps, an empty answer writes nothing."""
+        gateway = _gateway(tmp_path, alice)
+        client = self._redactable_client(gateway)
+        send = AsyncMock(side_effect=delivered_matrix_side_effect("$sent"))
+        request = self._final_request("", source_kind=MESSAGE_SOURCE_KIND)
+        if regenerates:
+            request = replace(request, existing_event_id="$prior_answer")
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_span(gateway, alice, request, regenerates=regenerates)
 
         assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
         assert outcome.event_id is None
         send.assert_not_awaited()
+        client.room_redact.assert_not_awaited()
+        if regenerates:
+            reply = await alice.replies.for_event("$prior_answer")
+            assert reply is not None
+            assert reply.state is rl.ReplyState.COMPLETED
+
+    @pytest.mark.parametrize("failed", [False, True], ids=["finished_empty", "delivery_failed"])
+    async def test_a_stream_that_showed_only_its_placeholder_ends_it_by_how_it_finished(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        failed: bool,
+    ) -> None:
+        """A stream that finished with no answer notes it on the placeholder; one whose delivery failed removes it."""
+        gateway = _gateway(tmp_path, alice)
+        send = AsyncMock(side_effect=delivered_matrix_side_effect("$note"))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            async with reply_span(
+                alice,
+                source_event_id="$cause",
+                room_id=_ROOM_ID,
+                placeholder_event_id="$placeholder",
+            ):
+                outcome = await gateway.finalize_streamed_response(
+                    FinalizeStreamedResponseRequest(
+                        target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                        stream_transport_outcome=StreamTransportOutcome(
+                            last_physical_stream_event_id="$placeholder",
+                            rendered_body="Thinking...",
+                            visible_body_state="placeholder_only",
+                            failed=failed,
+                        ),
+                        initial_delivery_kind="edited",
+                        identity=_identity(),
+                        tool_trace=None,
+                        extra_content=None,
+                        existing_event_id="$placeholder",
+                        existing_event_is_placeholder=True,
+                    ),
+                )
+
+        reply = await alice.replies.for_sources(("$cause",))
+        assert reply is not None
+        if failed:
+            assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED)
+            assert reply.state is rl.ReplyState.GONE
+            send.assert_not_awaited()
+            return
+        assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
+        assert outcome.final_visible_event_id == "$placeholder"
+        assert reply.state is rl.ReplyState.FAILED
+        assert send.await_args.args[2]["m.new_content"]["body"] == note_segment(NoteKind.NOTHING_TO_SHOW).text
 
     @pytest.mark.parametrize("generated_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])
     async def test_silent_schedule_hook_finding_delivers_after_no_report_generation(

@@ -601,17 +601,29 @@ class DeliveryGateway:
 
     async def _end_without_answer(
         self,
+        target: MessageTarget,
         *,
         cause: FailureCause,
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
     ) -> FinalDeliveryOutcome:
-        """End a reply that has nothing to show; the reply's records remove its placeholder."""
+        """End a reply that has nothing to show.
+
+        A turn that finished without an answer notes that on the placeholder it showed, because its hidden tool calls
+        may have run; otherwise the reply's records remove the placeholder.
+        """
+        ending = Failed(cause)
         handle = self._live_span()
         if handle is not None:
+            reply = await self.deps.outbox.replies.load(handle.reply_id)
+            assert reply is not None, "a span's reply exists while the span ends"
+            if cause is FailureCause.NOTHING_TO_SHOW and reply.event_id is not None and reply.placeholder_only:
+                noted = await self.end_interrupted_span(handle, target, ending=ending, delivery_started=True)
+                assert noted is not None, "a failure always ends with its note"
+                return noted
             await self.end_reply_span(handle, suppress_decision(handle))
         return FinalDeliveryOutcome(
-            ending=Failed(cause),
+            ending=ending,
             tool_trace=tuple(tool_trace or ()),
             extra_content=extra_content,
         )
@@ -1706,8 +1718,9 @@ class DeliveryGateway:
             state=ReplyState.COMPLETED,
         )
         if reply_write.placeholder_only:
-            # A reply with nothing to show ends as a stream that showed only its placeholder: the placeholder goes.
+            # A reply with nothing to show ends as a stream that showed only its placeholder does.
             return await self._end_without_answer(
+                request.target,
                 cause=FailureCause.NOTHING_TO_SHOW,
                 tool_trace=draft.tool_trace,
                 extra_content=draft.extra_content,
@@ -2078,7 +2091,7 @@ class DeliveryGateway:
             )
 
         # A stream writes a terminal update only once it finished, so the update is the reply's answer; one that
-        # showed only its placeholder answered nothing, and the span's exit removes the placeholder.
+        # showed only its placeholder answered nothing, and its finalization ends the placeholder.
 
         def terminal(progress: ProgressState) -> ReplyWrite:
             if progress.untransformed_text is None:
@@ -2332,6 +2345,7 @@ class DeliveryGateway:
 
             if stream_outcome.visible_body_state == "placeholder_only":
                 return await self._end_without_answer(
+                    request.target,
                     cause=FailureCause.DELIVERY_FAILED if stream_outcome.failed else FailureCause.NOTHING_TO_SHOW,
                     tool_trace=request.tool_trace,
                     extra_content=request.extra_content,

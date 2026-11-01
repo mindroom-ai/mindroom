@@ -125,6 +125,7 @@ The partial text stays in the message, followed by a note explaining how it ende
 | `**[Response interrupted by service restart]**` | MindRoom restarted while the response was being generated; the reply continues below the note once MindRoom is back, or ends there if nothing is left to continue. |
 | `**[Response interrupted]**` | The response was interrupted for another reason. |
 | `**[Response interrupted by an error: <error description>]**` | MindRoom could not finish the reply; the description says why. |
+| `Finished without a reply.` | The agent finished without writing an answer, for example after tool calls hidden by `show_tool_calls: false`; those tool calls still ran. |
 
 A crash, an orderly shutdown, or an agent restarted by a configuration or MCP change, including during an approved tool call, keeps the partial reply and its tool calls, and the agent continues it in the same message once MindRoom is back.
 The agent is told which tool calls already finished, and which were still running, so it avoids repeating side effects, including calls hidden by `show_tool_calls: false` and calls made while streaming is off.
