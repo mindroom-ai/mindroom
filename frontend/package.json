@@ -11,7 +11,7 @@
     "build": "tsc && vite build && vite build --config vite.connections.config.ts",
     "preview": "vite preview",
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
-    "type-check": "tsc --noEmit",
+    "type-check": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "screenshot": "node scripts/screenshot.cjs",
     "test": "vitest",
     "test:ui": "vitest --ui",
