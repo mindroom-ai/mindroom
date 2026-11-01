@@ -866,12 +866,9 @@ async def test_row_adopted_as_unreadable_reads_like_any_other(tmp_path: Path) ->
     with sqlite3.connect(_oauth_credential_database_path(context)) as connection:
         connection.execute("UPDATE oauth_credential_state SET credential_unreadable = 1 WHERE singleton = 1")
 
-    async with oauth_credential_reader(context) as reader:
-        read = await reader.snapshot()
-    async with oauth_credential_transaction(context) as transaction:
-        written = await transaction.snapshot()
-
-    for snapshot in (read, written):
+    for open_store in (oauth_credential_reader, oauth_credential_transaction):
+        async with open_store(context) as store:
+            snapshot = await store.snapshot()
         assert snapshot.credentials == {"token": "adopted", "refresh_token": "refresh-adopted"}
         assert (snapshot.generation, snapshot.connection_generation) == generations
 

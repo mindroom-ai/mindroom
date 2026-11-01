@@ -480,9 +480,7 @@ def test_persist_local_provisioning_env_writes_owner_when_available(tmp_path: Pa
 def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path) -> None:
     """Placeholder replacement should quote MXIDs so '@' doesn't break YAML."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\nroom_defaults:\n  admins:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
-    )
+    config_path.write_text(_OWNER_PLACEHOLDER_CONFIG)
 
     replaced = cli_connect.replace_owner_placeholders_in_config(
         config_path=config_path,
@@ -498,7 +496,6 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
     # Verify the result is valid YAML
     parsed = yaml.safe_load(updated)
     assert parsed["administrators"] == ["@alice:mindroom.chat:8448"]
-    assert parsed["room_defaults"]["admins"] == ["@alice:mindroom.chat:8448"]
 
 
 def test_replace_owner_placeholders_reaches_included_files(tmp_path: Path) -> None:

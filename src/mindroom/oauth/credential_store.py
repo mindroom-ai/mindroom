@@ -116,7 +116,7 @@ def _rollback_connection(connection: sqlite3.Connection) -> None:
 
 
 class _OAuthCredentialReader:
-    """One read-only view of a committed per-scope credential state."""
+    """Read one per-scope credential state through an open database connection."""
 
     def __init__(self, context: OAuthCredentialStoreContext, database: _OAuthDatabase) -> None:
         self._context = context
@@ -140,29 +140,8 @@ class _OAuthCredentialReader:
         return await self._database.run(_reset_operation_result, self._connection, operation_id)
 
 
-class OAuthCredentialTransaction:
+class OAuthCredentialTransaction(_OAuthCredentialReader):
     """One open per-scope SQLite write transaction."""
-
-    def __init__(
-        self,
-        context: OAuthCredentialStoreContext,
-        database: _OAuthDatabase,
-    ) -> None:
-        self._context = context
-        self._database = database
-        self._connection = database.connection
-
-    async def generations(self) -> _OAuthStoredGenerations:
-        """Read revisions without blocking the OAuth event loop."""
-        return await self._database.run(self._generations)
-
-    def _generations(self) -> _OAuthStoredGenerations:
-        """Read revisions without decoding credential bytes."""
-        return _stored_generations(_state_row(self._connection))
-
-    async def snapshot(self) -> _OAuthStoredCredentialSnapshot:
-        """Read credentials without blocking the OAuth event loop."""
-        return await self._database.run(_stored_snapshot, self._context, self._connection)
 
     async def publish(
         self,
@@ -203,10 +182,6 @@ class OAuthCredentialTransaction:
             generation=generation,
             connection_generation=connection_generation,
         )
-
-    async def reset_operation_result(self, operation_id: str) -> bool | None:
-        """Read a reset receipt without blocking the OAuth event loop."""
-        return await self._database.run(_reset_operation_result, self._connection, operation_id)
 
     async def reset(self, operation_id: str | None) -> bool:
         """Delete credentials without blocking the OAuth event loop."""
@@ -297,14 +272,13 @@ def _decode_credentials(
         msg = "Stored OAuth credentials could not be loaded"
         raise OAuthCredentialUnreadableError(msg)
     try:
-        credentials = context.credentials_manager.decode_credentials(
+        return context.credentials_manager.decode_credentials(
             context.provider.credential_service,
             bytes(payload),
         )
     except (OSError, TypeError, ValueError, InvalidTag) as exc:
         msg = "Stored OAuth credentials could not be loaded"
         raise OAuthCredentialUnreadableError(msg) from exc
-    return credentials
 
 
 def _oauth_credential_database_path(context: OAuthCredentialStoreContext) -> Path:
