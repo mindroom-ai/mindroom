@@ -340,7 +340,7 @@ async def test_matrix_message_send_resolves_room_alias_before_send(tmp_path: Pat
     ):
         payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id="#ops:localhost"))
 
-    mock_access.assert_called_once_with(ctx, "!ops:localhost")
+    mock_access.assert_called_once_with(ctx, "!ops:localhost", contact_room_ok=True)
     assert mock_send.await_args.args[1] == "!ops:localhost"
     assert payload["status"] == "ok"
     assert payload["room_id"] == "!ops:localhost"

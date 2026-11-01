@@ -693,6 +693,7 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.conversation_reads"
 depends_on = [
+    "mindroom.entity_resolution",
     "mindroom.matrix.agent_message_snapshot",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_hydration",
@@ -2421,6 +2422,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.attachment_helpers"
 depends_on = [
+    "mindroom.contacts.turns",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.projected_thread_membership",
     "mindroom.matrix.state",
@@ -2479,6 +2481,8 @@ visibility = [
 [[modules]]
 path = "mindroom.custom_tools.matrix_message"
 depends_on = [
+    "mindroom.contacts.parties",
+    "mindroom.contacts.turns",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.custom_tools.matrix_conversation_operations",
@@ -2502,6 +2506,8 @@ depends_on = [
 path = "mindroom.custom_tools.matrix_conversation_operations"
 depends_on = [
     "mindroom.constants",
+    "mindroom.contacts.policy",
+    "mindroom.contacts.turns",
     "mindroom.custom_tools.attachments",
     "mindroom.interactive",
     "mindroom.matrix.client_delivery",

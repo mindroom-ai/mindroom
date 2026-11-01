@@ -9,6 +9,8 @@ from pathlib import Path  # noqa: TC003 - tool config sync evaluates constructor
 from threading import Lock
 from typing import TYPE_CHECKING, ClassVar, Literal
 
+from mindroom.contacts.parties import personal_room_of
+from mindroom.contacts.turns import contact_turn
 from mindroom.custom_tools import matrix_conversation_operations
 from mindroom.custom_tools.attachment_helpers import (
     explicit_thread_root,
@@ -31,6 +33,21 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+
+_CONTACT_DESTINATION_ERROR = (
+    "Error: in a contact conversation you can only write to this room or to your owner's personal room"
+)
+
+
+def _contact_turn_may_reach(context: ToolRuntimeContext, room_id: str) -> bool:
+    """Return whether this turn may use ``room_id``: a contact turn reaches only its room and its owner's with it."""
+    config = context.current_config
+    contact = contact_turn(config, context.runtime_paths, context.room_id, context.agent_name)
+    if contact is None or room_id == context.room_id:
+        return True
+    record, side = contact
+    return personal_room_of(config, context.runtime_paths, record.party(side).owner) == (context.agent_name, room_id)
 
 
 def _optional_string(value: str | None, name: str) -> str | None:
@@ -160,7 +177,9 @@ class MatrixMessageTools(Toolkit):
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
-        if not await room_access_allowed(context, resolved_room_id):
+        if not _contact_turn_may_reach(context, resolved_room_id):
+            return self._payload("error", room_id=resolved_room_id, message=_CONTACT_DESTINATION_ERROR)
+        if not await room_access_allowed(context, resolved_room_id, contact_room_ok=True):
             return self._payload("error", room_id=resolved_room_id, message="Not authorized to access the target room.")
         dispatch = partial(
             self._dispatch_action,
