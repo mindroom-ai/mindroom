@@ -381,8 +381,12 @@ class GatewayServer:
         # The default tracing middleware parses client `_meta` trace fields and logs malformed ones verbatim.
         self._server.middleware.clear()
         origin = urlsplit(public_url)
+        allowed_hosts = [origin.netloc]
+        if origin.port is None:
+            default_port = 443 if origin.scheme == "https" else 80
+            allowed_hosts.append(f"{origin.netloc}:{default_port}")
         security = TransportSecuritySettings(
-            allowed_hosts=[origin.netloc],
+            allowed_hosts=allowed_hosts,
             allowed_origins=list(allowed_origins)
             if allowed_origins is not None
             else [f"{origin.scheme}://{origin.netloc}"],

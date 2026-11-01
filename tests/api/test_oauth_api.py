@@ -68,7 +68,12 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     resolve_worker_target,
 )
-from tests.api.conftest import publish_api_config, trusted_upstream_env, trusted_upstream_headers
+from tests.api.conftest import (
+    login_with_api_key,
+    publish_api_config,
+    trusted_upstream_env,
+    trusted_upstream_headers,
+)
 from tests.conftest import publish_test_plugins
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 from tests.runtime_fakes import bind_test_embedded_runtime
@@ -348,12 +353,6 @@ def _fake_provider(
         token_exchanger=_exchange,
         requester_scoped_credentials=requester_scoped_credentials,
     )
-
-
-def _login(client: TestClient) -> None:
-    client.headers["Origin"] = str(client.base_url).rstrip("/")
-    response = client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert response.status_code == 200
 
 
 def _error_detail(response: Any) -> str:  # noqa: ANN401
@@ -805,7 +804,7 @@ def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
 
     assert response.status_code == 200
@@ -843,7 +842,7 @@ def test_connect_uses_stored_oauth_client_config(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
 
     assert response.status_code == 200
@@ -875,7 +874,7 @@ def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> N
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
 
     assert response.status_code == 200
@@ -952,7 +951,7 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url=public_url) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.request(method, path, follow_redirects=False)
 
     assert response.status_code == expected_status
@@ -1142,7 +1141,7 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="https://mindroom.example.test") as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.request(method, path)
 
     assert response.status_code == 503
@@ -1315,7 +1314,7 @@ def test_oauth_entrypoints_reject_dynamic_client_without_exact_https_redirect(
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url=request_base_url) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.request(method, path)
 
     assert response.status_code == 503
@@ -2505,7 +2504,7 @@ def test_cors_wildcard_never_becomes_a_message_target(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.get(f"/api/oauth/{provider.id}/success?opener_origin=https://anywhere.example")
 
     _expect_opener_notice(response, provider_id=provider.id, status="connected")
@@ -2531,7 +2530,7 @@ def test_success_page_is_styled_and_signals_completion_to_popup_opener(tmp_path:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.get(f"/api/oauth/{provider.id}/success")
 
     _expect_styled_oauth_page(response, status=200, message=f"{provider.display_name} is connected.")
@@ -2643,7 +2642,7 @@ def test_oauth_pages_never_repeat_provider_or_agent_text_from_the_url(tmp_path: 
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             page = client.get(url, follow_redirects=False)
             api = client.post(api_url)
 
@@ -2739,7 +2738,7 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -2788,7 +2787,7 @@ def test_callback_uses_stored_oauth_client_config(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -2966,7 +2965,7 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
         with TestClient(api_app, base_url="http://localhost:8765") as client:
             unauthenticated_confirmation = client.get(reset_url, follow_redirects=False)
             unauthenticated_reset = client.post(reset_url, follow_redirects=False)
-            _login(client)
+            login_with_api_key(client)
             tampered_target = client.get(
                 reset_url.replace("agent_name=general", "agent_name=devagent"),
                 follow_redirects=False,
@@ -3275,7 +3274,7 @@ def test_browser_reset_rejects_stale_connection_generation(tmp_path: Path) -> No
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.post(reset_url, follow_redirects=False)
 
     assert response.status_code == 409
@@ -3341,7 +3340,7 @@ def test_browser_reset_rejects_target_removed_by_config_reload(tmp_path: Path) -
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
-            _login(client)
+            login_with_api_key(client)
             confirmation = client.get(reset_url, follow_redirects=False)
             response = client.post(reset_url, follow_redirects=False)
 
@@ -3361,7 +3360,7 @@ def test_spotify_connect_refuses_an_isolating_worker_scope(tmp_path: Path) -> No
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user"))
 
     with TestClient(api_app) as client:
-        _login(client)
+        login_with_api_key(client)
         response = client.post("/api/oauth/spotify/connect?agent_name=general")
 
     assert response.status_code == 400
@@ -3407,7 +3406,7 @@ def test_browser_reset_rejects_a_target_whose_scope_changed_since_the_link(tmp_p
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.post(reset_url, follow_redirects=False)
 
     assert response.status_code == 400
@@ -3463,7 +3462,7 @@ def test_disconnect_invalidates_oauth_state_issued_before_reset(tmp_path: Path) 
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             stale_state = _state_from_auth_url(connect_response.json()["auth_url"])
             disconnect_response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
@@ -3514,7 +3513,7 @@ def test_disconnect_deletes_mcp_credentials_encrypted_with_unreadable_key(tmp_pa
     mcp_manager = MCPServerManager(runtime_paths)
     bind_mcp_server_manager(mcp_manager)
     with TestClient(api_app) as client:
-        _login(client)
+        login_with_api_key(client)
         response = client.post("/api/oauth/mcp_demo/disconnect?agent_name=general")
     assert response.status_code == 200
     assert _stored_oauth_credentials(provider, runtime_paths) is None
@@ -3568,7 +3567,7 @@ def test_unreadable_oauth_status_can_be_reset_and_reconnected(
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             unreadable_status = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
             disconnect_response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
             reset_status = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
@@ -3627,7 +3626,7 @@ def test_callback_maps_exchange_failures_to_a_safe_error_page(
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             response = client.get(f"/api/oauth/{provider.id}/callback?code=test-code&state={state}")
@@ -3705,7 +3704,7 @@ def test_generated_mcp_oauth_routes_follow_agent_scope_for_connect_status_and_di
     generated_provider = config_plugins(config, runtime_paths).oauth_providers["mcp_demo"]
 
     with TestClient(api_app) as client:
-        _login(client)
+        login_with_api_key(client)
         connect_response = client.post("/api/oauth/mcp_demo/connect?agent_name=general")
         state = _state_from_auth_url(connect_response.json()["auth_url"])
         callback_response = client.get(
@@ -3796,7 +3795,7 @@ def test_callback_does_not_preserve_refresh_token_from_previous_client(
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -3827,7 +3826,7 @@ def test_user_scope_oauth_token_not_in_worker_path(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -3861,7 +3860,7 @@ def test_shared_scope_oauth_token_uses_agent_store_not_shared_or_worker_path(tmp
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -3906,7 +3905,7 @@ def test_requester_scoped_provider_uses_user_store_for_non_private_agent_runtime
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect{agent_query}")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -4163,7 +4162,7 @@ def test_shared_scope_plugin_oauth_token_uses_agent_store_not_shared_or_worker_p
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -4206,7 +4205,7 @@ def test_user_agent_scope_plugin_oauth_token_uses_private_store_not_worker_path(
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -4230,7 +4229,7 @@ def test_dashboard_private_oauth_rejects_unbound_standalone_requester(tmp_path: 
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
 
     assert response.status_code == 403
@@ -4272,7 +4271,7 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -4332,7 +4331,7 @@ def test_callback_does_not_carry_refresh_token_to_a_moved_token_endpoint(tmp_pat
         patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}),
         TestClient(api_app) as client,
     ):
-        _login(client)
+        login_with_api_key(client)
         connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
         state = _state_from_auth_url(connect_response.json()["auth_url"])
         callback_response = client.get(
@@ -4559,7 +4558,7 @@ def test_disconnect_cleanup_failure_preserves_credentials(tmp_path: Path, monkey
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
 
     assert response.status_code == 503
@@ -4598,7 +4597,7 @@ def test_callback_drops_old_refresh_token_when_identity_changes(tmp_path: Path) 
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -4641,7 +4640,7 @@ def test_callback_replaces_old_refresh_token_when_provider_returns_new_one(tmp_p
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -4687,7 +4686,7 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
@@ -5703,7 +5702,7 @@ def test_connect_token_binding_setup_error_returns_503(
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=devagent&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
@@ -5735,7 +5734,7 @@ def test_connect_token_rejects_a_target_other_than_its_own(tmp_path: Path, targe
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.get(
                 f"/api/oauth/{provider.id}/authorize?{target_query}connect_token={connect_token}",
                 follow_redirects=False,
@@ -5772,7 +5771,7 @@ def test_agent_connect_token_rejects_different_authenticated_requester(tmp_path:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
@@ -5814,7 +5813,7 @@ def test_shared_agent_connect_token_uses_link_target_despite_authenticated_reque
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=shared"
                 f"&connect_token={connect_token}",
@@ -5844,7 +5843,7 @@ def test_callback_rejects_wrong_provider_state(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value=providers):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{first_provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -5884,7 +5883,7 @@ def test_callback_exchanges_code_only_at_token_endpoint_bound_during_connect(tmp
         patch("mindroom.api.oauth.issue_pending_oauth_state", side_effect=state_issuer),
         TestClient(api_app) as client,
     ):
-        _login(client)
+        login_with_api_key(client)
         connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
         state = _state_from_auth_url(connect_response.json()["auth_url"])
         if binding == "changed":
@@ -5910,7 +5909,7 @@ def test_callback_rejects_changed_credential_target(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             _publish_config(api_app, runtime_paths, _config_payload(worker_scope="shared"))
@@ -5940,7 +5939,7 @@ def test_callback_rejects_failed_claim_validation(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -5968,7 +5967,7 @@ def test_callback_rejects_unverified_email_domain_claim(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
             callback_response = client.get(
@@ -6020,7 +6019,7 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
             disconnect_response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
             disconnected_status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
@@ -6076,7 +6075,7 @@ def test_disconnect_preserves_tool_config_settings(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
 
     assert response.status_code == 200
@@ -6104,7 +6103,7 @@ def test_status_requires_client_config_for_connected_true(tmp_path: Path) -> Non
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6141,7 +6140,7 @@ def test_status_rejects_stored_token_without_client_id(tmp_path: Path) -> None:
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6180,7 +6179,7 @@ def test_status_rejects_token_from_previous_oauth_client(tmp_path: Path) -> None
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6207,7 +6206,7 @@ def test_status_reports_shared_oauth_client_config_service(tmp_path: Path) -> No
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status")
 
     assert status_response.status_code == 200
@@ -6228,7 +6227,7 @@ def test_google_status_reports_connected_with_service_account(tmp_path: Path) ->
     provider = google_oauth_provider("google_drive")
 
     with TestClient(api_app, base_url="http://localhost:8765") as client:
-        _login(client)
+        login_with_api_key(client)
         status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6252,7 +6251,7 @@ def test_google_docs_status_reports_capabilities_with_service_account(tmp_path: 
     provider = google_oauth_provider("google_docs")
 
     with TestClient(api_app, base_url="http://localhost:8765") as client:
-        _login(client)
+        login_with_api_key(client)
         status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6281,7 +6280,7 @@ def test_status_hides_runtime_bootstrapped_client_from_remote_request(tmp_path: 
     )
 
     with TestClient(api_app, base_url="https://mindroom.example.test") as client:
-        _login(client)
+        login_with_api_key(client)
         status_response = client.get(f"/api/oauth/{provider.id}/status")
 
     assert status_response.status_code == 200
@@ -6316,7 +6315,7 @@ def test_status_rejects_expired_access_token_without_refresh(tmp_path: Path) -> 
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6380,7 +6379,7 @@ def test_status_refreshes_expired_access_token_with_refresh_token(
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6451,7 +6450,7 @@ def test_status_keeps_connected_when_proactive_refresh_fails_for_still_valid_tok
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6521,7 +6520,7 @@ def test_status_disconnects_after_terminal_refresh_rejection(
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6579,7 +6578,7 @@ def test_status_does_not_refresh_credentials_missing_required_scopes(
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6638,7 +6637,7 @@ def test_status_rejects_refresh_only_credentials_without_expiry(tmp_path: Path) 
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6758,7 +6757,7 @@ def test_status_rejects_refresh_token_without_required_scopes(tmp_path: Path) ->
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6793,7 +6792,7 @@ def test_status_rejects_stored_oauth_token_disallowed_by_new_identity_policy(tmp
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6826,7 +6825,7 @@ def test_status_rejects_stored_oauth_token_unverified_claim_summary(tmp_path: Pa
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200
@@ -6858,7 +6857,7 @@ def test_status_rejects_stored_oauth_token_missing_claims_when_identity_policy_c
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
-            _login(client)
+            login_with_api_key(client)
             status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
 
     assert status_response.status_code == 200

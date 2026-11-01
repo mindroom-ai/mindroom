@@ -37,7 +37,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -84,7 +84,6 @@ def _make_bot(tmp_path: Path) -> AgentBot:
         ),
         runtime_paths,
     )
-    persist_entity_accounts(config, runtime_paths)
     agent_user = AgentMatrixUser(
         agent_name="general",
         user_id=entity_ids(config, runtime_paths)["general"].full_id,

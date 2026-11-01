@@ -3709,6 +3709,7 @@ async def test_completed_approval_continuation_delivers_canonical_ordered_body_u
             continuation,
             request=request,
             target=target,
+            identity=runner.locked.build_lifecycle(request, response_kind="ai").identity,
         )
 
     final_request = deliver_final.await_args.args[0]
@@ -8022,7 +8023,12 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
 
             async def recover_owned() -> None:
                 completed.append(
-                    await runner.approvals._execute_claimed_approval(claimed, request=request, target=target),
+                    await runner.approvals._execute_claimed_approval(
+                        claimed,
+                        request=request,
+                        target=target,
+                        identity=runner.locked.build_lifecycle(request, response_kind="ai").identity,
+                    ),
                 )
 
             recovery = runner.inbox.track_inbox_response(

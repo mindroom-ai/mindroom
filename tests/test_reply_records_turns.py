@@ -527,6 +527,27 @@ async def test_a_redaction_of_an_event_already_gone_is_done(tmp_path: Path) -> N
     assert (await _reply(bot)).redaction_pending == ("$kept",)
 
 
+@pytest.mark.parametrize("failure", ["no client", "transport error"])
+async def test_a_redaction_that_cannot_reach_matrix_stays_owed(tmp_path: Path, failure: str) -> None:
+    """A bot without a client, or a redaction that raised, leaves the event owed for the next settlement."""
+    bot = await _streaming_bot(tmp_path)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
+    answered = await _reply(bot)
+    await _owe(bot, answered.reply_id, redaction_pending=("$owed",))
+    client = bot.client
+    client.room_redact = AsyncMock(side_effect=OSError("connection reset"))
+    if failure == "no client":
+        bot.client = None
+
+    with capture_logs() as logs:
+        await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
+
+    assert (await _reply(bot)).redaction_pending == ("$owed",)
+    assert client.room_redact.called is (failure == "transport error")
+    # Only a redaction that reached Matrix and failed is worth a warning; no client yet is an expected state.
+    assert any(log["event"] == "Owed reply redaction failed" for log in logs) is (failure == "transport error")
+
+
 @dataclass
 class _FirstCallHold:
     """Hold the first Matrix call until released; later calls go straight through."""

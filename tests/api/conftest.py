@@ -298,6 +298,13 @@ def commit_tool_change(
     return commit.config
 
 
+def login_with_api_key(client: TestClient) -> None:
+    """Sign `client` in with the `test-key` session cookie and send its origin, as a browser does."""
+    client.headers["Origin"] = str(client.base_url).rstrip("/")
+    response = client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert response.status_code == 200
+
+
 PLATFORM_SSO_SECRET = "instance-platform-sso-secret-for-tests-0001"  # noqa: S105
 
 

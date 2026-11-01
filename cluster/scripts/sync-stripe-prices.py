@@ -8,7 +8,7 @@
 """Sync pricing configuration with Stripe.
 
 This script reads pricing-config.yaml, creates or updates the MindRoom product in Stripe,
-reuses or creates a price for each paid plan and billing cycle, and writes the price IDs back to the YAML file.
+reuses or creates a test-mode price for each paid plan and billing cycle, and writes the price IDs back to the YAML file.
 """
 
 import os
@@ -26,6 +26,10 @@ load_dotenv(env_path)
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 if not stripe.api_key:
     print("❌ Error: STRIPE_SECRET_KEY not found in environment variables")
+    sys.exit(1)
+if stripe.api_key.startswith(("sk_live_", "rk_live_")):
+    print("❌ Error: STRIPE_SECRET_KEY is a live-mode key; this script syncs test-mode prices only.")
+    print("Create live prices by hand: docs/deployment/saas-platform.md#changing-a-plan-price")
     sys.exit(1)
 
 config_path = repo_root / "saas-platform" / "pricing-config.yaml"
@@ -137,8 +141,7 @@ def main():
     update_config_with_price_ids(price_ids)
 
     print("\n✨ Stripe sync complete!")
-    print("\nPrice IDs have been saved to pricing-config.yaml")
-    print("The backend and frontend will now use these prices automatically.")
+    print("Set the live price IDs and deploy: docs/deployment/saas-platform.md#changing-a-plan-price")
 
 
 if __name__ == "__main__":

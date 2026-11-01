@@ -231,6 +231,7 @@ def test_a_file_that_is_not_a_graph_item_or_link_is_refused(
         (lambda tools: tools.microsoft_files_list_folder(SHARE_LINK, limit=0), "invalid_argument"),
         (lambda tools: tools.microsoft_files_list_folder(SHARE_LINK, limit=201), "invalid_argument"),
         (lambda tools: tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget", "A1:"), "invalid_argument"),
+        (lambda tools: tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget", "A1:CV101"), "too_large"),
     ],
 )
 def test_a_malformed_argument_is_refused_before_asking_for_a_connection(
@@ -734,13 +735,6 @@ def test_excel_read_sends_the_address_without_padding(tmp_path: Path, monkeypatc
 
     assert json.loads(tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget", " $A$1:B2 "))["status"] == "ok"
     assert unquote(graph.requests[-1].url.path).endswith("/worksheets/Budget/range(address='$A$1:B2')")
-
-
-def test_excel_read_refuses_an_address_over_the_cell_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _Graph(), connected=False)
-
-    assert json.loads(tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget", "A1:CV101"))["code"] == "too_large"
-    assert graph.requests == []
 
 
 @pytest.mark.parametrize("worksheet", ["", ".", "..", "a/b", "a:b", "a?b", "a*b", "a[b", "a]b", "a\\b", "x" * 32])

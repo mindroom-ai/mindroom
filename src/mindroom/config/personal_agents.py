@@ -63,7 +63,8 @@ class PersonalAgentTemplateConfig(BaseModel):
     agent: AgentConfig = Field(
         description=(
             "Agent fields shared by every user's agent; display_name, role, and instructions accept "
-            "{user}, {username}, and {user_display_name}. Only the owner and administrators may use each agent "
+            "{user}, {username}, and {user_display_name}, and the template key in delegate_to names each user's "
+            "own agent. Only the owner and administrators may use each agent "
             "unless access admits others, and the owner is always added to access.users and credential_managers"
         ),
     )
@@ -263,6 +264,11 @@ def personal_agent_data(template: Mapping[str, Any], entry: PersonalAgentRosterE
     if isinstance(agent.get("instructions"), list):
         agent["instructions"] = [
             _render_placeholders(item, values) if isinstance(item, str) else item for item in agent["instructions"]
+        ]
+    # The template key names each user's own agent, as in personal_rooms.agent, so the agent can run copies of itself.
+    if isinstance(agent.get("delegate_to"), list):
+        agent["delegate_to"] = [
+            entry.agent_name if target == entry.template else target for target in agent["delegate_to"]
         ]
 
     access = {} if agent.get("access") is None else agent["access"]

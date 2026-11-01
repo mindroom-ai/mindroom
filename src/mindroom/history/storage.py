@@ -207,7 +207,8 @@ def _remove_redacted_event_from_history(
     legacy_event_ids = summary_rows.legacy_event_ids(storage, session_id=session_id, scope_key=scope.key)
     if legacy_event_ids is not None and _legacy_summary_may_contain(event_id, legacy_source_event_id, legacy_event_ids):
         summary_rows.cut_at_legacy_row(storage, session=session, scope_key=scope.key)
-    elif not summary_rows.cut_at_event(
+        return True
+    if not summary_rows.cut_at_event(
         storage,
         # The id repeats the session's: `remove_runs_answering` cuts with the id alone, so this function takes both.
         session_id=session_id,
@@ -217,7 +218,7 @@ def _remove_redacted_event_from_history(
         session=session,
     ):
         return False
-    elif legacy_event_ids is not None:
+    if legacy_event_ids is not None:
         summary_rows.retire(storage, session=session, scope_key=scope.key)
     return True
 

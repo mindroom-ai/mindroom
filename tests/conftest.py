@@ -2222,6 +2222,7 @@ def make_relation_lookup(
     *,
     threads: dict[str, str | None] | None = None,
     client: object | None = None,
+    failure: Exception | None = None,
 ) -> RelationLookup:
     """Return a real relation lookup over an in-memory set of admitted events.
 
@@ -2233,9 +2234,42 @@ def make_relation_lookup(
     """
     resolved_client = SimpleNamespace(client=client) if client is not None else _serving_client()
     return RelationLookup(
-        store=cast("RelationView", FakeRelationStore(threads=dict(threads or {}))),
+        store=cast("RelationView", FakeRelationStore(threads=dict(threads or {}), failure=failure)),
         runtime=resolved_client,  # type: ignore[arg-type]
     )
+
+
+def event_serving_client(
+    event_id: str,
+    *,
+    content: dict[str, object],
+    event_type: str = "m.room.message",
+) -> MagicMock:
+    """Return a homeserver that serves one event for every point lookup."""
+    client = MagicMock()
+    client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "event_id": event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "type": event_type,
+                "content": content,
+            },
+        ),
+    )
+    return client
+
+
+def make_thread_reply_lookup(reply_event_id: str, thread_root_id: str) -> RelationLookup:
+    """Return a relation lookup whose homeserver answers every event lookup with one reply inside a thread."""
+    content = {
+        "msgtype": "m.text",
+        "body": "reply",
+        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
+    }
+    return make_relation_lookup(client=event_serving_client(reply_event_id, content=content))
 
 
 def _serving_client() -> SimpleNamespace:

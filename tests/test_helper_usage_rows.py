@@ -64,7 +64,7 @@ from tests.conftest import bind_runtime_paths, install_model_providers, seed_ses
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import _forced_compaction_context, _make_config, _reported, _session
-from tests.identity_helpers import persist_actual_entity_accounts, persist_entity_accounts
+from tests.identity_helpers import persist_actual_entity_accounts
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -116,15 +116,13 @@ def _usage_rows(storage_root: Path) -> list[list[str]]:
 
 
 def _system_config(paths: RuntimePaths) -> Config:
-    config = bind_runtime_paths(
+    return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", role="Help")},
             models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         paths,
     )
-    persist_entity_accounts(config, paths)
-    return config
 
 
 def _scripted(monkeypatch: pytest.MonkeyPatch, text: str, *, sums_attempts: bool = False) -> None:

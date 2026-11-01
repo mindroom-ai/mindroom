@@ -31,7 +31,6 @@ from mindroom.tool_jobs.client_cancel import (
     cancel_room_jobs,
     handle_job_cancel_event,
     jobs_listing,
-    person_may_cancel,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -76,32 +75,53 @@ def test_parse_accepts_one_job_or_all_and_rejects_anything_else() -> None:
     assert _parse_job_cancel({"all": "yes"}) is None
 
 
+async def _cancel_event(
+    tmp_path: Path,
+    content: object,
+    *,
+    agent_name: str = "agent_a",
+    sender: str = "@alice:test",
+    may_talk: bool = True,
+) -> None:
+    """Hand one client cancel event in `!room:test` to an agent, as its journal callback does."""
+    event = nio.UnknownEvent.from_dict(
+        {
+            "type": "io.mindroom.background_job_cancel",
+            "sender": sender,
+            "event_id": "$cancel",
+            "origin_server_ts": 1,
+            "content": {},
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
+    event.source["content"] = content
+    talked: list[tuple[str, str]] = []
+
+    def policy(sender_id: str, room_id: str) -> bool:
+        talked.append((sender_id, room_id))
+        return may_talk
+
+    config = Config(agents={"agent_a": AgentConfig(display_name="Agent A"), "agent_b": AgentConfig(display_name="B")})
+    await handle_job_cancel_event(
+        nio.MatrixRoom("!room:test", "@mindroom_agent_a:test"),
+        event,
+        agent_name=agent_name,
+        runtime=SimpleNamespace(config=config),
+        runtime_paths=_runtime_paths(tmp_path),
+        may_talk=policy,
+    )
+    assert talked in ([], [(sender, "!room:test")])
+
+
 @pytest.mark.asyncio
 async def test_a_cancel_reaches_only_the_owning_agent(tmp_path: Path) -> None:
     """Every bot sees the cancel event; only the agent that owns the job cancels it."""
-    runtime = await tool_job_runtime(tmp_path)
+    runtime = await _command_runtime(tmp_path)
     try:
         await _start(runtime, "job_a", agent="agent_a")
-        content = {"job_id": "job_a"}
-        assert (
-            await handle_job_cancel_event(
-                runtime,
-                agent_name="agent_b",
-                room_id="!room:test",
-                content=content,
-                sender_may_cancel=True,
-            )
-            == ()
-        )
+        await _cancel_event(tmp_path, {"job_id": "job_a"}, agent_name="agent_b")
         assert _status(runtime, "job_a") == "running"
-        cancelled = await handle_job_cancel_event(
-            runtime,
-            agent_name="agent_a",
-            room_id="!room:test",
-            content=content,
-            sender_may_cancel=True,
-        )
-        assert [job.job_id for job in cancelled] == ["job_a"]
+        await _cancel_event(tmp_path, {"job_id": "job_a"})
         await wait_for_status(runtime, "job_a", "cancelled")
     finally:
         await runtime.shutdown()
@@ -110,20 +130,12 @@ async def test_a_cancel_reaches_only_the_owning_agent(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_cancel_all_stops_only_this_threads_jobs(tmp_path: Path) -> None:
     """Stop all in a thread leaves the agent's jobs in other threads and the main timeline running."""
-    runtime = await tool_job_runtime(tmp_path)
+    runtime = await _command_runtime(tmp_path)
     try:
         await _start(runtime, "here", thread="$root")
         await _start(runtime, "elsewhere", thread="$other")
         await _start(runtime, "main", thread=None)
-        content = {"all": True, "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
-        cancelled = await handle_job_cancel_event(
-            runtime,
-            agent_name="agent_a",
-            room_id="!room:test",
-            content=content,
-            sender_may_cancel=True,
-        )
-        assert [job.job_id for job in cancelled] == ["here"]
+        await _cancel_event(tmp_path, {"all": True, "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}})
         await wait_for_status(runtime, "here", "cancelled")
         assert (_status(runtime, "elsewhere"), _status(runtime, "main")) == ("running", "running")
     finally:
@@ -131,24 +143,41 @@ async def test_cancel_all_stops_only_this_threads_jobs(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_unauthorized_sender_cancels_nothing(tmp_path: Path) -> None:
-    """A sender who may not talk to the agent here, such as another agent account, cancels nothing."""
-    runtime = await tool_job_runtime(tmp_path)
+@pytest.mark.parametrize(
+    ("content", "sender", "may_talk"),
+    [
+        ({"all": True}, "@alice:test", False),
+        ({"all": True}, "agent account", True),
+        ("not an object", "@alice:test", True),
+    ],
+    ids=["may not talk", "agent account", "malformed content"],
+)
+async def test_an_unauthorized_sender_or_a_malformed_cancel_cancels_nothing(
+    tmp_path: Path,
+    content: object,
+    sender: str,
+    may_talk: bool,
+) -> None:
+    """A sender who may not talk to the agent here, another agent's account, or a malformed cancel stops no job."""
+    runtime = await _command_runtime(tmp_path)
+    paths = _runtime_paths(tmp_path)
+    if sender == "agent account":
+        sender = MatrixID.from_username(
+            agent_username_localpart("agent_b", paths),
+            runtime_matrix_domain(paths),
+        ).full_id
     try:
         await _start(runtime, "job_a")
-        assert (
-            await handle_job_cancel_event(
-                runtime,
-                agent_name="agent_a",
-                room_id="!room:test",
-                content={"all": True, "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"}},
-                sender_may_cancel=False,
-            )
-            == ()
-        )
+        await _cancel_event(tmp_path, content, sender=sender, may_talk=may_talk)
         assert _status(runtime, "job_a") == "running"
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_without_a_job_runtime_does_nothing(tmp_path: Path) -> None:
+    """With background jobs off, the process has no job runtime and a cancel event is ignored."""
+    await _cancel_event(tmp_path, {"all": True})
 
 
 @pytest.mark.asyncio
@@ -309,17 +338,6 @@ async def test_cancel_job_all_cancels_this_threads_jobs(tmp_path: Path) -> None:
         assert _status(runtime, "elsewhere") == "running"
     finally:
         await runtime.shutdown()
-
-
-def test_another_agent_never_may_cancel(tmp_path: Path) -> None:
-    """A person who may talk to the entity may stop its work; another agent's account never may."""
-    config = Config(agents={"agent_a": AgentConfig(display_name="Agent A")})
-    paths = _runtime_paths(tmp_path)
-    agent_id = MatrixID.from_username(agent_username_localpart("agent_a", paths), runtime_matrix_domain(paths)).full_id
-    allowed = {"may_talk": lambda _sender: True}
-    assert person_may_cancel("@alice:test", config=config, runtime_paths=paths, **allowed)
-    assert not person_may_cancel(agent_id, config=config, runtime_paths=paths, **allowed)
-    assert not person_may_cancel("@alice:test", config=config, runtime_paths=paths, may_talk=lambda _sender: False)
 
 
 @pytest.mark.asyncio

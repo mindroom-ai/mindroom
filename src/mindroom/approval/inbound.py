@@ -24,11 +24,12 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.runtime_protocols import OrchestratorRuntime
+    from mindroom.runtime_protocols import OrchestratorRuntime, SupportsConfigOrchestrator
 
 __all__ = [
     "ApprovalResponsePayload",
     "handle_tool_approval_action",
+    "handle_tool_approval_response_event",
     "maybe_handle_tool_approval_reply",
     "parse_approval_response_event",
 ]
@@ -164,6 +165,40 @@ async def handle_tool_approval_action(
             reason=result.error_reason,
         )
     return result.consumed
+
+
+async def handle_tool_approval_response_event(
+    room: nio.MatrixRoom,
+    event: nio.UnknownEvent,
+    *,
+    runtime: SupportsConfigOrchestrator,
+    runtime_paths: RuntimePaths,
+    logger: structlog.stdlib.BoundLogger,
+) -> None:
+    """Resolve one approval response a client sent as a custom event, under the live config."""
+    raw_sender_id = event.source.get("sender")
+    if not isinstance(raw_sender_id, str) or not raw_sender_id:
+        logger.debug("ignoring_tool_approval_response_without_sender")
+        return
+    payload = parse_approval_response_event(event)
+    if payload.status is None and payload.action is None:
+        return
+    await handle_tool_approval_action(
+        room=room,
+        sender_id=raw_sender_id,
+        config=runtime.config,
+        runtime_paths=runtime_paths,
+        orchestrator=runtime.orchestrator,
+        logger=logger,
+        approval_event_id=payload.card_event_id,
+        status=payload.status,
+        reason=payload.reason,
+        auto_approve_seconds=payload.auto_approve_seconds,
+        action=payload.action,
+        grant_id=payload.grant_id,
+        scheduled_scope=payload.scheduled_scope,
+        membership_index=runtime.agent_reply_memberships,
+    )
 
 
 async def maybe_handle_tool_approval_reply(

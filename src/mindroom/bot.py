@@ -7,13 +7,13 @@ import random
 import time
 from contextvars import Context
 from functools import cached_property, partial
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import uuid4
 
 import nio
 from nio import AuthenticatedToDeviceEvent
 
-from mindroom.approval.inbound import handle_tool_approval_action, parse_approval_response_event
+from mindroom.approval.inbound import handle_tool_approval_response_event
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState, RunPhase
 from mindroom.config.resolution import entity_timezone
@@ -24,14 +24,11 @@ from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
     EVENT_BOT_READY,
-    EVENT_REACTION_RECEIVED,
     AgentLifecycleContext,
     HookContextSupport,
     HookRegistry,
     HookRegistryLifetime,
-    ReactionReceivedContext,
     emit,
-    send_hook_message,
 )
 from mindroom.hooks.ingress import IngressHookRunner
 from mindroom.integrations import reply_mirror_for
@@ -54,7 +51,6 @@ from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manag
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.model_catalog_receiver import register_model_catalog_receiver
 from mindroom.orchestration.server_state import publish_server_state, server_state_content
-from mindroom.personal_agents import provision_personal_agent
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.runtime_shutdown import (
@@ -101,12 +97,11 @@ from .journal_dispatch import (
 )
 from .knowledge.utils import KnowledgeAccessSupport
 from .logging_config import get_logger
-from .managed_avatars import entity_avatar_path
-from .matrix.avatar import set_user_avatar_from_file, user_has_avatar
+from .managed_avatars import ensure_entity_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.conversation_hydration import ConversationHydrator
-from .matrix.conversation_reads import ConversationReader, latest_agent_message_snapshot
+from .matrix.conversation_reads import ConversationReader
 from .matrix.relation_lookup import RelationLookup
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .reply_scope import ReplyRuntime
@@ -117,7 +112,7 @@ from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .router.duties import RouterDuties, RouterDutiesDeps
-from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
+from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event
 from .tool_jobs.follow_ups import follow_up_event
 from .tool_jobs.runtime import get_background_runtime
 from .turn_policy import TurnPolicy, TurnPolicyDeps
@@ -142,7 +137,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
-    from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.runtime_protocols import OrchestratorRuntime
@@ -157,8 +151,6 @@ class _ProcessShutdownMatrixClient(Protocol):
     def begin_process_shutdown_transport_fence(self) -> None:
         """Permanently refuse new Matrix transport attempts."""
 
-
-type _MatrixEventId = str
 
 logger = get_logger(__name__)
 
@@ -346,7 +338,6 @@ class AgentBot:
                 ),
             )
 
-        self._personal_agents_provisioning: set[tuple[str, str]] = set()
         self.personal_rooms = PersonalRoomService(
             self.agent_name,
             self._runtime_view,
@@ -359,7 +350,8 @@ class AgentBot:
             self.runtime_paths,
             self.personal_rooms,
             self._lookup_personal_room_target,
-            self._provision_personal_agent,
+            orchestrator.config_reload,
+            self._report_personal_room_membership_change,
         )
         self._room_lifecycle = BotRoomLifecycle(
             BotRoomLifecycleDeps(
@@ -404,8 +396,7 @@ class AgentBot:
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
         self._journal_principal_id = journal_principal_id(self.agent_name, runtime_matrix_id.full_id)
-        # One database holds every principal, so the runtime's one store serves this bot's view, including the new
-        # principal's view after a login authenticates as a different Matrix user. The runtime closes it.
+        # One database holds every principal, so the runtime's one store serves this bot's view. The runtime closes it.
         self._journal_store = self.orchestrator.event_journal_store()
         principal = self._journal_store.principal(self._journal_principal_id)
         self._journal_principal = principal
@@ -471,8 +462,8 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             agent_name=self.agent_name,
             hook_registry_state=self._hook_registry_state,
-            hook_send_message=self.hook_send_message,
-            agent_message_snapshot_reader=self.hook_agent_message_snapshot,
+            conversation_reader=self._conversation_reader,
+            logger=self.logger,
         )
         self._router = (
             None
@@ -501,14 +492,25 @@ class AgentBot:
         )
         self._journal_dispatcher = JournalDispatcher(
             store=principal,
-            # Every callback reaches an owner built below, which hands its sources back through this dispatcher, so
-            # each callback is a bot routing method or resolves its owner when it runs.
+            # Owners built below hand their sources back through this dispatcher, so a callback that reaches one is a
+            # bot routing method or resolves its owner when it runs.
             callbacks=JournalCallbacks(
                 on_message=self._on_message,
                 on_media=self._on_media_message,
                 on_reaction=self._on_reaction,
-                on_approval=self._on_unknown_event,
-                on_job_cancel=self._on_job_cancel,
+                on_approval=partial(
+                    handle_tool_approval_response_event,
+                    runtime=self._runtime_view,
+                    runtime_paths=self.runtime_paths,
+                    logger=self.logger,
+                ),
+                on_job_cancel=partial(
+                    handle_job_cancel_event,
+                    agent_name=self.agent_name,
+                    runtime=self._runtime_view,
+                    runtime_paths=self.runtime_paths,
+                    may_talk=self._turn_policy.can_reply_to_sender_in_room,
+                ),
                 on_room_lifecycle=self._on_room_member,
                 on_rtc=self._on_rtc_event,
                 on_redaction=self._on_redaction,
@@ -554,7 +556,6 @@ class AgentBot:
                 agent_name=self.agent_name,
                 logger=self.logger,
                 resolver=self._conversation_resolver,
-                redact_message_event=self._redact_message_event,
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
                     # Reads the live config, which a reload replaces.
@@ -794,12 +795,12 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 journal_dispatcher=self._journal_dispatcher,
-                agent_reply_memberships=self._runtime_view.agent_reply_memberships,
                 user_stop_reconciler=self._user_stop_reconciler,
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_ingress.reserve_prompt_ingress_order,
                 enqueue_interactive_selection=self._interactive_selections.enqueue_interactive_selection,
-                emit_reaction_received_hooks=self._emit_reaction_received_hooks,
+                hook_context=self._hook_context_support,
+                resolver=self._conversation_resolver,
                 config_confirmation=config_confirmation.ConfigConfirmationContext(
                     runtime=self._runtime_view,
                     runtime_paths=self.runtime_paths,
@@ -840,15 +841,6 @@ class AgentBot:
             context=Context(),
         )
 
-    def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
-        """Refresh startup collaborators when Matrix login authenticates as a different user."""
-        if self.agent_user.user_id == matrix_id_before_login.full_id:
-            return
-
-        self.agent_user.__dict__.pop("matrix_id", None)
-        self.__dict__.pop("matrix_id", None)
-        self._init_runtime_components()
-
     @property
     def client(self) -> nio.AsyncClient | None:
         """Return the current Matrix client."""
@@ -880,16 +872,6 @@ class AgentBot:
         """Return the runtime this bot belongs to."""
         return self._runtime_view.orchestrator
 
-    @property
-    def approval_store(self) -> PrincipalStore:
-        """Return this bot principal's complete event-journal view."""
-        return self._journal_principal
-
-    @property
-    def runtime_started_at(self) -> float:
-        """Return when this bot runtime started."""
-        return self._runtime_view.runtime_started_at
-
     async def latest_thread_event_id_if_needed(
         self,
         room_id: str,
@@ -902,6 +884,11 @@ class AgentBot:
     def hook_registry(self) -> HookRegistry:
         """Return the active hook registry, which holds no hooks once this generation stopped."""
         return self._hook_registry_state.registry
+
+    @property
+    def hook_context(self) -> HookContextSupport:
+        """Return the hook capabilities this bot binds into the hook contexts it emits, including its hook sender."""
+        return self._hook_context_support
 
     @property
     def conversation_reader(self) -> ConversationReader:
@@ -1031,47 +1018,6 @@ class AgentBot:
         if journal_sources:
             self._journal_dispatcher.retry_turn_sources(room_id, journal_sources)
 
-    async def _emit_reaction_received_hooks(
-        self,
-        *,
-        room_id: str,
-        event: nio.ReactionEvent,
-        correlation_id: str,
-    ) -> None:
-        """Emit reaction:received after built-in handlers decline the reaction."""
-        assert self.client is not None
-        if not self.hook_registry.has_hooks(EVENT_REACTION_RECEIVED):
-            return
-
-        normalized_target_event_id = event.reacts_to.strip()
-        thread_id: str | None = None
-        if normalized_target_event_id:
-            try:
-                thread_id = (
-                    await self._conversation_resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort(
-                        room_id,
-                        normalized_target_event_id,
-                    )
-                )
-            except Exception as exc:
-                self.logger.debug(
-                    "Failed to resolve reaction target thread for hook context",
-                    room_id=room_id,
-                    target_event_id=normalized_target_event_id,
-                    error=str(exc),
-                )
-
-        context = ReactionReceivedContext(
-            **self._hook_context_support.base_kwargs(EVENT_REACTION_RECEIVED, correlation_id),
-            room_id=room_id,
-            event_id=event.event_id,
-            sender_id=event.sender,
-            reaction_key=event.key,
-            target_event_id=event.reacts_to,
-            thread_id=thread_id,
-        )
-        await emit(self.hook_registry, EVENT_REACTION_RECEIVED, context)
-
     async def _emit_agent_lifecycle_event(
         self,
         event_name: str,
@@ -1082,7 +1028,6 @@ class AgentBot:
         if not self.hook_registry.has_hooks(event_name):
             return
 
-        matrix_user_id = self.agent_user.user_id or self.matrix_id.full_id
         configured_rooms = tuple(get_rooms_for_entity(self.agent_name, self.config))
         joined_room_ids = tuple(room_id for room_id in self.rooms if room_id.startswith("!"))
         if event_name == EVENT_BOT_READY and self.client is not None:
@@ -1094,7 +1039,7 @@ class AgentBot:
             entity_name=self.agent_name,
             entity_type=self._entity_type(),
             rooms=configured_rooms,
-            matrix_user_id=matrix_user_id,
+            matrix_user_id=self.agent_user.user_id,
             joined_room_ids=joined_room_ids,
             stop_reason=stop_reason,
         )
@@ -1154,32 +1099,6 @@ class AgentBot:
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
         await self._room_lifecycle.leave_unconfigured_rooms()
-
-    async def ensure_user_account(self) -> None:
-        """Verify that orchestrator account preparation supplied this bot's account."""
-        if self.agent_user.user_id:
-            return
-        msg = f"Matrix account for {self.agent_name!r} was not prepared before bot startup"
-        raise PermanentMatrixStartupError(msg)
-
-    async def _set_avatar_if_available(self) -> None:
-        """Give the entity its avatar when its Matrix profile has none yet."""
-        if not self.client:
-            return
-
-        entity_type = "teams" if self.agent_name in self.config.teams else "agents"
-        try:
-            if await user_has_avatar(self.client):
-                return
-            avatar_path = await entity_avatar_path(entity_type, self.agent_name, self.runtime_paths)
-            if avatar_path is None:
-                return
-            if await set_user_avatar_from_file(self.client, avatar_path):
-                self.logger.info("avatar_set")
-            else:
-                self.logger.warning("avatar_set_failed")
-        except Exception as e:
-            self.logger.warning("avatar_set_failed", error=str(e))
 
     async def refresh_presence(self) -> None:
         """Set presence status with model information."""
@@ -1599,20 +1518,17 @@ class AgentBot:
         self._response_runner.follow_approval_holds(self._journal_store.approval_signals, self._journal_principal_id)
 
     async def start(self) -> None:
-        """Start the agent bot with user account setup (but don't join rooms yet)."""
-        await self.ensure_user_account()
-        matrix_id_before_login = self.matrix_id
+        """Log in with the account the runtime prepared and start this bot's services, without joining rooms yet."""
         client = await self._open_owned_matrix_client()
         # Captured the moment it becomes true. A restart that logs in as a new
         # device must not resend under the old device's transaction IDs
         # believing they still deduplicate.
         self._sending_device_id = client.device_id or None
         try:
-            self._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
             self.orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
             await self._room_lifecycle.restore_pending_join_decrypt_fences()
-            await self._set_avatar_if_available()
+            await ensure_entity_avatar(client, self.agent_name, self.config, self.runtime_paths, logger=self.logger)
             # Keep durable tracking-state loading off the event loop at startup.
             await self._turn_store.warm()
             # This bot instance now owns its replies; spans of earlier instances can no longer write.
@@ -1622,7 +1538,7 @@ class AgentBot:
 
             # Persist correctness-critical source events; keep ID-less auxiliary inputs best-effort.
             client.add_event_callback(
-                self._on_invite_before_sync_certification,  # ty: ignore[invalid-argument-type]
+                self._room_lifecycle.on_invite,  # ty: ignore[invalid-argument-type]
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
             await self._register_call_manager_callbacks(client)
@@ -2044,29 +1960,6 @@ class AgentBot:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _on_invite_before_sync_certification(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.InviteEvent,
-    ) -> None:
-        """Act on one invite without journalling it.
-
-        An invite has no Matrix event ID to key durable work on.
-        Persist its room and inviter before network work moves to the
-        background so policy changes and process restarts can reconcile it.
-        """
-        if (
-            not isinstance(event, nio.InviteMemberEvent)
-            or event.state_key != self.agent_user.user_id
-            or event.membership != "invite"
-        ):
-            return
-        await self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
-        create_background_task(
-            self._room_lifecycle.handle_recorded_invite(room, event.sender),
-            owner=self._runtime_view,
-        )
-
     def _room_for_journal_event(self, room_id: str) -> nio.MatrixRoom:
         """Resolve one recovery room without depending on a new sync response."""
         client = self.client
@@ -2121,93 +2014,19 @@ class AgentBot:
             return None
         return PersonalRoomTarget(target.personal_rooms, target.first_sync_complete)
 
-    async def _provision_personal_agent(
-        self,
-        template: str,
-        user_id: str,
-        source_user_id: str,
-        source_room_id: str,
-    ) -> None:
-        """Create one user's agent from a template and reload the config so the runtime starts it."""
-        client = self.client
-        assert client is not None
-        # A live join and a reconciliation pass can both reach one user; only one may register the account.
-        # A second call returns at once, so the caller treats the user as pending and retries without waiting.
-        key = (template, user_id)
-        if key in self._personal_agents_provisioning:
-            return
-        self._personal_agents_provisioning.add(key)
-        try:
-            profile = await client.get_displayname(user_id)
-            _, changed = await provision_personal_agent(
-                self.config,
-                self.runtime_paths,
-                template=template,
-                user_id=user_id,
-                user_display_name=profile.displayname
-                if isinstance(profile, nio.ProfileGetDisplayNameResponse)
-                else None,
-                source_user_id=source_user_id,
-                source_room_id=source_room_id,
-            )
-        finally:
-            self._personal_agents_provisioning.discard(key)
-        # This runs only while the live config lacks the agent, so an existing entry still needs a reload,
-        # but re-requesting a queued one would restart its debounce and response drain on every retry.
-        config_reload = self.orchestrator.config_reload
-        if changed or config_reload.status.status != "pending":
-            config_reload.request_reload()
-
     def personal_room_target_ready(self) -> None:
         """Let the router onboard a user at once because their own agent finished its first sync."""
         self._personal_room_lifecycle.target_ready()
 
-    async def _on_job_cancel(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
-        """Cancel this entity's background jobs a person asked to stop from their client."""
-        runtime = get_background_runtime(self.runtime_paths)
-        sender = event.source.get("sender")
-        if runtime is None or not isinstance(sender, str):
-            return
-        await handle_job_cancel_event(
-            runtime,
-            agent_name=self.agent_name,
-            room_id=room.room_id,
-            content=event.source.get("content") or {},
-            sender_may_cancel=person_may_cancel(
-                sender,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                may_talk=lambda sender_id: self._turn_policy.can_reply_to_sender_in_room(sender_id, room.room_id),
-            ),
-        )
+    def _report_personal_room_membership_change(self, room_id: str, event_id: str) -> None:
+        """Forward a room's membership event to the router, which owns personal-room retries."""
+        router = self.orchestrator.agent_bots.get(ROUTER_AGENT_NAME)
+        if router is not None:
+            router.personal_room_membership_changed(room_id, event_id)
 
-    async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
-        """Handle custom Matrix events that are not part of nio's typed event set."""
-        if event.type != "io.mindroom.tool_approval_response":
-            return
-        raw_sender_id = event.source.get("sender")
-        if not isinstance(raw_sender_id, str) or not raw_sender_id:
-            self.logger.debug("ignoring_tool_approval_response_without_sender")
-            return
-        payload = parse_approval_response_event(event)
-        if (payload.status is None and payload.action is None) or payload.card_event_id is None:
-            return
-        await handle_tool_approval_action(
-            room=room,
-            sender_id=raw_sender_id,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            orchestrator=self.orchestrator,
-            logger=self.logger,
-            approval_event_id=payload.card_event_id,
-            status=payload.status,
-            reason=payload.reason,
-            auto_approve_seconds=payload.auto_approve_seconds,
-            action=payload.action,
-            grant_id=payload.grant_id,
-            scheduled_scope=payload.scheduled_scope,
-            membership_index=self._runtime_view.agent_reply_memberships,
-        )
+    def personal_room_membership_changed(self, room_id: str, event_id: str) -> None:
+        """Retry at once onboarding that the personal room's imported roster blocked, as its membership changed."""
+        self._personal_room_lifecycle.membership_changed(room_id, event_id)
 
     async def _on_media_message(
         self,
@@ -2216,69 +2035,3 @@ class AgentBot:
     ) -> TurnDispatchOutcome:
         """Delegate one inbound media event to the turn engine."""
         return await self._turn_ingress.handle_media_event(room, event)
-
-    async def hook_send_message(
-        self,
-        room_id: str,
-        body: str,
-        thread_id: str | None,
-        source_hook: str,
-        extra_content: dict[str, Any] | None = None,
-        *,
-        trigger_dispatch: bool = False,
-    ) -> _MatrixEventId | None:
-        """Send a hook-originated Matrix message with stable metadata tags."""
-        if self.client is None:
-            self.logger.warning("Hook send requested before Matrix client is ready", room_id=room_id)
-            return None
-
-        event_id = await send_hook_message(
-            self.client,
-            self.config,
-            self.runtime_paths,
-            room_id,
-            body,
-            thread_id,
-            source_hook,
-            extra_content,
-            trigger_dispatch=trigger_dispatch,
-            conversation_reader=self._conversation_reader,
-        )
-        if event_id:
-            self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)
-            return event_id
-        self.logger.error("Failed to send hook message", room_id=room_id, source_hook=source_hook)
-        return None
-
-    async def hook_agent_message_snapshot(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        sender: str,
-    ) -> AgentMessageSnapshot | None:
-        """Read the latest visible sender message for hook helpers."""
-        return await latest_agent_message_snapshot(
-            self._conversation_reader,
-            room_id=room_id,
-            thread_id=thread_id,
-            sender=sender,
-        )
-
-    async def _redact_message_event(
-        self,
-        *,
-        room_id: str,
-        event_id: str,
-        reason: str,
-    ) -> bool:
-        """Redact one visible event when a provisional response should disappear entirely."""
-        if self.client is None:
-            return False
-        response = await self.client.room_redact(room_id, event_id, reason=reason)
-        if isinstance(response, nio.RoomRedactError):
-            if response.status_code == "M_NOT_FOUND":
-                # Gone already, which is what the redaction was for.
-                return True
-            self.logger.error("Failed to redact message", event_id=event_id, error=str(response))
-            return False
-        return True

@@ -27,21 +27,11 @@ from tests.conftest import (
     published_config_load,
     runtime_paths_for,
 )
-from tests.identity_helpers import persist_entity_accounts
 from tests.matrix_state_helpers import save_matrix_state
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    runtime_paths = orchestrator_runtime_paths(
-        tmp_path,
-        config_path=tmp_path / "config.yaml",
-    )
-    bound_config = bind_runtime_paths(
-        config,
-        runtime_paths,
-    )
-    persist_entity_accounts(bound_config, runtime_paths)
-    return bound_config
+    return bind_runtime_paths(config, orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
 
 
 @pytest.fixture
@@ -236,7 +226,6 @@ async def test_orchestrator_creates_router_with_all_rooms(
     """Test that the orchestrator properly initializes the router with all rooms."""
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
 
-    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
     # Create orchestrator
@@ -292,7 +281,6 @@ async def test_router_updates_rooms_on_config_change(
         },
     )
 
-    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     setup_rooms = AsyncMock()
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", setup_rooms)
 
@@ -327,16 +315,12 @@ async def test_router_updates_rooms_on_config_change(
         async def mock_start() -> None:
             pass
 
-        async def mock_ensure_user_account() -> None:
-            pass
-
         async def mock_sync_forever() -> None:
             raise asyncio.CancelledError
 
         for bot in orchestrator.agent_bots.values():
             monkeypatch.setattr(bot, "stop", mock_stop)
             monkeypatch.setattr(bot, "start", mock_start)
-            monkeypatch.setattr(bot, "ensure_user_account", mock_ensure_user_account)
             monkeypatch.setattr(bot, "sync_forever", mock_sync_forever)
 
         # Update config

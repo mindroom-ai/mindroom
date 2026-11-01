@@ -19,6 +19,7 @@ from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOUR
 from mindroom.failure_text import failure_text
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
+    HookBindings,
     HookRegistrySource,
     ScheduleFiredContext,
     build_hook_message_sender,
@@ -167,11 +168,8 @@ async def _prepare_scheduled_trigger(
     message_text = workflow.message
     hook_registry = hook_registry_state.registry
     if hook_registry.has_hooks(EVENT_SCHEDULE_FIRED):
-        context = ScheduleFiredContext(
-            event_name=EVENT_SCHEDULE_FIRED,
-            config=config,
-            runtime_paths=runtime_paths,
-            correlation_id=correlation_id,
+        bindings = HookBindings(
+            registry_state=hook_registry_state,
             message_sender=build_hook_message_sender(
                 client,
                 config,
@@ -181,13 +179,20 @@ async def _prepare_scheduled_trigger(
             matrix_admin=matrix_admin,
             room_state_querier=build_hook_room_state_querier(client),
             room_state_putter=build_hook_room_state_putter(client),
+        )
+        context = ScheduleFiredContext(
+            **bindings.context_kwargs(
+                EVENT_SCHEDULE_FIRED,
+                config=config,
+                runtime_paths=runtime_paths,
+                correlation_id=correlation_id,
+            ),
             task_id=task_id,
             workflow=workflow,
             room_id=target.room_id,
             thread_id=target.resolved_thread_id,
             created_by=workflow.created_by,
             message_text=message_text,
-            _hook_registry_state=hook_registry_state,
         )
         await emit(hook_registry, EVENT_SCHEDULE_FIRED, context)
         if context.suppress:

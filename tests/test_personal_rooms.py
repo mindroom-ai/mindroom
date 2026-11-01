@@ -21,7 +21,6 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind
@@ -32,6 +31,7 @@ from mindroom.matrix.personal_room_store import (
     PersonalRoomAdoption,
     PersonalRoomRecord,
     _personal_room_records,
+    personal_room_cleanup_exclusions,
     personal_room_digest,
     personal_room_record_path,
     read_personal_room,
@@ -43,7 +43,6 @@ from mindroom.matrix.personal_rooms import (
     PersonalRoomService,
     PersonalRoomValidationError,
 )
-from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.personal_agents import _append_personal_agent_roster_entry
@@ -317,6 +316,8 @@ async def test_validated_replacement_source_completes_deferred_welcome(
             owner.runtime_paths,
             owner,
             lambda _: None,
+            Mock(),
+            Mock(),
         )
         await lifecycle.member_event(
             nio.MatrixRoom(room_id, server.user_id),
@@ -332,6 +333,8 @@ async def test_validated_replacement_source_completes_deferred_welcome(
         restarted.runtime_paths,
         restarted,
         lambda _: PersonalRoomTarget(restarted, True),
+        Mock(),
+        Mock(),
     )
     await router._reconcile()
     record = read_personal_room(path)
@@ -651,6 +654,8 @@ async def test_a_pending_guest_removal_retry_does_not_delay_shutdown(
         runtime_paths=owner.runtime_paths,
         service=owner,
         lookup_target=lambda _agent: None,
+        config_reload=Mock(),
+        report_membership_change=Mock(),
     )
 
     await asyncio.wait_for(lifecycle.cancel_reconciliation(timeout_seconds=1), timeout=2)
@@ -671,6 +676,8 @@ async def test_the_room_lifecycle_removes_an_invited_person(tmp_path: Path, monk
         runtime_paths=owner.runtime_paths,
         service=owner,
         lookup_target=lambda _agent: None,
+        config_reload=Mock(),
+        report_membership_change=Mock(),
     )
     room = nio.MatrixRoom(room_id, server.user_id)
     room.add_member("@alice:localhost", None, None)
@@ -819,6 +826,49 @@ async def test_an_imported_room_with_unattested_people_names_them_and_removes_no
         "invite",
         "join",
     )
+
+
+@pytest.mark.asyncio
+async def test_an_imported_room_onboards_its_owner_as_soon_as_the_unattested_person_leaves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router warns once while the room stays unchanged, and the target seeing the departure retries it at once."""
+    server = MatrixServer()
+    router, target = bots(tmp_path, server, monkeypatch, welcome="")
+    room_id = await target.personal_rooms.ensure("@alice:localhost", "!lobby:localhost", server)
+    # An imported room its owner has not been invited to yet, holding someone its record does not list.
+    server.state[room_id] = [event for event in server.state[room_id] if event["state_key"] != "@alice:localhost"]
+    path = personal_room_record_path(target.runtime_paths, "helper", "@alice:localhost")
+    record = read_personal_room(path)
+    record.adoption = PersonalRoomAdoption(creator_user_id=server.user_id, agent_user_id=server.user_id)
+    write_personal_room(path, record)
+    server.set_member(room_id, "@eve:localhost", "join")
+    lifecycle = router._personal_room_lifecycle
+
+    with capture_logs() as logs:
+        for _ in range(2):
+            lifecycle.config_changed()
+            lifecycle.schedule_reconciliation()
+            assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert server.membership(room_id, "@alice:localhost") is None
+
+        server.set_member(room_id, "@eve:localhost", "leave")
+        left = _room_member_event(
+            event_id="$eve-left",
+            user_id="@eve:localhost",
+            membership="leave",
+            prev_membership="join",
+        )
+        await _dispatch_member(target, nio.MatrixRoom(room_id, target.agent_user.user_id), left)
+        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+
+    assert server.membership(room_id, "@alice:localhost") == "invite"
+    assert [
+        entry["log_level"] for entry in logs if entry["event"] == "Personal-room imported roster has unattested members"
+    ] == ["warning", "debug"]
+    assert lifecycle._reconciled
+    assert not server.kicks
 
 
 @pytest.mark.asyncio
@@ -1010,129 +1060,6 @@ def bots(tmp_path: Path, server: MatrixServer, monkeypatch: pytest.MonkeyPatch, 
     return router, target
 
 
-def _template_router(tmp_path: Path, profile: object, status: str = "applied") -> tuple[Any, Config, Any, Mock]:
-    """A router whose personal_rooms.agent names a template, with a stub reload lifecycle in the given status."""
-    paths = test_runtime_paths(tmp_path)
-    state = MatrixState.load(paths)
-    state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    save_matrix_state(state, paths)
-    config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
-    user = AgentMatrixUser(
-        agent_name=ROUTER_AGENT_NAME,
-        user_id="@mindroom_router:localhost",
-        display_name="Router",
-        password=TEST_PASSWORD,
-    )
-    router = make_test_agent_bot(user, config=config, runtime_paths=paths)
-    router.client = SimpleNamespace(user_id=user.user_id, get_displayname=AsyncMock(return_value=profile))
-    config_reload = router.orchestrator.config_reload
-    config_reload.request_reload = Mock()
-    config_reload.status = ConfigReloadStatus(status=status)
-    return router, config, paths, config_reload.request_reload
-
-
-_ALICE_JOIN = RoomMemberJoin(
-    "!lobby:localhost",
-    "$join",
-    "@alice:localhost",
-    "@alice:localhost",
-    None,
-    None,
-    "join",
-    None,
-)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("profile", "display_name"),
-    [
-        (nio.ProfileGetDisplayNameResponse("Alice A."), "Alice A."),
-        (nio.ProfileGetDisplayNameError("missing", "M_NOT_FOUND"), None),
-    ],
-)
-async def test_router_provisions_a_joining_users_agent_and_reloads(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    profile: object,
-    display_name: str | None,
-) -> None:
-    """A lobby join with a template target creates that user's agent under their display name, then reloads."""
-    router, config, paths, request_reload = _template_router(tmp_path, profile)
-    provision = AsyncMock(return_value=("mind_alice", True))
-    monkeypatch.setattr("mindroom.bot.provision_personal_agent", provision)
-
-    await router._personal_room_lifecycle.baseline_join(_ALICE_JOIN)
-
-    router.client.get_displayname.assert_awaited_once_with("@alice:localhost")
-    provision.assert_awaited_once_with(
-        config,
-        paths,
-        template="mind",
-        user_id="@alice:localhost",
-        user_display_name=display_name,
-        source_user_id="@alice:localhost",
-        source_room_id="!lobby:localhost",
-    )
-    request_reload.assert_called_once_with()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("changed", "status", "reloads"),
-    [(True, "pending", True), (False, "pending", False), (False, "applied", True), (False, "failed", True)],
-)
-async def test_router_reprovisioning_never_supersedes_a_queued_reload(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    changed: bool,
-    status: str,
-    reloads: bool,
-) -> None:
-    """An agent whose roster entry already existed asks for a reload only when none is queued, so retries cannot restart its wait."""
-    router, _, _, request_reload = _template_router(tmp_path, nio.ProfileGetDisplayNameResponse("Alice"), status)
-    monkeypatch.setattr("mindroom.bot.provision_personal_agent", AsyncMock(return_value=("mind_alice", changed)))
-
-    await router._personal_room_lifecycle.baseline_join(_ALICE_JOIN)
-
-    assert request_reload.called is reloads
-
-
-@pytest.mark.asyncio
-async def test_router_provisions_one_users_agent_one_call_at_a_time(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A second call for a user being provisioned returns at once instead of registering again; other users proceed."""
-    router, _, _, _ = _template_router(tmp_path, nio.ProfileGetDisplayNameResponse("Alice"))
-    release = asyncio.Event()
-    users: list[str] = []
-
-    async def provision(*_args: object, user_id: str, **_kwargs: object) -> tuple[str, bool]:
-        users.append(user_id)
-        await release.wait()
-        return "mind_x", True
-
-    monkeypatch.setattr("mindroom.bot.provision_personal_agent", provision)
-
-    first = asyncio.create_task(
-        router._provision_personal_agent("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost"),
-    )
-    await asyncio.sleep(0)
-    await asyncio.wait_for(
-        router._provision_personal_agent("mind", "@alice:localhost", "@bridge_alice:localhost", "!other:localhost"),
-        timeout=1,
-    )
-    other = asyncio.create_task(
-        router._provision_personal_agent("mind", "@bob:localhost", "@bob:localhost", "!lobby:localhost"),
-    )
-    await asyncio.sleep(0)
-    release.set()
-    await asyncio.gather(first, other)
-
-    assert users == ["@alice:localhost", "@bob:localhost"]
-
-
 @pytest.mark.asyncio
 async def test_router_join_creates_room_without_hooks_or_target_lobby_membership(
     tmp_path: Path,
@@ -1317,6 +1244,48 @@ async def test_retention_recovers_create_before_local_receipt(tmp_path: Path, mo
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     await target._room_lifecycle.join_configured_rooms()
     join_room.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_waits_for_an_in_flight_create_but_not_the_rest_of_onboarding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup that sees the creator joined before the alias resolves keeps the room once the create records it."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch)
+    create_room = server.room_create
+    invite = server.room_invite
+    creator_joined = asyncio.Event()
+    create_returns = asyncio.Event()
+    invite_started = asyncio.Event()
+    invite_returns = asyncio.Event()
+
+    async def join_before_alias_resolves(**kwargs: Any) -> object:
+        # A homeserver such as Tuwunel makes the creator a member before the new alias resolves.
+        response = await create_room(**kwargs)
+        del server.aliases[f"#{kwargs['alias']}:localhost"]
+        creator_joined.set()
+        await create_returns.wait()
+        return response
+
+    async def stalled_invite(room_id: str, user_id: str) -> object:
+        invite_started.set()
+        await invite_returns.wait()
+        return await invite(room_id, user_id)
+
+    monkeypatch.setattr(server, "room_create", join_before_alias_resolves)
+    monkeypatch.setattr(server, "room_invite", stalled_invite)
+    create = asyncio.create_task(owner.ensure("@alice:localhost", "!lobby:localhost", server))
+    await creator_joined.wait()
+    cleanup = asyncio.create_task(personal_room_cleanup_exclusions(server, owner.runtime_paths, "helper"))
+    done, _ = await asyncio.wait({cleanup}, timeout=0.5)
+    assert not done
+    create_returns.set()
+    await invite_started.wait()
+    assert await asyncio.wait_for(cleanup, timeout=5) == {"!personal1:localhost"}
+    invite_returns.set()
+    assert await create == "!personal1:localhost"
 
 
 @pytest.mark.asyncio
@@ -2478,6 +2447,8 @@ async def test_owner_event_retires_initial_join_after_later_invite(
         owner.runtime_paths,
         owner,
         lambda _agent: None,
+        Mock(),
+        Mock(),
     )
     server.set_member(room_id, "@alice:localhost", observed_membership)
     event = _room_member_event(membership=observed_membership, prev_membership=previous_membership)
@@ -2519,6 +2490,8 @@ async def test_owner_event_retirement_requires_recorded_room_and_user(
         owner.runtime_paths,
         owner,
         lambda _agent: None,
+        Mock(),
+        Mock(),
     )
     leave = _room_member_event(membership="leave", prev_membership="invite")
     await lifecycle.member_event(nio.MatrixRoom("!other:localhost", server.user_id), leave)
@@ -2547,6 +2520,8 @@ async def test_unrecorded_owner_event_creates_no_lock_when_feature_disabled(
         owner.runtime_paths,
         owner,
         lambda _agent: None,
+        Mock(),
+        Mock(),
     )
     await lifecycle.member_event(
         nio.MatrixRoom("!other:localhost", server.user_id),

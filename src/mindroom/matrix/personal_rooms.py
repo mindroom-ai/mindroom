@@ -33,6 +33,7 @@ from mindroom.matrix.client_room_admin import (
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.personal_room_store import (
     PersonalRoomRecord,
+    personal_room_create_lock,
     personal_room_digest,
     personal_room_record_path,
     read_personal_room,
@@ -68,6 +69,15 @@ _GUEST_REMOVAL_NOTICE = (
 # owner tries again.
 _GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
 _UNREADABLE_ROOM_ERRCODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
+
+
+async def is_onboarding_room_member(source_client: nio.AsyncClient, user_id: str, source_room_id: str) -> bool:
+    """Return whether a requester is still in the onboarding room that admits them; raise when its members are unknown."""
+    members = await get_room_members(source_client, source_room_id)
+    if members is None:
+        msg = "Personal-room onboarding membership unavailable"
+        raise RuntimeError(msg)
+    return user_id in members
 
 
 class _PolicyChangedError(Exception):
@@ -186,11 +196,9 @@ class PersonalRoomService:
     ) -> PersonalRoomsConfig | None:
         if self._current_settings(user_id, source_room_id) is None:
             return None
-        members = await get_room_members(source_client, source_room_id)
-        if members is None:
-            msg = "Personal-room onboarding membership unavailable"
-            raise RuntimeError(msg)
-        return self._current_settings(user_id, source_room_id) if user_id in members else None
+        if not await is_onboarding_room_member(source_client, user_id, source_room_id):
+            return None
+        return self._current_settings(user_id, source_room_id)
 
     async def ensure(
         self,
@@ -226,8 +234,9 @@ class PersonalRoomService:
                     record.resume_source_room_id = source_room_id
                     await run_blocking_until_complete(write_personal_room, path, record)
                 if record.room_id is None:
-                    record.room_id = await self._resolve_or_create(record, source_room_id)
-                    await run_blocking_until_complete(write_personal_room, path, record)
+                    async with personal_room_create_lock(path):
+                        record.room_id = await self._resolve_or_create(record, source_room_id)
+                        await run_blocking_until_complete(write_personal_room, path, record)
                 human_joined = await self._reconcile_membership(
                     record,
                     path,
