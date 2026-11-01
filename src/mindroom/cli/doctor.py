@@ -19,7 +19,7 @@ from rich.markup import escape
 
 from mindroom import constants
 from mindroom.config.resolution import memory_backend
-from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_values
+from mindroom.constants import RuntimePaths, env_key_for_provider
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.credentials.sync import provider_key_with_source
@@ -256,12 +256,18 @@ def _endpoint_settings(value: object, path: str) -> list[str]:
 
 
 def _endpoint_variables(env_key: str, runtime_paths: RuntimePaths) -> list[str]:
-    """Return the set endpoint variables of ``env_key``'s provider family, such as ``OPENAI_BASE_URL``."""
+    """Return the set endpoint variables of ``env_key``'s provider family, such as ``OPENAI_BASE_URL``.
+
+    Each is read as providers read it, so its ``<NAME>_FILE`` variable sets it and a blank export does not hide ``.env``.
+    """
     family = env_key.removesuffix("API_KEY")
+    names = {name.removesuffix("_FILE") for name in (*runtime_paths.process_env, *runtime_paths.env_file_values)}
     return sorted(
         name
-        for name, value in runtime_env_values(runtime_paths).items()
-        if name.startswith(family) and name.endswith(("_URL", "_HOST", "_ENDPOINT", "_API_BASE")) and value.strip()
+        for name in names
+        if name.startswith(family)
+        and name.endswith(("_URL", "_HOST", "_ENDPOINT", "_API_BASE"))
+        and runtime_paths.first_env_value((name,))
     )
 
 

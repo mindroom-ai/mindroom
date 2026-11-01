@@ -47,6 +47,7 @@ from mindroom.api.egress_status import (
 )
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.config.egress_broker import EgressService
+from mindroom.config.main import validation_issue_message
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import EgressAgentScope, egress_agent_scope
 from mindroom.egress_broker.oauth_reuse import set_oauth_reuse
@@ -515,7 +516,7 @@ def _parse_user_service(body: object) -> EgressService:
         messages = []
         for error in exc.errors(include_url=False, include_context=False, include_input=False):
             where = ".".join(str(part) for part in error["loc"])
-            message = error["msg"].removeprefix("Value error, ")
+            message = validation_issue_message(error)
             messages.append(f"{where}: {message}" if where else message)
         raise _unprocessable("; ".join(messages)) from exc
 

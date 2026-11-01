@@ -258,7 +258,7 @@ def test_has_missing_managed_avatars_ignores_direct_room_ids(
 def test_has_missing_managed_avatars_ignores_full_room_aliases(
     workspace_avatar_dir: Path,
 ) -> None:
-    """External room aliases should not be treated as managed avatar targets."""
+    """A managed room's full alias is not a second managed avatar target."""
     raw_config = {
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
@@ -266,14 +266,14 @@ def test_has_missing_managed_avatars_ignores_full_room_aliases(
             "general": {
                 "display_name": "General",
                 "model": "default",
-                "rooms": ["#external:localhost"],
+                "rooms": ["lobby", "#lobby:localhost"],
             },
         },
         "matrix_space": {"enabled": False},
     }
     config = _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent)
     runtime_paths = _runtime_paths(workspace_avatar_dir.parent)
-    for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
+    for entity_type, entity_name in (("agents", "general"), ("agents", "router"), ("rooms", "lobby")):
         avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")

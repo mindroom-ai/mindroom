@@ -367,6 +367,7 @@ def _timing_probe_labels(
     env["MINDROOM_TIMING"] = "1"
     script = textwrap.dedent(
         f"""
+        import asyncio
         import json
         from unittest.mock import Mock, patch
 
@@ -415,6 +416,22 @@ def test_load_compaction_model_preserves_history_prepare_subspan() -> None:
         patch_target="mindroom.providers.registry.build_model_provider",
     )
     assert labels == ["system_prompt_assembly.history_prepare.compaction_model_init"]
+
+
+def test_team_history_preparation_logs_the_history_prepare_label() -> None:
+    """A team turn's history preparation counts toward the same parent label as an agent turn's."""
+    labels = _timing_probe_labels(
+        module_name="mindroom.execution_preparation",
+        call_expression=(
+            "asyncio.run(target_module.prepare_bound_team_run_context(Mock(), scope_context=Mock(), "
+            "leader_system_messages=(), leader_tools=(), model=Mock(), prompt='', thread_history=None, "
+            "runtime_paths=Mock(), config=Mock(), timezone='UTC', "
+            "history_settings=Mock(compaction_config=Mock(replay_window_tokens=None)), "
+            "active_model_name='team-model', active_context_window=None))"
+        ),
+        patch_target="mindroom.execution_preparation._prepare_execution_context_common",
+    )
+    assert labels == ["system_prompt_assembly.history_prepare"]
 
 
 def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> None:

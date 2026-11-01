@@ -18,7 +18,6 @@ import pytest
 import yaml
 from structlog.testing import capture_logs
 
-import mindroom.matrix.rooms as matrix_rooms
 import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
@@ -32,8 +31,6 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, ConfigReloadedContext, hook
-from mindroom.matrix import client_room_admin
-from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import (
     _AGENT_LIVE_FIELDS,
@@ -153,22 +150,6 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
     """Return a runtime-bound config for reload tests."""
     runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
     return bind_runtime_paths(config, runtime_paths)
-
-
-def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
-    """Helper to setup a test bot with required attributes."""
-
-    async def change_membership(room_id: str, target_membership: str) -> bool:
-        if target_membership == "join":
-            return await client_room_admin.join_room(mock_client, room_id) is RoomJoinOutcome.JOINED
-        assert target_membership == "leave"
-        return await matrix_rooms.leave_room(mock_client, room_id)
-
-    bot.client = mock_client
-    bot._room_lifecycle.deps = replace(
-        bot._room_lifecycle.deps,
-        change_membership=change_membership,
-    )
 
 
 def test_startup_phase_logging_helpers_emit_structured_timing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1684,7 +1665,7 @@ async def test_queued_config_reload_waits_for_in_flight_response(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    setup_test_bot(bot, AsyncMock())
+    bot.client = AsyncMock()
 
     response_started = asyncio.Event()
     release_response = asyncio.Event()
@@ -2727,83 +2708,6 @@ def test_config_update_plan_starts_added_entities_without_restarting_them() -> N
 
 
 @pytest.fixture
-def initial_config() -> Config:
-    """Initial configuration with some agents and rooms."""
-    return _runtime_bound_config(
-        Config(
-            agents={
-                "agent1": AgentConfig(
-                    display_name="Agent 1",
-                    role="Test agent",
-                    rooms=["room1", "room2"],
-                ),
-                "agent2": AgentConfig(
-                    display_name="Agent 2",
-                    role="Another test agent",
-                    rooms=["room1"],
-                ),
-            },
-            teams={
-                "team1": TeamConfig(
-                    display_name="Team 1",
-                    role="Test team",
-                    agents=["agent1", "agent2"],
-                    rooms=["room3"],
-                ),
-            },
-            models={
-                "default": ModelConfig(
-                    provider="ollama",
-                    id="llama3.2",
-                    host="http://localhost:11434",
-                ),
-            },
-        ),
-    )
-
-
-@pytest.fixture
-def updated_config() -> Config:
-    """Updated configuration with changed room assignments."""
-    return _runtime_bound_config(
-        Config(
-            agents={
-                "agent1": AgentConfig(
-                    display_name="Agent 1",
-                    role="Test agent",
-                    rooms=["room1", "room4"],  # Changed: removed room2, added room4
-                ),
-                "agent2": AgentConfig(
-                    display_name="Agent 2",
-                    role="Another test agent",
-                    rooms=["room2", "room3"],  # Changed: removed room1, added room2 and room3
-                ),
-                "agent3": AgentConfig(  # New agent
-                    display_name="Agent 3",
-                    role="New agent",
-                    rooms=["room5"],
-                ),
-            },
-            teams={
-                "team1": TeamConfig(
-                    display_name="Team 1",
-                    role="Test team",
-                    agents=["agent1", "agent2", "agent3"],  # Added agent3
-                    rooms=["room3", "room6"],  # Added room6
-                ),
-            },
-            models={
-                "default": ModelConfig(
-                    provider="ollama",
-                    id="llama3.2",
-                    host="http://localhost:11434",
-                ),
-            },
-        ),
-    )
-
-
-@pytest.fixture
 def mock_agent_users() -> dict[str, AgentMatrixUser]:
     """Create mock agent users."""
     return {
@@ -2814,285 +2718,9 @@ def mock_agent_users() -> dict[str, AgentMatrixUser]:
             password=TEST_PASSWORD,
         )
         for name, display_name in (
-            (ROUTER_AGENT_NAME, "RouterAgent"),
             ("agent1", "Agent 1"),
             ("agent2", "Agent 2"),
-            ("agent3", "Agent 3"),
-            ("team1", "Team 1"),
         )
-    }
-
-
-@pytest.mark.asyncio
-async def test_agent_joins_new_rooms_on_config_reload(
-    mock_agent_users: dict[str, AgentMatrixUser],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Test that agents join new rooms when their configuration is updated."""
-    # Track room operations
-    joined_rooms: dict[str, list[str]] = {}
-    left_rooms: dict[str, list[str]] = {}
-
-    async def mock_join_room(client: AsyncMock, room_id: str) -> RoomJoinOutcome:
-        user_id = client.user_id
-        if user_id not in joined_rooms:
-            joined_rooms[user_id] = []
-        joined_rooms[user_id].append(room_id)
-        return RoomJoinOutcome.JOINED
-
-    async def mock_leave_room(client: AsyncMock, room_id: str) -> bool:
-        user_id = client.user_id
-        if user_id not in left_rooms:
-            left_rooms[user_id] = []
-        left_rooms[user_id].append(room_id)
-        return True
-
-    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
-    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
-
-    # agent1 is currently in room1 and room2
-    async def mock_get_joined_rooms(_client: AsyncMock) -> list[str]:
-        return ["room1", "room2"]
-
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
-
-    # Create agent1 bot with initial config
-    config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
-    agent1_bot = make_test_agent_bot(
-        agent_user=mock_agent_users["agent1"],
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=["room1", "room2"],  # Initial rooms
-    )
-    mock_client = AsyncMock()
-    mock_client.user_id = "@mindroom_agent1:localhost"
-    setup_test_bot(agent1_bot, mock_client)
-
-    # Update to new config rooms
-    agent1_bot.rooms = ["room1", "room4"]  # New rooms: removed room2, added room4
-
-    # Apply room updates
-    await agent1_bot.join_configured_rooms()
-    await agent1_bot.leave_unconfigured_rooms()
-
-    # Verify agent1 joined room4 (new room)
-    assert "room4" in joined_rooms.get("@mindroom_agent1:localhost", [])
-    # Verify agent1 left room2 (no longer configured)
-    assert "room2" in left_rooms.get("@mindroom_agent1:localhost", [])
-
-
-@pytest.mark.asyncio
-async def test_router_updates_rooms_on_config_reload(
-    initial_config: Config,
-    updated_config: Config,
-    mock_agent_users: dict[str, AgentMatrixUser],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Test that the router updates its room list when agents/teams change their rooms."""
-    # Track room operations
-    joined_rooms: list[str] = []
-    left_rooms: list[str] = []
-
-    async def mock_join_room(_client: AsyncMock, room_id: str) -> RoomJoinOutcome:
-        joined_rooms.append(room_id)
-        return RoomJoinOutcome.JOINED
-
-    async def mock_leave_room(_client: AsyncMock, room_id: str) -> bool:
-        left_rooms.append(room_id)
-        return True
-
-    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
-    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
-
-    # Mock get_joined_rooms to simulate current room membership
-    async def mock_get_joined_rooms(_client: AsyncMock) -> list[str]:
-        # Router is currently in initial config rooms
-        return ["room1", "room2", "room3"]
-
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
-
-    # Get initial router rooms
-    initial_router_rooms = initial_config.get_all_configured_rooms()
-    assert initial_router_rooms == {"room1", "room2", "room3"}
-
-    # Get updated router rooms
-    updated_router_rooms = updated_config.get_all_configured_rooms()
-    assert updated_router_rooms == {"room1", "room2", "room3", "room4", "room5", "room6"}
-
-    # Create router bot with updated config
-    config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
-    router_bot = make_test_agent_bot(
-        agent_user=mock_agent_users[ROUTER_AGENT_NAME],
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=list(updated_router_rooms),
-    )
-    mock_client = AsyncMock()
-    mock_client.user_id = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
-    setup_test_bot(router_bot, mock_client)
-
-    # Apply room updates
-    await router_bot.join_configured_rooms()
-    await router_bot.leave_unconfigured_rooms()
-
-    # Verify router joined new rooms
-    for new_room in ["room4", "room5", "room6"]:
-        assert new_room in joined_rooms
-
-    # Router should not leave any rooms (all initial rooms still have agents)
-    assert len(left_rooms) == 0
-
-
-@pytest.mark.asyncio
-async def test_new_agent_joins_rooms_on_config_reload(
-    mock_agent_users: dict[str, AgentMatrixUser],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Test that new agents are created and join their configured rooms."""
-    # Track room operations
-    joined_rooms: dict[str, list[str]] = {}
-
-    async def mock_join_room(client: AsyncMock, room_id: str) -> RoomJoinOutcome:
-        user_id = client.user_id
-        if user_id not in joined_rooms:
-            joined_rooms[user_id] = []
-        joined_rooms[user_id].append(room_id)
-        return RoomJoinOutcome.JOINED
-
-    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
-
-    # Mock get_joined_rooms
-    async def mock_get_joined_rooms(_client: AsyncMock) -> list[str]:
-        return []  # New agent has no rooms initially
-
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
-
-    # Create agent3 bot (new agent in updated config)
-    config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
-    agent3_bot = make_test_agent_bot(
-        agent_user=mock_agent_users["agent3"],
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=["room5"],
-    )
-    mock_client = AsyncMock()
-    mock_client.user_id = "@mindroom_agent3:localhost"
-    setup_test_bot(agent3_bot, mock_client)
-
-    # Apply room updates for new agent
-    await agent3_bot.join_configured_rooms()
-
-    # Verify agent3 joined its configured room
-    assert "room5" in joined_rooms.get("@mindroom_agent3:localhost", [])
-
-
-@pytest.mark.asyncio
-async def test_room_membership_state_after_config_update(  # noqa: C901
-    mock_agent_users: dict[str, AgentMatrixUser],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Test that room membership state is correct after config updates."""
-    # Simulate room membership state
-    room_memberships = {
-        "room1": [
-            "@mindroom_agent1:localhost",
-            "@mindroom_agent2:localhost",
-            f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-        ],
-        "room2": ["@mindroom_agent1:localhost", f"@mindroom_{ROUTER_AGENT_NAME}:localhost"],
-        "room3": ["@mindroom_team1:localhost", f"@mindroom_{ROUTER_AGENT_NAME}:localhost"],
-    }
-
-    def update_room_membership(user_id: str, room_id: str, action: str) -> None:
-        """Update simulated room membership."""
-        if action == "join":
-            if room_id not in room_memberships:
-                room_memberships[room_id] = []
-            if user_id not in room_memberships[room_id]:
-                room_memberships[room_id].append(user_id)
-        elif action == "leave":
-            if room_id in room_memberships and user_id in room_memberships[room_id]:
-                room_memberships[room_id].remove(user_id)
-
-    async def mock_join_room(client: AsyncMock, room_id: str) -> RoomJoinOutcome:
-        update_room_membership(client.user_id, room_id, "join")
-        return RoomJoinOutcome.JOINED
-
-    async def mock_leave_room(client: AsyncMock, room_id: str) -> bool:
-        update_room_membership(client.user_id, room_id, "leave")
-        return True
-
-    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
-    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
-
-    # Mock get_joined_rooms based on room_memberships
-    async def mock_get_joined_rooms(client: AsyncMock) -> list[str]:
-        user_id = client.user_id
-        rooms = []
-        for room_id, members in room_memberships.items():
-            if user_id in members:
-                rooms.append(room_id)
-        return rooms
-
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
-
-    # Apply the updated config's rooms to each bot
-    new_rooms_by_entity = {
-        "agent1": ["room1", "room4"],
-        "agent2": ["room2", "room3"],
-        "agent3": ["room5"],
-        "team1": ["room3", "room6"],
-        ROUTER_AGENT_NAME: ["room1", "room2", "room3", "room4", "room5", "room6"],
-    }
-
-    # Simulate config update for each bot
-    for entity_name, new_rooms in new_rooms_by_entity.items():
-        agent_user = mock_agent_users[entity_name]
-        mock_client = AsyncMock()
-        mock_client.user_id = agent_user.user_id
-
-        config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
-
-        bot = make_test_agent_bot(
-            agent_user=agent_user,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=new_rooms,
-        )
-        setup_test_bot(bot, mock_client)
-
-        await bot.join_configured_rooms()
-        await bot.leave_unconfigured_rooms()
-
-    # Verify final room membership state
-    assert set(room_memberships.get("room1", [])) == {
-        "@mindroom_agent1:localhost",
-        f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-    }
-    assert set(room_memberships.get("room2", [])) == {
-        "@mindroom_agent2:localhost",
-        f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-    }
-    assert set(room_memberships.get("room3", [])) == {
-        "@mindroom_agent2:localhost",
-        "@mindroom_team1:localhost",
-        f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-    }
-    assert set(room_memberships.get("room4", [])) == {
-        "@mindroom_agent1:localhost",
-        f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-    }
-    assert set(room_memberships.get("room5", [])) == {
-        "@mindroom_agent3:localhost",
-        f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-    }
-    assert set(room_memberships.get("room6", [])) == {
-        "@mindroom_team1:localhost",
-        f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
     }
 
 
@@ -3114,7 +2742,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    setup_test_bot(bot, AsyncMock())
+    bot.client = AsyncMock()
 
     send_entered = asyncio.Event()
     release_send = asyncio.Event()
@@ -3174,7 +2802,7 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
     bots = {}
     for agent_name in ("agent1", "agent2"):
         bot = make_test_agent_bot(mock_agent_users[agent_name], orchestrator=runtime)
-        setup_test_bot(bot, AsyncMock())
+        bot.client = AsyncMock()
         bots[agent_name] = bot
 
     shared_gate = runtime.response_admission_gate
@@ -3229,7 +2857,7 @@ async def test_closed_admission_defers_response_until_gate_reopens(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    setup_test_bot(bot, AsyncMock())
+    bot.client = AsyncMock()
     runner = unwrap_extracted_collaborator(bot._response_runner)
     admission_gate = bot.orchestrator.response_admission_gate
     response_started = asyncio.Event()
@@ -3280,7 +2908,7 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    setup_test_bot(bot, AsyncMock())
+    bot.client = AsyncMock()
     send_response = AsyncMock(return_value="$thinking")
     install_send_response_mock(bot, send_response)
     admission_gate = bot.orchestrator.response_admission_gate

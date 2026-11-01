@@ -55,8 +55,11 @@ EXECUTION_ENV_TOOL_NAMES = constants.EXECUTION_ENV_TOOL_NAMES
 
 def _runner_execution_mode(runtime_paths: RuntimePaths) -> str:
     """Return the configured sandbox runner execution mode."""
-    raw_mode = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], default="inprocess")
-    return (raw_mode or "inprocess").strip().lower()
+    return (
+        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], default="inprocess")
+        .strip()
+        .lower()
+    )
 
 
 def runner_uses_subprocess(runtime_paths: RuntimePaths) -> bool:
@@ -76,7 +79,7 @@ def runner_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:
         default=str(_DEFAULT_SUBPROCESS_TIMEOUT_SECONDS),
     )
     try:
-        timeout = float(raw_timeout or _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS)
+        timeout = float(raw_timeout)
     except ValueError:
         timeout = _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
     return max(1.0, timeout)
@@ -84,16 +87,15 @@ def runner_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:
 
 def runner_dedicated_worker_key(runtime_paths: RuntimePaths) -> str | None:
     """Return the pinned dedicated worker key when configured."""
-    raw = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default="") or "").strip()
-    return raw or None
+    raw = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"])
+    return None if raw is None else raw.strip()
 
 
-def runner_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
+def runner_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path:
     """Return the dedicated worker root visible to this runner."""
-    raw_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"], default="")
-    dedicated_root = (raw_root or "").strip()
-    if dedicated_root:
-        return Path(dedicated_root).expanduser().resolve()
+    raw_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"])
+    if raw_root is not None:
+        return Path(raw_root.strip()).expanduser().resolve()
     return runtime_paths.storage_root.resolve()
 
 
@@ -119,24 +121,20 @@ def _shared_root_from_dedicated_worker_root(
 
 def _runner_shared_storage_root(runtime_paths: RuntimePaths) -> Path | None:
     """Return the shared storage root for worker-visible agent paths."""
-    shared_root = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"], default="") or "").strip()
-    if shared_root:
-        return Path(shared_root).expanduser().resolve()
+    shared_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"])
+    if shared_root is not None:
+        return Path(shared_root.strip()).expanduser().resolve()
 
-    dedicated_root = runner_dedicated_worker_root(runtime_paths)
     worker_key = runner_dedicated_worker_key(runtime_paths)
-    if dedicated_root is None or worker_key is None:
+    if worker_key is None:
         return None
 
-    raw_storage_subpath_prefix = runtime_paths.env_value(
+    storage_subpath_prefix = runtime_paths.env_value(
         _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV,
         default=_DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX,
-    )
-    storage_subpath_prefix = (raw_storage_subpath_prefix or _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX).strip() or (
-        _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX
-    )
+    ).strip()
     return _shared_root_from_dedicated_worker_root(
-        dedicated_root=dedicated_root,
+        dedicated_root=runner_dedicated_worker_root(runtime_paths),
         worker_key=worker_key,
         storage_subpath_prefix=storage_subpath_prefix,
     )
@@ -191,13 +189,8 @@ def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths)
     if not runner_uses_dedicated_worker(runtime_paths):
         return frozenset()
 
-    protected_names = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", SHARED_CREDENTIALS_PATH_ENV}
-    protected_names.update(
-        name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")
-    )
-    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
-        protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
-    return frozenset(protected_names)
+    control_paths = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", SHARED_CREDENTIALS_PATH_ENV}
+    return frozenset(control_paths) | constants.secret_path_env_names(runtime_paths)
 
 
 def tool_runtime_paths_with_request_env(

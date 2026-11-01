@@ -1,6 +1,5 @@
 import { createBrowserClient } from '@supabase/ssr'
 import { getRuntimeConfig, isSupabaseConfigured, type RuntimeConfig } from '@/lib/runtime-config'
-import type { Database } from './types'
 
 /** Create a browser Supabase client from runtime config. */
 export function createClient(config: RuntimeConfig = getRuntimeConfig()) {
@@ -10,5 +9,5 @@ export function createClient(config: RuntimeConfig = getRuntimeConfig()) {
 
   const { supabaseUrl, supabaseAnonKey } = config
 
-  return createBrowserClient<Database>(supabaseUrl, supabaseAnonKey)
+  return createBrowserClient(supabaseUrl, supabaseAnonKey)
 }

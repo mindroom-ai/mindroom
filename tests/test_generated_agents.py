@@ -700,8 +700,12 @@ async def test_a_change_the_next_load_would_reject_is_refused(tmp_path: Path, mo
         return ({**data, "display_name": 5} if broken else data), dropped
 
     monkeypatch.setattr(generated_agents, "_generated_agent_data", broken_for_some)
-    with pytest.raises(_GeneratedAgentError, match="would not load"):
+    with pytest.raises(_GeneratedAgentError, match="would not load") as raised:
         _update(config, paths, {"role": "Broken"})
+    assert str(raised.value) == (
+        "The agent would not load with this change, so nothing was stored: "
+        "agents → creator_research → display_name: Input should be a valid string"
+    )
     register = _register()
     with pytest.raises(_GeneratedAgentError, match="would not load"):
         await _create(config, paths, register, name="writer")

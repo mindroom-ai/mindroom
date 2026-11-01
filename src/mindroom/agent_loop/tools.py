@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import threading
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.llm.events import ToolProgress
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import ToolExecution
 from mindroom.logging_config import get_logger
@@ -17,6 +20,7 @@ from mindroom.tool_system.invocation import (
     execute_tool_call,
     parse_tool_arguments,
 )
+from mindroom.tool_system.progress import shown_progress, tool_progress_reporter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
@@ -33,6 +37,8 @@ _LIMIT_ERROR_TEXT = "Tool call limit reached. Tool call {name} not executed. Don
 # The model writes the name of a tool it was not offered, so the log keeps only this much of it.
 _MAX_LOGGED_TOOL_NAME = 100
 MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
+# Live frames go out ten times a second; reports a call makes between two of them would never be seen.
+_PROGRESS_FLUSH_SECONDS = 0.1
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -233,8 +239,10 @@ async def dispatch_tool_calls(
     *,
     run: RunContext,
     middleware: Sequence[ToolMiddleware],
-) -> AsyncIterator[tuple[PlannedCall, Message]]:
+) -> AsyncIterator[ToolProgress | tuple[PlannedCall, Message]]:
     """Run the batch's unpaused calls concurrently and yield each with its result message as soon as it finishes.
+
+    The progress a running call reports comes as ``ToolProgress`` before that call's result.
 
     A call's execution is filled in place with its result, error flag, and stop flag as soon as that call finishes,
     whatever its siblings are doing, so a batch cut short leaves every call that finished recorded as finished. A
@@ -254,9 +262,9 @@ async def dispatch_tool_calls(
     finished = callback_event_stream(run_batch)
     async with closing_async_stream(finished):
         async for item in finished:
-            # The batch's own result, None, comes last; everything before it is a finished call.
+            # The batch's own result, None, comes last; everything before it is a call's progress or a finished call.
             if item is not None:
-                yield cast("tuple[PlannedCall, Message]", item)
+                yield cast("ToolProgress | tuple[PlannedCall, Message]", item)
 
 
 async def _run_call(
@@ -265,10 +273,48 @@ async def _run_call(
     middleware: Sequence[ToolMiddleware],
     emit: Callable[[object], None],
 ) -> None:
-    """Run one call, record its outcome on its execution, and hand the call over with its result message."""
+    """Run one call, hand over its progress while it runs, record its outcome, and hand it over with its result."""
     execution = call.execution
     context = run.call_context(execution.tool_call_id)
-    outcome = await execute_tool_call(call.function, execution.tool_args, context, middleware=middleware)
+    loop = asyncio.get_running_loop()
+    lock = threading.Lock()
+    latest: str | None = None
+    flush_scheduled = False
+    returned = False
+    last_flush = -math.inf
+
+    def flush() -> None:
+        nonlocal latest, flush_scheduled, last_flush
+        with lock:
+            text, latest, flush_scheduled = latest, None, False
+        last_flush = loop.time()
+        if text is not None:
+            # Output can print credentials; mask them as the call's result preview does.
+            emit(ToolProgress(execution.tool_call_id, shown_progress(text)))
+
+    def schedule_flush() -> None:
+        loop.call_later(max(0.0, last_flush + _PROGRESS_FLUSH_SECONDS - loop.time()), flush)
+
+    def report(text: str) -> None:
+        # Any thread may report, and a tool, such as untrusted worker code, may report far faster than anyone can
+        # watch: keep only the newest report and flush it at most as often as live frames go out.
+        nonlocal latest, flush_scheduled
+        with lock:
+            if returned:
+                return  # A thread that outlives the call cannot report for it.
+            latest = text
+            if flush_scheduled:
+                return
+            flush_scheduled = True
+        loop.call_soon_threadsafe(schedule_flush)
+
+    try:
+        with tool_progress_reporter(report):
+            outcome = await execute_tool_call(call.function, execution.tool_args, context, middleware=middleware)
+    finally:
+        with lock:
+            returned = True
+        flush()  # The latest report lands before the result.
     execution.result = outcome.content
     execution.is_error = outcome.is_error
     execution.stop_after_call = outcome.stop_after_call

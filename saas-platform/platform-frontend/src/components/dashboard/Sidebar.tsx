@@ -21,7 +21,7 @@ const navigation = [
   { name: 'Instance', href: '/dashboard/instance', icon: Server },
   { name: 'Billing', href: '/dashboard/billing', icon: CreditCard },
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },
-  { name: 'Support', href: '/dashboard/support', icon: HelpCircle },
+  { name: 'Support', href: 'mailto:support@mindroom.chat', icon: HelpCircle },
 ]
 
 interface SidebarProps {

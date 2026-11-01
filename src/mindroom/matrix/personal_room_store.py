@@ -108,11 +108,44 @@ def personal_room_create_lock(path: Path) -> AbstractAsyncContextManager[TextIO]
     return async_exclusive_file_lock(path.with_suffix(".create.lock"))
 
 
+# Each agent's records directory by storage root, and the room IDs of its records with the directory's mtime when read.
+_RECORDS_DIRECTORIES: dict[tuple[Path, str], Path] = {}
+_PERSONAL_ROOM_IDS: dict[Path, tuple[int, frozenset[str]]] = {}
+
+
 def write_personal_room(path: Path, record: PersonalRoomRecord) -> None:
     """Publish one lifecycle update with the existing durable-write primitive."""
     data = record.model_dump(mode="json")
     PersonalRoomRecord.model_validate(data)
     write_json_file_durable(path, data, strict_atomic_replace=True)
+    _PERSONAL_ROOM_IDS.pop(path.parent, None)
+
+
+def personal_room_ids(runtime_paths: RuntimePaths, agent_name: str) -> frozenset[str]:
+    """Return the rooms of one agent's personal-room records, read again only after a record changes.
+
+    Call-room checks ask on every call event. A damaged record leaves out only its own room; the lifecycle reports it.
+    """
+    key = (runtime_paths.storage_root, agent_name)
+    if (directory := _RECORDS_DIRECTORIES.get(key)) is None:
+        directory = _RECORDS_DIRECTORIES[key] = personal_room_record_path(runtime_paths, agent_name, "").parent
+    try:
+        version = directory.stat().st_mtime_ns
+    except FileNotFoundError:
+        return frozenset()
+    cached = _PERSONAL_ROOM_IDS.get(directory)
+    if cached is not None and cached[0] == version:
+        return cached[1]
+    rooms: set[str] = set()
+    for path in directory.glob("*.json"):
+        try:
+            record = read_personal_room(path)
+        except ValueError:
+            continue
+        if record is not None and record.room_id is not None:
+            rooms.add(record.room_id)
+    _PERSONAL_ROOM_IDS[directory] = (version, frozenset(rooms))
+    return frozenset(rooms)
 
 
 def _personal_room_records(runtime_paths: RuntimePaths, agent_name: str) -> list[PersonalRoomRecord]:

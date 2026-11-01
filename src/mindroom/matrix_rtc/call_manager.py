@@ -33,6 +33,7 @@ from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
+from mindroom.matrix.personal_room_store import personal_room_ids
 from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge, prewarm_call_audio_process
 from mindroom.matrix_rtc.call_backends import fetch_sfu_grant, resolve_livekit_service, resolve_voice_backend
@@ -218,6 +219,14 @@ class _RoomCallState:
 
     members: list[CallMember]
     agent_call_events: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class _CallRoomOwners:
+    """One storage read of the rooms each calls-enabled agent holds by accepted invite or as a personal room."""
+
+    invited: Mapping[str, AbstractSet[str]]
+    personal: Mapping[str, AbstractSet[str]]
 
 
 @dataclass(frozen=True)
@@ -573,10 +582,12 @@ class CallManager:
             if room_ids is None
             else (room for room_id in room_ids if (room := self._client.rooms.get(room_id)) is not None)
         )
-        rooms = [room for room in candidates if self._is_configured_call_room(room)]
+        # Room ownership is read from storage, so one read serves the whole pass instead of several per room.
+        owners = self._call_room_owners()
+        rooms = [room for room in candidates if self._is_configured_call_room(room, owners=owners)]
         for room in rooms:
             self._observe(room)
-        await asyncio.gather(*(self._reconcile(room) for room in rooms))
+        await asyncio.gather(*(self._reconcile(room, owners=owners) for room in rooms))
 
     async def reconcile_reply_authorization(self) -> None:
         """Revoke denied calls, then start joined calls that became authorized."""
@@ -683,14 +694,21 @@ class CallManager:
         finally:
             self._reconcile_tasks.pop(room_id, None)
 
-    async def _reconcile(self, room: nio.MatrixRoom, *, retrying: bool = False) -> None:
-        if room.room_id in self._departed_rooms or not self._is_configured_call_room(room):
+    async def _reconcile(
+        self,
+        room: nio.MatrixRoom,
+        *,
+        retrying: bool = False,
+        owners: _CallRoomOwners | None = None,
+    ) -> None:
+        if room.room_id in self._departed_rooms or not self._is_configured_call_room(room, owners=owners):
             return
         room_id = room.room_id
         try:
             async with self._admission_fence():
                 lock = self._locks.setdefault(room_id, asyncio.Lock())
                 async with lock:
+                    # Read ownership again: another agent may have taken the room while this waited for admission.
                     if (
                         self._shutting_down
                         or room_id in self._departed_rooms
@@ -803,17 +821,35 @@ class CallManager:
             self._replay_pending_keys(room_call, session)
             room_call.clear_reconcile_retry()
 
-    def _is_configured_call_room(self, room: nio.MatrixRoom, *, call_event: nio.UnknownEvent | None = None) -> bool:
-        """Return whether this agent is configured to join calls in ``room``."""
+    def _call_room_owners(self) -> _CallRoomOwners:
+        return _CallRoomOwners(
+            invited=self._get_invited_rooms_by_agent(),
+            personal={
+                agent_name: personal_room_ids(self._runtime_paths, agent_name)
+                for agent_name in self._config.calls.agents
+            },
+        )
+
+    def _is_configured_call_room(
+        self,
+        room: nio.MatrixRoom,
+        *,
+        call_event: nio.UnknownEvent | None = None,
+        owners: _CallRoomOwners | None = None,
+    ) -> bool:
+        """Return whether this agent is configured to join calls in ``room``, reading room ownership unless given."""
         room_alias = room.canonical_alias
         room_aliases = (room_alias,) if isinstance(room_alias, str) and room_alias else ()
         try:
+            if owners is None:
+                owners = self._call_room_owners()
             configured_agent = configured_call_agent_name_for_room(
                 self._config,
                 room.room_id,
                 self._runtime_paths,
                 room_aliases=room_aliases,
-                invited_rooms_by_agent=self._get_invited_rooms_by_agent(),
+                invited_rooms_by_agent=owners.invited,
+                personal_rooms_by_agent=owners.personal,
             )
         except ValueError as error:
             log = logger.warning if self._has_live_remote_call_signal(room, call_event) else logger.debug

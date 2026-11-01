@@ -164,11 +164,7 @@ def _prepare_worker(
         if worker_key != dedicated_worker_key:
             msg = f"Dedicated sandbox worker is pinned to '{worker_log_id(dedicated_worker_key)}' but received '{worker_log_id(worker_key)}'."
             raise WorkerBackendError(msg)
-        dedicated_root = sandbox_exec.runner_dedicated_worker_root(runtime_paths)
-        if dedicated_root is None:
-            msg = "Dedicated sandbox worker requires a configured worker root."
-            raise WorkerBackendError(msg)
-        paths = local_worker_state_paths_for_root(dedicated_root)
+        paths = local_worker_state_paths_for_root(sandbox_exec.runner_dedicated_worker_root(runtime_paths))
         try:
             if run_scoped_script:
                 ensure_local_script_worker_state_locked(paths)

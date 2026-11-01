@@ -578,10 +578,10 @@ def _private_report_url(
     workflow_id: str,
     run_id: str,
 ) -> str | None:
-    if base_url is None or not base_url.strip():
+    if base_url is None:
         return None
     owner_key = _owner_dir_name(owner_id)
-    return f"{base_url.rstrip('/')}/reports/private/{scope}/{owner_key}/{workflow_id}/{run_id}"
+    return f"{base_url}/reports/private/{scope}/{owner_key}/{workflow_id}/{run_id}"
 
 
 def _relative_artifact_path(artifact_path: Path, storage_root: Path) -> str:

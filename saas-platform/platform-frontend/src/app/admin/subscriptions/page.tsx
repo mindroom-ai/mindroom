@@ -2,18 +2,17 @@
 
 import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
-import { Button } from '@/components/ui/button'
-import { apiCall } from '@/lib/api'
+import { apiCall, type Subscription as SubscriptionOut } from '@/lib/api'
 import { logger } from '@/lib/logger'
+import { formatRecordedPrice } from '@/lib/pricing-config'
 
 interface Subscription {
   id: string
   account_id: string
-  price_tier: string
   tier: string
   status: string
-  price: number
-  billing_period: string
+  price_cents: SubscriptionOut['price_cents']
+  billing_cycle: SubscriptionOut['billing_cycle']
   current_period_end: string | null
   created_at: string
   accounts?: {
@@ -47,13 +46,6 @@ export default function SubscriptionsPage() {
     fetchSubscriptions()
   }, [])
 
-  const formatPrice = (amount: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-    }).format(amount / 100)
-  }
-
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -64,12 +56,9 @@ export default function SubscriptionsPage() {
 
   return (
     <div>
-      <div className="mb-8 flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Subscriptions</h1>
-          <p className="text-gray-600 dark:text-gray-400 mt-2">Manage customer subscriptions and billing</p>
-        </div>
-        <Button onClick={() => alert('Export functionality coming soon')}>Export</Button>
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Subscriptions</h1>
+        <p className="text-gray-600 dark:text-gray-400 mt-2">View customer subscriptions and billing</p>
       </div>
 
       <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
@@ -87,7 +76,6 @@ export default function SubscriptionsPage() {
                   <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Price</th>
                   <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Started</th>
                   <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Next Bill</th>
-                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -107,7 +95,7 @@ export default function SubscriptionsPage() {
                       </td>
                       <td className="py-3 px-4">
                         <div className={`font-medium text-gray-900 dark:text-gray-100 ${noPlan ? '' : 'capitalize'}`}>
-                          {noPlan ? 'No plan' : subscription.price_tier || subscription.tier || 'Unknown'}
+                          {noPlan ? 'No plan' : subscription.tier}
                         </div>
                       </td>
                       <td className="py-3 px-4">
@@ -125,17 +113,12 @@ export default function SubscriptionsPage() {
                         )}
                       </td>
                       <td className="py-3 px-4">
-                        {noPlan ? (
+                        {noPlan || subscription.price_cents == null ? (
                           <span className="text-gray-500 dark:text-gray-400">—</span>
                         ) : (
-                          <>
-                            <span className="text-gray-900 dark:text-gray-100">
-                              {formatPrice(subscription.price || 0)}
-                            </span>
-                            <span className="text-gray-500 dark:text-gray-400 text-sm">
-                              /{subscription.billing_period || 'month'}
-                            </span>
-                          </>
+                          <span className="text-gray-900 dark:text-gray-100">
+                            {formatRecordedPrice(subscription.price_cents, subscription.billing_cycle)}
+                          </span>
                         )}
                       </td>
                       <td className="py-3 px-4 text-sm text-gray-500 dark:text-gray-400">
@@ -146,16 +129,6 @@ export default function SubscriptionsPage() {
                           ? new Date(subscription.current_period_end).toLocaleDateString()
                           : '-'
                         }
-                      </td>
-                      <td className="py-3 px-4">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
-                          onClick={() => alert(`Managing subscription ${subscription.id}`)}
-                        >
-                          Manage
-                        </Button>
                       </td>
                     </tr>
                   )

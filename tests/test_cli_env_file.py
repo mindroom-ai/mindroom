@@ -57,6 +57,16 @@ def test_upsert_env_values_leaves_exactly_one_assignment(tmp_path: Path) -> None
     assert dotenv_values(env_path)["OPENAI_API_KEY"] == "sk-new"
 
 
+def test_upsert_env_values_replaces_the_first_assignment_of_a_utf8_bom_file(tmp_path: Path) -> None:
+    """A `.env` saved with a byte order mark keeps one assignment of its first key, so the old value leaves the file."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENAI_API_KEY=sk-old\nUNRELATED=value\n", encoding="utf-8-sig")
+
+    upsert_env_values(env_path, {"OPENAI_API_KEY": "sk-new"})
+
+    assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-new\nUNRELATED=value\n"
+
+
 def test_upsert_env_values_creates_parent_directory_and_file(tmp_path: Path) -> None:
     """Creating a missing env file should still use the same KEY=value format."""
     env_path = tmp_path / "missing" / ".env"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from dataclasses import replace
@@ -1118,3 +1119,46 @@ def test_binding_switched_on_during_sign_in_grants_no_dashboard(
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=10)
         loop.close()
+
+
+def hand_off(client: TestClient, name: str, origin: str | None = CHAT_ORIGIN) -> Response:
+    """Submit the form MindRoom Chat posts when someone opens its /connections page."""
+    token = {"access_token": name, "token_type": "Bearer", "matrix_server_name": "example.org", "expires_in": 300}
+    return client.post(
+        "/api/connections/session/handoff",
+        headers={} if origin is None else {"Origin": origin},
+        data={"openid_token": json.dumps(token)},
+        follow_redirects=False,
+    )
+
+
+def test_handoff_from_chat_signs_in_and_opens_the_portal(signin: dict[str, Any]) -> None:
+    """Chat's form post starts the same session as the portal's sign-in and lands on the portal."""
+    response = hand_off(signin["client"], "alice")
+    assert response.status_code == 303, response.text
+    assert response.headers["location"] == "/connections/"
+    assert "no-store" in response.headers["cache-control"]
+    assert _session_of(signin["client"]) == ("@alice:example.org", False)
+
+
+@pytest.mark.parametrize("origin", [None, "null", "https://evil.example.org", PORTAL_ORIGIN])
+def test_handoff_needs_an_allowlisted_chat_origin(signin: dict[str, Any], origin: str | None) -> None:
+    """The browser sets Origin on the form post, so another page cannot sign the browser in as its own user."""
+    response = hand_off(signin["client"], "mallory", origin=origin)
+    assert response.status_code == 403, response.text
+    assert _session_of(signin["client"]) is None
+    signin["verifier"].assert_not_awaited()
+
+
+def test_handoff_rejects_bad_token_without_echo(signin: dict[str, Any]) -> None:
+    """A malformed or unverifiable token gets the portal's sign-in refusal, never an echo of the submitted token."""
+    malformed = signin["client"].post(
+        "/api/connections/session/handoff",
+        headers={"Origin": CHAT_ORIGIN},
+        data={"openid_token": "not-json-secret"},
+        follow_redirects=False,
+    )
+    assert malformed.status_code == 401
+    assert "not-json-secret" not in malformed.text
+    assert hand_off(signin["client"], "nobody").status_code == 401
+    assert _session_of(signin["client"]) is None

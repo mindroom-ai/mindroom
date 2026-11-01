@@ -1,4 +1,12 @@
-import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
+import {
+  useState,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
 import {
   Settings,
   CheckCircle2,
@@ -61,6 +69,7 @@ import { EnhancedConfigDialog } from "./EnhancedConfigDialog";
 import { FilterSelector } from "@/components/shared/FilterSelector";
 
 const SHARED_ONLY_PROVIDER_IDS = new Set(["spotify", "homeassistant"]);
+const NO_INTEGRATIONS: Integration[] = [];
 
 type FilterMode = "all" | "available" | "unconfigured" | "configured";
 
@@ -332,7 +341,9 @@ export function Integrations() {
   const [loading, setLoading] = useState(false);
   const loadRequestIdRef = useRef(0);
   const currentScopeKeyRef = useRef(currentScopeKey);
-  currentScopeKeyRef.current = currentScopeKey;
+  useLayoutEffect(() => {
+    currentScopeKeyRef.current = currentScopeKey;
+  }, [currentScopeKey]);
   const isCurrentScope = (scopeKey: string) =>
     currentScopeKeyRef.current === scopeKey;
   const isCurrentLoadRequest = (requestId: number, scopeKey: string) =>
@@ -367,10 +378,6 @@ export function Integrations() {
       setScopeAgentName(null);
     }
   }, [scopeAgentName, scopedAgents]);
-
-  useEffect(() => {
-    loadIntegrations();
-  }, [backendTools, currentScopeKey]);
 
   const loadIntegrations = async (forceRefresh = false) => {
     const scopeKey = currentScopeKey;
@@ -472,6 +479,11 @@ export function Integrations() {
       }
     }
   };
+
+  const reloadIntegrations = useEffectEvent(loadIntegrations);
+  useEffect(() => {
+    reloadIntegrations();
+  }, [backendTools, currentScopeKey]);
 
   // OAuth cards connect for the selected agent's scope; other credentials stay shared-only.
   const blocksScopedDashboardCredentials = (integration: Integration) =>
@@ -672,6 +684,11 @@ export function Integrations() {
       const { message } = (await response.json()) as { message: string };
       return { title: integration.name, description: message };
     });
+
+  const integrations =
+    integrationsState.scopeKey === currentScopeKey
+      ? integrationsState.integrations
+      : NO_INTEGRATIONS;
 
   const getActionButton = (integration: Integration) => {
     if (blocksScopedDashboardCredentials(integration)) {
@@ -1006,11 +1023,6 @@ export function Integrations() {
       actionButton
     );
   };
-
-  const integrations =
-    integrationsState.scopeKey === currentScopeKey
-      ? integrationsState.integrations
-      : [];
 
   const filteredIntegrations = useMemo(() => {
     let filtered = integrations;

@@ -45,7 +45,12 @@ function hostError(host: string): string | null {
 
 /** The part of a rule a problem belongs to, so the editor can show it by that field. */
 export type RuleFieldPart =
-  "host" | "pathPrefix" | "port" | "username" | "authName" | "template";
+  | "host"
+  | "pathPrefix"
+  | "port"
+  | "username"
+  | "authName"
+  | "template";
 
 /** The id of the field that shows a problem with a rule. */
 export function ruleField(index: number, part: RuleFieldPart): string {

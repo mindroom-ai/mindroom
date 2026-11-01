@@ -46,7 +46,7 @@ A calls-enabled agent shows `📞 Voice calls` in its Matrix presence status whe
 |-------|------|---------|-------------|
 | `calls.enabled` | bool | `false` | Lets agents join voice calls. |
 | `calls.profiles` | map of name to profile | `{}` | Reusable, complete voice pipelines; each has a `backend` and the fields below. |
-| `calls.agents` | map of agent name to profile name | `{}` | Each calls-enabled agent uses exactly one profile. |
+| `calls.agents` | map of agent name to profile name | `{}` | Each calls-enabled agent uses exactly one profile. A [`personal_agents`](personal-agents.md#voice-calls) template key gives every user's agent from that template the profile. |
 | `calls.livekit_service_url` | string | discovered | MatrixRTC authorization service URL to use instead of discovering it from the agent homeserver's `.well-known/matrix/client`. |
 
 `enabled` and `livekit_service_url` are global and cannot be set per agent.
@@ -58,6 +58,7 @@ Configuration loading fails with one of these errors when references are wrong:
 - `calls.agents references unknown profile(s): ...`
 - `calls.agents references unknown agent(s): ...`
 - `calls.agents configures multiple agents for room(s): ...`, because a room can have at most one calls-enabled agent.
+- `calls.agents names personal_agents.<key>, whose agent lists rooms in the template or a user's override; ...`, because a room takes only one calls-enabled agent.
 - `calls.profiles references unknown cascaded model(s): ...` or `calls.profiles references unknown Live agent model(s): ...`, when a profile's model alias is not in the top-level `models` mapping.
 
 ### Realtime profile fields
@@ -236,9 +237,9 @@ Different agents can use different profiles, for example one agent on `realtime`
 
 ## When an agent joins a call
 
-An agent joins a call when it starts in one of the agent's configured rooms, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](configuration/agents.md) setting.
+An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](personal-rooms.md) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](configuration/agents.md) setting.
 Ad-hoc rooms let a Matrix client create a private voice room and invite one agent without adding the room to `config.yaml`.
-A configured room assignment wins over invites; if several calls-enabled agents were only invited to the same room, none of them answers calls there.
+A configured room assignment wins over personal rooms and invites; if several calls-enabled agents are in the same room only through those, none of them answers calls there.
 
 The agent stays in a call only while one Matrix user is in it (that user may join from several devices) and only while that user passes the normal room and per-agent reply permissions.
 That user is the requester for tools, and requester-private agents use that user's workspace, memory, credentials, history, and knowledge.

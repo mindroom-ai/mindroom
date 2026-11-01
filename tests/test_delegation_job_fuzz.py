@@ -65,7 +65,8 @@ class SubagentLifecycles(RuleBasedStateMachine):
         """Wait for a child's job from a parent turn."""
         self._step("wait", index=index, budget=budget)
 
-    @precondition(lambda self: self.runner.approvals.pending())
+    # Hypothesis calls preconditions synchronously; a card its job's end already denied is skipped by the rule.
+    @precondition(lambda self: any(not card.decision.done() for card in self.runner.approvals.cards))
     @rule(index=_INDEXES, approve=st.booleans())
     def approve(self, index: int, approve: bool) -> None:
         """Answer one approval card a child's job posted."""

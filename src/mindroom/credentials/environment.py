@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.constants import PROVIDER_ENV_KEYS, runtime_env_path
+from mindroom.constants import PROVIDER_ENV_KEYS, read_secret_file, runtime_env_path
 from mindroom.credentials.manager import validate_service_name
 from mindroom.credentials.policy import is_oauth_token_service
 from mindroom.logging_config import get_logger
@@ -49,7 +49,7 @@ def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
 
 def _read_text_file(path: Path) -> str | None:
     try:
-        return path.read_text(encoding="utf-8").strip()
+        return read_secret_file(path)
     except OSError:
         return None
 
@@ -111,7 +111,7 @@ def _load_declared_credential_seeds(runtime_paths: RuntimePaths) -> list[_Creden
     seed_file = runtime_env_path(runtime_paths, CREDENTIAL_SEEDS_FILE_ENV)
     if seed_file is not None:
         try:
-            raw_file_json = seed_file.read_text(encoding="utf-8")
+            raw_file_json = read_secret_file(seed_file)
         except OSError as exc:
             logger.warning(
                 "credential_seed_declaration_file_unreadable",

@@ -1088,8 +1088,12 @@ class ApprovalContinuationRunner:
             membership_turn_id=continuation.source_event_ids[0],
             queue_memory_persistence=self._approval_memory_persistence(continuation),
             # A continuation keeps its turn's source events, so a run paused for approval is verified when it ends.
+            # The resumed reply reports the whole turn's cost, but the usage stored before the pause may already be in a
+            # scan, possibly of an earlier month, so its cost is not dated and budgets recount instead.
             notify_response_finished=self.locked.response_finished_notifier(
                 continuation.sources.logical_source_event_ids,
+                continuation.requester_id,
+                None,
             ),
             persist_response_event_id=self._approval_response_event_persistence(continuation),
         )

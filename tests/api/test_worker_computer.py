@@ -197,7 +197,9 @@ def test_worker_browser_call_reaches_its_own_time_limit_past_a_shorter_runner_ti
 
     assert response.json()["error"] == (
         "Sandbox tool execution failed: HostCallTimeLimitError: Browser action=status did not finish within 1.5 "
-        "seconds and was stopped. If the page stays unresponsive, close its tab with action=close."
+        "seconds, so MindRoom stopped waiting for it. Work it already sent to the page, such as a running script or a "
+        "pending upload, may continue. Check the tab with action=tabs: close it with action=close if it is marked "
+        "unresponsive, and otherwise take a snapshot before acting on it again."
     )
 
 

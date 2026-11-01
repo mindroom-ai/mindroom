@@ -751,7 +751,6 @@ class TestDelegateKnowledge:
     async def test_delegation_rebinds_resolved_model_for_child_agent(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
         thread_model_name: str | None,
         model: str | None,
         expected_model_name: str,
@@ -772,7 +771,7 @@ class TestDelegateKnowledge:
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:example.org": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=8_000),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -780,7 +779,6 @@ class TestDelegateKnowledge:
         )
         config = _bind_runtime_paths(config, tmp_path)
         runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-        monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
         if thread_model_name is not None:
             set_thread_model_override(
                 runtime_paths,

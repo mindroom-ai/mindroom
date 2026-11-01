@@ -206,13 +206,12 @@ def test_resolve_turn_model_prefers_thread_override(tmp_path: Path) -> None:
 
 def test_resolve_turn_model_thread_override_beats_room_override(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A thread override should beat the room_models override."""
     config = bind_runtime_paths(
         Config(
             agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
-            room_models={"lobby": "default"},
+            room_models={ROOM_ID: "default"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=32_000),
@@ -220,7 +219,6 @@ def test_resolve_turn_model_thread_override_beats_room_override(
         ),
         test_runtime_paths(tmp_path),
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
     runtime_paths = runtime_paths_for(config)
     set_thread_model_override(
         runtime_paths,

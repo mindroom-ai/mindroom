@@ -25,7 +25,7 @@ from mindroom.agent_loop.tools import (
     tool_result_message,
 )
 from mindroom.llm.errors import incomplete_stream_error
-from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.events import ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance, usage_sums_attempts
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement, joined_texts
@@ -139,7 +139,7 @@ class LoopEnded:
     paused: bool
 
 
-type LoopEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | LoopEnded
+type LoopEvent = TextDelta | ReasoningDelta | ToolStarted | ToolProgress | ToolCompleted | LoopEnded
 
 
 @dataclass
@@ -278,7 +278,7 @@ async def _run_tool_batch(
     progress: _Progress,
     hooks: LoopHooks,
     max_tool_calls_per_turn: int | None,
-) -> AsyncIterator[ToolStarted | ToolCompleted]:
+) -> AsyncIterator[ToolStarted | ToolProgress | ToolCompleted]:
     """Answer one assistant message's tool calls with what ``answer_tool_calls`` gives, else plan and run them.
 
     Either way every call is recorded, and its start announced, in call order, and its answer reaches the model in
@@ -311,7 +311,11 @@ async def _run_tool_batch(
     executed: list[Message] = []
     finished = dispatch_tool_calls(batch.planned, run=state.run, middleware=hooks.tool_middleware)
     async with closing_async_stream(finished):
-        async for call, result in finished:
+        async for item in finished:
+            if isinstance(item, ToolProgress):
+                yield item
+                continue
+            call, result = item
             executed.append(result)
             yield ToolCompleted(call.execution.call)
     progress.calls_so_far += len(executed) + sum(isinstance(call, RefusedCall) and call.counts for call in batch.calls)
@@ -325,7 +329,7 @@ async def _answer_resumed(
     state: LoopState,
     progress: _Progress,
     hooks: LoopHooks,
-) -> AsyncIterator[ToolStarted | ToolCompleted]:
+) -> AsyncIterator[ToolStarted | ToolProgress | ToolCompleted]:
     """Answer the requirements a resume decided, in order, as the rest of the batch the run paused in.
 
     Approved calls run from their stored arguments and announce themselves as tool events; denied calls answer with
@@ -342,7 +346,12 @@ async def _answer_resumed(
             planned = PlannedCall(function=function, execution=execution)
             yield ToolStarted(execution.call)
             finished = dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware)
-            results.extend([result async for _, result in finished])
+            async with closing_async_stream(finished):
+                async for item in finished:
+                    if isinstance(item, ToolProgress):
+                        yield item
+                    else:
+                        results.append(item[1])
             yield ToolCompleted(execution.call)
         elif execution.confirmed is False:
             execution.is_error = True

@@ -39,7 +39,7 @@ Thread and conversation policy should live in a small number of named decision p
 ## Enforcement is not convergence
 
 Tach refuses only the imports its declared rules forbid, and the rules describe the import graph as it is, so some of them record debt rather than intent.
-Modules that `tach.toml` does not declare are outside its dependency rules entirely.
+Tach checks a file that `tach.toml` does not declare as the nearest declared package containing it, and a file with no declared package is outside its dependency rules entirely.
 Tightening a boundary means narrowing a `depends_on` list or adding an interface, then fixing the imports the change rejects.
 When this page and `tach.toml` disagree, one of them is wrong, and deciding which is the useful outcome.
 

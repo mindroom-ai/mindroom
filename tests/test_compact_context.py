@@ -15,10 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history.manual import request_compaction_before_next_reply
-from mindroom.history.session_context import (
-    ScopeSessionContext,
-    load_scope_session,
-)
+from mindroom.history.session_context import load_scope_session
 from mindroom.history.storage import (
     has_queued_force_compaction,
     read_scope_state,
@@ -127,25 +124,6 @@ async def _compact_as_team_member(tool: CompactContextTools, team_scope: History
     [function] = adapt_toolkit(tool).functions
     context = ToolCallContext(run_id="member-run", session_id="session-1", history_scope=team_scope, user_id=None)
     return (await run_tool_call(function, {}, context, middleware=())).value
-
-
-def _load_scope_context(
-    *,
-    scope: HistoryScope,
-    session_id: str,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity,
-) -> ScopeSessionContext:
-    scope_context = load_scope_session(
-        scope=scope,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-    )
-    assert scope_context is not None
-    return scope_context
 
 
 @pytest.mark.asyncio
@@ -392,7 +370,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
     )
 
     team_scope = HistoryScope(kind="team", scope_id="team-123")
-    team_context = _load_scope_context(
+    team_context = load_scope_session(
         scope=team_scope,
         session_id="session-1",
         runtime_paths=runtime_paths,
@@ -611,7 +589,7 @@ async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) ->
     with tool_runtime_context(_member_runtime_context(config, runtime_paths, agent_name="beta")):
         result = await _compact_as_team_member(tool, team_scope)
 
-    team_context = _load_scope_context(
+    team_context = load_scope_session(
         scope=team_scope,
         session_id="session-1",
         runtime_paths=runtime_paths,
@@ -649,7 +627,7 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         execution_identity=identity,
     )
     team_scope = HistoryScope(kind="team", scope_id="team_123")
-    team_context = _load_scope_context(
+    team_context = load_scope_session(
         scope=team_scope,
         session_id="session-1",
         runtime_paths=runtime_paths,
@@ -672,7 +650,6 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
 @pytest.mark.asyncio
 async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_missing(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Team-scoped compaction should reuse the room-aware team model resolver."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -688,7 +665,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -696,7 +673,6 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     identity = _execution_identity()
     tool = CompactContextTools(
@@ -706,7 +682,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         execution_identity=identity,
     )
     team_scope = HistoryScope(kind="team", scope_id="team_123")
-    team_context = _load_scope_context(
+    team_context = load_scope_session(
         scope=team_scope,
         session_id="session-1",
         runtime_paths=runtime_paths,
@@ -729,7 +705,6 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
 @pytest.mark.asyncio
 async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model_missing(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Agent-scoped compaction should reuse the room-aware runtime model resolver."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -742,7 +717,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -750,7 +725,6 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     identity = _execution_identity()
     tool = CompactContextTools(
@@ -759,7 +733,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         runtime_paths=runtime_paths,
         execution_identity=identity,
     )
-    scope_context = _load_scope_context(
+    scope_context = load_scope_session(
         scope=_AGENT_SCOPE,
         session_id="session-1",
         runtime_paths=runtime_paths,

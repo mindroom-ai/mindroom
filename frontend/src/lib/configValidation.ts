@@ -17,7 +17,8 @@ export interface ValidationConfigDiagnostic {
 }
 
 export type ConfigDiagnostic =
-  GlobalConfigDiagnostic | ValidationConfigDiagnostic;
+  | GlobalConfigDiagnostic
+  | ValidationConfigDiagnostic;
 
 export function isConfigConflictDiagnostic(
   diagnostic: ConfigDiagnostic,
@@ -36,39 +37,13 @@ export function getConfigValidationIssues(
     .map((diagnostic) => diagnostic.issue);
 }
 
-/** Validation issues tied to a config location; root-level issues show as global diagnostics instead. */
-export function getLocatedConfigValidationIssues(
-  diagnostics: ConfigDiagnostic[],
-): ConfigValidationIssue[] {
-  return getConfigValidationIssues(diagnostics).filter(
-    (issue) => issue.loc.length > 0,
-  );
-}
-
 export function getGlobalConfigDiagnostics(
   diagnostics: ConfigDiagnostic[],
 ): GlobalConfigDiagnostic[] {
-  const explicitGlobals = diagnostics.filter(
+  return diagnostics.filter(
     (diagnostic): diagnostic is GlobalConfigDiagnostic =>
       diagnostic.kind === "global",
   );
-  const rootValidationGlobals = getConfigValidationIssues(diagnostics)
-    .filter((issue) => issue.loc.length === 0)
-    .map((issue) => ({
-      kind: "global" as const,
-      message: issue.msg,
-      blocking: false,
-    }));
-  const seen = new Set<string>();
-
-  return [...explicitGlobals, ...rootValidationGlobals].filter((diagnostic) => {
-    const key = `${diagnostic.blocking}:${diagnostic.message}`;
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
 }
 
 export function findConfigValidationIssue(

@@ -25,7 +25,8 @@ from mindroom.session_storage.agent_storage import (
     create_state_storage,
     prepare_conversation_database,
 )
-from mindroom.session_storage.schema import LEDGER_TOTALS_VERSION, TableNames, table_names
+from mindroom.session_storage.schema import LEDGER_TOTALS_VERSION, TableNames, quote_identifier, table_names
+from mindroom.session_storage.store import begun, connect_conversation_database
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage import stats_storage
@@ -647,6 +648,34 @@ def test_a_read_is_one_snapshot_from_its_layout_check_to_its_last_session(
 
     assert [row.row_key for row in result if isinstance(row, UsageSessionRow)] == ["session-1"]
     assert writes == ["database is locked"]
+
+
+def test_a_caller_holding_a_row_does_not_keep_writers_waiting(tmp_path: Path) -> None:
+    """A writer commits while the caller works on a row, and the rows still come from the snapshot before its write."""
+    storage = create_agent_state_storage("code", tmp_path)
+    for session_id in ("session-1", "session-2"):
+        persist_runs(
+            storage,
+            ConversationSession(kind="agent", session_id=session_id, owner_id="code"),
+            RunRecord(
+                run_id=f"{session_id}-run",
+                user_id="@alice:example.test",
+                created_at=1_723_837_600,
+                status=RunStatus.completed,
+                metrics=RunMetrics(tokens=TokenCounts(total_tokens=20)),
+            ),
+        )
+    source = _source(storage.path)
+    rows = iter_usage_storage_rows(source)
+    first = next(rows)
+
+    # The store's own write path, with a busy timeout short enough to fail while a reader holds its lock.
+    with closing(connect_conversation_database(storage.path, timeout=0.2)) as writer, begun(writer, write=True):
+        assert writer.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+        writer.execute(f"DELETE FROM {quote_identifier(source.names.sessions)}")  # noqa: S608
+
+    read = [first, *rows]
+    assert sorted(row.row_key for row in read if isinstance(row, UsageSessionRow)) == ["session-1", "session-2"]
 
 
 def test_a_read_leaves_a_crashed_writers_journal_for_the_store_to_roll_back(tmp_path: Path) -> None:

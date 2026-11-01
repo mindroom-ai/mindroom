@@ -1,7 +1,8 @@
 """Admin-only routes for platform management."""
 
+from collections import Counter
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from backend.config import ENABLE_CLEANUP_SCHEDULER, INSTANCE_TEARDOWN_GRACE_DAYS, logger
 from backend.deps import (
@@ -21,16 +22,15 @@ from backend.models import (
     AdminGetOneResponse,
     AdminInstanceLifecycleResponse,
     AdminListResponse,
-    AdminStatsOut,
     AdminUpdateResponse,
     ProvisionResponse,
     SyncResult,
     UpdateAccountStatusResponse,
 )
-from backend.pricing import PRICING_CONFIG_MODEL
 from backend.services import instance_lifecycle, instances_data, provisioner_service
 from backend.utils.audit import create_audit_log
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from backend.utils.paging import select_all_pages
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -54,55 +54,10 @@ def audit_log_entry(
     )
 
 
-def _monthly_plan_prices_usd() -> dict[str, int]:
-    """Return configured monthly prices in dollars for automatic MRR estimates."""
-    prices: dict[str, int] = {}
-    for tier, plan in PRICING_CONFIG_MODEL.plans.items():
-        if isinstance(plan.price_monthly, int):
-            prices[tier] = plan.price_monthly // 100
-        else:
-            prices[tier] = 0
-    return prices
-
-
-@router.get("/admin/stats", response_model=AdminStatsOut)
-@limiter.limit("30/minute")
-async def get_admin_stats(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
-    """Get platform statistics for admin dashboard."""
-    audit_log_entry(account_id=admin["user_id"], action="view", resource_type="stats")
-    sb = ensure_supabase()
-
-    try:
-        accounts = sb.table("accounts").select("*", count="exact").execute()
-        subscriptions = (
-            sb.table("subscriptions").select("*", count="exact").eq("status", "active").neq("tier", "free").execute()
-        )
-        instances = sb.table("instances").select("*", count="exact").eq("status", "running").execute()
-
-        # Get recent activity for dashboard
-        recent_logs = (
-            sb.table("audit_logs").select("*, accounts(email)").order("created_at", desc=True).limit(5).execute()
-        )
-
-        recent_activity = []
-        if recent_logs.data:
-            recent_activity.extend(
-                {
-                    "type": log.get("action", "unknown"),
-                    "description": f"{log.get('resource_type', '')} {log.get('action', '')} by {log.get('accounts', {}).get('email', 'System')}",
-                    "timestamp": log.get("created_at", ""),
-                }
-                for log in recent_logs.data
-            )
-
-        return {
-            "accounts": len(accounts.data) if accounts.data else 0,
-            "active_subscriptions": len(subscriptions.data) if subscriptions.data else 0,
-            "running_instances": len(instances.data) if instances.data else 0,
-        }
-    except Exception as e:
-        logger.exception("Error fetching admin stats")
-        raise HTTPException(status_code=500, detail="Failed to fetch statistics") from e
+def _monthly_revenue_usd(subscription: dict[str, Any]) -> float:
+    """Return the monthly revenue of a subscription's recorded Stripe price, or 0 before a price is recorded."""
+    months = 12 if subscription["billing_cycle"] == "yearly" else 1
+    return (subscription["price_cents"] or 0) / months / 100
 
 
 @router.post("/admin/instances/{instance_id}/start", response_model=ActionResult)
@@ -362,24 +317,16 @@ async def get_dashboard_metrics(
 
     try:
         accounts = sb.table("accounts").select("*", count="exact", head=True).execute()
-        active_subs = (
-            sb.table("subscriptions")
-            .select("*", count="exact", head=True)
-            .eq("status", "active")
-            .neq("tier", "free")
-            .execute()
+        active_subs = select_all_pages(
+            lambda: (
+                sb.table("subscriptions")
+                .select("billing_cycle,price_cents")
+                .eq("status", "active")
+                .neq("tier", "free")
+                .order("id")
+            )
         )
-
-        subs_data = sb.table("subscriptions").select("tier").eq("status", "active").neq("tier", "free").execute()
-        tier_prices = _monthly_plan_prices_usd()
-        mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
-
-        all_instances = instances_data.list_instances(sb, columns="status")
-        status_counts: dict[str, int] = {}
-        for inst in all_instances:
-            status = inst.get("status", "unknown")
-            status_counts[status] = status_counts.get(status, 0) + 1
-
+        instances = instances_data.list_instances(sb, columns="status")
         audit_logs = (
             sb.table("audit_logs")
             .select("created_at, action, account_id")
@@ -387,100 +334,57 @@ async def get_dashboard_metrics(
             .limit(10)
             .execute()
         )
-        recent_activity = audit_logs.data if audit_logs.data else []
-    except Exception:
-        logger.exception("Error fetching metrics")
-        return {
-            "total_accounts": 0,
-            "active_subscriptions": 0,
-            "total_instances": 0,
-            "instances_by_status": {},
-            "subscription_revenue": 0.0,
-            "subscriptions_by_tier": {},
-            "recent_signups": [],
-            "recent_instances": [],
-        }
-    else:
-        # Build subscriptions by tier
-        subscriptions_by_tier = {}
-        if subs_data.data:
-            for sub in subs_data.data:
-                tier = sub.get("tier", "free")
-                subscriptions_by_tier[tier] = subscriptions_by_tier.get(tier, 0) + 1
+    except Exception as e:
+        logger.exception("Error fetching dashboard metrics")
+        raise HTTPException(status_code=500, detail="Failed to fetch dashboard metrics") from e
 
-        # Build instances by status dict
-        instances_by_status = {status: count for status, count in status_counts.items()}
-
-        return {
-            "total_accounts": accounts.count or 0,
-            "active_subscriptions": active_subs.count or 0,
-            "total_instances": len(all_instances),
-            "instances_by_status": instances_by_status,
-            "subscription_revenue": float(mrr),
-            "subscriptions_by_tier": subscriptions_by_tier,
-            "recent_signups": [],  # Not implemented yet
-            "recent_instances": recent_activity if recent_activity else [],
-        }
+    return {
+        "total_accounts": accounts.count or 0,
+        "active_subscriptions": len(active_subs),
+        "instances_by_status": Counter(inst["status"] for inst in instances),
+        "subscription_revenue": float(round(sum(_monthly_revenue_usd(sub) for sub in active_subs))),
+        "recent_instances": audit_logs.data or [],
+    }
 
 
-# === React Admin Data Provider ===
+# === Generic admin resources ===
+# Admin lists embed the account each row belongs to.
+_LIST_COLUMNS = {
+    "instances": "*, accounts(email, full_name)",
+    "subscriptions": "*, accounts(email, full_name)",
+    "audit_logs": "*, accounts(email)",
+}
+
+
 @router.get("/admin/{resource}", response_model=AdminListResponse)
 @limiter.limit("60/minute")
-async def admin_get_list(  # noqa: C901
+async def admin_get_list(
     request: Request,  # noqa: ARG001
     resource: str,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
-    _sort: Annotated[str | None, Query()] = None,
-    _order: Annotated[str | None, Query()] = None,
-    _start: int = Query(0),  # noqa: FAST002
-    _end: int = Query(10),  # noqa: FAST002
-    q: Annotated[str | None, Query()] = None,
+    limit: int | None = None,
 ) -> dict[str, Any]:
-    """Generic list endpoint for React Admin."""
+    """List a resource's rows, newest first.
+
+    Without ``limit``, every row; with it, the ``limit`` newest rows. ``total`` counts every row.
+    """
     if resource not in ALLOWED_RESOURCES:
         raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
-    audit_log_entry(
-        account_id=admin["user_id"],
-        action="list",
-        resource_type=resource,
-        details={"query": q, "start": _start, "end": _end},
-    )
+    audit_log_entry(account_id=admin["user_id"], action="list", resource_type=resource, details={"limit": limit})
 
-    try:
-        # Add joins for better data display in admin panel
-        if resource == "instances":
-            query = sb.table("instances").select("*, accounts(email, full_name)", count="exact")
-        elif resource == "subscriptions":
-            query = sb.table("subscriptions").select("*, accounts(email, full_name)", count="exact")
-        elif resource == "audit_logs":
-            query = sb.table("audit_logs").select("*, accounts(email)", count="exact")
-        else:
-            query = sb.table(resource).select("*", count="exact")
+    def build_query(count: Literal["exact"] | None = None) -> Any:  # noqa: ANN401
+        query = sb.table(resource).select(_LIST_COLUMNS.get(resource, "*"), count=count)
+        # Ordering ties by id keeps the pages of a full listing from skipping or repeating a row.
+        return query.order("created_at", desc=True).order("id")
 
-        if q:
-            search_fields = {
-                "accounts": ["email", "full_name", "company_name"],
-                "instances": ["name", "subdomain"],
-                "audit_logs": ["action", "details"],
-                "subscriptions": ["tier", "status"],
-            }
-            if resource in search_fields:
-                or_conditions = [f"{field}.ilike.%{q}%" for field in search_fields[resource]]
-                query = query.or_(",".join(or_conditions))
-
-        if _sort:
-            order_column = f"{_sort}.{_order.lower() if _order else 'asc'}"
-            query = query.order(order_column)
-
-        query = query.range(_start, _end - 1)
-        result = query.execute()
-    except Exception:
-        logger.exception("Error in get_list")
-        return {"data": [], "total": 0}
-    else:
-        return {"data": result.data, "total": result.count}
+    if limit is None:
+        # No count here: with one, PostgREST refuses the final empty page if a row was deleted meanwhile.
+        rows = select_all_pages(build_query)
+        return {"data": rows, "total": len(rows)}
+    result = build_query("exact").limit(limit).execute()
+    return {"data": result.data, "total": result.count}
 
 
 @router.get("/admin/{resource}/{resource_id}", response_model=AdminGetOneResponse)

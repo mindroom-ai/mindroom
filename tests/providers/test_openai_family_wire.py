@@ -1039,7 +1039,7 @@ def test_a_proxy_error_page_becomes_a_retryable_error_with_its_text() -> None:
     ],
     ids=["codex", "kimi"],
 )
-@pytest.mark.parametrize("authored", [False, True], ids=["env-file", "authored-wins"])
+@pytest.mark.parametrize("source", ["env-file", "env-file-under-blank-export", "authored-wins"])
 async def test_a_cli_login_home_set_in_the_env_file_is_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1047,13 +1047,14 @@ async def test_a_cli_login_home_set_in_the_env_file_is_read(
     variable: str,
     reply: dict[str, Any],
     authorization: str,
-    *,
-    authored: bool,
+    source: str,
 ) -> None:
     """``CODEX_HOME`` and ``KIMI_CODE_HOME`` in the ``.env`` beside the config locate the CLI's saved login.
 
-    A home the model authors wins, and the user's own home holds no login, so neither test can find one there.
+    A blank export is unset, a home the model authors wins, and the user's own home holds no login, so neither test
+    can find one there.
     """
+    authored = source == "authored-wins"
     monkeypatch.delenv(variable, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     homes = {"CODEX_HOME": ("<codex_home>", "codex_home"), "KIMI_CODE_HOME": ("<kimi_home>", "kimi_home")}
@@ -1069,8 +1070,11 @@ async def test_a_cli_login_home_set_in_the_env_file_is_read(
         sent.append(request)
         return encoded_response(reply)
 
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={})
-    runtime = provider_runtime(paths, http_client=httpx2.AsyncClient(transport=httpx2_transport(respond)))
+    exported = {variable: ""} if source == "env-file-under-blank-export" else {}
+    runtime = replace(
+        _runtime(tmp_path, **exported),
+        http_client=httpx2.AsyncClient(transport=httpx2_transport(respond)),
+    )
 
     await complete(build_provider(ModelConfig(**model_config), runtime), ModelRequest(messages=[_user()]))
 

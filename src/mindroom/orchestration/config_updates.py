@@ -137,6 +137,7 @@ class ConfigUpdatePlan:
     mindroom_user_changed: bool = False
     room_access_changed: bool = False
     matrix_space_changed: bool = False
+    server_emoji_changed: bool = False
     authorization_changed: bool = False
     # Any input reply, invite, or trigger authorization reads changed, so publication waits for replies.
     reply_authorization_changed: bool = False
@@ -524,6 +525,7 @@ def build_config_update_plan(
         room_access_changed=current_config.room_defaults != new_config.room_defaults
         or current_config.rooms != new_config.rooms,
         matrix_space_changed=current_config.matrix_space != new_config.matrix_space,
+        server_emoji_changed=current_config.server_emoji != new_config.server_emoji,
         authorization_changed=current_config.authorization != new_config.authorization,
         reply_authorization_changed=_reply_authorization_inputs_changed(current_config, new_config),
         responder_access_changed=_responder_access_changed(current_config, new_config),

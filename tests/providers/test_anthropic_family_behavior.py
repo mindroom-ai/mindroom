@@ -60,7 +60,13 @@ from tests.providers.anthropic_family_support import (
     route_provider,
     sse_reply,
 )
-from tests.providers.golden_support import Wire, claude_stream_events, pipeline_provider, sse_response
+from tests.providers.golden_support import (
+    Wire,
+    claude_stream_events,
+    hide_provider_environment,
+    pipeline_provider,
+    sse_response,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1623,6 +1629,25 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
         )
 
 
+def test_bedrock_reads_the_region_variables_in_the_order_aws_tools_read_them(tmp_path: Path) -> None:
+    """Both region variables are tried in the process environment before either in ``.env``, as AWS tools try them."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("AWS_REGION=us-west-2\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "data",
+        process_env={"AWS_DEFAULT_REGION": "eu-central-1"},
+    )
+    keys = {"aws_access_key": "AKIA-static", "aws_secret_key": "static-secret"}
+    with isolated_provider_environment():
+        bedrock = build_provider(
+            ModelConfig(provider="bedrock_claude", id="anthropic.claude-sonnet-5-5", extra_kwargs=keys),
+            runtime_paths,
+        )
+    assert bedrock.settings.aws_region == "eu-central-1"
+
+
 def test_anthropic_base_url_sets_the_direct_endpoint_only_where_client_params_set_none(tmp_path: Path) -> None:
     """``ANTHROPIC_BASE_URL`` from the runtime env is the direct route's endpoint unless the model configures one."""
     config_path = tmp_path / "config.yaml"
@@ -1642,6 +1667,74 @@ def test_anthropic_base_url_sets_the_direct_endpoint_only_where_client_params_se
     assert from_env.identity.endpoint == "https://env-gateway.example"
     assert configured.identity.endpoint == "https://own-gateway.example"
     assert configured.settings.client_params == own["client_params"]
+
+
+def test_a_blank_exported_anthropic_base_url_keeps_the_direct_route_on_anthropics_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK reads ``ANTHROPIC_BASE_URL`` itself when given none, and would take a blank export as its endpoint."""
+    config_path = tmp_path / "config.yaml"
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_BASE_URL": ""},
+    )
+    hide_provider_environment(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
+    own = {"client_params": {"base_url": "https://own-gateway.example"}}
+    default = build_provider(ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k"), runtime_paths)
+    configured = build_provider(
+        ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=own),
+        runtime_paths,
+    )
+
+    assert str(default._client().base_url).rstrip("/") == "https://api.anthropic.com"
+    assert str(configured._client().base_url).rstrip("/") == "https://own-gateway.example"
+
+
+@pytest.mark.parametrize(
+    ("name", "setting", "value", "fix"),
+    [
+        ("ANTHROPIC_VERTEX_BASE_URL", "base_url", "https://vertex.example/v1", "unset it for the region's endpoint"),
+        ("CLOUD_ML_REGION", "region", "europe-west1", "set a region"),
+    ],
+)
+def test_a_blank_exported_vertex_endpoint_or_region_fails_the_build_and_names_the_variable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    setting: str,
+    value: str,
+    fix: str,
+) -> None:
+    """The Vertex SDK reads these itself when given none, and would build every request URL from a blank export."""
+    config_path = tmp_path / "config.yaml"
+    env = {"ANTHROPIC_VERTEX_PROJECT_ID": "p", "CLOUD_ML_REGION": "us-east5", name: ""}
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
+    hide_provider_environment(monkeypatch)
+    model = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5")
+
+    with pytest.raises(ValueError, match=f"{name} is exported blank, .*; {fix}"):
+        build_provider(model, runtime_paths)
+    # A value the model or the `.env` sets reaches the SDK, which then reads nothing from the environment.
+    for extra_kwargs in ({setting: value}, {"client_params": {setting: value}}):
+        build_provider(model.model_copy(update={"extra_kwargs": extra_kwargs}), runtime_paths)
+    (tmp_path / ".env").write_text(f"{name}={value}\n", encoding="utf-8")
+    env_file_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
+    assert getattr(build_provider(model, env_file_paths).settings, setting) == value
+
+
+def test_a_blank_exported_vertex_project_still_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Vertex SDK reads a blank project as unset and takes the credentials' project, so the build goes on."""
+    config_path = tmp_path / "config.yaml"
+    env = {"ANTHROPIC_VERTEX_PROJECT_ID": "", "CLOUD_ML_REGION": "us-east5"}
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
+    hide_provider_environment(monkeypatch)
+
+    vertex = build_provider(ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5"), runtime_paths)
+
+    assert (vertex.settings.project_id, vertex.settings.region) == (None, "us-east5")
 
 
 @pytest.mark.asyncio

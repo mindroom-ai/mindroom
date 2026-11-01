@@ -120,6 +120,8 @@ def test_reference_fields_are_annotated() -> None:
     defs = schema["$defs"]
     assert defs["PersonalRoomsConfig"]["properties"]["agent"][HINT_KEY] == {"reference": "personal_room_agent"}
     assert defs["PersonalRoomsConfig"]["properties"]["onboarding_rooms"][HINT_KEY] == {"reference": "room"}
+    # calls.agents keys name an agent or a personal_agents template, the same choices as personal_rooms.agent.
+    assert defs["CallsConfig"]["properties"]["agents"][HINT_KEY] == {"key_reference": "personal_room_agent"}
     assert schema["properties"]["room_thread_summary_models"][HINT_KEY] == {
         "reference": "model",
         "key_reference": "room",

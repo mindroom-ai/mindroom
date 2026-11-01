@@ -92,6 +92,36 @@ describe('BillingPage', () => {
     expect(screen.queryByText('custom/month')).not.toBeInTheDocument()
   })
 
+  it.each([
+    ['the yearly price a yearly subscriber pays', { price_cents: 9600, billing_cycle: 'yearly' }, '$96/year'],
+    ['the monthly price a monthly subscriber pays', { price_cents: 800, billing_cycle: 'monthly' }, '$8/month'],
+    ['a recorded price with cents', { price_cents: 18240, billing_cycle: 'yearly' }, '$182.40/year'],
+    ["the plan's monthly price before Stripe records one", { price_cents: null, billing_cycle: null }, '$10/month'],
+  ])('shows %s', async (_case, recordedPrice, shown) => {
+    ;(useSubscription as jest.Mock).mockReturnValue({
+      subscription: {
+        tier: 'byok',
+        status: 'active',
+        can_run_instances: true,
+        stripe_subscription_ended: false,
+        stripe_subscription_id: 'sub_123',
+        ...recordedPrice,
+      },
+      loading: false,
+      refresh: jest.fn(),
+    })
+    ;(getPricingConfig as jest.Mock).mockResolvedValue({
+      ...enterprisePricing,
+      plans: {
+        byok: { ...enterprisePricing.plans.enterprise, name: 'Your own keys', price_monthly: '$10', price_yearly: '$96' },
+      },
+    })
+
+    render(<BillingPage />)
+
+    expect(await screen.findByText(shown)).toBeInTheDocument()
+  })
+
   it('shows an account without a plan as No plan with a way to choose one', async () => {
     ;(useSubscription as jest.Mock).mockReturnValue({
       subscription: { tier: 'free', status: 'active', stripe_subscription_id: null },

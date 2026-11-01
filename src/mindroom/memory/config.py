@@ -10,13 +10,15 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
-from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host
+from mindroom.credentials.environment import get_secret_from_env
+from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host, get_openai_base_url
 from mindroom.embeddings.errors import EmbedderRequestError, embedder_request_error, openai_embedder_error
 from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 from mindroom.memory._mem0_usage import install_mem0_usage_capture
 from mindroom.model_defaults import (
+    ANTHROPIC_BASE_URL_DEFAULT,
     MEMORY_OLLAMA_LLM,
     OPENROUTER_BASE_URL_DEFAULT,
     claude_rejects_sampling_controls,
@@ -217,6 +219,13 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
     llm_provider_config = {key: value for key, value in memory_llm.config.items() if key != "host"}
     if llm_provider == "ollama":
         llm_provider_config["ollama_base_url"] = mem0_ollama_host(config, runtime_paths)
+    elif llm_provider == "openai" and not llm_provider_config.get("openai_base_url"):
+        llm_provider_config["openai_base_url"] = get_openai_base_url(runtime_paths)
+    elif llm_provider == "anthropic" and not llm_provider_config.get("anthropic_base_url"):
+        # Mem0's client would read ANTHROPIC_BASE_URL from the process env alone.
+        llm_provider_config["anthropic_base_url"] = (
+            get_secret_from_env("ANTHROPIC_BASE_URL", runtime_paths=runtime_paths) or ANTHROPIC_BASE_URL_DEFAULT
+        )
 
     if llm_provider in {"openai", "anthropic", "openrouter"} and not llm_provider_config.get("api_key"):
         api_key = get_api_key_for_provider(llm_provider, runtime_paths=runtime_paths)
@@ -280,9 +289,7 @@ def _get_memory_config(store_root: Path, config: Config, runtime_paths: RuntimeP
     # Add provider-specific configuration
     if embedder_provider == "openai":
         embedder_provider_config["api_key"] = resolved_embedder.api_key
-        # Support custom OpenAI-compatible base URL (e.g., llama.cpp)
-        if resolved_embedder.host:
-            embedder_provider_config["openai_base_url"] = resolved_embedder.host
+        embedder_provider_config["openai_base_url"] = resolved_embedder.host
         if resolved_embedder.dimensions is not None:
             embedder_provider_config["embedding_dims"] = resolved_embedder.dimensions
     elif embedder_provider == "ollama":

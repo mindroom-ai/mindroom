@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
 import { X } from "lucide-react";
+import { create } from "zustand";
 import { cn } from "@/lib/utils";
 
 interface Toast {
@@ -10,54 +10,34 @@ interface Toast {
 }
 
 let toastCount = 0;
-const toasts: Toast[] = [];
-const listeners: Array<(toasts: Toast[]) => void> = [];
+const useToasts = create<{ toasts: Toast[] }>(() => ({ toasts: [] }));
 
-function notify() {
-  listeners.forEach((listener) => {
-    listener(toasts);
-  });
+function dismiss(id: string) {
+  useToasts.setState(({ toasts }) => ({
+    toasts: toasts.filter((t) => t.id !== id),
+  }));
 }
 
 export function toast(props: Omit<Toast, "id">) {
   const id = String(toastCount++);
-  const toast = { id, ...props };
-  toasts.push(toast);
-  notify();
-
-  setTimeout(() => {
-    const index = toasts.findIndex((t) => t.id === id);
-    if (index > -1) {
-      toasts.splice(index, 1);
-      notify();
-    }
-  }, 5000);
+  useToasts.setState(({ toasts }) => ({
+    toasts: [...toasts, { id, ...props }],
+  }));
+  setTimeout(() => dismiss(id), 5000);
 }
 
 export function Toaster() {
-  const [toasts, setToasts] = useState<Toast[]>([]);
-
-  useEffect(() => {
-    listeners.push(setToasts);
-    return () => {
-      const index = listeners.indexOf(setToasts);
-      if (index > -1) {
-        listeners.splice(index, 1);
-      }
-    };
-  }, []);
-
-  const dismiss = (id: string) => {
-    const index = toasts.findIndex((t) => t.id === id);
-    if (index > -1) {
-      toasts.splice(index, 1);
-      notify();
-    }
-  };
+  const shown = useToasts((state) => state.toasts);
 
   return (
-    <div className="fixed bottom-0 right-0 z-50 p-4 space-y-2">
-      {toasts.map((toast) => (
+    <div
+      role="status"
+      // The role implies it, but an open Radix dialog hides all but [aria-live] elements from screen readers.
+      aria-live="polite"
+      aria-atomic="false"
+      className="fixed bottom-0 right-0 z-50 p-4 space-y-2"
+    >
+      {shown.map((toast) => (
         <div
           key={toast.id}
           className={cn(
@@ -76,6 +56,7 @@ export function Toaster() {
             )}
           </div>
           <button
+            aria-label="Dismiss notification"
             onClick={() => dismiss(toast.id)}
             className="absolute right-2 top-2 rounded-md p-1 opacity-0 hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring"
           >

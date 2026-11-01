@@ -168,6 +168,25 @@ def test_keyed_dashboard_serves_any_host(temp_config_file: Path) -> None:
     assert (keyed.status_code, unkeyed.status_code) == (200, 401)
 
 
+def test_blank_exported_key_does_not_open_a_dashboard_keyed_in_the_env_file(temp_config_file: Path) -> None:
+    """A compose passthrough of an unset `MINDROOM_API_KEY` exports it blank, which must not drop the `.env` key."""
+    (temp_config_file.parent / ".env").write_text("MINDROOM_API_KEY=env-key\n", encoding="utf-8")
+    client = _dashboard_client(temp_config_file, MINDROOM_API_KEY="")
+
+    unkeyed = client.get("/api/config/raw")
+    wrong = client.get("/api/config/raw", headers={"Authorization": "Bearer wrong-key"})
+    keyed = client.get("/api/config/raw", headers={"Authorization": "Bearer env-key"})
+
+    assert (unkeyed.status_code, wrong.status_code, keyed.status_code) == (401, 401, 200)
+
+
+def test_key_blank_everywhere_keeps_the_dashboard_open(temp_config_file: Path) -> None:
+    """A key left blank in both the environment and the `.env` still means open access."""
+    (temp_config_file.parent / ".env").write_text("MINDROOM_API_KEY=\n", encoding="utf-8")
+
+    assert _dashboard_client(temp_config_file, MINDROOM_API_KEY="").get("/api/config/raw").status_code == 200
+
+
 def test_guard_follows_the_current_runtime(temp_config_file: Path) -> None:
     """Removing the key at runtime guards the next request, and naming the host lifts the guard."""
     rebound = {"Host": "attacker.example"}

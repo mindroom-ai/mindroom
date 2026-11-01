@@ -15,7 +15,7 @@ personal_agents:
     name: "{username}_mind"
     matrix_username: "{username}.mind"
     agent:
-      display_name: "{user_display_name}'s Mind"
+      display_name: "{user_first_name}'s Mind"
       role: Personal assistant for {user}.
       model: sonnet
       memory_backend: file
@@ -51,6 +51,7 @@ Placeholders are replaced as exact tokens, so other braces in prompts stay liter
 | `{user}` | The user's full Matrix ID. | `display_name`, `role`, and each `instructions` item |
 | `{username}` | The localpart lowercased, every character outside `[a-z0-9_]` replaced by `_`, cut to 40 characters, or `user` when empty. | `display_name`, `role`, each `instructions` item, `name`, and `matrix_username`; in the last two it is the only placeholder |
 | `{user_display_name}` | The user's Matrix display name at onboarding, without control characters, cut to 100 characters, or the localpart when unset. | `display_name`, `role`, and each `instructions` item |
+| `{user_first_name}` | The first word of `{user_display_name}`, so `Bas Nijholt` gives `Bas`, or the localpart when the display name is blank. | `display_name`, `role`, and each `instructions` item |
 
 If the rendered `name` or Matrix account is already taken, `{username}` becomes the slug plus `_` and the first 6 hex characters of the SHA-256 of the user ID, for example `alice_86f01a` for `@alice:example.org`.
 Taken means an authored agent, team, or template key, including one saved but not yet reloaded, `router`, `user`, `_shared`, another generated agent, or an account MindRoom already manages.
@@ -72,7 +73,7 @@ Generated agents are ordinary agents in the running config, and workers receive 
 They never appear in the saved config file, and the dashboard and `config_manager` edit only what you authored.
 
 - Editing the template changes every user's agent at the next reload.
-  The name, Matrix account, and `{user_display_name}` stay fixed at what onboarding stored.
+  The name, Matrix account, `{user_display_name}`, and `{user_first_name}` stay fixed at what onboarding stored.
   A field its owner changed with [`update_agent`](#updating-a-generated-agent) keeps the owner's value until the owner restores it.
 - An authored agent or team that uses a generated agent's name fails validation with an error such as `agents.mind_alice collides with the agent generated from personal_agents.mind for @alice:example.org`.
   The same error rejects a dashboard or `config_manager` save that edits a generated agent in place, so use `personal_agents.<key>.users` for per-user changes.
@@ -91,6 +92,28 @@ To let two people's agents talk only after both owners approve, with each agent 
 > Anyone the template's `access` admits can work with the owner's agent, including its memory, its files, and its shared credentials.
 > That includes the admitted person's own agent acting for them, because an agent mentioned in a reply acts for the person who requested that reply (see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents)).
 > Admit only people you would trust with everything an owner gives their agent.
+
+## Voice Calls
+
+Name the template key in [`calls.agents`](https://docs.mindroom.chat/voice-calls/#calls-configuration) to let every user call their own agent:
+
+```yaml
+calls:
+  enabled: true
+  profiles:
+    openai-live:
+      backend: live
+      model: gpt-live-1
+      credentials_service: openai-live
+      voice: marin
+  agents:
+    mind: openai-live
+```
+
+Each generated agent then uses that profile in its owner's personal room, including agents of people onboarded after the config was loaded.
+The saved config keeps `mind`, not the generated agent names.
+A generated agent that `calls.agents` also names directly keeps the profile given there.
+Neither the template's `agent` nor its `users` overrides may list `rooms`, because a room takes only one calls-enabled agent; config loading fails with `calls.agents names personal_agents.mind, whose agent lists rooms in the template or a user's override`.
 
 ## Onboarding Behavior
 

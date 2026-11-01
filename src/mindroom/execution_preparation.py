@@ -907,6 +907,7 @@ async def prepare_agent_execution_context(
     )
 
 
+@timed("system_prompt_assembly.history_prepare")
 async def prepare_bound_team_run_context(
     ctx: ResponseTurnContext,
     *,

@@ -30,8 +30,9 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.resolution import memory_backend
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
+from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS
+from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT, OPENAI_EMBEDDING_DIMENSIONS
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 from mindroom.tool_system.worker_routing import agent_state_root_path
@@ -300,15 +301,14 @@ async def _trusted_embedding_size(runtime_paths: RuntimePaths, config: Config) -
 
 def _configured_embedding_size(config: Config, runtime_paths: RuntimePaths) -> int | None:
     """Return the size OpenAI's own API gives the configured embeddings: their `dimensions`, or the model's own size."""
-    embedder = config.memory.embedder
+    settings = resolve_embedder_settings(config, runtime_paths)
     # Only OpenAI's own API applies `dimensions` for certain: other providers never receive it, and an OpenAI-compatible
-    # server, set as `host` or through the `OPENAI_BASE_URL` the OpenAI SDK reads without one, may ignore it or serve
-    # another model under the same name.
-    if embedder.provider != "openai" or embedder.config.host is not None or runtime_paths.env_value("OPENAI_BASE_URL"):
+    # server, set as `host` or through `OPENAI_BASE_URL`, may ignore it or serve another model under the same name.
+    if settings.provider != "openai" or settings.host != OPENAI_BASE_URL_DEFAULT:
         return None
-    if embedder.config.dimensions is not None:
-        return embedder.config.dimensions
-    return OPENAI_EMBEDDING_DIMENSIONS.get(embedder.config.model)
+    if settings.dimensions is not None:
+        return settings.dimensions
+    return OPENAI_EMBEDDING_DIMENSIONS.get(settings.model)
 
 
 def _held_embedding_size(team_root: Path, collection_name: str) -> int | None:

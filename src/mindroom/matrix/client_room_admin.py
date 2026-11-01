@@ -21,10 +21,12 @@ from mindroom.matrix.event_types import (
 )
 from mindroom.matrix.room_power import has_privileged_creators, user_power_level
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_creators, read_state_event
+from mindroom.matrix.state import resolve_room_id
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 if TYPE_CHECKING:
     from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -764,6 +766,25 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> RoomJoinOutcome:
     return outcome
 
 
+async def resolve_room_reference(
+    client: nio.AsyncClient,
+    room_ref: str,
+    runtime_paths: RuntimePaths,
+) -> str | nio.RoomResolveAliasError | None:
+    """Return the room ID a room ID, room key, or alias names, or the homeserver's answer to an alias it cannot resolve.
+
+    Rooms MindRoom created resolve from its own record, because any account may repoint an alias.
+    Any other alias resolves through the room directory, and a room key with no recorded room names no room yet.
+    """
+    room_id = resolve_room_id(room_ref, runtime_paths)
+    if room_id.startswith("!"):
+        return room_id
+    if not room_id.startswith("#"):
+        return None
+    response = await client.room_resolve_alias(room_id)
+    return response.room_id if isinstance(response, nio.RoomResolveAliasResponse) else response
+
+
 async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str] | None:
     """Get the current members of a room, or ``None`` when the fetch fails."""
     try:
@@ -844,6 +865,7 @@ __all__ = [
     "invite_to_room",
     "join_room",
     "leave_room",
+    "resolve_room_reference",
     "room_admin_power_user",
     "room_encryption_enabled",
 ]

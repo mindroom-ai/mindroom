@@ -244,7 +244,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     if is_cli:
         # Reconstruct an interrupted minimal response using its exact saved approval.
         scope_context = load_scope()
-        assert scope_context is not None
         assert isinstance(scope_context.storage.get_run(paused.run_id), RunRecord)
         assert scope_context.session is not None
         assert scope_context.storage.patch_run_metadata(
@@ -343,7 +342,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     assert get_helper_usage_owner() is None
     assert helper_results == ["Sample helper output."]
     scope_context = load_scope()
-    assert scope_context is not None
     rows = _usage_rows(scope_context.storage)
     helpers = [
         (session_id, json.loads(value))
@@ -527,7 +525,6 @@ async def test_workflow_first_turn_uses_actual_caller_store(
     install_model_providers(monkeypatch, {"default": model})
     scope_context = load_scope()
     with helper_usage_context(scope_context):
-        assert scope_context is not None
         storage = scope_context.storage
         result = await _execute_participant(
             context,
@@ -654,7 +651,6 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
         pytest.raises(asyncio.CancelledError),
         helper_usage_context(context),
     ):
-        assert context is not None
         owner = get_helper_usage_owner()
         assert owner is not None
         assert owner.initial_session is not None
@@ -677,7 +673,6 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
     assert get_helper_usage_owner() is None
     assert collect_admin_usage(config=config, runtime_paths=paths).totals.total_tokens == 11
     context = load_scope()
-    assert context is not None
     sessions = quote_identifier(context.storage.names.sessions)
     with context.storage.transaction(write=True) as connection:
         connection.execute(f"DELETE FROM {sessions} WHERE session_id = ?", ("session",))  # noqa: S608

@@ -255,6 +255,37 @@ async def test_personal_mode_uses_requester_token(paths: RuntimePaths, monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("auth_test", "error"),
+    [
+        ({"ok": False, "error": "invalid_auth"}, "The MindRoom Slack app is not configured"),
+        (lambda _request: httpx.Response(503), "Slack could not be reached; try again"),
+    ],
+    ids=["token-rejected", "slack-server-error"],
+)
+async def test_read_names_why_the_bot_lookup_failed(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    auth_test: Answer,
+    error: str,
+) -> None:
+    """A failed lookup of the bot's workspace reads as a missing app only when Slack rejected the bot token."""
+    _connect_alice(paths)
+    message = {"type": "message", "ts": ROOT_TS, "user": DANA["id"], "text": "beta is blocked"}
+    FakeSlack(
+        {
+            "conversations.history": {"ok": True, "messages": [message]},
+            "users.info": {"ok": True, "user": DANA},
+            "auth.test": auth_test,
+        },
+    ).install(monkeypatch)
+
+    result = json.loads(await _tools(paths).slack_read(CHANNEL))
+
+    assert result == {"status": "error", "tool": "slack", "message": error}
+
+
+@pytest.mark.asyncio
 async def test_personal_mode_without_connection_returns_connect_link(
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,

@@ -27,7 +27,7 @@ from mindroom.legacy_streaming import has_legacy_terminal_suffix, strip_legacy_t
 from mindroom.live_frames.frames import LIVE_CHECKPOINT_KEY, LiveDocs
 from mindroom.live_frames.publisher import LivePublisher
 from mindroom.live_frames.transport import homeserver_relays_live_frames
-from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result
 from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
@@ -142,7 +142,15 @@ RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 
 StreamInputChunk = (
-    str | StructuredStreamChunk | TextDelta | ReasoningDelta | FailedReply | RunFinished | ToolStarted | ToolCompleted
+    str
+    | StructuredStreamChunk
+    | TextDelta
+    | ReasoningDelta
+    | FailedReply
+    | RunFinished
+    | ToolStarted
+    | ToolProgress
+    | ToolCompleted
 )
 # How long queued and in-flight progress edits get to land before stopping the stream cancels them.
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
@@ -257,7 +265,7 @@ class UnfinishedStreamedReply:
 
 @dataclass(frozen=True)
 class _CommittedDeliveryState:
-    """One frozen stream state that definitely reached Matrix."""
+    """The frozen stream state one delivery attempt carries; once that delivery lands, it is what reached Matrix."""
 
     accumulated_text: str
     tool_trace: list[ToolTraceEntry]
@@ -267,8 +275,6 @@ class _CommittedDeliveryState:
     visible_body_state: Literal["placeholder_only", "visible_body"]
     interactive_metadata: interactive.InteractiveMetadata | None
     stream_status: str
-    # The stream's pending-character count when this state was captured.
-    chars_since_last_update: int
     # The text before the final transform reshaped it, when it did.
     untransformed_text: str | None = None
 
@@ -331,12 +337,14 @@ def interactive_response_for_visible_body(
 
 @dataclass(frozen=True, slots=True)
 class _PreparedStreamingDelivery:
-    """One frozen non-terminal delivery attempt."""
+    """One frozen delivery attempt, non-terminal or terminal."""
 
     content: dict[str, Any]
     display_text: str
     committed_state: _CommittedDeliveryState
     had_warmup_suffix: bool
+    # The stream's pending-character count when this delivery's state was captured.
+    chars_since_last_update: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,10 +474,10 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
             ),
             interactive_metadata=interactive_metadata,
             stream_status=snapshot.stream_status,
-            chars_since_last_update=snapshot.chars_since_last_update,
             untransformed_text=snapshot.untransformed_text,
         ),
         had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
+        chars_since_last_update=snapshot.chars_since_last_update,
     )
 
 
@@ -610,6 +618,8 @@ class StreamingResponse:
     reasoning_text: str = field(default="", init=False)
     _reasoning_segment_started_at: float | None = field(default=None, init=False, repr=False)
     _reasoning_seconds: float = field(default=0.0, init=False, repr=False)
+    # The latest output each running tool call reported, by call ID; only live frames show it.
+    tool_progress: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     # This reply's live frames, once the homeserver relays them; durable edits are then checkpoints.
     live: LivePublisher | None = field(default=None, init=False, repr=False)
     # Frames start once the reply's event shows this stream: its adopted placeholder or its first progress write.
@@ -672,10 +682,18 @@ class StreamingResponse:
             else visible_markdown(self.config, self.runtime_paths, display_text)
         )
         warmup_lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
+        tools = serialize_tool_trace(self.tool_trace) if self.show_tool_calls else ()
+        if tools and self.tool_progress:
+            tools = tuple(
+                {**entry, "progress": self.tool_progress[trace.tool_call_id]}
+                if trace.tool_call_id in self.tool_progress
+                else entry
+                for trace, entry in zip(self.tool_trace, tools, strict=True)
+            )
         return self.event_id, LiveDocs(
             md=md,
             reasoning=self.reasoning_text,
-            tools=serialize_tool_trace(self.tool_trace) if self.show_tool_calls else (),
+            tools=tools,
             status=self._resolve_stream_status(is_final=False),
             activity="\n".join(line.text for line in warmup_lines),
         )
@@ -738,7 +756,7 @@ class StreamingResponse:
 
     def _mark_nonterminal_delivery(
         self,
-        committed_state: _CommittedDeliveryState,
+        prepared_delivery: _PreparedStreamingDelivery,
         *,
         boundary_refresh: bool = False,
     ) -> None:
@@ -747,7 +765,7 @@ class StreamingResponse:
         if self.stream_started_at is None:
             self.stream_started_at = now
         self.last_update = now
-        if self._live_state_matches(committed_state):
+        if self._live_state_matches(prepared_delivery.committed_state):
             self.last_delta_at = now
             self.last_boundary_refresh_at = now if boundary_refresh else None
             self.chars_since_last_update = 0
@@ -761,7 +779,7 @@ class StreamingResponse:
         # A tool-trace or presentation change alone adds nothing here, just as
         # it adds nothing when it arrives between edits.
         self.last_boundary_refresh_at = None
-        self.chars_since_last_update -= committed_state.chars_since_last_update
+        self.chars_since_last_update -= prepared_delivery.chars_since_last_update
 
     def _live_state_matches(self, captured: _CommittedDeliveryState) -> bool:
         """Return whether the live text, tool trace, and presentation still equal one captured state."""
@@ -1022,10 +1040,7 @@ class StreamingResponse:
                 had_warmup_suffix=prepared_delivery.had_warmup_suffix,
             )
             self._mark_delivery_committed(prepared_delivery.committed_state)
-            self._mark_nonterminal_delivery(
-                prepared_delivery.committed_state,
-                boundary_refresh=boundary_refresh,
-            )
+            self._mark_nonterminal_delivery(prepared_delivery, boundary_refresh=boundary_refresh)
         else:
             self.placeholder_progress_sent = False
         return True
@@ -1548,6 +1563,10 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 # Reasoning is shown live and kept by the terminal update; no progress edit carries it.
                 streaming.add_reasoning(chunk.text, started_at=chunk.started_at)
                 continue
+            if isinstance(chunk, ToolProgress):
+                # Only live frames show a running call's output; no write carries it.
+                streaming.tool_progress[chunk.tool_call_id] = chunk.text
+                continue
             streaming.end_reasoning_segment()
             if isinstance(chunk, str):
                 text_chunk = chunk
@@ -1602,6 +1621,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 )
                 continue
             elif isinstance(chunk, ToolCompleted):
+                streaming.tool_progress.pop(chunk.call.tool_call_id, None)
                 tool_name = chunk.call.tool_name
                 pending_tool, completed_trace = tool_tracker.complete(chunk.call, origin=chunk.origin)
                 if not streaming.show_tool_calls:
@@ -2279,6 +2299,9 @@ async def stream_progress_edits(
             nonlocal published
             if delivery_task.done():
                 return
+            if chunk.tool_progress is not None:
+                # Only live frames show it; no write carries it.
+                streaming.tool_progress = dict(chunk.tool_progress)
             trace_changed = False
             if chunk.tool_trace is not None and not _tool_traces_match(streaming.tool_trace, chunk.tool_trace):
                 # Callers keep mutating their trace entries; hold the published state.

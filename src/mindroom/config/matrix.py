@@ -118,6 +118,35 @@ class MatrixSpaceConfig(BaseModel):
         return normalized
 
 
+class ServerEmojiConfig(BaseModel):
+    """Configuration for the optional room whose emoji packs every MindRoom Chat user on the homeserver can use."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to create and maintain the server custom emoji room for MindRoom Chat",
+    )
+    name: str = Field(
+        default="Emoji",
+        description="Display name for the emoji room and its first emoji pack when MindRoom creates them",
+    )
+    moderators_only: bool = Field(
+        default=False,
+        description="Whether only moderators (power level 50) may add, rename, or remove server emoji",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, name: str) -> str:
+        """Validate and normalize the emoji room and pack display name."""
+        normalized = name.strip()
+        if not normalized:
+            msg = "server_emoji.name cannot be empty"
+            raise ValueError(msg)
+        return normalized
+
+
 class EventJournalConfig(BaseModel):
     """Where this runtime's durable event journal lives."""
 

@@ -56,6 +56,7 @@ from mindroom.config.matrix import (
     MatrixSpaceConfig,
     MatrixSyncConfig,
     MindRoomUserConfig,
+    ServerEmojiConfig,
 )
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import (
@@ -114,7 +115,12 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
 )
 from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN
-from mindroom.entity_resolution import call_room_ownership_key, resolve_agent_thread_mode, router_agents_for_room
+from mindroom.entity_resolution import (
+    canonical_room_reference,
+    names_room,
+    resolve_agent_thread_mode,
+    router_agents_for_room,
+)
 from mindroom.file_locks import advisory_file_lock
 from mindroom.git_urls import credential_free_repo_url
 
@@ -127,6 +133,7 @@ from mindroom.matrix_identifiers import (
     is_managed_room_key,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
+    server_emoji_alias_localpart,
 )
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
@@ -139,6 +146,8 @@ from mindroom.workspaces import control_plane_owns_private_templates, validate_w
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
+
+    from pydantic_core import ErrorDetails
 
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.personal_agents import PersonalAgentRoster
@@ -181,6 +190,7 @@ _OPTIONAL_SECTION_NAMES = (
     "mcp_servers",
     "prompts",
     "matrix_space",
+    "server_emoji",
     "debug",
     "external_trigger_policy",
     "matrix_sync",
@@ -214,20 +224,24 @@ CONFIG_LOAD_USER_ERROR_TYPES = (
 )
 
 
+def validation_issue_message(error: ErrorDetails) -> str:
+    """Return what a user reads for one Pydantic error: how to fix an unknown key, or the message a validator raised."""
+    if error["type"] == "extra_forbidden":
+        return f"Unknown key '{error['loc'][-1]}': remove it or correct its spelling"
+    # Pydantic writes a validator's raised message after this prefix.
+    return error["msg"].removeprefix("Value error, ")
+
+
 def config_validation_issues(
     exc: Exception,
 ) -> list[tuple[tuple[str | int, ...], str]]:
-    """Return the user-facing messages of one config validation exception, each with its config location."""
+    """Return the user-facing messages of one config validation exception, each with its config location.
+
+    An issue about the whole config is located at `config`.
+    """
     if isinstance(exc, ValidationError):
         return [
-            (
-                tuple(error["loc"]),
-                (
-                    f"Unknown key '{error['loc'][-1]}': remove it or correct its spelling"
-                    if error["type"] == "extra_forbidden"
-                    else error["msg"]
-                ),
-            )
+            (error["loc"] or ("config",), validation_issue_message(error))
             for error in exc.errors(include_context=False)
         ]
     if isinstance(exc, (ConfigRuntimeValidationError, ConfigIncludeError)):
@@ -246,6 +260,13 @@ def iter_config_validation_messages(
     return [
         (" → ".join(str(part) for part in location), message) for location, message in config_validation_issues(exc)
     ]
+
+
+def config_validation_summary(exc: Exception) -> str:
+    """Return a config validation error's issues on one line as ``<location>: <message>``, or another error's text."""
+    if not isinstance(exc, (ValidationError, ConfigRuntimeValidationError)):
+        return str(exc)
+    return "; ".join(f"{location}: {message}" for location, message in iter_config_validation_messages(exc))
 
 
 def format_invalid_config_message(
@@ -329,6 +350,8 @@ class Config(BaseModel):
     _approved_egress_enabled: bool = PrivateAttr(default=False)
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
     _personal_agent_instances: dict[str, PersonalAgentInstance] = PrivateAttr(default_factory=dict)
+    _personal_agent_call_templates: dict[str, str] = PrivateAttr(default_factory=dict)
+    _personal_agent_call_agents: dict[str, str] = PrivateAttr(default_factory=dict)
     _generated_agent_dumps: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
     _generated_agents: dict[str, GeneratedAgentInfo] = PrivateAttr(default_factory=dict)
     _personal_agents_added_agents_section: bool = PrivateAttr(default=False)
@@ -442,6 +465,10 @@ class Config(BaseModel):
     matrix_space: MatrixSpaceConfig = Field(
         default_factory=MatrixSpaceConfig,
         description="Optional root Matrix Space for grouping managed rooms",
+    )
+    server_emoji: ServerEmojiConfig = Field(
+        default_factory=ServerEmojiConfig,
+        description="Optional room whose emoji packs every MindRoom Chat user on the homeserver can use",
     )
     authorization: AuthorizationConfig = Field(
         default_factory=AuthorizationConfig,
@@ -930,24 +957,63 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_root_space_alias_does_not_collide_with_managed_rooms(self, info: ValidationInfo) -> Config:
-        """Ensure no managed room key maps to the reserved root Space alias."""
-        if not self.matrix_space.enabled:
-            return self
+    def validate_reserved_aliases_do_not_collide_with_managed_rooms(self, info: ValidationInfo) -> Config:
+        """Ensure no managed room key maps to the reserved alias of the root Space or the server emoji room."""
         runtime_paths = _context_runtime_paths(info)
         if runtime_paths is None:
             return self
-        reserved_alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
-        colliding_rooms = sorted(
-            room_key
-            for room_key in self.managed_room_keys()
-            if managed_room_alias_localpart(room_key, runtime_paths=runtime_paths) == reserved_alias_localpart
+        reserved_aliases: dict[str, str] = {}
+        if self.matrix_space.enabled:
+            reserved_aliases[managed_space_alias_localpart(runtime_paths=runtime_paths)] = "root Space"
+        if self.server_emoji.enabled:
+            reserved_aliases[server_emoji_alias_localpart(runtime_paths)] = "server emoji room"
+        for reserved_alias_localpart, owner in reserved_aliases.items():
+            colliding_rooms = sorted(
+                room_key
+                for room_key in self.managed_room_keys()
+                if managed_room_alias_localpart(room_key, runtime_paths=runtime_paths) == reserved_alias_localpart
+            )
+            if colliding_rooms:
+                formatted = ", ".join(colliding_rooms)
+                msg = f"Managed room keys conflict with the reserved {owner} alias '{reserved_alias_localpart}': {formatted}"
+                raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_room_references_name_rooms(self, info: ValidationInfo) -> Config:
+        """Reject a room reference that the runtime cannot map to a room ID."""
+        runtime_paths = _context_runtime_paths(info)
+        if runtime_paths is None:
+            return self
+        references: list[tuple[str, str | None]] = [("rooms", room) for room in self.rooms]
+        for name, agent in self.agents.items():
+            references += [(f"agents.{name}.rooms", room) for room in agent.rooms]
+            references += [(f"agents.{name}.room_thread_modes", room) for room in agent.room_thread_modes]
+            references += [
+                (f"agents.{name}.automations.{automation.name}.room", automation.room)
+                for automation in agent.automations or ()
+            ]
+        references += [(f"teams.{name}.rooms", room) for name, team in self.teams.items() for room in team.rooms]
+        references += [
+            (f"defaults.automations.{automation.name}.room", automation.room)
+            for automation in self.defaults.automations
+        ]
+        references += [("room_models", room) for room in self.room_models]
+        # A summary model may also be keyed by the responding agent or team, for rooms without a configured key.
+        references += [
+            ("room_thread_summary_models", room)
+            for room in self.room_thread_summary_models
+            if room not in self.agents and room not in self.teams
+        ]
+        unknown_rooms = sorted(
+            f"{location} -> {room}"
+            for location, room in references
+            if room is not None and not names_room(self, room, runtime_paths)
         )
-        if colliding_rooms:
-            formatted = ", ".join(colliding_rooms)
+        if unknown_rooms:
             msg = (
-                "Managed room keys conflict with the reserved root Space alias "
-                f"'{reserved_alias_localpart}': {formatted}"
+                "Each room reference must be a room key MindRoom manages, that room's full alias, or a ! room ID: "
+                + ", ".join(unknown_rooms)
             )
             raise ValueError(msg)
         return self
@@ -1020,7 +1086,9 @@ class Config(BaseModel):
                     tolerate_plugin_load_errors=tolerate_plugin_load_errors,
                 )
             except (ValidationError, ConfigRuntimeValidationError) as exc:
-                msg = f"personal_agents would generate an invalid agent for a new user: {exc}"
+                msg = (
+                    f"personal_agents would generate an invalid agent for a new user: {config_validation_summary(exc)}"
+                )
                 raise ConfigRuntimeValidationError(msg) from exc
         settings = config.personal_rooms
         instance = expansion.instances.get(settings.agent) if settings is not None else None
@@ -1032,6 +1100,8 @@ class Config(BaseModel):
             )
             raise ConfigRuntimeValidationError(msg)
         config._personal_agent_instances = expansion.instances
+        config._personal_agent_call_templates = expansion.call_templates
+        config._personal_agent_call_agents = expansion.call_agents
         # Pass two builds every generated agent from pass one, so a creator's own edits never change what it grants.
         generated_data, generated = expand_generated_agents(config, cast("dict[str, Any]", expansion.data), roster)
         if generated_data is not None:
@@ -1047,6 +1117,8 @@ class Config(BaseModel):
                 # Edits and created agents wait for a fix; the owners keep their agents and loading never breaks.
                 logger.warning("generated_agents_invalid", error=str(exc))
             config._personal_agent_instances = expansion.instances
+            config._personal_agent_call_templates = expansion.call_templates
+            config._personal_agent_call_agents = expansion.call_agents
         config._generated_agents = {name: info for name, info in generated.items() if name in config.agents}
         # authored_model_dump drops generated agents while they match these dumps.
         config._generated_agent_dumps = {
@@ -1067,7 +1139,7 @@ class Config(BaseModel):
         tolerate_plugin_load_errors: bool,
     ) -> Config:
         config = cls.model_validate(data, context={"runtime_paths": runtime_paths})
-        config._reject_call_agents_sharing_a_room(lambda room: call_room_ownership_key(room, runtime_paths))
+        config._reject_call_agents_sharing_a_room(lambda room: canonical_room_reference(room, runtime_paths))
         # A sandbox runner runs tool calls, never a model, and its config snapshot carries no models.
         if not runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]):
             config._validate_model_references()
@@ -1101,6 +1173,14 @@ class Config(BaseModel):
                 # An edited personal agent stays, so saving it collides with its roster entry.
             if not agents and self._personal_agents_added_agents_section:
                 payload.pop("agents")
+        calls = payload.get("calls")
+        if self._personal_agent_call_templates and isinstance(calls, dict):
+            # Loading gave each generated agent its template's call profile; the saved config keeps the template key.
+            calls["agents"] = {
+                agent_name: profile
+                for agent_name, profile in calls.get("agents", {}).items()
+                if self._personal_agent_call_agents.get(agent_name) != profile
+            } | self._personal_agent_call_templates
         return payload
 
     def runtime_model_dump(self) -> dict[str, Any]:

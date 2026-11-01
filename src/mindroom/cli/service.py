@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform
 import signal
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -172,7 +173,7 @@ def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | N
         try:
             result = _install_and_start_service(manager, runtime_paths)
         except ValueError as exc:
-            # Keys that cannot be saved to `.env` stop the installation before anything is installed.
+            # Raised before anything is installed, so there is nothing to uninstall.
             _err_console.print(f"[bold red]Error:[/bold red] {exc}")
         else:
             if result.success:
@@ -191,8 +192,14 @@ def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | N
 def _install_and_start_service(manager: ServiceManager, runtime_paths: RuntimePaths) -> InstallResult:
     """Save the keys this shell exports to `.env`, the only environment the service reads, then install and start it.
 
-    Raises `ValueError`, before installing anything, when the keys cannot be saved to `.env`.
+    Raises `ValueError`, before installing anything, when the service could not start with the dashboard settings in
+    `.env`, as `mindroom run` refuses them, or when the keys cannot be saved to `.env`.
     """
+    from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
+
+    # The service's environment adds nothing `_build_auth_settings` reads, so `.env` alone decides; as everywhere in
+    # this process, `${NAME}` references in it expand from this shell.
+    dashboard_requires_credential(replace(runtime_paths, process_env={}))
     # Without a config there is no service to install, and no `.env` to save keys for.
     if runtime_paths.config_path.exists() and (shell_keys := _shell_service_keys(runtime_paths)):
         upsert_env_values(runtime_paths.env_path, shell_keys)
@@ -220,7 +227,7 @@ def _shell_service_keys(runtime_paths: RuntimePaths) -> dict[str, str]:
         (env_key, name) for env_key in PROVIDER_ENV_KEYS.values() for name in (env_key, f"{env_key}_FILE")
     ]
     # `${NAME}` in `.env` expands from this shell's variables here but not in the service, so compare lines as written.
-    written_env_values = dotenv_values(runtime_paths.env_path, interpolate=False)
+    written_env_values = dotenv_values(runtime_paths.env_path, interpolate=False, encoding="utf-8-sig")
     return {
         name: value
         for env_key, name in candidates

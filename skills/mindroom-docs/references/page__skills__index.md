@@ -105,7 +105,7 @@ If `metadata.openclaw` is present, MindRoom loads the skill only when these rule
 
 - `os: ["linux", "darwin", "windows"]`: the current OS must be listed
 - `always: true` bypasses `requires`, but not an OS mismatch
-- `requires.env`: each environment variable is set, or a stored credential with that key exists
+- `requires.env`: each environment variable is set, directly or through its [`_FILE` variant](https://docs.mindroom.chat/configuration/models/#file-based-secrets), or a stored credential with that key exists
 - `requires.config`: each config path is truthy, for example `agents.code.tools`
 - `requires.bins`: all binaries exist in `PATH`
 - `requires.anyBins`: at least one binary exists in `PATH`

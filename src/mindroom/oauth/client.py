@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from google.auth.exceptions import GoogleAuthError, RefreshError
 from google.auth.transport import requests as google_requests
 
+from mindroom.constants import runtime_env_path
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
@@ -158,12 +159,12 @@ class ScopedOAuthClientMixin:
     def _apply_runtime_original_auth_kwargs(self, kwargs: dict[str, Any]) -> bool:
         """Populate upstream Google auth kwargs from the resolved runtime env."""
         if not kwargs.get("service_account_path"):
-            service_account_path = self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE")
-            if service_account_path:
-                kwargs["service_account_path"] = service_account_path
+            service_account_path = runtime_env_path(self._runtime_paths, "GOOGLE_SERVICE_ACCOUNT_FILE")
+            if service_account_path is not None:
+                kwargs["service_account_path"] = str(service_account_path)
         if not kwargs.get("delegated_user"):
             delegated_user = self._runtime_paths.env_value("GOOGLE_DELEGATED_USER")
-            if delegated_user:
+            if delegated_user is not None:
                 kwargs["delegated_user"] = delegated_user
         return bool(kwargs.get("service_account_path"))
 

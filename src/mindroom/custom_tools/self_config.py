@@ -196,7 +196,7 @@ class SelfConfigTools(Toolkit):
         try:
             validated_agent = AgentConfig.model_validate(candidate_agent_data)
         except ValidationError as e:
-            return f"Error validating configuration: {e}"
+            return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 
         current_values = agent.model_dump()
         validated_values = validated_agent.model_dump()

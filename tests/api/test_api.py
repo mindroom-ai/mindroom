@@ -61,7 +61,7 @@ from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import (
     PLATFORM_SSO_SECRET,
     login_with_api_key,
-    publish_api_config,
+    publish_api_payload,
     set_platform_auth,
     trusted_upstream_env,
     trusted_upstream_headers,
@@ -167,8 +167,7 @@ def _publish_committed_runtime_config(
 ) -> None:
     """Publish one committed config snapshot for request-bound API tests."""
     main.initialize_api_app(api_app, runtime_paths)
-    publish_api_config(api_app, Config.validate_with_runtime(authored_payload, runtime_paths))
-    config_lifecycle.app_state(api_app).api_auth_state = None
+    publish_api_payload(api_app, authored_payload)
 
 
 def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_path: Path) -> None:
@@ -3924,7 +3923,7 @@ def test_api_key_missing_header_rejects(api_key_client: TestClient) -> None:
 
 
 def test_api_key_still_required_after_config_publish(api_key_client: TestClient) -> None:
-    """The API key lives in the fixture's runtime, so it survives the publish helper clearing the cached auth state."""
+    """The API key stays required after a config publish."""
     runtime_paths = main._app_runtime_paths(api_key_client.app)
     _publish_committed_runtime_config(api_key_client.app, runtime_paths, _authored_config_payload("general"))
 

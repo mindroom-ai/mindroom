@@ -208,6 +208,26 @@ def test_get_secret_from_env_resolves_relative_file_paths_from_config_dir(tmp_pa
     assert get_secret_from_env("OPENAI_API_KEY", _runtime_paths(tmp_path, {})) == "sk-relative"
 
 
+def test_a_secret_file_saved_with_a_byte_order_mark_reads_as_its_value(tmp_path: Path) -> None:
+    """A `<NAME>_FILE` saved as UTF-8 with a BOM supplies the key without the BOM, as the `.env` beside it reads."""
+    secret_file = tmp_path / "openai.key"
+    secret_file.write_text("sk-bom\n", encoding="utf-8-sig")
+
+    runtime_paths = _runtime_paths(tmp_path, {"OPENAI_API_KEY_FILE": str(secret_file)})
+
+    assert get_secret_from_env("OPENAI_API_KEY", runtime_paths) == "sk-bom"
+
+
+def test_a_blank_exported_file_variable_does_not_hide_the_env_file_one(tmp_path: Path) -> None:
+    """A blank exported `<NAME>_FILE` counts as unset, so the `.env` one still names the secret file."""
+    (tmp_path / "openai.key").write_text("sk-from-file\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY_FILE=openai.key\n", encoding="utf-8")
+
+    assert (
+        get_secret_from_env("OPENAI_API_KEY", _runtime_paths(tmp_path, {"OPENAI_API_KEY_FILE": ""})) == "sk-from-file"
+    )
+
+
 def test_a_valid_name_ignores_an_unresolvable_file_variable(tmp_path: Path) -> None:
     """A non-empty NAME supplies the key without resolving a broken NAME_FILE path."""
     runtime_paths = _runtime_paths(
@@ -294,12 +314,17 @@ def test_embedder_api_key_declares_the_embedder_credential(tmp_path: Path, from_
     assert manager.load_credentials("embedder") == {"api_key": "sk-embedder-key"}
 
 
-def test_google_application_credentials_declares_the_vertex_adc_path(tmp_path: Path) -> None:
-    """GOOGLE_APPLICATION_CREDENTIALS supplies the path of the Vertex AI application default credentials."""
+@pytest.mark.parametrize("from_env_file", [False, True], ids=["exported", "env-file-under-blank-export"])
+def test_google_application_credentials_declares_the_vertex_adc_path(tmp_path: Path, from_env_file: bool) -> None:
+    """GOOGLE_APPLICATION_CREDENTIALS supplies the path of the Vertex AI application default credentials.
+
+    A blank exported value, as a compose passthrough of an unset variable gives, does not hide the `.env` one.
+    """
     adc_file = tmp_path / "adc.json"
-    manager = get_runtime_credentials_manager(
-        _runtime_paths(tmp_path, {"GOOGLE_APPLICATION_CREDENTIALS": str(adc_file)}),
-    )
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": "" if from_env_file else str(adc_file)}
+    if from_env_file:
+        (tmp_path / ".env").write_text(f"GOOGLE_APPLICATION_CREDENTIALS={adc_file}\n", encoding="utf-8")
+    manager = get_runtime_credentials_manager(_runtime_paths(tmp_path, env))
 
     assert manager.load_credentials("google_vertex_adc") == {
         "application_credentials_path": str(adc_file.resolve()),
@@ -329,11 +354,12 @@ def test_a_seed_declares_its_service_from_variables(tmp_path: Path) -> None:
     )
 
 
-def test_a_seed_file_relative_to_the_config_directory_declares_its_service(tmp_path: Path) -> None:
-    """Credential seeds can live in a JSON file named relative to the config directory."""
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"], ids=["plain", "byte-order-mark"])
+def test_a_seed_file_relative_to_the_config_directory_declares_its_service(tmp_path: Path, encoding: str) -> None:
+    """Credential seeds can live in a JSON file named relative to the config directory, saved with or without a BOM."""
     (tmp_path / "credential-seeds.json").write_text(
         _credential_seed_json(service="example_oauth_client"),
-        encoding="utf-8",
+        encoding=encoding,
     )
     (tmp_path / ".env").write_text("MINDROOM_CREDENTIAL_SEEDS_FILE=credential-seeds.json\n", encoding="utf-8")
     runtime_paths = _runtime_paths(tmp_path, _OAUTH_CLIENT_ENV)
@@ -361,10 +387,11 @@ def test_a_seed_field_reads_a_file_variable(tmp_path: Path) -> None:
     )
 
 
-def test_a_seed_field_reads_literal_and_file_values(tmp_path: Path) -> None:
-    """Seed fields can hold literal values and direct file references."""
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"], ids=["plain", "byte-order-mark"])
+def test_a_seed_field_reads_literal_and_file_values(tmp_path: Path, encoding: str) -> None:
+    """Seed fields can hold literal values and direct file references, read without a byte order mark."""
     secret_file = tmp_path / "oauth-client-secret"
-    secret_file.write_text("client-secret\n", encoding="utf-8")
+    secret_file.write_text("client-secret\n", encoding=encoding)
     seed = {
         "service": "google_oauth_client",
         "credentials": {"client_id": {"value": "client-id"}, "client_secret": {"file": str(secret_file)}},

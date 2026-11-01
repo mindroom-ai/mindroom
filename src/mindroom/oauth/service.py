@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from mindroom.constants import runtime_env_path
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.credential_binding import (
     OAuthCredentialBinding,
@@ -200,8 +201,9 @@ def oauth_success_redirect_url(provider: OAuthProvider, runtime_paths: RuntimePa
 
 def oauth_provider_service_account_configured(provider: OAuthProvider, runtime_paths: RuntimePaths) -> bool:
     """Return whether one provider can authenticate through a Google service account."""
-    return provider.id in _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS and bool(
-        runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"),
+    return (
+        provider.id in _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS
+        and runtime_env_path(runtime_paths, "GOOGLE_SERVICE_ACCOUNT_FILE") is not None
     )
 
 

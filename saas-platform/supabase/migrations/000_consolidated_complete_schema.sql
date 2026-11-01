@@ -79,6 +79,8 @@ CREATE TABLE subscriptions (
     stripe_subscription_id TEXT UNIQUE,
     stripe_price_id TEXT,
     tier TEXT NOT NULL DEFAULT 'free' CHECK (tier IN ('free', 'byok', 'hobby', 'pro', 'enterprise')),
+    billing_cycle TEXT CHECK (billing_cycle IN ('monthly', 'yearly')), -- Billing cycle of stripe_price_id
+    price_cents INTEGER, -- Amount stripe_price_id bills per billing cycle, in US cents
     status TEXT NOT NULL DEFAULT 'trialing' CHECK (status IN ('trialing', 'active', 'cancelled', 'past_due', 'paused', 'incomplete', 'incomplete_expired', 'unpaid')),
 
     -- Billing periods

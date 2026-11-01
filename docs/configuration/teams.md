@@ -50,7 +50,7 @@ teams:
 | `role` | string | *required* | Description of the team's purpose, which the team model reads beside each member agent's own `role` when it chooses whom to delegate to |
 | `agents` | list | *required* | Names of agents under `agents:` that form the team; at least one, no duplicates |
 | `mode` | string | `coordinate` | `coordinate` or `collaborate`; any other value fails config validation |
-| `rooms` | list | `[]` | Room keys, aliases, or Matrix room IDs the team joins and responds in |
+| `rooms` | list | `[]` | Room keys or Matrix room IDs the team joins and responds in (see [Rooms](../rooms.md#configuration)) |
 | `accept_invites` | bool or list | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID; this is separate from the members' own settings. Joining a room never grants its members access; see [Invitations](../authorization.md#invitations) |
 | `access` | object | `null` | Who may converse with the team: `current_room_members`, `members_of_rooms`, and `users`. When omitted, members of the team's own managed `rooms` have access. See [Responder access](../authorization.md#responder-access) |
 | `model` | string | `"default"` | Key under `models:` used for coordination and synthesis |

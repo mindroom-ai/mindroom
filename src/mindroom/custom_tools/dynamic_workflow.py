@@ -57,6 +57,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_run_usage
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
+from mindroom.origins import configured_public_url
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.run_storage import TerminalRecord
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -294,7 +295,7 @@ class DynamicWorkflowTools(Toolkit):
                 owner_id=owner_id,
                 input_data=input,
                 requested_by=context.requester_id,
-                base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+                base_url=configured_public_url(context.runtime_paths),
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))

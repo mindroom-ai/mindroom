@@ -90,7 +90,7 @@ A new thread may not appear in `matrix_room(action="threads")` until it has a re
 | `action` | `"send" \| "read" \| "edit" \| "react"` | `"send"` | Message operation. |
 | `message` | `str \| None` | `None` | Text for send/edit; emoji for react, defaulting to 👍. |
 | `recipient` | `str \| None` | `None` | Available agent or team name to request a response from; send only. |
-| `room_id` | `str \| None` | `None` | Matrix room ID or configured room name; current room by default. |
+| `room_id` | `str \| None` | `None` | Matrix room ID, alias, or configured room name; current room by default. |
 | `thread_id` | `str \| None` | `None` | Thread root ID, or `"room"` for the room timeline; current conversation by default. |
 | `new_thread` | `bool` | `False` | Start a separate thread; send only, cannot be combined with `thread_id`. |
 | `event_id` | `str \| None` | `None` | Target message ID; required for edit and react. |

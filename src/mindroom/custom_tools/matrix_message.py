@@ -158,7 +158,7 @@ class MatrixMessageTools(Toolkit):
             action: send, read, edit, or react.
             message: Text to send/edit, or reaction emoji.
             recipient: Agent/team name to request a response from; send only.
-            room_id: Room ID or configured room name; current room by default.
+            room_id: Room ID, alias, or configured room name; current room by default.
             thread_id: Thread root ID; current conversation by default, "room" for room timeline.
             new_thread: Start a separate thread; send only, cannot combine with thread_id.
             event_id: Message event ID to edit or react to.
@@ -205,7 +205,7 @@ class MatrixMessageTools(Toolkit):
                 parsed_extras = parse_message_extra_sections(message_extras)
             except ValueError as exc:
                 return self._payload("error", message=str(exc))
-        resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
+        resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
         target_error = _contact_turn_target_error(

@@ -23,6 +23,7 @@ from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.origins import configured_public_url
 from mindroom.response_activity import ActiveScriptRunInfo
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker, drain_script_tool_cleanup
@@ -1227,13 +1228,7 @@ def _reload_reason_for(
 
 
 def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:
-    raw = (
-        runtime_paths.env_value(
-            _SCRIPT_RETENTION_SECONDS_ENV,
-            default=str(_DEFAULT_SCRIPT_RETENTION_SECONDS),
-        )
-        or ""
-    ).strip()
+    raw = runtime_paths.env_value(_SCRIPT_RETENTION_SECONDS_ENV, default=str(_DEFAULT_SCRIPT_RETENTION_SECONDS))
     try:
         value = float(raw)
     except ValueError:
@@ -1260,9 +1255,8 @@ async def _script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: i
         gateway_url = explicit_url.rstrip("/")
         await _validate_script_gateway(gateway_url)
         return gateway_url
-    public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
-    if public_url:
-        gateway_url = f"{public_url.rstrip('/')}/api/script-gateway"
+    if public_url := configured_public_url(runtime_paths):
+        gateway_url = f"{public_url}/api/script-gateway"
         await _validate_script_gateway(gateway_url)
         return gateway_url
     msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
@@ -1275,10 +1269,9 @@ async def optional_script_gateway_url(runtime_paths: RuntimePaths, *, host: str,
         return await _script_gateway_url(runtime_paths, host=host, port=port)
     except ValueError:
         explicit_url = (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip()
-        public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
         if explicit_url:
             raise
-        if public_url:
+        if configured_public_url(runtime_paths):
             logger.warning("background_script_gateway_disabled_invalid_public_url")
         return ""
 

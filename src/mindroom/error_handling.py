@@ -16,6 +16,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.logging_config import get_logger
+from mindroom.origins import configured_public_url
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -47,8 +48,8 @@ def minimal_mode_failure_message(reason: str, agent_name: str, *, subagent: bool
 
 
 def _missing_provider_key_message(runtime_paths: RuntimePaths | None) -> str:
-    dashboard_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip() if runtime_paths else ""
-    dashboard = f"the MindRoom dashboard ({dashboard_url.rstrip('/')})" if dashboard_url else "the MindRoom dashboard"
+    dashboard_url = configured_public_url(runtime_paths) if runtime_paths else None
+    dashboard = f"the MindRoom dashboard ({dashboard_url})" if dashboard_url else "the MindRoom dashboard"
     return (
         "🔑 No AI provider key is set up yet, so I can't reply. "
         f"Open {dashboard}, choose **Connect your AI provider**, paste your key, then send your message again."

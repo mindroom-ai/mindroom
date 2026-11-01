@@ -39,6 +39,10 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  confirmLeavingUnsavedDrafts,
+  useUnsavedDraft,
+} from "@/hooks/useUnsavedDraft";
 import type { ConfigPath } from "@/lib/configSchema";
 import { getConfigValidationIssues } from "@/lib/configValidation";
 import {
@@ -173,10 +177,9 @@ function saveFailureMessage(
   const issues = getConfigValidationIssues(result.diagnostics)
     .filter((issue) => issue.loc[0] === "egress_broker")
     .map((issue) => {
-      const message = issue.msg.replace(/^Value error, /, "");
       // An issue on `egress_broker` itself has no field path to show.
       const where = issue.loc.slice(2).join(".");
-      return where ? `${where}: ${message}` : message;
+      return where ? `${where}: ${issue.msg}` : issue.msg;
     });
   return issues.length > 0 ? issues.join("; ") : result.message;
 }
@@ -223,6 +226,8 @@ function ServiceSection({
   const [preloaded] = useState(initial !== undefined);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
+  const hasUnsavedEdit = editor !== null && editorDirty;
+  useUnsavedDraft(hasUnsavedEdit);
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const latest = useRef(0);
@@ -316,7 +321,7 @@ function ServiceSection({
 
   // Opening another service's editor would throw away what is typed in this one.
   const requestEdit = (name: string) => {
-    if (editor !== null && editorDirty) setPendingEdit(name);
+    if (hasUnsavedEdit) setPendingEdit(name);
     else startEdit(name);
   };
 
@@ -799,7 +804,11 @@ function AgentKeys({ checked }: { checked: ServicesListing }) {
             className="h-9 rounded-md border border-input bg-background px-3 text-sm"
             value={target?.value ?? UNSCOPED_VALUE}
             disabled={targets.length === 0}
-            onChange={(event) => setSelected(event.target.value)}
+            // Another target remounts the services below, dropping an open editor.
+            onChange={(event) => {
+              if (confirmLeavingUnsavedDrafts())
+                setSelected(event.target.value);
+            }}
           >
             {targets.map((item) => (
               <option key={item.value} value={item.value}>

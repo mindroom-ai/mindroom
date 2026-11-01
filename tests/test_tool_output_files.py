@@ -104,10 +104,10 @@ def test_runtime_policy_defaults_to_50_kib_auto_save_threshold(tmp_path: Path) -
     [
         ({}, "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES=5\n", 5),
         ({"MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES": "7"}, "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES=5\n", 7),
-        ({"MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES": ""}, "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES=5\n", 64 * 1024**2),
+        ({"MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES": ""}, "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES=5\n", 5),
         ({}, "", 64 * 1024**2),
     ],
-    ids=["env_file", "process_env_wins", "blank_restores_default", "live_environ_ignored"],
+    ids=["env_file", "process_env_wins", "blank_export_keeps_env_file", "live_environ_ignored"],
 )
 def test_runtime_policy_reads_the_output_cap_from_the_runtime_env(
     monkeypatch: pytest.MonkeyPatch,

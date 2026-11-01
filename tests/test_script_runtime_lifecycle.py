@@ -7,7 +7,6 @@ import hashlib
 import inspect
 import socket
 import threading
-import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -47,6 +46,7 @@ from mindroom.orchestration.script_runtime import (
     _ScriptRuntimeLifecycleError,
     _ScriptRuntimeUnavailableError,
     build_script_runtime,
+    optional_script_gateway_url,
 )
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToolBroker
 from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
@@ -88,6 +88,7 @@ from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     bound_worker_launch_config,
     initialize_approval_store_for_test,
+    loop_runs_while_blocked,
     make_conversation_reader_mock,
     make_relation_lookup,
 )
@@ -187,6 +188,10 @@ def _plan(current: Config, updated: Config) -> ConfigUpdatePlan:
         new_config=updated,
         bots={name: MagicMock() for name in existing},
     )
+
+
+# A pass deadline that the work before a test's blocking step meets even on a loaded host, far below the outer wait.
+_LOADED_HOST_PASS_TIMEOUT_SECONDS = 1.0
 
 
 async def _reconcile_once(runtime: ScriptRuntimeLifecycle) -> None:
@@ -681,6 +686,24 @@ async def test_worker_gateway_rejects_explicit_loopback_urls(
 
     with pytest.raises(ValueError, match="non-loopback"):
         await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("public_url", [None, "http://localhost:8765/"], ids=["unset", "unreachable"])
+async def test_optional_worker_gateway_turns_off_for_a_missing_or_unreachable_public_url(
+    tmp_path: Path,
+    public_url: str | None,
+) -> None:
+    """Without an explicit gateway, background scripts turn off instead of failing startup, and an unusable public URL says so."""
+    process_env = {} if public_url is None else {"MINDROOM_PUBLIC_URL": public_url}
+    runtime_paths = _runtime_paths(tmp_path, **_STATIC_RUNNER_ENV, **process_env)
+
+    with capture_logs() as logs:
+        gateway_url = await optional_script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+    assert gateway_url == ""
+    warned = [entry for entry in logs if entry["event"] == "background_script_gateway_disabled_invalid_public_url"]
+    assert len(warned) == (public_url is not None)
 
 
 @pytest.mark.asyncio
@@ -2556,7 +2579,7 @@ async def test_reconciliation_pass_has_one_overall_deadline(tmp_path: Path) -> N
         runtime_paths,
         store=store,
         manager=_manager_stub(reconcile_durable=reconcile_durable),
-        pass_timeout_seconds=0.1,
+        pass_timeout_seconds=_LOADED_HOST_PASS_TIMEOUT_SECONDS,
     )
 
     # Far above the pass deadline, so only the pass's own deadline lets this return in time.
@@ -2568,29 +2591,33 @@ async def test_reconciliation_pass_has_one_overall_deadline(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_blocking_backend_provider_cannot_stall_the_event_loop_past_pass_deadline(tmp_path: Path) -> None:
     """Potentially blocking backend construction is off-loop and bounded by the pass."""
-    heartbeat = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    release_provider = threading.Event()
+    provider_returned = threading.Event()
+    provider_saw_loop_running: list[bool] = []
 
-    def slow_provider(_locator: str | None) -> None:
-        time.sleep(0.2)
-
-    async def beat() -> None:
-        await asyncio.sleep(0.01)
-        heartbeat.set()
+    def blocking_provider(_locator: str | None) -> None:
+        provider_saw_loop_running.append(loop_runs_while_blocked(loop))
+        # Only an off-loop provider holds the pass, since nothing could release one that blocks the loop.
+        if provider_saw_loop_running[-1]:
+            release_provider.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+        provider_returned.set()
 
     runtime = _lifecycle(
         _runtime_paths(tmp_path),
         manager=_manager_stub(reconcile_durable=AsyncMock()),
-        worker_lease_provider=slow_provider,
+        worker_lease_provider=blocking_provider,
         pass_timeout_seconds=0.02,
     )
-    heartbeat_task = asyncio.create_task(beat())
-    started = asyncio.get_running_loop().time()
 
-    await _reconcile_once(runtime)
-
-    assert asyncio.get_running_loop().time() - started < 0.1
-    await asyncio.wait_for(heartbeat.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-    await heartbeat_task
+    try:
+        await _reconcile_once(runtime)
+        # The pass deadline ended the pass while the provider still held it.
+        assert not provider_returned.is_set()
+    finally:
+        release_provider.set()
+    assert await asyncio.to_thread(provider_returned.wait, SETTLE_TIMEOUT_SECONDS)
+    assert provider_saw_loop_running == [True]
 
 
 @pytest.mark.asyncio
@@ -3297,7 +3324,7 @@ async def test_blocking_retired_lease_release_cannot_stall_reconciliation(tmp_pa
         runtime_paths,
         manager=_manager_stub(reconcile_durable=AsyncMock()),
         worker_lease_provider=lambda _locator: _Lease(_Backend([])),
-        pass_timeout_seconds=0.02,
+        pass_timeout_seconds=_LOADED_HOST_PASS_TIMEOUT_SECONDS,
     )
     runtime._publish_worker_lease(retired)
     # The pass that finishes startup cleanup retires the lease no adopted run needs.
@@ -3475,7 +3502,7 @@ async def test_startup_pruning_is_inside_one_complete_pass_deadline(tmp_path: Pa
         manager=_manager_stub(gateway_url="", reconcile_durable=AsyncMock()),
         resolver=SimpleNamespace(is_authorized=MagicMock(return_value=True), prune_approvals=prune_approvals),
         retention_seconds=0.001,
-        pass_timeout_seconds=0.02,
+        pass_timeout_seconds=_LOADED_HOST_PASS_TIMEOUT_SECONDS,
     )
     runtime.bind_api("http://primary.test/api/script-gateway")
     runtime._startup_cleanup_pending = True
@@ -3508,7 +3535,7 @@ async def test_pruning_has_an_overall_deadline(tmp_path: Path) -> None:
         manager=_manager_stub(),
         resolver=SimpleNamespace(is_authorized=MagicMock(return_value=True), prune_approvals=prune_approvals),
         retention_seconds=0.001,
-        pass_timeout_seconds=0.02,
+        pass_timeout_seconds=_LOADED_HOST_PASS_TIMEOUT_SECONDS,
     )
 
     # Far above the pass deadline, so only the pass's own deadline lets this return in time.

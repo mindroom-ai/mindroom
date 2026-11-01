@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -16,10 +17,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, StreamingConfig
 from mindroom.live_frames.publisher import LivePublisher
 from mindroom.live_frames.transport import LiveSendOutcome
-from mindroom.llm.events import ReasoningDelta, ReportedCall, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, ReportedCall, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
-from mindroom.streaming import send_streaming_response
+from mindroom.streaming import send_streaming_response, stream_progress_edits
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
@@ -117,7 +119,9 @@ def _records() -> FakeReplyRecords:
     return FakeReplyRecords(send=send, edit=edit)
 
 
-async def _stream(*chunks: str | float | ReasoningDelta | ToolStarted | ToolCompleted) -> AsyncIterator[Any]:
+async def _stream(
+    *chunks: str | float | ReasoningDelta | ToolStarted | ToolProgress | ToolCompleted,
+) -> AsyncIterator[Any]:
     """Yield text, reasoning, and tool events, pausing for each float as a model or a tool call would."""
     for chunk in chunks:
         if isinstance(chunk, float):
@@ -135,6 +139,7 @@ async def _run(
     edits: _Edits,
     *,
     placeholder_event_id: str | None = None,
+    show_tool_calls: bool = True,
 ) -> None:
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edits.edit)):
         await send_streaming_response(
@@ -145,6 +150,7 @@ async def _run(
             stream,
             existing_event_id=placeholder_event_id,
             adopt_existing_placeholder=placeholder_event_id is not None,
+            show_tool_calls=show_tool_calls,
             **records.hooks(),
         )
 
@@ -259,6 +265,103 @@ async def test_tool_calls_ride_in_frames_until_the_checkpoint(tmp_path: Path, fr
     tools = [frame["delta"]["tools"] for frame in frames.sent if "tools" in frame.get("delta", {})]
     assert [change["set"][0][1]["type"] for change in tools] == ["tool_call_started", "tool_call_completed"]
     assert _terminal(records)["io.mindroom.tool_trace"]["events"][0]["type"] == "tool_call_completed"
+
+
+def _tool_states(sent: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """The tools document each frame left, applying snapshots and tools deltas in order."""
+    tools: list[dict[str, Any]] = []
+    states = []
+    for frame in sent:
+        if "snapshot" in frame:
+            tools = list(frame["snapshot"]["tools"])
+        elif "tools" in frame["delta"]:
+            change = frame["delta"]["tools"]
+            tools = (tools + [{}] * change["len"])[: change["len"]]
+            for index, entry in change["set"]:
+                tools[index] = entry
+        states.append(list(tools))
+    return states
+
+
+def _running_shell(*between: float | ToolProgress) -> AsyncIterator[Any]:
+    started = ReportedCall(tool_call_id="call-1", tool_name="run_shell_command", tool_args={"command": "make"})
+    completed = ReportedCall(
+        tool_call_id="call-1",
+        tool_name="run_shell_command",
+        tool_args={"command": "make"},
+        result="built",
+    )
+    return _stream(
+        "Building",
+        0.05,
+        ToolStarted(started),
+        0.05,
+        *between,
+        ToolCompleted(completed),
+        0.05,
+        " done",
+        0.05,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_running_tool_shows_its_latest_output_in_frames_only(tmp_path: Path, frames: _Frames) -> None:
+    """A running call's reported output rides in its frame entry until it completes; no write keeps it."""
+    records, edits = _records(), _Edits()
+    stream = _running_shell(ToolProgress("call-1", "step 1"), 0.05, ToolProgress("call-1", "x" * 1000), 0.05)
+    await _run(_config(tmp_path), stream, records, edits)
+
+    entries = [state[0] for state in _tool_states(frames.sent) if state]
+    shown = [entry.get("progress") for entry in entries]
+    assert "progress" not in entries[0]
+    assert "step 1" in shown
+    assert "x" * 1000 in shown
+    assert entries[-1]["type"] == "tool_call_completed"
+    assert "progress" not in entries[-1]
+    written = [write.content for write in records.writes if write.content is not None] + edits.contents
+    assert all('"progress"' not in json.dumps(content) for content in written)
+
+
+@pytest.mark.asyncio
+async def test_a_continued_reply_shows_a_running_calls_output_in_frames(tmp_path: Path, frames: _Frames) -> None:
+    """Work resumed after an approval shows a running call's output in the reply it continues."""
+    config = _config(tmp_path)
+    started = [ToolTraceEntry(type="tool_call_started", tool_name="run_shell_command", tool_call_id="call-1")]
+    chunk = StructuredStreamChunk(
+        content="Approved.\n\n🔧 `run_shell_command` [1] ⏳",
+        tool_trace=started,
+        tool_progress={"call-1": "step 1"},
+    )
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=_Edits().edit)):
+        async with stream_progress_edits(
+            make_matrix_client_mock(user_id="@mindroom_code:localhost"),
+            MessageTarget.resolve(_ROOM_ID, None, "$question"),
+            config,
+            runtime_paths_for(config),
+            event_id="$answer",
+            show_tool_calls=True,
+            **FakeReplyRecords().progress_hooks(),
+        ) as publish:
+            await publish(chunk)
+            await asyncio.sleep(0.1)
+
+    entries = [state[0] for state in _tool_states(frames.sent) if state]
+    assert any(entry.get("progress") == "step 1" for entry in entries)
+
+
+@pytest.mark.asyncio
+async def test_hidden_tool_calls_show_no_output(tmp_path: Path, frames: _Frames) -> None:
+    """A reply that hides its tool calls shows none of their output either."""
+    records, edits = _records(), _Edits()
+    await _run(
+        _config(tmp_path),
+        _running_shell(ToolProgress("call-1", "step 1"), 0.05),
+        records,
+        edits,
+        show_tool_calls=False,
+    )
+
+    assert all(state == [] for state in _tool_states(frames.sent))
 
 
 @pytest.mark.asyncio

@@ -267,7 +267,7 @@ class MatrixVoiceMessageTools(Toolkit):
             )
 
         # A blank room_id means the current room, as omitting it does.
-        resolved_room_id, room_error = resolve_requested_room_id(context, (room_id or "").strip() or None)
+        resolved_room_id, room_error = await resolve_requested_room_id(context, (room_id or "").strip() or None)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
         if not await room_access_allowed(context, resolved_room_id):

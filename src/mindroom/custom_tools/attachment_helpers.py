@@ -7,9 +7,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.contacts.turns import contact_room
-from mindroom.matrix.client_room_admin import get_room_members
+from mindroom.matrix.client_room_admin import get_room_members, resolve_room_reference
 from mindroom.matrix.projected_thread_membership import resolve_thread_root_event_id
-from mindroom.matrix.state import resolve_room_id
 from mindroom.requester_identity import (
     equivalent_requester_ids,
     is_human_requester_id,
@@ -75,27 +74,22 @@ async def room_access_allowed(context: ToolRuntimeContext, room_id: str, *, cont
     ) and await requester_joined_target_room(context, room_id)
 
 
-def unknown_room_error(room_id: str) -> str:
-    """Return the error for a requested room that names no known room."""
-    return f"Unknown room {room_id!r}; pass a room ID, alias, or configured room name."
-
-
-def resolve_requested_room_id(
+async def resolve_requested_room_id(
     context: ToolRuntimeContext,
     room_id: str | None,
 ) -> tuple[str | None, str | None]:
     """Resolve the requested room target or return a validation error.
 
-    A configured room name resolves to its room ID; any other name that is neither a room ID nor an alias is unknown.
+    A configured room name or an alias resolves to its room ID; anything that names no room is unknown.
     """
     if room_id is None:
         return context.room_id, None
     normalized_room_id = room_id.strip()
     if not normalized_room_id:
         return None, "room_id must be a non-empty string."
-    resolved_room_id = resolve_room_id(normalized_room_id, context.runtime_paths)
-    if not resolved_room_id.startswith(("!", "#")):
-        return None, unknown_room_error(normalized_room_id)
+    resolved_room_id = await resolve_room_reference(context.client, normalized_room_id, context.runtime_paths)
+    if not isinstance(resolved_room_id, str):
+        return None, f"Unknown room {normalized_room_id!r}; pass a room ID, alias, or configured room name."
     return resolved_room_id, None
 
 

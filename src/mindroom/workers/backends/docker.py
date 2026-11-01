@@ -19,6 +19,7 @@ from mindroom.constants import (
     runtime_env_values,
     runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
+    secret_path_env_names,
 )
 from mindroom.credentials.manager import (
     get_runtime_credentials_manager,
@@ -210,18 +211,6 @@ __all__ = [
     "ensure_docker_dependencies",
     "list_docker_worker_containers",
 ]
-
-
-def _protected_runtime_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return the primary's secret-path variables, whose worker-side values operator env must not replace."""
-    protected_names = {
-        env_name
-        for env_name in {*runtime_paths.process_env, *runtime_paths.env_file_values}
-        if env_name.endswith("_FILE")
-    }
-    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
-        protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
-    return frozenset(protected_names)
 
 
 def _runtime_namespace_for_workers_root(workers_root: Path) -> str:
@@ -1191,7 +1180,8 @@ class DockerWorkerBackend:
         validate_dedicated_worker_extra_env(
             self.config.extra_env,
             backend_name="Docker",
-            extra_reserved_names=_protected_runtime_env_names(self._runtime_paths),
+            # The primary's secret-path variables, whose worker-side values operator env must not replace.
+            extra_reserved_names=secret_path_env_names(self._runtime_paths),
         )
         return dedicated_worker_startup_runtime_paths(
             self._worker_layout,

@@ -64,9 +64,10 @@ A realtime voice call's speech tokens are charged at the prices of an `openai` m
 Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
-Spend updates within about a minute of a chat reply finishing and within five minutes of other usage, such as voice calls, so a user can go slightly over their cap before the fallback applies.
-With a lot of retained usage, recounting spend takes longer, and updates wait about ten times that long so the recount does not slow replies.
-A reply that already started finishes on its model.
+A completed agent or team reply's cost counts as soon as the reply finishes, in chat and on the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/).
+A reply that is stopped, fails, or finishes after a tool approval counts once spend is recounted from recorded usage, which such a reply starts soon after it ends.
+Other usage, such as delegated agents, voice calls, and helper work, counts at the next recount: at startup, about every six hours, when the month starts, when budgets are turned on, and after a config change that adds or removes agents or teams, makes an agent private or shared, or changes model prices, bot accounts, the internal user, or bridge aliases.
+A reply that already started finishes on its model, so the reply that reaches the cap still uses its model and the user's next reply uses the fallback.
 
 ## Over-Budget Replies
 

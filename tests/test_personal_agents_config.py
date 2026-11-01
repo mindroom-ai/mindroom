@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from pydantic import ValidationError
 
+from mindroom.approval.tool_owners import _catalog_authority
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.personal_agents import (
@@ -76,6 +77,13 @@ def test_generated_agent_renders_placeholders_and_forces_owner_access() -> None:
     assert agent["instructions"] == ["Owner: @Alice.Smith:example.org"]
     assert agent["access"] == {"members_of_rooms": [], "users": ["@Alice.Smith:example.org"]}
     assert agent["credential_managers"] == ["@Alice.Smith:example.org"]
+
+
+def test_first_name_placeholder_is_the_display_names_first_word() -> None:
+    """`{user_first_name}` is the display name's first word, or the localpart for a blank display name."""
+    template = {"agent": {"display_name": "{user_first_name}'s Mind"}}
+    assert personal_agent_data(template, _entry(user_display_name="Bas Nijholt"))["display_name"] == "Bas's Mind"
+    assert personal_agent_data(template, _entry(user_display_name=" \u00a0"))["display_name"] == "Alice.Smith's Mind"
 
 
 def test_placeholder_values_are_not_rendered_again() -> None:
@@ -269,8 +277,12 @@ def test_broken_template_fails_without_any_user(tmp_path: Path) -> None:
     data = deepcopy(BASE)
     # Config does not check agent model names, so use a knowledge base reference it does check.
     data["personal_agents"]["mind"]["agent"]["knowledge_bases"] = ["missing"]
-    with pytest.raises(ConfigRuntimeValidationError, match="personal_agents would generate an invalid agent"):
+    with pytest.raises(ConfigRuntimeValidationError) as raised:
         _runtime_config(tmp_path, data)
+    assert str(raised.value) == (
+        "personal_agents would generate an invalid agent for a new user: "
+        "config: Agents reference unknown knowledge bases: mind_personal_agent_probe_0 -> missing"
+    )
 
 
 def test_broken_override_for_user_not_onboarded_fails(tmp_path: Path) -> None:
@@ -379,3 +391,95 @@ def test_invalid_roster_error_names_the_file(tmp_path: Path, content: str) -> No
         read_personal_agent_roster(paths)
     with pytest.raises(ConfigRuntimeValidationError, match=r"Personal agent roster .* is invalid"):
         Config.validate_with_runtime(deepcopy(BASE), paths)
+
+
+_CALLS: dict[str, Any] = {
+    "enabled": True,
+    "profiles": {
+        "voice": {"backend": "live", "model": "gpt-live-1", "credentials_service": "openai-live", "voice": "marin"},
+    },
+    "agents": {"mind": "voice"},
+}
+
+
+def test_calls_template_key_enables_calls_for_each_generated_agent(tmp_path: Path) -> None:
+    """A template key in calls.agents gives every user's agent from that template the profile."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    config = _runtime_config(tmp_path, data, roster=(_entry(), _entry("@bob:example.org")))
+    assert config.calls.agents == {"mind_alice_smith": "voice", "mind_bob": "voice"}
+    assert config.calls.resolve_agent_config("mind_bob").backend == "live"
+
+
+def test_calls_template_key_loads_before_anyone_is_onboarded(tmp_path: Path) -> None:
+    """A calls-enabled template with no users yet loads and enables nobody."""
+    config = _runtime_config(tmp_path, deepcopy(BASE) | {"calls": deepcopy(_CALLS)})
+    assert config.calls.agents == {}
+
+
+def test_authored_dump_keeps_calls_template_key(tmp_path: Path) -> None:
+    """Saving the config keeps the template key, not the generated agents it expanded to."""
+    config = _runtime_config(tmp_path, deepcopy(BASE) | {"calls": deepcopy(_CALLS)}, roster=(_entry(),))
+    assert config.authored_model_dump()["calls"]["agents"] == {"mind": "voice"}
+
+
+def test_calls_template_whose_agent_lists_rooms_is_rejected(tmp_path: Path) -> None:
+    """Every user's agent would join the same rooms, and a room takes only one calls-enabled agent."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    data["personal_agents"]["mind"]["agent"]["rooms"] = ["lobby"]
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"calls\.agents names personal_agents\.mind, whose agent lists rooms",
+    ):
+        _runtime_config(tmp_path, data)
+
+
+def test_explicit_call_profile_for_a_generated_agent_wins_and_is_saved(tmp_path: Path) -> None:
+    """An agent named in calls.agents keeps its own profile over its template's, and saving keeps both entries."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    data["calls"]["profiles"]["other"] = data["calls"]["profiles"]["voice"] | {"voice": "cedar"}
+    data["calls"]["agents"]["mind_bob"] = "other"
+    config = _runtime_config(tmp_path, data, roster=(_entry(), _entry("@bob:example.org")))
+    assert config.calls.agents == {"mind_alice_smith": "voice", "mind_bob": "other"}
+    assert config.authored_model_dump()["calls"]["agents"] == {"mind": "voice", "mind_bob": "other"}
+
+
+def test_calls_template_whose_user_override_lists_rooms_is_rejected(tmp_path: Path) -> None:
+    """A per-user override must not put a calls-enabled template's agent into rooms either, onboarded or not."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    data["personal_agents"]["mind"]["users"] = {"@carol:example.org": {"rooms": ["lobby"]}}
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"calls\.agents names personal_agents\.mind, whose agent lists rooms",
+    ):
+        _runtime_config(tmp_path, data)
+
+
+def test_unknown_template_call_profile_fails_before_onboarding(tmp_path: Path) -> None:
+    """A template's unknown profile fails the load that names it, not the reload that onboards its first user."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS) | {"agents": {"mind": "voiec"}}}
+    with pytest.raises(ConfigRuntimeValidationError, match=r"calls\.agents references unknown profile\(s\): voiec"):
+        _runtime_config(tmp_path, data)
+
+
+def test_explicit_call_profile_equal_to_the_template_is_saved(tmp_path: Path) -> None:
+    """An authored entry for a generated agent survives saving even when it names the template's profile."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    data["calls"]["agents"]["mind_bob"] = "voice"
+    config = _runtime_config(tmp_path, data, roster=(_entry(), _entry("@bob:example.org")))
+    assert config.authored_model_dump()["calls"]["agents"] == {"mind": "voice", "mind_bob": "voice"}
+
+
+def test_onboarding_under_a_calls_template_keeps_other_agents_cli_catalogs(tmp_path: Path) -> None:
+    """Another user's onboarding adds only that user's call entry, which never reaches this agent's toolkits."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    before = _runtime_config(tmp_path / "before", deepcopy(data), roster=(_entry(),))
+    after = _runtime_config(tmp_path / "after", deepcopy(data), roster=(_entry(), _entry("@bob:example.org")))
+    assert after.calls.agents != before.calls.agents
+    assert _catalog_authority(after, "mind_alice_smith") == _catalog_authority(before, "mind_alice_smith")
+
+
+def test_blank_template_call_profile_is_a_validation_error(tmp_path: Path) -> None:
+    """A template key without a profile is refused like any other non-string profile, not with a TypeError."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS) | {"agents": {"mind": None}}}
+    with pytest.raises(ValueError, match=r"calls\.agents\.mind"):
+        _runtime_config(tmp_path, data)

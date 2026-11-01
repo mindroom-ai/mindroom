@@ -21,6 +21,7 @@ from google.genai.types import HttpOptions
 from pydantic import ValidationError
 
 from mindroom.constants import PROVIDER_ENV_KEYS
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.llm.errors import QUOTA_EXHAUSTED, InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
@@ -309,7 +310,7 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
     if (kwargs.get("client_params") or {}).get("api_key"):
         return kwargs
     for key, variable in (("project_id", "GOOGLE_CLOUD_PROJECT"), ("location", "GOOGLE_CLOUD_LOCATION")):
-        if not kwargs.get(key) and (value := runtime_paths.env_value(variable)):
+        if not kwargs.get(key) and (value := get_secret_from_env(variable, runtime_paths=runtime_paths)):
             kwargs[key] = value
     return with_runtime_application_credentials(kwargs, runtime_paths)
 

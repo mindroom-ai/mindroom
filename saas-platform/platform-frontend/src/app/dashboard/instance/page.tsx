@@ -6,7 +6,7 @@ import { useAuth } from '@/hooks/useAuth'
 import { useSubscription } from '@/hooks/useSubscription'
 import { planAction, planState } from '@/lib/plan-state'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, MessageCircle, Globe } from 'lucide-react'
-import { startInstance, stopInstance, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
+import { provisionInstance, startInstance, stopInstance, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
 import { getCachedInstance, loadInstance } from '@/lib/instance-resource'
 import { buildCinnyLoginUrl } from '@/lib/cinny'
 import { getRuntimeConfig } from '@/lib/runtime-config'
@@ -32,7 +32,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
   const [loading, setLoading] = useState(!cachedInstance)
   const [refreshing, setRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
-  const { platformDomain, apiUrl } = useMemo(() => getRuntimeConfig(), [])
+  const { platformDomain } = useMemo(() => getRuntimeConfig(), [])
 
 
   useEffect(() => {
@@ -77,7 +77,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
     setRefreshing(false)
   }
 
-  const handleAction = async (action: 'start' | 'stop' | 'restart' | 'delete' | 'reprovision') => {
+  const handleAction = async (action: 'start' | 'stop' | 'restart' | 'reprovision') => {
     if (!instance) return
 
     setActionLoading(action)
@@ -94,13 +94,8 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
           await apiRestartInstance(instance.instance_id)
           break
         case 'reprovision':
-          // Use the provision endpoint which now handles reprovisioning
-          const { provisionInstance } = await import('@/lib/api')
           await provisionInstance()
           break
-        case 'delete':
-          // Delete not implemented yet
-          throw new Error('Delete not implemented')
       }
 
       // Refresh instance status

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import itertools
 import os
 import re
 import signal
@@ -43,10 +44,11 @@ _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
-# A running command reports the tail of its output at most this often, and only when it changed.
-_PROGRESS_INTERVAL_SECONDS = 2.0
-_PROGRESS_TAIL_LINES = 20
+# A running command reports the tail of its output at most this often, and only when it changed; replies show it live.
+_PROGRESS_INTERVAL_SECONDS = 0.5
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
+# Numbers every append to any output buffer, so a reader can tell which stream printed last.
+_APPEND_SEQUENCE = itertools.count(1)
 
 
 @dataclass
@@ -58,10 +60,14 @@ class _OutputBuffer:
     chunks: deque[str] = field(default_factory=deque)
     byte_count: int = 0
     truncated: bool = False
+    # The number of this buffer's latest append, so a reader can tell new output from a full buffer that rotated to
+    # the same size, and which stream printed last.
+    last_append: int = 0
 
     def append(self, text: str) -> None:
         if not text:
             return
+        self.last_append = next(_APPEND_SEQUENCE)
 
         encoded = text.encode("utf-8", errors="replace")
         if len(encoded) > self.max_bytes:
@@ -139,24 +145,41 @@ class ProcessRecord:
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
+def _progress_lines(buffer: _OutputBuffer) -> str:
+    """Return what a running command printed so far, each line in the state it was redrawn to last.
+
+    It is reported whole, so whoever shows its tail can mask a credential whose label sits above the tail.
+    """
+    return "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in buffer.last_lines(buffer.max_lines).split("\n"))
+
+
 class _OutputProgress:
-    """Report a running command's latest output, at most every few seconds and only when it changed."""
+    """Report a running command's latest output, at most twice a second and only when it changed."""
 
     def __init__(self, report: Callable[[str], None], stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer) -> None:
         self._report = report
         self._stdout_buf = stdout_buf
         self._stderr_buf = stderr_buf
         self._sent = ""
+        self._last_appends = (0, 0)
         self._due = time.monotonic() + _PROGRESS_INTERVAL_SECONDS
 
     def poll(self) -> None:
         now = time.monotonic()
-        if now < self._due:
+        last_appends = (self._stdout_buf.last_append, self._stderr_buf.last_append)
+        if now < self._due or last_appends == self._last_appends:
             return
         self._due = now + _PROGRESS_INTERVAL_SECONDS
-        text = self._stdout_buf.last_lines(_PROGRESS_TAIL_LINES)
-        if errors := self._stderr_buf.last_lines(_PROGRESS_TAIL_LINES):
-            text = f"{text}\nStderr:\n{errors}" if text else f"Stderr:\n{errors}"
+        self._last_appends = last_appends
+        text = _progress_lines(self._stdout_buf)
+        if errors := _progress_lines(self._stderr_buf):
+            # The stream that printed last ends the report, where the live view shows its tail.
+            if not text:
+                text = f"Stderr:\n{errors}"
+            elif self._stderr_buf.last_append > self._stdout_buf.last_append:
+                text = f"{text}\nStderr:\n{errors}"
+            else:
+                text = f"Stderr:\n{errors}\nStdout:\n{text}"
         if text and text != self._sent:
             self._sent = text
             self._report(text)

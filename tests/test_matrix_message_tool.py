@@ -340,6 +340,8 @@ async def test_matrix_message_send_resolves_room_alias_before_send(tmp_path: Pat
     ):
         payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id="#ops:localhost"))
 
+    # MindRoom's record of its own room wins, because any account may repoint the alias in the directory.
+    ctx.client.room_resolve_alias.assert_not_awaited()
     mock_access.assert_called_once_with(ctx, "!ops:localhost", contact_room_ok=True)
     assert mock_send.await_args.args[1] == "!ops:localhost"
     assert payload["status"] == "ok"
@@ -347,16 +349,48 @@ async def test_matrix_message_send_resolves_room_alias_before_send(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_unknown_room_name_is_reported_as_unknown() -> None:
-    """A room name that resolves to no room ID or alias is unknown, not an access denial."""
+async def test_matrix_message_send_resolves_a_room_alias_through_the_directory() -> None:
+    """An alias of a room MindRoom did not create resolves through Matrix before authorization and delivery."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+    ctx.client.room_resolve_alias = AsyncMock(
+        return_value=nio.RoomResolveAliasResponse(
+            room_alias="#ideas:example.org",
+            room_id="!ideas:localhost",
+            servers=[],
+        ),
+    )
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.room_access_allowed", return_value=True) as mock_access,
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id="#ideas:example.org"))
+
+    mock_access.assert_called_once_with(ctx, "!ideas:localhost", contact_room_ok=True)
+    assert mock_send.await_args.args[1] == "!ideas:localhost"
+    assert payload["status"] == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("room_id", ["Ops Room", "#gone:example.org"])
+async def test_matrix_message_unknown_room_is_reported_as_unknown(room_id: str) -> None:
+    """A room name or alias that names no room is unknown, not an access denial."""
     tool = MatrixMessageTools()
     ctx = _make_context()
+    ctx.client.room_resolve_alias = AsyncMock(
+        return_value=nio.RoomResolveAliasError(message="Room alias not found", status_code="M_NOT_FOUND"),
+    )
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id="Ops Room"))
+        payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id=room_id))
 
     assert payload["status"] == "error"
-    assert payload["message"] == "Unknown room 'Ops Room'; pass a room ID, alias, or configured room name."
+    assert payload["message"] == f"Unknown room {room_id!r}; pass a room ID, alias, or configured room name."
 
 
 @pytest.mark.asyncio

@@ -346,6 +346,180 @@
           "activity": "w"
         }
       }
+    },
+    {
+      "name": "a running tool reports its output",
+      "before": {
+        "md": "x",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_started",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": null,
+            "truncated": false
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "x",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_started",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": null,
+            "truncated": false,
+            "progress": "step 1"
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 9,
+        "delta": {
+          "tools": {
+            "len": 1,
+            "set": [
+              [
+                0,
+                {
+                  "type": "tool_call_started",
+                  "tool_name": "web_search",
+                  "args_preview": "query=matrix",
+                  "result_preview": null,
+                  "truncated": false,
+                  "progress": "step 1"
+                }
+              ]
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "newer output replaces the older",
+      "before": {
+        "md": "x",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_started",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": null,
+            "truncated": false,
+            "progress": "step 1"
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "x",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_started",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": null,
+            "truncated": false,
+            "progress": "step 1\nstep 2 😀"
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 10,
+        "delta": {
+          "tools": {
+            "len": 1,
+            "set": [
+              [
+                0,
+                {
+                  "type": "tool_call_started",
+                  "tool_name": "web_search",
+                  "args_preview": "query=matrix",
+                  "result_preview": null,
+                  "truncated": false,
+                  "progress": "step 1\nstep 2 😀"
+                }
+              ]
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "the completed tool drops its output",
+      "before": {
+        "md": "x",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_started",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": null,
+            "truncated": false,
+            "progress": "step 1\nstep 2 😀"
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "x",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": "3 results",
+            "truncated": false
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 11,
+        "delta": {
+          "tools": {
+            "len": 1,
+            "set": [
+              [
+                0,
+                {
+                  "type": "tool_call_completed",
+                  "tool_name": "web_search",
+                  "args_preview": "query=matrix",
+                  "result_preview": "3 results",
+                  "truncated": false
+                }
+              ]
+            ]
+          }
+        }
+      }
     }
   ]
 }

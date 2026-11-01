@@ -2668,7 +2668,10 @@ _LIMIT = {"restrict_only": True, "rules": [{"host": "api.github.com", "path_pref
     ("body", "fragment"),
     [
         ({"description": "no rules"}, "at least one rule"),
-        ({**_NOTES, "unknown_field": 1}, "unknown_field"),
+        (
+            {**_NOTES, "unknown_field": 1},
+            "unknown_field: Unknown key 'unknown_field': remove it or correct its spelling",
+        ),
         ({**_NOTES, "preset": "no_such_preset"}, "unknown egress preset"),
         (
             {"rules": [{"host": "https://api.notes.example.com", "auth": {"type": "bearer"}}]},

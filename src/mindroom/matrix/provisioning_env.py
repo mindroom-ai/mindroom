@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import (
     DEFAULT_MATRIX_HOMESERVER,
     is_hosted_matrix_homeserver,
+    read_secret_file,
     runtime_env_path,
     runtime_matrix_homeserver,
 )
@@ -36,21 +37,21 @@ def provisioning_url_from_env(runtime_paths: RuntimePaths) -> str | None:
 
 def registration_token_from_env(runtime_paths: RuntimePaths) -> str | None:
     """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
-    token = (runtime_paths.env_value("MATRIX_REGISTRATION_TOKEN") or "").strip()
-    return token or None
+    token = runtime_paths.env_value("MATRIX_REGISTRATION_TOKEN")
+    return None if token is None else token.strip()
 
 
 def registration_shared_secret_from_env(runtime_paths: RuntimePaths) -> str | None:
     """Get Synapse shared-secret registration credentials from env or file."""
-    secret = (runtime_paths.env_value("MATRIX_REGISTRATION_SHARED_SECRET") or "").strip()
-    if secret:
-        return secret
+    secret = runtime_paths.env_value("MATRIX_REGISTRATION_SHARED_SECRET")
+    if secret is not None:
+        return secret.strip()
 
     file_path = runtime_env_path(runtime_paths, "MATRIX_REGISTRATION_SHARED_SECRET_FILE")
     if file_path is None:
         return None
     try:
-        return file_path.read_text(encoding="utf-8").strip() or None
+        return read_secret_file(file_path) or None
     except OSError as exc:
         msg = f"MATRIX_REGISTRATION_SHARED_SECRET_FILE is not readable: {file_path}"
         raise _permanent_startup_error(msg) from exc

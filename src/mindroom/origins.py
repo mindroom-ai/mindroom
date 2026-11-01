@@ -67,17 +67,17 @@ def is_local_origin(origin: str | None) -> bool:
 
 def local_api_origin(paths: RuntimePaths) -> str:
     """Return MindRoom's own API origin on this machine, which links, callbacks, and token audiences use by default."""
-    return f"http://localhost:{paths.env_value('MINDROOM_PORT', default='8765') or '8765'}"
+    return f"http://localhost:{paths.env_value('MINDROOM_PORT', default='8765')}"
 
 
 def configured_public_url(paths: RuntimePaths) -> str | None:
-    """Return `MINDROOM_PUBLIC_URL` without its trailing slash, or None when it is unset."""
-    return (paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/") or None
+    """Return `MINDROOM_PUBLIC_URL` trimmed and without its trailing slash, the base of MindRoom's links, or None when unset."""
+    return (paths.env_value("MINDROOM_PUBLIC_URL") or "").strip().rstrip("/") or None
 
 
 def with_api_port(paths: RuntimePaths, api_port: int) -> RuntimePaths:
     """Return paths whose `MINDROOM_PORT` is the port the API serves on, unless the operator set one."""
-    if (paths.env_value("MINDROOM_PORT") or "").strip():
+    if paths.env_value("MINDROOM_PORT") is not None:
         return paths
     return replace(paths, process_env=MappingProxyType({**paths.process_env, "MINDROOM_PORT": str(api_port)}))
 
@@ -111,7 +111,7 @@ def dashboard_origin(paths: RuntimePaths) -> str | None:
 def allowed_client_origins(paths: RuntimePaths, env_name: str) -> tuple[str, ...]:
     """Read a JSON list of exact web and bundled iOS app origins from `env_name`; invalid configuration fails closed."""
     try:
-        origins = json.loads(paths.env_value(env_name, default="[]") or "[]")
+        origins = json.loads(paths.env_value(env_name, default="[]"))
         if not isinstance(origins, list) or not all(isinstance(origin, str) for origin in origins):
             return ()
         # The bundled iOS app has a fixed custom-scheme origin. Accept only
@@ -125,7 +125,7 @@ def allowed_client_origins(paths: RuntimePaths, env_name: str) -> tuple[str, ...
 
 def connections_origins_configured(paths: RuntimePaths) -> bool:
     """Return whether the operator lists Connections Chat origins, which replaces the defaults."""
-    return bool((paths.env_value(CONNECTIONS_ALLOWED_ORIGINS_ENV) or "").strip())
+    return paths.env_value(CONNECTIONS_ALLOWED_ORIGINS_ENV) is not None
 
 
 def connections_client_origin_allowed(paths: RuntimePaths, client_origin: str, server_origin: str | None) -> bool:

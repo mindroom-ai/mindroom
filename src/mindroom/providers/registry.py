@@ -166,7 +166,7 @@ def stream_idle_timeout_seconds(model_config: ModelConfig, runtime_paths: Runtim
     provider = provider_route(model_config.provider)
     if provider in _LOCAL_STREAM_PROVIDERS or _sets_base_url(model_config.extra_kwargs):
         return None
-    if (variable := _ENDPOINT_VARIABLES.get(provider)) and runtime_paths.env_value(variable):
+    if (variable := _ENDPOINT_VARIABLES.get(provider)) and runtime_paths.first_env_value((variable,)):
         return None
     return _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
 

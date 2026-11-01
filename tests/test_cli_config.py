@@ -39,6 +39,7 @@ from mindroom.cli.main import (
     app,
 )
 from mindroom.cli.main import main as cli_main
+from mindroom.cli.service import _shell_service_keys
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
@@ -800,10 +801,12 @@ class TestConfigInit:
     def test_init_mindroom_chat_warns_about_a_saved_owner_it_cannot_use(
         self,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A saved owner outside the current Matrix grammar is reported, not silently dropped."""
+        """A saved owner outside the current Matrix grammar is reported, under a blank export too, not dropped."""
         target = tmp_path / "config.yaml"
         (tmp_path / ".env").write_text(f"{OWNER_MATRIX_USER_ID_ENV}=@Alice:selfhosted.example\n", encoding="utf-8")
+        monkeypatch.setenv(OWNER_MATRIX_USER_ID_ENV, "")
 
         result = runner.invoke(
             app,
@@ -1401,13 +1404,16 @@ class TestConfigInit:
         assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-existing\nMINDROOM_API_KEY=\n"
         assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
 
+    @pytest.mark.parametrize(("exported", "generated"), [("exported-key", False), ("", True)], ids=["key", "blank"])
     def test_init_keeping_existing_env_leaves_exported_dashboard_key_alone(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        exported: str,
+        generated: bool,
     ) -> None:
-        """An exported MINDROOM_API_KEY wins over `.env`, so setup writes no second key that a restart would ignore."""
-        monkeypatch.setenv("MINDROOM_API_KEY", "exported-key")
+        """An exported key wins over `.env`, so setup writes no second key; an exported blank does not, so it does."""
+        monkeypatch.setenv("MINDROOM_API_KEY", exported)
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text("OPENAI_API_KEY=sk-existing\n", encoding="utf-8")
@@ -1418,8 +1424,8 @@ class TestConfigInit:
         )
 
         assert result.exit_code == 0, result.output
-        assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-existing\n"
-        assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
+        assert ("MINDROOM_API_KEY=" in env_path.read_text(encoding="utf-8")) is generated
+        assert ("Generated MINDROOM_API_KEY" in normalize_console_output(result.output)) is generated
 
     @pytest.mark.parametrize(
         ("env_text", "process_env", "has_credential", "generated"),
@@ -1427,10 +1433,16 @@ class TestConfigInit:
             ("OPENAI_API_KEY=sk-existing\n", {"MINDROOM_WORKER_BACKEND": "docker"}, False, True),
             (None, {"MINDROOM_WORKER_BACKEND": "docker"}, False, True),
             ("MINDROOM_API_KEY=\n", {"MINDROOM_WORKER_BACKEND": "docker"}, False, False),
+            (
+                "OPENAI_API_KEY=sk-existing\n",
+                {"MINDROOM_WORKER_BACKEND": "docker", "MINDROOM_API_KEY": ""},
+                False,
+                True,
+            ),
             ("OPENAI_API_KEY=sk-existing\n", {}, False, False),
             ("OPENAI_API_KEY=sk-existing\n", {"MINDROOM_WORKER_BACKEND": "docker"}, True, False),
         ],
-        ids=["docker", "docker-without-env-file", "explicit-open", "local-tools", "platform-auth"],
+        ids=["docker", "docker-without-env-file", "explicit-open", "exported-blank", "local-tools", "platform-auth"],
     )
     def test_run_protects_the_dashboard_api_from_dedicated_workers(
         self,
@@ -2572,6 +2584,30 @@ def test_a_non_utf8_env_file_names_itself_and_the_fix(
     output = normalize_console_output(capsys.readouterr().out)
     assert f"Error: {env_path.resolve()} is not UTF-8 text" in output
     assert "save it as UTF-8" in output
+
+
+def test_a_utf8_bom_env_file_keeps_its_first_variable(tmp_path: Path) -> None:
+    """A `.env` saved as UTF-8 with a byte order mark reads its first variable, and setup never adds a second one."""
+    target = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    env_path.write_text("MINDROOM_API_KEY=dashboard-existing\nOPENAI_API_KEY=sk-existing\n", encoding="utf-8-sig")
+    original = env_path.read_bytes()
+
+    result = runner.invoke(
+        app,
+        ["config", "init", "--path", str(target), "--matrix-server", "self-hosted", "--no-input"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert env_path.read_bytes() == original
+    assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
+    runtime_paths = constants_module.resolve_runtime_paths(
+        config_path=target,
+        process_env={"MINDROOM_API_KEY": "dashboard-existing", "OPENAI_API_KEY": "sk-existing"},
+    )
+    assert runtime_paths.env_file_values["MINDROOM_API_KEY"] == "dashboard-existing"
+    # The service reads `.env`, which already holds both keys this shell exports, so it saves neither.
+    assert _shell_service_keys(runtime_paths) == {}
 
 
 # ---------------------------------------------------------------------------

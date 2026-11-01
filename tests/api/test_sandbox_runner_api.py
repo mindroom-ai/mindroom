@@ -19,7 +19,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
@@ -2371,6 +2371,31 @@ def test_sandbox_runner_execution_env_excludes_relative_file_secret_paths(
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in execution_env
 
 
+@pytest.mark.parametrize("exported", ["/worker/adc.json", ""], ids=["exported", "env-file-under-blank-export"])
+def test_a_dedicated_worker_keeps_its_own_google_application_credentials(exported: str) -> None:
+    """A request env cannot replace the worker's own credentials path, even one its `.env` names under a blank export."""
+    worker_runtime = dedicated_worker_startup_runtime_paths(
+        DedicatedWorkerLayout(dedicated_root="/app/worker", config_path="/app/config.yaml", worker_port=8766),
+        worker_key="v1:default:shared:code",
+        process_env={},
+        env_file_values={},
+    )
+    worker_runtime = replace(
+        worker_runtime,
+        process_env={**worker_runtime.process_env, "GOOGLE_APPLICATION_CREDENTIALS": exported},
+        env_file_values={"GOOGLE_APPLICATION_CREDENTIALS": "/worker/adc.json"},
+    )
+
+    execution_env = sandbox_exec_module.request_execution_env(
+        "python",
+        {"GOOGLE_APPLICATION_CREDENTIALS": "/primary/adc.json", "PROBE": "kept"},
+        worker_runtime,
+    )
+
+    assert execution_env["PROBE"] == "kept"
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in execution_env
+
+
 def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3743,7 +3768,8 @@ def test_sandbox_runner_stops_a_shell_command_past_its_timeout_in_subprocess_mod
     )
 
     assert response.status_code == 200
-    assert response.json() == {
+    # The response streams the command's progress lines before its result line.
+    assert json.loads(response.text.splitlines()[-1]) == {
         "ok": True,
         "result": "Stopped after 1s.\nOutput:\nstarted",
         "error": None,

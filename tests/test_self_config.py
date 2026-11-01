@@ -708,7 +708,7 @@ class TestUpdateOwnConfig:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
             with _as_requester(tool):
                 result = tool.update_own_config(thread_mode="invalid")
-            assert "Error validating configuration" in result
+            assert result.startswith("❌ Invalid configuration:\n• thread_mode: Input should be ")
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].thread_mode == "thread"
@@ -749,7 +749,9 @@ class TestUpdateOwnConfig:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
             with _as_requester(tool):
                 result = tool.update_own_config(num_history_runs=2, num_history_messages=10)
-            assert "Error validating configuration" in result
+            assert result.startswith(
+                "❌ Invalid configuration:\n• config: num_history_runs and num_history_messages are mutually exclusive\n",
+            )
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].num_history_runs is None

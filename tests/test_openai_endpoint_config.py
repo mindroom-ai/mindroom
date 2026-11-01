@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         ("default", "https://api.openai.com/v1/"),
         ("dotenv", "https://dotenv.example/v1/"),
         ("dotenv_with_null_model_url", "https://dotenv.example/v1/"),
+        ("dotenv_under_blank_export", "https://dotenv.example/v1/"),
         ("process", "https://process.example/v1/"),
         ("process_snapshot", "https://process.example/v1/"),
         ("model", "https://model.example/v1/"),
@@ -46,7 +47,7 @@ async def test_openai_endpoint_precedence_reaches_sdk_clients(
     endpoint_source: str,
     expected_url: str,
 ) -> None:
-    """Runtime endpoints reach SDK construction, while explicit endpoints keep precedence."""
+    """Runtime endpoints reach SDK construction, while explicit endpoints keep precedence; a blank export is unset."""
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
@@ -56,6 +57,8 @@ async def test_openai_endpoint_precedence_reaches_sdk_clients(
     if endpoint_source in {"process", "process_snapshot", "model", "client_params"}:
         process_env["OPENAI_BASE_URL"] = "https://process.example/v1"
         monkeypatch.setenv("OPENAI_BASE_URL", "https://process.example/v1")
+    elif endpoint_source == "dotenv_under_blank_export":
+        process_env["OPENAI_BASE_URL"] = ""
     runtime_paths = resolve_runtime_paths(config_path=config_path, process_env=process_env)
     if endpoint_source == "process_snapshot":
         monkeypatch.delenv("OPENAI_BASE_URL")
@@ -82,5 +85,5 @@ async def test_openai_endpoint_precedence_reaches_sdk_clients(
 
     [request] = wire.requests
     assert str(request.url) == expected_url + ("responses" if responses else "chat/completions")
-    if endpoint_source in {"default", "dotenv", "dotenv_with_null_model_url", "process_snapshot"}:
+    if endpoint_source not in {"process", "model", "client_params"}:
         assert "OPENAI_BASE_URL" not in os.environ

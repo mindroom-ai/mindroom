@@ -642,6 +642,21 @@ def test_a_provider_family_s_set_endpoint_variables_count(tmp_path: Path) -> Non
     assert _endpoint_variables("GOOGLE_API_KEY", runtime_paths) == []
 
 
+def test_endpoint_variables_are_read_as_the_providers_read_them(tmp_path: Path) -> None:
+    """A blank export does not hide the ``.env`` endpoint, and a ``<NAME>_FILE`` variable sets one, as for providers."""
+    endpoint_file = tmp_path / "openai-endpoint"
+    endpoint_file.write_text("https://file-gateway.example/v1\n", encoding="utf-8")
+    runtime_paths = _runtime_with_env(
+        tmp_path,
+        {"ANTHROPIC_BASE_URL": "https://gateway.example"},
+        {"ANTHROPIC_BASE_URL": "", "OPENAI_BASE_URL_FILE": str(endpoint_file), "GROQ_BASE_URL": ""},
+    )
+
+    assert _endpoint_variables("ANTHROPIC_API_KEY", runtime_paths) == ["ANTHROPIC_BASE_URL"]
+    assert _endpoint_variables("OPENAI_API_KEY", runtime_paths) == ["OPENAI_BASE_URL"]
+    assert _endpoint_variables("GROQ_API_KEY", runtime_paths) == []
+
+
 _GATEWAY = "https://gateway.example/v1"
 
 
@@ -1347,7 +1362,7 @@ def test_memory_embedder_check_warns_when_endpoint_unreachable(
             "OPENAI_API_KEY",
             "memory.llm.config.openai_base_url",
         ),
-        # Mem0's OpenAI client reads OPENAI_BASE_URL itself, for the shared key and a configured one alike.
+        # The memory LLM reaches OPENAI_BASE_URL, for the shared key and a configured one alike.
         (
             "openai",
             {"model": "m"},
@@ -1362,7 +1377,7 @@ def test_memory_embedder_check_warns_when_endpoint_unreachable(
             "memory.llm.config.api_key",
             "OPENAI_BASE_URL",
         ),
-        # Mem0's Anthropic client leaves the endpoint to the SDK, which reads ANTHROPIC_BASE_URL.
+        # The Anthropic memory LLM reaches ANTHROPIC_BASE_URL.
         (
             "anthropic",
             {"model": "m", "api_key": "sk-litellm"},

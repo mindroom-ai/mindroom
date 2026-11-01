@@ -66,45 +66,27 @@ def managed_room_alias_localpart(room_key: str, runtime_paths: RuntimePaths) -> 
     return f"{room_key}_{namespace}"
 
 
+def managed_room_alias(room_key: str, server_name: str, runtime_paths: RuntimePaths) -> str:
+    """Build the full alias MindRoom gives the managed room for a room key, as its record stores it."""
+    return f"#{managed_room_alias_localpart(room_key, runtime_paths)}:{server_name}"
+
+
 def managed_space_alias_localpart(runtime_paths: RuntimePaths) -> str:
     """Build the reserved alias localpart for the root MindRoom Space."""
     return managed_room_alias_localpart("_mindroom_root_space", runtime_paths)
 
 
-def _managed_room_key_from_alias_localpart(
-    alias_localpart: str,
-    runtime_paths: RuntimePaths,
-) -> str | None:
-    """Extract the configured managed room key from an alias localpart."""
+def server_emoji_alias_localpart(runtime_paths: RuntimePaths) -> str:
+    """Build the alias localpart of the server custom emoji room."""
+    return managed_room_alias_localpart("emoji", runtime_paths)
+
+
+def managed_room_key_for_alias(room_alias: str, server_name: str, runtime_paths: RuntimePaths) -> str | None:
+    """Return the room key whose managed room alias is exactly ``room_alias``, or None for any other reference."""
+    alias_localpart = room_alias[1:].split(":", 1)[0]
     namespace = _mindroom_namespace(runtime_paths)
-    if not namespace:
-        return alias_localpart
-
-    suffix = f"_{namespace}"
-    if not alias_localpart.endswith(suffix):
-        return None
-    room_key = alias_localpart[: -len(suffix)]
-    return room_key or None
-
-
-def _room_alias_localpart(room_alias: str) -> str | None:
-    """Extract the localpart from a room alias like '#lobby:example.com'."""
-    if not room_alias.startswith("#") or ":" not in room_alias:
-        return None
-    return room_alias[1:].split(":", 1)[0]
-
-
-def room_alias_identifier_candidates(room_alias: str, runtime_paths: RuntimePaths) -> list[str]:
-    """Return alias, localpart, and managed-room key identifiers for one Matrix alias."""
-    identifiers = [room_alias]
-    localpart = _room_alias_localpart(room_alias)
-    if not localpart:
-        return identifiers
-    identifiers.append(localpart)
-    managed_room_key = _managed_room_key_from_alias_localpart(localpart, runtime_paths)
-    if managed_room_key:
-        identifiers.append(managed_room_key)
-    return identifiers
+    room_key = alias_localpart.removesuffix(f"_{namespace}") if namespace else alias_localpart
+    return room_key if managed_room_alias(room_key, server_name, runtime_paths) == room_alias else None
 
 
 def is_concrete_matrix_user_id(user_id: str) -> bool:

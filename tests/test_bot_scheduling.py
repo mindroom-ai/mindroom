@@ -454,11 +454,7 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.login_agent_owned_session") as mock_login,
                 patch("mindroom.bot.AgentBot.refresh_presence", new_callable=AsyncMock),
             ):
-                mock_client = AsyncMock()
-                mock_client.add_event_callback = MagicMock()
-                mock_client.add_response_callback = MagicMock()
-                mock_client.user_id = agent_user.user_id
-                mock_client.device_id = "TEST_DEVICE"
+                mock_client = make_matrix_client_mock(user_id=agent_user.user_id)
                 mock_client.access_token = TEST_ACCESS_TOKEN
                 mock_client.rooms = {}
                 mock_login.return_value = owned_matrix_login(mock_client)
@@ -483,8 +479,8 @@ class TestCommandHandling:
         self.config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                    "finance": AgentConfig(display_name="Finance", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
+                    "finance": AgentConfig(display_name="Finance", rooms=["!test:example.org"]),
                 },
                 teams={},
                 room_models={},

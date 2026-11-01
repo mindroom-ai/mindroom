@@ -232,6 +232,16 @@ def test_a_file_that_is_not_a_graph_item_or_link_is_refused(
         (lambda tools: tools.microsoft_files_list_folder(SHARE_LINK, limit=201), "invalid_argument"),
         (lambda tools: tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget", "A1:"), "invalid_argument"),
         (lambda tools: tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget", "A1:CV101"), "too_large"),
+        (
+            lambda tools: tools.microsoft_files_excel_update_range(
+                ITEM_PATH,
+                "Budget",
+                "A1:CV101",
+                [[0] * 100] * 101,
+                WEB_URL,
+            ),
+            "too_large",
+        ),
     ],
 )
 def test_a_malformed_argument_is_refused_before_asking_for_a_connection(
@@ -760,14 +770,3 @@ def test_excel_update_accepts_values_matching_the_address(tmp_path: Path, monkey
 
     assert result["status"] == "ok"
     assert json.loads(graph.requests[-1].content) == {"values": [[1, 2], [3, 4]]}
-
-
-def test_excel_update_refuses_a_range_over_the_cell_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
-
-    result = json.loads(
-        tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", "A1:CV101", [[0] * 100] * 101, WEB_URL),
-    )
-
-    assert result["code"] == "too_large"
-    assert graph.requests == []

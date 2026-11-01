@@ -57,6 +57,7 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import (
     bind_runtime_paths,
+    loop_runs_while_blocked,
     make_conversation_reader_mock,
     make_relation_lookup,
     runtime_paths_for,
@@ -89,7 +90,7 @@ def _room_agent_model(monkeypatch: pytest.MonkeyPatch, *turns: list[ScriptStep])
 
 @dataclass
 class LoopFreedom:
-    """The wrapped file operations that ran, and the first one another coroutine could not run beside."""
+    """The wrapped file operations that ran, and the first one the event loop could not run other work beside."""
 
     called: list[str] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
@@ -97,10 +98,10 @@ class LoopFreedom:
 
 @contextmanager
 def file_work_waiting_for_the_loop(methods: dict[object, tuple[str, ...]]) -> Iterator[LoopFreedom]:
-    """Make each named method wait, before its file work, until another coroutine has run on the event loop.
+    """Make each named method wait, before its file work, until the event loop has run other work.
 
-    Another coroutine runs only while the loop is free, so a method called on the loop thread records itself as
-    blocked; the methods after it skip the wait, which would only time out again.
+    The loop runs other work only while the method runs off it, so a method called on the loop thread records itself
+    as blocked; the methods after it skip the check, so a loop that stays blocked costs at most one wait.
     """
     loop = asyncio.get_running_loop()
     freedom = LoopFreedom()
@@ -108,11 +109,8 @@ def file_work_waiting_for_the_loop(methods: dict[object, tuple[str, ...]]) -> It
     def waiting(method: Callable[..., object], name: str) -> Callable[..., object]:
         def call(*args: object, **kwargs: object) -> object:
             freedom.called.append(name)
-            if not freedom.blocked:
-                try:
-                    asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(timeout=5)
-                except TimeoutError:
-                    freedom.blocked.append(name)
+            if not freedom.blocked and not loop_runs_while_blocked(loop):
+                freedom.blocked.append(name)
             return method(*args, **kwargs)
 
         return call
@@ -1922,6 +1920,7 @@ def test_room_agent_participant_runs_as_that_agent_without_durable_state(
                 "specialist": AgentConfig(
                     display_name="Specialist Agent",
                     model="default",
+                    rooms=["lobby"],
                     tools=["memory"],
                     knowledge_bases=["reference"],
                 ),

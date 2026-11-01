@@ -14,7 +14,7 @@ from mindroom.ai import (
     ai_response,
 )
 from mindroom.config.main import Config
-from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.runs import RunRecord, RunRequirement, ToolExecution
 from mindroom.response_turn import (
     PausedAttempt,
@@ -394,3 +394,42 @@ async def test_a_collected_reply_drops_reasoning() -> None:
 
     assert body == "Answer"
     assert trace == []
+
+
+@pytest.mark.asyncio
+async def test_a_running_tools_output_reaches_the_reply_stream() -> None:
+    """The progress a running call reports passes through to the reply stream unchanged."""
+
+    async def stream() -> AsyncGenerator[object]:
+        yield ToolProgress("call-1", "step 1")
+        yield TextDelta("Answer")
+
+    chunks = [
+        chunk
+        async for chunk in _process_stream_events(
+            stream(),
+            state=_StreamingAttemptState(),
+            show_tool_calls=True,
+            show_reasoning=True,
+            agent_name="a",
+        )
+    ]
+
+    assert chunks == [ToolProgress("call-1", "step 1"), TextDelta("Answer")]
+
+
+@pytest.mark.asyncio
+async def test_a_collected_reply_keeps_tool_output_out_of_its_answer() -> None:
+    """A collected reply's answer and trace never include a running call's output; its presentation keeps it to publish."""
+    presentation = CollectedStreamPresentation(show_tool_calls=True)
+
+    async def stream() -> AsyncGenerator[object]:
+        yield TextDelta("A")
+        yield ToolProgress("call-1", "step 1")
+        yield TextDelta("nswer")
+
+    body, trace = await collect_streamed_response_content(stream(), presentation=presentation)
+
+    assert body == "Answer"
+    assert trace == []
+    assert presentation.tool_progress == {"call-1": "step 1"}

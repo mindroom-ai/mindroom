@@ -43,7 +43,7 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput, persist_interrupted_replay_snapshot
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import RunRequirement, RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
@@ -575,6 +575,8 @@ def _apply_collected_chunk(presentation: CollectedStreamPresentation, chunk: Str
         presentation.start_tool(chunk.call, origin=chunk.origin)
     elif isinstance(chunk, ToolCompleted):
         presentation.complete_tool(chunk.call, origin=chunk.origin)
+    elif isinstance(chunk, ToolProgress):
+        presentation.show_tool_progress(chunk.tool_call_id, chunk.text)
     # Reasoning is shown only while a reply streams; a collected reply drops it.
 
 

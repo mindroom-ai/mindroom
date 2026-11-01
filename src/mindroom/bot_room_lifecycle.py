@@ -445,9 +445,9 @@ class BotRoomLifecycle:
         contact_rooms = await asyncio.to_thread(contact_room_ids, self.deps.runtime_paths, self.deps.agent_name)
         configured_rooms.update(contact_rooms)
         if self.deps.agent_name == ROUTER_AGENT_NAME:
-            root_space_id = matrix_state_for_runtime(self.deps.runtime_paths).space_room_id
-            if root_space_id is not None:
-                configured_rooms.add(root_space_id)
+            # The router maintains the root Space and the server emoji room outside the configured rooms.
+            state = matrix_state_for_runtime(self.deps.runtime_paths)
+            configured_rooms.update(room_id for room_id in (state.space_room_id, state.server_emoji_room_id) if room_id)
 
         return list(current_rooms - configured_rooms)
 

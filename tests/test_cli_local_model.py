@@ -57,13 +57,21 @@ def test_local_model_keeps_agents_credentials_and_original_backup(tmp_path: Path
     assert env.read_text() == "OPENAI_API_KEY=existing-secret\n"
 
 
-@pytest.mark.parametrize("source", ["models: !include models.yaml\n", "models: []\n", "agents: [invalid]\n"])
-def test_invalid_or_composed_configuration_is_not_rewritten(tmp_path: Path, source: str) -> None:
-    """An unsupported document never leaves a partial write or backup."""
+@pytest.mark.parametrize(
+    ("source", "reason"),
+    [
+        ("models: !include models.yaml\n", "could not determine a constructor for the tag"),
+        ("models: []\n", "Configuration must contain a models mapping."),
+        ("agents: [invalid]\n", "agents: Input should be a valid dictionary"),
+    ],
+)
+def test_invalid_or_composed_configuration_is_not_rewritten(tmp_path: Path, source: str, reason: str) -> None:
+    """An unsupported document never leaves a partial write or backup, and the error names what is wrong."""
     path = tmp_path / "config.yaml"
     path.write_text(source)
     result = _configure(path)
     assert result.exit_code == 1
+    assert result.output.startswith(f"Local model configuration failed: {reason}")
     assert path.read_text() == source
     assert not path.with_name("config.yaml.before-local-model").exists()
 

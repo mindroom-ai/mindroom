@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import ATTACHMENT_IDS_KEY
@@ -106,6 +107,8 @@ class ResponseRequest:
     # follows it, so a contact removed while the turn runs still hides its final reply and its errors, and a turn
     # whose contact was already removed runs nothing.
     contact: tuple[ContactRecord, SideName] | None = None
+    # When the turn was requested, before its run started; budgets date the reply's cost by it.
+    requested_at: datetime = field(default_factory=lambda: datetime.now(UTC), compare=False)
 
     def __post_init__(self) -> None:
         """Require the envelope to name the source driving this response."""

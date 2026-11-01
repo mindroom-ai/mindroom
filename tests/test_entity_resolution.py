@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import nio
 import pytest
 
+from mindroom.authorization import configured_responder_entities_for_room
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
@@ -140,6 +142,41 @@ def test_configured_bot_user_ids_for_room_uses_persisted_current_user_ids(tmp_pa
     }
 
 
+@pytest.mark.parametrize(
+    ("namespace", "canonical_alias", "expected"),
+    [
+        ("team1", "#dev:localhost", None),
+        ("", "#dev:other.org", None),
+        ("team1", "#dev_team1:localhost", "a"),
+        ("", "#dev:localhost", "a"),
+    ],
+    ids=["namespace-missing", "other-server", "namespaced", "plain"],
+)
+def test_live_canonical_alias_selects_configured_responders_only_when_it_is_the_managed_alias(
+    tmp_path: Path,
+    namespace: str,
+    canonical_alias: str,
+    expected: str | None,
+) -> None:
+    """A room outside MindRoom whose alias only shares a room key's localpart answers with the agents present."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": namespace},
+    )
+    config = bind_runtime_paths(
+        Config(agents={"a": AgentConfig(display_name="A", rooms=["dev"])}),
+        runtime_paths,
+    )
+    room = nio.MatrixRoom("!other:localhost", "@user:localhost")
+    room.canonical_alias = canonical_alias
+
+    responders = configured_responder_entities_for_room(room, config, runtime_paths)
+
+    expected_ids = None if expected is None else [entity_identity_registry(config, runtime_paths).current_id(expected)]
+    assert responders == expected_ids
+
+
 def test_configured_call_agent_includes_authorized_ad_hoc_invited_room(tmp_path: Path) -> None:
     """A calls-enabled agent may answer in a room accepted through its invite policy."""
     config = _call_config(tmp_path, general=True, other=False)
@@ -150,6 +187,7 @@ def test_configured_call_agent_includes_authorized_ad_hoc_invited_room(tmp_path:
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent={"general": {"!agent-call:server"}},
+            personal_rooms_by_agent={},
         )
         == "general"
     )
@@ -168,6 +206,7 @@ def test_configured_call_agent_rejects_ambiguous_invited_room(tmp_path: Path) ->
                 "general": {"!agent-call:server"},
                 "other": {"!agent-call:server"},
             },
+            personal_rooms_by_agent={},
         )
 
 
@@ -185,6 +224,7 @@ def test_explicit_call_room_owner_overrides_ambiguous_invited_membership(tmp_pat
                 "general": {"!agent-call:server"},
                 "other": {"!agent-call:server"},
             },
+            personal_rooms_by_agent={},
         )
         == "general"
     )
@@ -200,6 +240,7 @@ def test_configured_call_agent_ignores_stale_invites_when_acceptance_is_disabled
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent={"general": {"!agent-call:server"}},
+            personal_rooms_by_agent={},
         )
         is None
     )
@@ -218,6 +259,7 @@ def test_configured_call_agent_uses_live_invited_room_state(tmp_path: Path) -> N
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent=invited_rooms_by_agent,
+            personal_rooms_by_agent={},
         )
         is None
     )
@@ -230,6 +272,7 @@ def test_configured_call_agent_uses_live_invited_room_state(tmp_path: Path) -> N
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent=invited_rooms_by_agent,
+            personal_rooms_by_agent={},
         )
         == "general"
     )

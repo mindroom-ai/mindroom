@@ -1103,6 +1103,56 @@ def test_service_install_keeps_the_shell_dashboard_key(
 
 @pytest.mark.parametrize("entry_point", ["run --service", "service install"])
 @pytest.mark.parametrize(
+    ("env_content", "shell_env", "error"),
+    [
+        (
+            "MINDROOM_BASE_URL=https://mindroom.example.org\n",
+            {},
+            "Error: MINDROOM_BASE_URL was removed; set MINDROOM_PUBLIC_URL",
+        ),
+        # Only this shell enables trusted upstream auth, and the service never sees it.
+        (
+            "MINDROOM_PUBLIC_URL=https://mindroom.example.org\nMINDROOM_DASHBOARD_URL=https://admin.example.org\n",
+            {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"},
+            "Error: MINDROOM_DASHBOARD_URL requires trusted upstream auth",
+        ),
+    ],
+    ids=["retired-base-url", "shell-only-trusted-upstream"],
+)
+def test_service_install_refuses_dashboard_settings_the_service_cannot_start_with(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entry_point: str,
+    env_content: str,
+    shell_env: dict[str, str],
+    error: str,
+) -> None:
+    """Dashboard settings the service would refuse fail the install with `mindroom run`'s error, not at service start."""
+    (tmp_path / ".env").write_text(env_content, encoding="utf-8")
+    runtime_paths = _shell_runtime(tmp_path, **shell_env)
+    manager = _login_service_manager()
+
+    if entry_point == "run --service":
+        with pytest.raises(typer.Exit) as exit_info:
+            start_login_service(runtime_paths, manager)
+        exit_code, output = exit_info.value.exit_code, capsys.readouterr().err
+    else:
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        for name, value in shell_env.items():
+            monkeypatch.setenv(name, value)
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        exit_code, output = result.exit_code, result.output
+
+    assert exit_code == 1
+    assert error in normalize_console_output(output)
+    manager.install_service.assert_not_called()
+    manager.install_runtime.assert_not_called()
+
+
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+@pytest.mark.parametrize(
     ("env_content", "warned"),
     [
         ("MATRIX_HOMESERVER=https://mindroom.chat\n", True),

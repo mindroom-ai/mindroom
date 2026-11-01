@@ -504,14 +504,16 @@ class TestMatrixRegistration:
             )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"], ids=["plain", "byte-order-mark"])
     async def test_register_user_uses_synapse_shared_secret_file_when_configured(
         self,
         tmp_path: Path,
+        encoding: str,
     ) -> None:
-        """Hosted Synapse instances can create bot accounts with shared-secret registration."""
+        """Hosted Synapse instances can create bot accounts with a shared secret file, saved with or without a BOM."""
         test_pass = "test_pass"  # noqa: S105
         shared_secret_path = tmp_path / "matrix-registration-secret"
-        shared_secret_path.write_text("shared-secret-value\n", encoding="utf-8")
+        shared_secret_path.write_text("shared-secret-value\n", encoding=encoding)
         runtime_paths = _runtime_paths(
             tmp_path,
             MATRIX_REGISTRATION_SHARED_SECRET_FILE=str(shared_secret_path),

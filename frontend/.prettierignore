@@ -13,10 +13,9 @@ build/
 package-lock.json
 bun.lock
 yarn.lock
-
-# Coverage
-coverage/
-.nyc_output/
+src/components/Integrations/iconMapping.tsx
+src/test/fixtures/config-schema.json
+src/test/fixtures/egressPresets.json
 
 # IDE
 .vscode/

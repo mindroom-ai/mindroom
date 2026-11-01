@@ -36,6 +36,7 @@ teams:
 
 Every room key listed by an agent or team, or under top-level `rooms`, is a managed room, created on startup or config reload if it does not exist yet.
 Entries starting with `!` are existing Matrix room IDs, which are joined as they are and are not created or managed.
+A `#` room alias is accepted only as the alias MindRoom gives a managed room (see [Room Management](#room-management)), so list a room MindRoom did not create by its `!` room ID.
 
 ## Room policy
 

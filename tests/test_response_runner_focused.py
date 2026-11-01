@@ -923,22 +923,22 @@ async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_ow
     """The proof deadline returns while its still-live store reader stays owned."""
     inbox = _inbox()
     response_started = asyncio.Event()
-    proof_started = asyncio.Event()
     proof_cancelled = asyncio.Event()
     release_proof = asyncio.Event()
     proof_finished = asyncio.Event()
+    drain_done_when_proof_cancelled: list[bool] = []
 
     async def interrupted_response() -> None:
         response_started.set()
         await asyncio.Event().wait()
 
     async def cancellation_resistant_proof() -> bool:
-        proof_started.set()
         try:
             while not release_proof.is_set():
                 try:
                     await release_proof.wait()
                 except asyncio.CancelledError:
+                    drain_done_when_proof_cancelled.append(drain.done())
                     proof_cancelled.set()
             return True
         finally:
@@ -952,35 +952,24 @@ async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_ow
     )
     await response_started.wait()
     inbox.begin_process_shutdown()
-    loop = asyncio.get_running_loop()
-    started_at = loop.time()
-
-    async def delayed_release() -> None:
-        await asyncio.sleep(0.2)
-        release_proof.set()
-
-    release_task = asyncio.create_task(delayed_release())
+    drain = asyncio.create_task(
+        inbox.drain_inbox_responses(
+            cancel_after_seconds=0.01,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        ),
+    )
 
     try:
-        with pytest.raises(
-            ResponseShutdownTimeoutError,
-            match="recovery proof",
-        ):
-            await asyncio.wait_for(
-                inbox.drain_inbox_responses(
-                    cancel_after_seconds=0.01,
-                    shutdown_intent=ORDERLY_SHUTDOWN,
-                ),
-                timeout=0.1,
-            )
-        assert loop.time() - started_at < 0.08
-        assert proof_started.is_set()
-        await asyncio.wait_for(proof_cancelled.wait(), timeout=0.02)
+        await asyncio.wait_for(proof_cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        # Only a drain that waited, however briefly, lets the cancellation reach the proof before it returns.
+        assert drain_done_when_proof_cancelled[:1] == [True], "the drain waited for its recovery proof"
+        with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
+            drain.result()
         assert inbox.pending_inbox_response_count == 1
     finally:
         release_proof.set()
-        await asyncio.wait_for(proof_finished.wait(), timeout=0.1)
-        await release_task
+        await asyncio.wait_for(proof_finished.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        await asyncio.gather(drain, return_exceptions=True)
         await asyncio.sleep(0)
         await asyncio.gather(response_task, return_exceptions=True)
 
@@ -8523,7 +8512,7 @@ def test_a_finished_approval_continuation_tells_automations_its_source_events(
 
     deps = coordinator.approvals._approval_post_response_deps(continuation)
     assert deps.notify_response_finished is not None
-    deps.notify_response_finished()
+    deps.notify_response_finished(None)
 
     assert automations.finished == [("$prompt",)]
 
@@ -8582,7 +8571,7 @@ async def test_automations_hear_of_every_final_response(succeeded: bool) -> None
     await apply_post_response_effects(
         FinalDeliveryOutcome(ending=Completed() if succeeded else Failed(FailureCause.ERROR)),
         ResponseOutcome(response_run_id="run-1", run_succeeded=succeeded),
-        PostResponseEffectsDeps(logger=MagicMock(), notify_response_finished=lambda: calls.append("finished")),
+        PostResponseEffectsDeps(logger=MagicMock(), notify_response_finished=lambda _cost: calls.append("finished")),
     )
     assert calls == ["finished"]
 

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
+from mindroom.config.main import config_validation_summary
 from mindroom.config.personal_agents import (
     CreatedAgentEntry,
     GeneratedAgentEdits,
@@ -75,7 +76,7 @@ def _refuse_unloadable(config: Config, runtime_paths: RuntimePaths, roster: Pers
         authored = config.authored_model_dump()
         config.validate_with_runtime(authored, runtime_paths, tolerate_plugin_load_errors=True, roster=roster)
     except ValueError as exc:  # Pydantic and runtime validation errors are both ValueErrors.
-        msg = f"The agent would not load with this change, so nothing was stored: {exc}"
+        msg = f"The agent would not load with this change, so nothing was stored: {config_validation_summary(exc)}"
         raise _GeneratedAgentError(msg) from exc
 
 
@@ -269,7 +270,7 @@ def _reserve_personal_agent(
             # An owner ID such as one with a space or a wildcard would make every later config load invalid.
             AgentConfig.model_validate(agent_data)
         except ValidationError as exc:
-            msg = f"{user_id} cannot own a personal agent: {exc}"
+            msg = f"{user_id} cannot own a personal agent: {config_validation_summary(exc)}"
             raise ValueError(msg) from exc
         if entry is not existing:
             _append_personal_agent_roster_entry(runtime_paths, entry)

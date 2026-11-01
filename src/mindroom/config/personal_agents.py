@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _USERNAME_PLACEHOLDER = "{username}"
-_PLACEHOLDER_PATTERN = re.compile(r"\{(user|username|user_display_name)\}")
+_PLACEHOLDER_PATTERN = re.compile(r"\{(user|username|user_display_name|user_first_name)\}")
 _MATRIX_LOCALPART_PATTERN = re.compile(r"[a-z0-9._=/-]+")
 _MAX_USERNAME_LENGTH = 40
 _MAX_DISPLAY_NAME_LENGTH = 100
@@ -62,9 +62,9 @@ class PersonalAgentTemplateConfig(BaseModel):
     )
     agent: AgentConfig = Field(
         description=(
-            "Agent fields shared by every user's agent; display_name, role, and instructions accept "
-            "{user}, {username}, and {user_display_name}, and the template key in delegate_to names each user's "
-            "own agent. Only the owner and administrators may use each agent "
+            "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, "
+            "{username}, {user_display_name}, and {user_first_name}, and the template key in delegate_to names "
+            "each user's own agent. Only the owner and administrators may use each agent "
             "unless access admits others, and the owner is always added to access.users and credential_managers"
         ),
     )
@@ -209,6 +209,10 @@ class _PersonalAgentExpansion:
     data: object
     instances: dict[str, PersonalAgentInstance]
     probe_data: object | None
+    # Call profile by template key for templates named in calls.agents; data lists their generated agents instead.
+    call_templates: dict[str, str]
+    # The calls.agents entries expansion added for generated agents, which saving drops again.
+    call_agents: dict[str, str]
 
 
 class PersonalAgentRoster(BaseModel):
@@ -236,6 +240,12 @@ def personal_agent_display_name(user_id: str, display_name: str | None) -> str:
     return (cleaned or _localpart(user_id))[:_MAX_DISPLAY_NAME_LENGTH]
 
 
+def _first_name(entry: PersonalAgentRosterEntry) -> str:
+    """Return the `{user_first_name}` value: the display name's first word, or the localpart when it has none."""
+    words = entry.user_display_name.split(maxsplit=1)
+    return words[0] if words else _localpart(entry.user_id)
+
+
 def _render_placeholders(text: str, values: Mapping[str, str]) -> str:
     return _PLACEHOLDER_PATTERN.sub(lambda match: values[match.group(1)], text)
 
@@ -257,7 +267,12 @@ def personal_agent_data(template: Mapping[str, Any], entry: PersonalAgentRosterE
     if isinstance(overrides, dict):
         agent.update(deepcopy(overrides))
 
-    values = {"user": entry.user_id, "username": entry.username, "user_display_name": entry.user_display_name}
+    values = {
+        "user": entry.user_id,
+        "username": entry.username,
+        "user_display_name": entry.user_display_name,
+        "user_first_name": _first_name(entry),
+    }
     for field in ("display_name", "role"):
         if isinstance(agent.get(field), str):
             agent[field] = _render_placeholders(agent[field], values)
@@ -326,9 +341,56 @@ def _probe_agents(
     return agents
 
 
+def _call_templates(config: Mapping[str, Any], templates: Mapping[str, dict[str, Any]]) -> dict[str, str]:
+    """Return the call profile of each template that calls.agents names."""
+    calls = config.get("calls")
+    if not isinstance(calls, dict) or not isinstance(calls.get("agents"), dict):
+        return {}
+    # A key without a string profile stays in calls.agents, where CallsConfig reports it like any other.
+    assigned = {
+        key: profile for key, profile in calls["agents"].items() if key in templates and isinstance(profile, str)
+    }
+    # Expansion removes the template keys, so CallsConfig would see a template's profile only once a user is onboarded.
+    profiles = calls.get("profiles")
+    if unknown := sorted({p for p in assigned.values() if not isinstance(profiles, dict) or p not in profiles}):
+        msg = f"calls.agents references unknown profile(s): {', '.join(unknown)}"
+        raise ValueError(msg)
+    for key in assigned:
+        users = templates[key].get("users")
+        overrides = (
+            [override for override in users.values() if isinstance(override, dict)] if isinstance(users, dict) else []
+        )
+        if any(agent.get("rooms") for agent in (templates[key]["agent"], *overrides)):
+            msg = (
+                f"calls.agents names personal_agents.{key}, whose agent lists rooms in the template or a user's "
+                "override; a room takes only one calls-enabled agent"
+            )
+            raise ValueError(msg)
+    return assigned
+
+
+def _with_call_agents(
+    config: Mapping[str, Any],
+    call_templates: Mapping[str, str],
+    instances: Mapping[str, PersonalAgentInstance],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Replace each template key in calls.agents with the agents generated from that template, and return those added.
+
+    An agent that calls.agents names itself keeps that profile.
+    """
+    calls = config["calls"]
+    call_agents = {key: profile for key, profile in calls["agents"].items() if key not in call_templates}
+    added = {
+        agent_name: call_templates[instance.template]
+        for agent_name, instance in instances.items()
+        if instance.template in call_templates and agent_name not in call_agents
+    }
+    return {**config, "calls": {**calls, "agents": call_agents | added}}, added
+
+
 def expand_personal_agents(data: object, roster: Sequence[PersonalAgentRosterEntry]) -> _PersonalAgentExpansion:
     """Add one generated agent per roster entry to raw config data without mutating the input."""
-    unexpanded = _PersonalAgentExpansion(data, {}, None)
+    unexpanded = _PersonalAgentExpansion(data, {}, None, {}, {})
     if not isinstance(data, dict):
         return unexpanded
     config = cast("dict[str, Any]", data)
@@ -365,11 +427,15 @@ def expand_personal_agents(data: object, roster: Sequence[PersonalAgentRosterEnt
         owners.setdefault(entry.template, set()).add(entry.user_id)
 
     probes = _probe_agents(templates, owners)
-    return _PersonalAgentExpansion(
-        {**config, "agents": agents} if instances else config,
-        instances,
-        {**config, "agents": {**agents, **probes}} if probes else None,
-    )
+    expanded: dict[str, Any] = {**config, "agents": agents} if instances else config
+    probe_data: dict[str, Any] | None = {**config, "agents": {**agents, **probes}} if probes else None
+    call_templates = _call_templates(config, templates)
+    call_agents: dict[str, str] = {}
+    if call_templates:
+        expanded, call_agents = _with_call_agents(expanded, call_templates, instances)
+        if probe_data is not None:
+            probe_data, _ = _with_call_agents(probe_data, call_templates, instances)
+    return _PersonalAgentExpansion(expanded, instances, probe_data, call_templates, call_agents)
 
 
 def personal_agent_roster_path(runtime_paths: RuntimePaths) -> Path:

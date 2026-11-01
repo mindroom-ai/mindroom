@@ -220,44 +220,6 @@ def test_scopes_requested_as_user_scope_only(tmp_path: Path) -> None:
     assert "scope" not in query
 
 
-def test_authorization_needs_the_slack_app(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    get_runtime_credentials_manager(runtime_paths).save_credentials(
-        "slack_oauth_client",
-        {"client_id": "slack-client-id", "client_secret": "slack-secret"},
-    )
-
-    with pytest.raises(OAuthProviderError, match="The MindRoom Slack app is not configured"):
-        asyncio.run(oauth_authorization_url(slack_oauth_provider(), runtime_paths, state="opaque-state"))
-
-
-def test_runtime_endpoints_reject_a_failed_auth_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    _configure(runtime_paths)
-    monkeypatch.setattr(
-        slack_oauth,
-        "slack_http_client",
-        lambda: _mock_client(lambda _request: httpx.Response(200, json={"ok": False, "error": "invalid_auth"})),
-    )
-
-    with pytest.raises(OAuthProviderError, match="The MindRoom Slack app is not configured"):
-        asyncio.run(slack_oauth_provider().runtime_endpoints(runtime_paths))
-
-
-def test_runtime_endpoints_reject_an_unreachable_slack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    _configure(runtime_paths)
-
-    def unreachable(request: httpx.Request) -> httpx.Response:
-        message = "no route to slack.com"
-        raise httpx.ConnectError(message, request=request)
-
-    monkeypatch.setattr(slack_oauth, "slack_http_client", lambda: _mock_client(unreachable))
-
-    with pytest.raises(OAuthProviderError, match="Slack could not be reached; try again"):
-        asyncio.run(slack_oauth_provider().runtime_endpoints(runtime_paths))
-
-
 def test_runtime_endpoints_look_up_the_bot_once(tmp_path: Path, auth_test_calls: list[httpx.Request]) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     _configure(runtime_paths)

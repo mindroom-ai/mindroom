@@ -433,7 +433,20 @@ def iter_usage_storage_rows(
 
     ``since`` reads only snapshots last updated at or after that epoch time, which leaves out the undated usage a
     session had before the ledger.
+
+    The whole database is read in one snapshot that is closed before the first row is yielded, so the caller's work
+    between rows never holds the database's read lock, which writers wait for. All of the database's rows are
+    therefore held in memory at once.
     """
+    yield from list(_read_usage_storage(source, since=since))
+
+
+def _read_usage_storage(
+    source: UsageStorageSource,
+    *,
+    since: float | None,
+) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
+    """Yield the database's rows, and a diagnostic for what it could not read, while its snapshot is open."""
     if not source.path.is_file():
         yield _source_diagnostic(source, "absent", "database absent")
         return

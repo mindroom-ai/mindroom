@@ -1,7 +1,6 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { useAuth } from './useAuth'
 import { restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
 import { cacheInstance, getCachedInstance, loadInstance } from '@/lib/instance-resource'
@@ -35,7 +34,6 @@ export function useInstance() {
   const [snapshot, setSnapshot] = useState({ userId, instance: cachedInstance })
   const instance = snapshot.userId === userId ? snapshot.instance : cachedInstance
   const [loading, setLoading] = useState(!cachedInstance)
-  const supabase = createClient()
 
   useEffect(() => {
     if (authLoading) return
@@ -91,7 +89,6 @@ export function useInstance() {
     }
 
     // Poll for changes every 15 seconds for more responsive updates
-    // (avoids RLS issues with direct Supabase access)
     const interval = setInterval(async () => {
       await fetchInstance(false)  // Background update, no loading state
     }, 15000)
@@ -100,7 +97,7 @@ export function useInstance() {
       active = false
       clearInterval(interval)
     }
-  }, [user, authLoading, supabase])
+  }, [user, authLoading])
 
   const restartInstance = async () => {
     if (!instance) return

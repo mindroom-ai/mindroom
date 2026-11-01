@@ -17,7 +17,7 @@ from mindroom.matrix import client_room_admin
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
-from mindroom.matrix_identifiers import managed_space_alias_localpart, room_alias_identifier_candidates
+from mindroom.matrix_identifiers import managed_space_alias_localpart
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
@@ -158,8 +158,7 @@ async def test_ensure_user_in_rooms_joins_with_the_saved_internal_account(
 def test_config_rejects_room_key_that_conflicts_with_root_space_alias() -> None:
     """Managed room keys must not map to the reserved root Space alias."""
     runtime_paths = constants.resolve_runtime_paths()
-    reserved_alias = managed_space_alias_localpart(runtime_paths)
-    colliding_room_key = room_alias_identifier_candidates(f"#{reserved_alias}:example.com", runtime_paths)[-1]
+    colliding_room_key = "_mindroom_root_space"
 
     with pytest.raises(ValueError, match="reserved root Space alias"):
         Config.model_validate(
@@ -174,8 +173,7 @@ def test_config_rejects_room_key_that_conflicts_with_root_space_alias() -> None:
 def test_config_allows_colliding_room_key_when_space_disabled() -> None:
     """Colliding room keys should be accepted when the space feature is disabled."""
     runtime_paths = constants.resolve_runtime_paths()
-    reserved_alias = managed_space_alias_localpart(runtime_paths)
-    colliding_room_key = room_alias_identifier_candidates(f"#{reserved_alias}:example.com", runtime_paths)[-1]
+    colliding_room_key = "_mindroom_root_space"
 
     config = Config.model_validate(
         {
@@ -734,7 +732,7 @@ async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -
 
 @pytest.mark.asyncio
 async def test_setup_rooms_and_memberships_reconciles_root_space_once(tmp_path) -> None:  # noqa: ANN001
-    """Space reconciliation should happen as a post-room phase during startup."""
+    """Space and server emoji room reconciliation should happen as a post-room phase during startup."""
     orchestrator = _MultiAgentOrchestrator(
         runtime_paths=orchestrator_runtime_paths(tmp_path),
         config=Config(
@@ -760,6 +758,7 @@ async def test_setup_rooms_and_memberships_reconciles_root_space_once(tmp_path) 
             new=AsyncMock(side_effect=[{"lobby": "!room1:localhost"}, {"lobby": "!room1:localhost"}]),
         ),
         patch.object(orchestrator._rooms, "link_root_space", new=AsyncMock()) as mock_root_space,
+        patch.object(orchestrator._rooms, "ensure_server_emoji_room", new=AsyncMock()) as mock_emoji_room,
         patch.object(orchestrator._rooms, "_ensure_room_invitations", new=AsyncMock()),
         patch("mindroom.orchestration.rooms.get_rooms_for_entity", return_value=["lobby"]),
         patch("mindroom.orchestration.rooms.resolve_room_aliases", return_value=["!room1:localhost"]),
@@ -771,6 +770,7 @@ async def test_setup_rooms_and_memberships_reconciles_root_space_once(tmp_path) 
     assert mock_root_space.await_args_list == [
         call({"lobby": "!room1:localhost"}),
     ]
+    mock_emoji_room.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

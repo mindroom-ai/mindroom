@@ -113,9 +113,6 @@ def _workspace_tool_factory(
             # A workspace-specific OAuth tool must never inherit global delegated auth.
             return False
 
-        def oauth_only_fallback(_self: object) -> bool:
-            return False
-
         return type(
             f"{prefix}_{base_class.__name__}",
             (base_class,),
@@ -124,7 +121,6 @@ def _workspace_tool_factory(
                 "_oauth_provider": provider,
                 "_oauth_tool_name": provider.tool_config_service,
                 "_apply_runtime_original_auth_kwargs": oauth_only_kwargs,
-                "_should_fallback_to_original_auth": oauth_only_fallback,
             },
         )
 

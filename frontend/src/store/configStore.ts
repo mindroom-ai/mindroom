@@ -465,6 +465,35 @@ function deleteDraftRoomMetadata(config: Config, roomId: string): Config {
   };
 }
 
+// Removes the config entries keyed by a deleted agent or team, so its deletion
+// saves without a validation error naming them: its `calls.agents` entry, which
+// only an agent has, and its own `room_thread_summary_models` key unless a room
+// has the same name, because that key still names the room.
+function configWithoutEntityKeys(
+  state: Pick<ConfigState, "config" | "loadedConfig">,
+  entityId: string,
+  rooms: Room[],
+): { config: Config | null; touchedPaths: ConfigDiagnosticPath[] } {
+  const paths: ConfigPath[] = [["calls", "agents", entityId]];
+  if (!rooms.some((room) => room.id === entityId)) {
+    paths.push(["room_thread_summary_models", entityId]);
+  }
+  let config = state.config;
+  const touchedPaths: ConfigDiagnosticPath[] = [];
+  for (const path of paths) {
+    if (!config || getPathValue(config, path) === undefined) {
+      continue;
+    }
+    config = configWithValue(
+      { config, loadedConfig: state.loadedConfig },
+      path,
+      undefined,
+    );
+    touchedPaths.push([...path]);
+  }
+  return { config, touchedPaths };
+}
+
 // Sets or clears one room's model override; the block goes once it is empty.
 function configWithRoomModel(
   config: Config,
@@ -1313,17 +1342,29 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       ),
     );
     const nextTeams = removeMissingTeamMembers(state.teams, nextAgents);
+    const nextRooms = roomsFromDraft(
+      state.config,
+      state.rooms,
+      nextAgents,
+      nextTeams,
+    );
+    const { config, touchedPaths } = configWithoutEntityKeys(
+      state,
+      agentId,
+      nextRooms,
+    );
     const { [agentId]: _removedBackup, ...remainingBackups } =
       state.privateWorkerScopeBackups;
     set({
       agents: nextAgents,
       teams: nextTeams,
-      rooms: roomsFromDraft(state.config, state.rooms, nextAgents, nextTeams),
+      config,
+      rooms: nextRooms,
       agentPoliciesByAgent: nextAgentPoliciesByAgent,
       privateWorkerScopeBackups: remainingBackups,
       selectedAgentId:
         state.selectedAgentId === agentId ? null : state.selectedAgentId,
-      ...markDraftDirty(state, [["agents"], ["teams"]]),
+      ...markDraftDirty(state, [["agents"], ["teams"], ...touchedPaths]),
     });
     if (get().config != null && deletedAgent != null) {
       void get().refreshAgentPolicies(nextAgents);
@@ -1385,17 +1426,24 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   deleteTeam: (teamId) => {
     set((state) => {
       const nextTeams = state.teams.filter((team) => team.id !== teamId);
+      const nextRooms = roomsFromDraft(
+        state.config,
+        state.rooms,
+        state.agents,
+        nextTeams,
+      );
+      const { config, touchedPaths } = configWithoutEntityKeys(
+        state,
+        teamId,
+        nextRooms,
+      );
       return {
         teams: nextTeams,
-        rooms: roomsFromDraft(
-          state.config,
-          state.rooms,
-          state.agents,
-          nextTeams,
-        ),
+        config,
+        rooms: nextRooms,
         selectedTeamId:
           state.selectedTeamId === teamId ? null : state.selectedTeamId,
-        ...markDraftDirty(state, [["teams"]]),
+        ...markDraftDirty(state, [["teams"], ...touchedPaths]),
       };
     });
   },

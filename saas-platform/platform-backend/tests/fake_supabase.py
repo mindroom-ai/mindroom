@@ -1,9 +1,13 @@
 """In-memory stand-in for the subset of the Supabase query builder the backend uses.
 
 Rows are plain dicts per table. Filters compare values as strings, like PostgREST query parameters.
-Embedded many-to-one selects such as ``subscription:subscriptions(*)`` resolve through ``<table>_id`` columns.
+Embedded many-to-one selects such as ``subscription:subscriptions(*)`` or ``accounts(email)`` resolve through
+``<table>_id`` columns.
 RPC calls are recorded in ``rpc_calls``, return ``rpc_results[name]`` (default None), and leave the tables alone.
 Deleting an auth user through ``auth.admin`` records it and removes its ``accounts`` row, like the ON DELETE CASCADE.
+A counted select whose range starts past the matching rows fails, like PostgREST's 416 (PGRST103).
+A ``head`` select returns only the count, like PostgREST's HEAD request.
+``max_rows`` caps the rows one select returns, like PostgREST's ``db-max-rows``.
 """
 
 from __future__ import annotations
@@ -13,7 +17,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-_EMBED = re.compile(r"(\w+):(\w+)\(([^)]*)\)")
+from postgrest.exceptions import APIError
+
+_EMBED = re.compile(r"(?:(\w+):)?(\w+)\(([^)]*)\)")
 # Embedded table -> foreign key column on the parent row.
 _FOREIGN_KEYS = {"subscriptions": "subscription_id", "accounts": "account_id"}
 
@@ -23,6 +29,7 @@ class FakeResult:
     """Query result exposing ``data`` like the Supabase client."""
 
     data: Any
+    count: int | None = None
 
 
 @dataclass
@@ -35,15 +42,17 @@ class FakeQuery:
     columns: str = "*"
     payload: dict[str, Any] | None = None
     filters: list[tuple[str, str, Any]] = field(default_factory=list)
-    order_by: tuple[str, bool] | None = None
+    order_by: list[tuple[str, bool]] = field(default_factory=list)
+    count_rows: bool = False
+    head: bool = False
     row_range: tuple[int, int] | None = None
     row_limit: int | None = None
     single_row: bool = False
     conflict_column: str | None = None
     negate_next: bool = False
 
-    def select(self, columns: str = "*", **_kwargs: Any) -> FakeQuery:  # noqa: ANN401
-        self.columns = columns
+    def select(self, columns: str = "*", *, count: str | None = None, head: bool = False) -> FakeQuery:
+        self.columns, self.count_rows, self.head = columns, count == "exact", head
         return self
 
     def update(self, payload: dict[str, Any]) -> FakeQuery:
@@ -71,6 +80,9 @@ class FakeQuery:
     def eq(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
         return self._filter("eq", column, value)
 
+    def neq(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
+        return self.not_.eq(column, value)
+
     def gt(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
         return self._filter("gt", column, value)
 
@@ -82,7 +94,7 @@ class FakeQuery:
         return self._filter("is", column, None)
 
     def order(self, column: str, *, desc: bool = False) -> FakeQuery:
-        self.order_by = (column, desc)
+        self.order_by.append((column, desc))
         return self
 
     def range(self, start: int, end: int) -> FakeQuery:
@@ -109,7 +121,7 @@ class FakeQuery:
         for alias, table, _columns in _EMBED.findall(self.columns):
             key = row.get(_FOREIGN_KEYS[table])
             match = next((r for r in self.db.tables.get(table, []) if str(r["id"]) == str(key)), None)
-            projected[alias] = dict(match) if match else None
+            projected[alias or table] = dict(match) if match else None
         return projected
 
     def execute(self) -> FakeResult:
@@ -135,18 +147,25 @@ class FakeQuery:
             for row in matched:
                 row.update(self.payload)
             return FakeResult([dict(row) for row in matched])
-        if self.order_by:
-            column, desc = self.order_by
-            matched.sort(key=lambda row: str(row.get(column) or ""), reverse=desc)
+        # Sorting by the last key first keeps earlier keys decisive, like ORDER BY a, b.
+        for column, desc in reversed(self.order_by):
+            matched.sort(key=lambda row, column=column: str(row.get(column) or ""), reverse=desc)
+        count = len(matched) if self.count_rows else None
+        if self.head:
+            return FakeResult([], count)
+        if count is not None and self.row_range and self.row_range[0] > count:
+            raise APIError({"code": "PGRST103", "message": "Requested range not satisfiable"})
         if self.row_range:
             matched = matched[self.row_range[0] : self.row_range[1] + 1]
         if self.row_limit is not None:
             matched = matched[: self.row_limit]
+        if self.db.max_rows is not None:
+            matched = matched[: self.db.max_rows]
         projected = [self._project(row) for row in matched]
         if self.single_row:
             assert len(projected) == 1, f"single() matched {len(projected)} rows in {self.table_name}"
             return FakeResult(projected[0])
-        return FakeResult(projected)
+        return FakeResult(projected, count)
 
 
 def _matches_filter(op: str, current: Any, value: Any) -> bool:  # noqa: ANN401
@@ -200,6 +219,7 @@ class FakeSupabase:
     tables: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     rpc_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     rpc_results: dict[str, Any] = field(default_factory=dict)
+    max_rows: int | None = None
     auth: FakeAuth = field(init=False)
 
     def __post_init__(self) -> None:

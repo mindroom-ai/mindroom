@@ -489,7 +489,7 @@ class MatrixRoomTools(Toolkit):
             return context
 
         context = replace(context, config=context.current_config, config_provider=None)
-        resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
+        resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", action=action, message=room_error)
         if not await room_access_allowed(context, resolved_room_id, contact_room_ok=True):

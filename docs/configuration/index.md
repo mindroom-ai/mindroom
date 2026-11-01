@@ -73,9 +73,10 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `calls` | Agents joining Element Call voice calls | [Voice Calls](../voice-calls.md#calls-configuration) |
 | `administrators`, `authorization`, `bot_accounts` | Platform administrators, command access, bridge aliases, and bridge bots | [Authorization](../authorization.md) |
 | `room_defaults`, `rooms` | Managed room policy, invitations, and room admins | [Rooms & Spaces](../rooms.md#room-policy) |
-| `room_models` | Map of managed room name to model name, the authored model default for a room | [Models](models.md#room_model) (`!room_model`) |
-| `room_thread_summary_models` | Map of room alias or Matrix room ID to automatic thread summary model | [Matrix & Attachments](../tools/matrix-and-attachments.md#automatic-thread-summaries) |
+| `room_models` | Map of room key or Matrix room ID to model name, the authored model default for a room | [Models](models.md#room_model) (`!room_model`) |
+| `room_thread_summary_models` | Map of room key, Matrix room ID, or agent or team name to automatic thread summary model | [Matrix & Attachments](../tools/matrix-and-attachments.md#automatic-thread-summaries) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](../rooms.md#matrix-space) |
+| `server_emoji` | Room whose emoji packs every MindRoom Chat user on the homeserver can use | [Custom Emoji](../custom-emoji.md#let-mindroom-create-the-room) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](../scheduling.md#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](../external-triggers.md) |
 | `slack` | How Slack workspace members map to Matrix users | [Slack](../tools/slack.md#slack-configuration) |
@@ -195,6 +196,7 @@ Changing a prompt that agents build in when they start, such as `HIDDEN_TOOL_CAL
 ## Environment Variables
 
 Set variables in the process environment or in the `.env` file next to `config.yaml`; the process environment wins.
+A blank value, or an unedited placeholder from the starter `.env`, counts as unset in either place unless a variable's description gives an empty value its own meaning, and an exported one never hides the `.env` value, so a container passthrough of a variable the host leaves unset keeps the `.env` setting.
 `MINDROOM_CONFIG_PATH`, `LOG_LEVEL`, `MINDROOM_LOGGER_LEVELS`, `MINDROOM_LOG_FORMAT`, `NO_COLOR`, and [`MINDROOM_TIMING`](../deployment/operational-log-events.md#debug-logging) are read only from the process environment, so the `.env` file does not set them.
 Container `env_file`/`--env-file` injection sets process variables and therefore works.
 
@@ -237,7 +239,8 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_BASE_URL` | Base URL for `provider: openai` models, such as a local inference server; a model's `extra_kwargs.base_url` overrides it, and `extra_kwargs.client_params.base_url` overrides both |
+| `OPENAI_BASE_URL` | Base URL for `provider: openai` models and the `openai` memory embedder and memory LLM, such as a local inference server; a model's `extra_kwargs.base_url` overrides it, and `extra_kwargs.client_params.base_url` overrides both |
+| `ANTHROPIC_BASE_URL` | Base URL for `provider: anthropic` models and the `anthropic` memory LLM, such as a gateway; a model's `extra_kwargs.client_params.base_url` overrides it |
 
 ### Dashboard and API
 

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom import constants
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
 
@@ -138,3 +141,89 @@ def test_isolated_runtime_paths_keep_the_process_env_over_the_env_file(tmp_path:
     assert worker_paths.env_file_values["MINDROOM_TIMEZONE"] == "from-file"
     assert worker_paths.env_value("MINDROOM_TIMEZONE") == "from-process"
     assert worker_paths.env_value("MINDROOM_LOCALE") == "file-only"
+
+
+@pytest.mark.parametrize(
+    ("process_value", "file_value", "expected"),
+    [
+        (None, None, "default"),
+        ("from-process", "from-file", "from-process"),
+        (None, "from-file", "from-file"),
+        # A compose passthrough of an unset variable exports it blank; that must not hide the `.env` value.
+        ("", "from-file", "from-file"),
+        ("  ", "from-file", "from-file"),
+        ("", "", "default"),
+        ("", None, "default"),
+        # An unedited starter-template placeholder is unset in either layer too.
+        ("your-anthropic-key-here", "sk-from-file", "sk-from-file"),
+        ("your-anthropic-key-here", "your-anthropic-key-here", "default"),
+    ],
+)
+def test_env_value_counts_blank_and_placeholder_values_as_unset(
+    tmp_path: Path,
+    process_value: str | None,
+    file_value: str | None,
+    expected: str,
+) -> None:
+    """Every variable reads the process env, then the `.env`, then the default, skipping blank or placeholder values."""
+    name = "ANTHROPIC_API_KEY"
+    if file_value is not None:
+        (tmp_path / ".env").write_text(f"{name}={file_value}\n", encoding="utf-8")
+    runtime_paths = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={} if process_value is None else {name: process_value},
+    )
+
+    assert runtime_paths.env_value(name, default="default") == expected
+    assert runtime_paths.env_value(name) == (None if expected == "default" else expected)
+
+
+@pytest.mark.parametrize(
+    ("file_text", "expected"),
+    [("", True), ("MATRIX_SSL_VERIFY=false\n", False)],
+)
+def test_env_flag_under_a_blank_export_reads_the_env_file_then_the_default(
+    tmp_path: Path,
+    file_text: str,
+    *,
+    expected: bool,
+) -> None:
+    """A blank exported flag is unset, so it neither disables a default-on flag nor hides the `.env` value."""
+    (tmp_path / ".env").write_text(file_text, encoding="utf-8")
+    runtime_paths = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MATRIX_SSL_VERIFY": ""},
+    )
+
+    assert runtime_paths.env_flag("MATRIX_SSL_VERIFY", default=True) is expected
+    assert constants.runtime_matrix_ssl_verify(runtime_paths) is expected
+
+
+@pytest.mark.parametrize(
+    "merged_env",
+    [
+        constants.runtime_env_values,
+        constants.trusted_tool_runtime_env_values,
+        lambda runtime_paths: constants.build_execution_tool_env("python", runtime_paths),
+    ],
+    ids=["runtime", "trusted-tool", "execution-tool"],
+)
+def test_merged_env_mappings_keep_the_env_file_value_under_a_blank_export(
+    tmp_path: Path,
+    merged_env: Callable[[constants.RuntimePaths], Mapping[str, str]],
+) -> None:
+    """The env mappings tools and worker backends read follow ``env_value``; a lone exported blank still stays."""
+    (tmp_path / ".env").write_text(
+        "MINDROOM_TIMEZONE=Europe/Amsterdam\nANTHROPIC_API_KEY=your-anthropic-key-here\n",
+        encoding="utf-8",
+    )
+    runtime_paths = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_TIMEZONE": "", "MINDROOM_LOCALE": "", "ANTHROPIC_API_KEY": ""},
+    )
+
+    env = merged_env(runtime_paths)
+
+    assert (env["MINDROOM_TIMEZONE"], env["MINDROOM_LOCALE"]) == ("Europe/Amsterdam", "")
+    # A starter-template placeholder never reaches a tool, whatever the layer filters let through.
+    assert env.get("ANTHROPIC_API_KEY", "") == ""

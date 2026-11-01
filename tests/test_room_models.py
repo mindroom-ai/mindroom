@@ -287,7 +287,7 @@ def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.Mo
     """Room runtime state must beat static room config while thread and explicit choices still win."""
     config = bind_runtime_paths(
         Config(
-            agents={"assistant": AgentConfig(display_name="Assistant", model="default")},
+            agents={"assistant": AgentConfig(display_name="Assistant", model="default", rooms=["lobby"])},
             room_models={"lobby": "default"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model"),
@@ -444,7 +444,7 @@ def test_stale_runtime_room_override_falls_back_to_static_room_model(
     """Removed runtime aliases must not mask a still-valid static room model."""
     config = bind_runtime_paths(
         Config(
-            agents={"assistant": AgentConfig(display_name="Assistant", model="large")},
+            agents={"assistant": AgentConfig(display_name="Assistant", model="large", rooms=["lobby"])},
             room_models={"lobby": "default"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model"),
@@ -463,6 +463,25 @@ def test_stale_runtime_room_override_falls_back_to_static_room_model(
 
     runtime_model = resolve_turn_model(config, runtime_paths, ModelScope(entity="assistant", room_id=ROOM_ID), None)
     assert runtime_model.model_name == "default"
+
+
+def test_static_room_model_applies_to_a_room_listed_by_room_id(tmp_path: Path) -> None:
+    """A room MindRoom did not create gets its authored room model through its ! room ID."""
+    config = bind_runtime_paths(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant", model="large")},
+            room_models={ROOM_ID: "default"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model"),
+                "large": ModelConfig(provider="openai", id="large-model"),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+
+    room_model = resolve_turn_model(config, runtime_paths, ModelScope(entity="assistant", room_id=ROOM_ID), None)
+    assert room_model.model_name == "default"
 
 
 @pytest.mark.asyncio

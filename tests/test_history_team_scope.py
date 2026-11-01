@@ -264,7 +264,6 @@ def test_the_team_build_takes_the_configured_team_s_call_limit_and_members(
         execution_identity=None,
         team_name="pair",
     )
-    assert scope_context is not None
     configured = _build_pair(
         config,
         runtime_paths,
@@ -457,8 +456,6 @@ def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path
         config=config,
         execution_identity=identity_for("@bob:localhost"),
     )
-    assert alice_scope is not None
-    assert bob_scope is not None
     assert alice_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
     assert bob_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
     assert alice_scope.scope != bob_scope.scope

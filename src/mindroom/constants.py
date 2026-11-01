@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
-from typing import TypeGuard, cast
+from typing import TypeGuard, cast, overload
 
 from dotenv import dotenv_values
 
@@ -158,37 +158,51 @@ class RuntimePaths:
     process_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     env_file_values: Mapping[str, str] = field(default_factory=dict, repr=False)
 
+    @overload
+    def env_value(self, name: str, *, default: str) -> str: ...
+
+    @overload
+    def env_value(self, name: str, *, default: None = None) -> str | None: ...
+
     def env_value(self, name: str, *, default: str | None = None) -> str | None:
-        """Resolve one env value against this runtime context."""
+        """Resolve one env value against this runtime context, read as ``plain_env_value`` reads it, else ``default``.
+
+        The runtime's own config, storage, and control-state paths answer for their variables.
+        """
         if name == "MINDROOM_CONFIG_PATH":
             return str(self.config_path)
         if name == "MINDROOM_STORAGE_PATH":
             return str(self.storage_root)
         if name == CONTROL_STATE_PATH_ENV:
             return str(self.control_state_root) if self.control_state_root is not None else default
-        if name in self.process_env:
-            return self.process_env[name]
-        if name in self.env_file_values:
-            return self.env_file_values[name]
-        return default
+        plain = self.plain_env_value((name,))
+        return default if plain is None else plain[0]
 
-    def first_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
-        """Return the first usable value of ``names`` and the variable that supplied it.
+    def plain_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
+        """Return the first usable value of ``names`` in the process env, then the `.env`, and the variable that set it.
 
-        Tries each name in the process env, then each in the `.env`, then the stripped contents of the file each
-        name's `<NAME>_FILE` names, so an earlier value never resolves a file path. A blank or unedited
-        starter-template placeholder value of a name counts as unset in all three, so an exported one does not hide
-        a `.env` value.
+        A blank or unedited starter-template placeholder value counts as unset, so an exported one does not hide a
+        `.env` value.
         """
         for layer in (self.process_env, self.env_file_values):
             for name in names:
                 value = layer.get(name, "")
                 if not runtime_env_policy.is_unset_env_value(name, value):
                     return value, name
+        return None
+
+    def first_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
+        """Return the first usable value of ``names`` and the variable that supplied it.
+
+        Tries ``plain_env_value``, then the stripped contents of the file each name's `<NAME>_FILE` names, so an
+        earlier value never resolves a file path; a file's blank or placeholder contents count as unset too.
+        """
+        if (plain := self.plain_env_value(names)) is not None:
+            return plain
         for name in names:
             path = runtime_env_path(self, f"{name}_FILE")
             try:
-                value = "" if path is None else path.read_text(encoding="utf-8").strip()
+                value = "" if path is None else read_secret_file(path)
             except (OSError, UnicodeDecodeError):
                 value = ""
             if not runtime_env_policy.is_unset_env_value(name, value):
@@ -216,7 +230,7 @@ class RuntimePaths:
 def resolve_session_state_root(state_root: Path, runtime_paths: RuntimePaths) -> Path:
     """Map a canonical state root into optional dedicated session storage."""
     configured_root = runtime_paths.env_value(runtime_env_policy.SESSION_STORAGE_PATH_ENV)
-    if configured_root is None or not configured_root.strip():
+    if configured_root is None:
         return state_root
 
     session_storage_root = Path(configured_root).expanduser()
@@ -257,7 +271,7 @@ def _runtime_env_file_values_for_path(env_path: Path) -> dict[str, str]:
     if not env_path.is_file():
         return {}
     try:
-        values = dotenv_values(env_path)
+        values = dotenv_values(env_path, encoding="utf-8-sig")
     except UnicodeDecodeError as exc:
         msg = f"{env_path} is not UTF-8 text ({exc.reason} at byte {exc.start}); save it as UTF-8."
         raise RuntimeEnvFileError(msg) from exc
@@ -596,10 +610,23 @@ def exported_process_env() -> dict[str, str]:
     return _copy_process_env()
 
 
+def _merged_env_layers(process_env: Mapping[str, str], env_file_values: Mapping[str, str]) -> dict[str, str]:
+    """Merge the process env over the `.env` as ``RuntimePaths.env_value`` reads them.
+
+    A usable exported value wins. A blank one lands only when neither layer has a usable value, for the readers that
+    give an empty value its own meaning, and a starter-template placeholder never lands.
+    """
+    merged_env: dict[str, str] = {}
+    for layer in (env_file_values, process_env):
+        for name, value in layer.items():
+            if not runtime_env_policy.is_unset_env_value(name, value) or (name not in merged_env and not value.strip()):
+                merged_env[name] = value
+    return merged_env
+
+
 def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the effective runtime env mapping for one explicit runtime context."""
-    merged_env = dict(runtime_paths.env_file_values)
-    merged_env.update(runtime_paths.process_env)
+    merged_env = _merged_env_layers(runtime_paths.process_env, runtime_paths.env_file_values)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
@@ -660,15 +687,6 @@ def _trusted_tool_runtime_env_layers(
     return process_env, env_file_values
 
 
-def _isolated_runtime_env_layers(
-    runtime_paths: RuntimePaths,
-) -> tuple[dict[str, str], dict[str, str]]:
-    return (
-        runtime_env_policy.isolated_worker_runtime_env(runtime_paths.process_env),
-        runtime_env_policy.isolated_worker_runtime_env(runtime_paths.env_file_values),
-    )
-
-
 def _shell_extra_env_patterns(extra_env_passthrough: str | None) -> tuple[str, ...]:
     if extra_env_passthrough is None:
         return ()
@@ -709,26 +727,14 @@ def trusted_tool_runtime_env_values(
     - exported process env is filtered to the committed runtime contract
     - internal control env such as sandbox auth tokens stay excluded
     """
-    process_env, env_file_values = _trusted_tool_runtime_env_layers(runtime_paths)
-    merged_env = dict(env_file_values)
-    merged_env.update(process_env)
+    merged_env = _merged_env_layers(*_trusted_tool_runtime_env_layers(runtime_paths))
     for name in tuple(merged_env):
         if name != "GOOGLE_APPLICATION_CREDENTIALS" and not name.endswith("_FILE"):
             continue
-        source_path = _runtime_env_source_path(runtime_paths, name)
+        source_path = runtime_env_path(runtime_paths, name)
         if source_path is None:
             continue
-        merged_env[name] = str(source_path.resolve())
-    merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
-    merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
-    return cast("Mapping[str, str]", MappingProxyType(merged_env))
-
-
-def _execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
-    """Return the stricter env visible to sandbox-proxied execution tools."""
-    process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
-    merged_env = dict(env_file_values)
-    merged_env.update(process_env)
+        merged_env[name] = str(source_path)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
@@ -736,15 +742,20 @@ def _execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[s
 
 def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Return one runtime view filtered for isolated worker execution."""
-    process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
     return RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
         env_path=runtime_paths.env_path,
         storage_root=runtime_paths.storage_root,
         control_state_root=None,
-        process_env=cast("Mapping[str, str]", MappingProxyType(process_env)),
-        env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
+        process_env=cast(
+            "Mapping[str, str]",
+            MappingProxyType(runtime_env_policy.isolated_worker_runtime_env(runtime_paths.process_env)),
+        ),
+        env_file_values=cast(
+            "Mapping[str, str]",
+            MappingProxyType(runtime_env_policy.isolated_worker_runtime_env(runtime_paths.env_file_values)),
+        ),
     )
 
 
@@ -763,17 +774,6 @@ def shell_execution_runtime_env_values(
     )
     merged_env.update(trusted_tool_runtime_env_values(runtime_paths))
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
-
-
-def _runtime_env_source_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
-    """Return one runtime env var as a lexical filesystem path without resolving symlinks."""
-    raw_value = runtime_paths.env_value(name)
-    if raw_value is None or not raw_value.strip():
-        return None
-    path = Path(raw_value).expanduser()
-    if not path.is_absolute():
-        path = runtime_paths.config_dir / path
-    return path
 
 
 def _sandbox_shell_execution_runtime_env_values(
@@ -816,31 +816,30 @@ def build_execution_tool_env(
                 process_env=shell_process_env,
             ),
         )
-    return dict(_execution_tool_runtime_env_values(runtime_paths))
+    return dict(runtime_env_values(isolated_runtime_paths(runtime_paths)))
+
+
+def read_secret_file(path: Path) -> str:
+    """Return a secret file's text without a UTF-8 byte order mark or surrounding whitespace, as the `.env` reads."""
+    return path.read_text(encoding="utf-8-sig").strip()
 
 
 def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
-    """Resolve one runtime env var as a filesystem path.
+    """Resolve one runtime env var, read as ``RuntimePaths.env_value`` reads it, as a filesystem path.
 
     Relative paths are interpreted relative to the runtime config directory.
     """
-    source_path = _runtime_env_source_path(runtime_paths, name)
-    if source_path is None:
+    if (value := runtime_paths.env_value(name)) is None:
         return None
-    return source_path.resolve()
+    return _resolve_runtime_relative_path(value, base_dir=runtime_paths.config_dir)
 
 
-def runtime_env_flag(
-    name: str,
-    runtime_paths: RuntimePaths,
-    *,
-    default: bool = False,
-) -> bool:
-    """Read a boolean runtime env flag with config-adjacent `.env` fallback."""
-    value = runtime_paths.env_value(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+def secret_path_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return the variables naming the primary's secret files: every `<NAME>_FILE`, and a set credentials path."""
+    names = {name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")}
+    if runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS") is not None:
+        names.add("GOOGLE_APPLICATION_CREDENTIALS")
+    return frozenset(names)
 
 
 def is_hosted_matrix_homeserver(homeserver: str) -> bool:
@@ -853,7 +852,7 @@ def is_hosted_matrix_homeserver(homeserver: str) -> bool:
 
 def runtime_matrix_homeserver(runtime_paths: RuntimePaths) -> str:
     """Return the effective Matrix homeserver for one runtime context."""
-    homeserver = runtime_paths.env_value("MATRIX_HOMESERVER") or DEFAULT_MATRIX_HOMESERVER
+    homeserver = runtime_paths.env_value("MATRIX_HOMESERVER", default=DEFAULT_MATRIX_HOMESERVER)
     if is_hosted_matrix_homeserver(homeserver):
         return DEFAULT_MATRIX_HOMESERVER
     return homeserver
@@ -861,7 +860,7 @@ def runtime_matrix_homeserver(runtime_paths: RuntimePaths) -> str:
 
 def runtime_matrix_ssl_verify(runtime_paths: RuntimePaths) -> bool:
     """Return whether Matrix HTTPS requests should verify certificates."""
-    return runtime_env_flag("MATRIX_SSL_VERIFY", default=True, runtime_paths=runtime_paths)
+    return runtime_paths.env_flag("MATRIX_SSL_VERIFY", default=True)
 
 
 def runtime_matrix_server_name(runtime_paths: RuntimePaths) -> str | None:
@@ -872,10 +871,7 @@ def runtime_matrix_server_name(runtime_paths: RuntimePaths) -> str | None:
 def runtime_mindroom_namespace(runtime_paths: RuntimePaths) -> str | None:
     """Return the optional installation namespace for one runtime context."""
     value = runtime_paths.env_value("MINDROOM_NAMESPACE")
-    if value is None:
-        return None
-    normalized = value.strip().lower()
-    return normalized or None
+    return None if value is None else value.strip().lower()
 
 
 def matrix_state_file(runtime_paths: RuntimePaths) -> Path:

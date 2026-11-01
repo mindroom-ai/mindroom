@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from threading import Event
 from typing import TYPE_CHECKING
 
@@ -12,10 +13,11 @@ import httpx2
 import pytest
 from google.oauth2.credentials import Credentials
 
-from mindroom.config.judgment import LLMJudgmentConfig
+from mindroom.config.judgment import LLMJudgmentConfig, TypeSafeJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.judgment.client import JudgmentClient
+from mindroom.judgment.evaluator import create_choice_evaluator
 from mindroom.judgment.execution import SHARED_CAPACITY
 from mindroom.judgment.llm import judge_with_llm
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
@@ -405,3 +407,28 @@ async def test_abandoned_model_load_retains_capacity(
             await asyncio.sleep(0)
     assert recovered.decision is True
     assert len(judge.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("process_env", "env_file_values", "has_key"),
+    [
+        ({"TYPESAFE_API_KEY_FILE": "typesafe-key"}, {}, True),
+        ({"TYPESAFE_API_KEY": ""}, {"TYPESAFE_API_KEY": "sk-typesafe"}, True),
+        ({"TYPESAFE_API_KEY": ""}, {}, False),
+    ],
+    ids=["file", "env-file-under-blank-export", "blank-export-only"],
+)
+def test_typesafe_reads_its_key_as_provider_keys_are_read(
+    tmp_path: Path,
+    process_env: dict[str, str],
+    env_file_values: dict[str, str],
+    has_key: bool,
+) -> None:
+    """``TYPESAFE_API_KEY_FILE`` supplies the System One key, and a blank export does not hide the ``.env`` key."""
+    (tmp_path / "typesafe-key").write_text("sk-typesafe\n", encoding="utf-8")
+    runtime_paths = replace(test_runtime_paths(tmp_path), process_env=process_env, env_file_values=env_file_values)
+    settings = TypeSafeJudgmentConfig(provider="typesafe")
+
+    evaluator = create_choice_evaluator(settings, runtime_paths, owner="router", question_id="responder")
+
+    assert (evaluator is not None) is has_key

@@ -72,6 +72,9 @@ function StatefulSection({ definition }: { definition: string }) {
   );
 }
 
+// Rendering and expanding the whole configuration schema takes seconds on a CI runner.
+vi.setConfig({ testTimeout: 15_000 });
+
 describe("forms rendered from the real configuration schema", () => {
   let consoleError: ReturnType<typeof vi.spyOn>;
 

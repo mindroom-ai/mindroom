@@ -41,7 +41,7 @@ from mindroom.matrix.personal_room_store import (
 )
 from mindroom.matrix.room_power import privileged_creators, user_power_level
 from mindroom.matrix.state import resolve_room_aliases
-from mindroom.matrix_identifiers import managed_room_alias_localpart
+from mindroom.matrix_identifiers import managed_room_alias
 from mindroom.requester_identity import (
     is_human_requester_id,
     is_managed_entity_id,
@@ -219,13 +219,13 @@ class PersonalRoomService:
                     return None
                 record = await run_blocking_until_complete(read_personal_room, path)
                 if record is None:
-                    localpart = managed_room_alias_localpart(
-                        f"{settings.alias_prefix}_{personal_room_digest(user_id)[:20]}",
-                        self.runtime_paths,
-                    )
                     record = PersonalRoomRecord(
                         user_id=user_id,
-                        alias=f"#{localpart}:{runtime_matrix_domain(self.runtime_paths)}",
+                        alias=managed_room_alias(
+                            f"{settings.alias_prefix}_{personal_room_digest(user_id)[:20]}",
+                            runtime_matrix_domain(self.runtime_paths),
+                            self.runtime_paths,
+                        ),
                         source_room_id=source_room_id,
                     )
                     await run_blocking_until_complete(write_personal_room, path, record)

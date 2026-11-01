@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel
@@ -68,12 +68,15 @@ class PricingConfig(BaseModel):
     discounts: Discounts
 
 
+BillingCycle = Literal["monthly", "yearly"]
+
+
 @dataclass(frozen=True)
 class StripePriceMatch:
     """Canonical plan metadata for a configured Stripe price ID."""
 
     tier: str
-    billing_cycle: Literal["monthly", "yearly"]
+    billing_cycle: BillingCycle
 
 
 def find_pricing_config_path() -> Path:
@@ -107,22 +110,10 @@ def find_pricing_config_path() -> Path:
 config_path = find_pricing_config_path()
 
 
-def load_pricing_config() -> dict[str, Any]:
-    """Load pricing configuration from YAML file."""
-    with config_path.open() as f:
-        return yaml.safe_load(f)
-
-
 def load_pricing_config_model() -> PricingConfig:
-    """Load pricing configuration as a Pydantic model.
-
-    Returns:
-        PricingConfig: Validated pricing configuration model
-
-    """
-    config_dict = load_pricing_config()
-    # Pydantic will validate all required fields automatically
-    return PricingConfig(**config_dict)
+    """Load and validate the pricing configuration from its YAML file."""
+    with config_path.open() as f:
+        return PricingConfig(**yaml.safe_load(f))
 
 
 def _stripe_mode() -> Literal["test", "live"]:
@@ -215,5 +206,4 @@ def is_trial_enabled_for_plan(plan: str) -> bool:
 
 
 # Export pricing data for easy access
-PRICING_CONFIG = load_pricing_config()
 PRICING_CONFIG_MODEL = load_pricing_config_model()

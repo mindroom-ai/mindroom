@@ -44,7 +44,7 @@ def _presence_bot(tmp_path: Path) -> AgentBot:
                     "test_agent": AgentConfig(
                         display_name="Test Agent",
                         model="gpt-6-astra",
-                        rooms=["#test:localhost"],
+                        rooms=["test"],
                     ),
                 },
                 models={

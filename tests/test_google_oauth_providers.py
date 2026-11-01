@@ -185,6 +185,23 @@ def test_each_google_provider_declares_its_service_on_the_shared_google_contract
     assert provider.token_parser is _google_token_parser
 
 
+def test_a_blank_exported_domain_restriction_does_not_hide_the_env_file_one(tmp_path: Path) -> None:
+    """A blank export, as a compose passthrough of an unset variable produces, must not lift a `.env` restriction."""
+    (tmp_path / ".env").write_text(
+        "GOOGLE_DRIVE_ALLOWED_HOSTED_DOMAINS=example.com\nGOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.org\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"GOOGLE_DRIVE_ALLOWED_HOSTED_DOMAINS": "", "GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS": " "},
+    )
+    provider = google_oauth_provider("google_drive")
+
+    assert provider.resolved_allowed_hosted_domains(runtime_paths) == ("example.com",)
+    assert provider.resolved_allowed_email_domains(runtime_paths) == ("example.org",)
+
+
 @pytest.mark.parametrize("scope_field", ["scopes", "scope"])
 @pytest.mark.parametrize(
     ("requested_scope", "response_scope", "expected_scope"),
@@ -535,6 +552,33 @@ def test_google_oauth_provider_bootstraps_client_for_paired_install(
     assert resolution.config.redirect_uri == "http://localhost:8765/api/oauth/google_drive/callback"
 
 
+def test_google_oauth_provider_reads_the_pairing_as_matrix_registration_does(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blank exports do not hide the `.env` pairing, and without a provisioning URL the hosted service pairs it."""
+    requests = _install_provisioning_transport(monkeypatch, "https://mindroom.chat")
+    (tmp_path / ".env").write_text(
+        "MINDROOM_LOCAL_CLIENT_ID=local-client\nMINDROOM_LOCAL_CLIENT_SECRET=local-secret\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_PROVISIONING_URL": "",
+            "MINDROOM_LOCAL_CLIENT_ID": "",
+            "MINDROOM_LOCAL_CLIENT_SECRET": "",
+        },
+    )
+
+    resolution = asyncio.run(google_oauth_provider("google_drive").client_config_resolution_async(runtime_paths))
+
+    assert resolution is not None
+    assert resolution.config.client_id == PROVISIONED_CLIENT_ID
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize(
     "process_env",
     [{}, {"MINDROOM_PROVISIONING_URL": "https://provisioning.example"}],
@@ -744,6 +788,64 @@ def test_google_oauth_provider_keeps_stale_client_when_refresh_is_unavailable(
 
     assert len(requests) == 1
     assert manager.load_credentials("google_oauth_client") == stale_credentials
+
+
+@pytest.mark.parametrize(
+    ("process_env", "message"),
+    [
+        ({"MINDROOM_LOCAL_CLIENT_ID": "local-client"}, "Provisioning credentials are incomplete"),
+        (
+            {
+                "MINDROOM_LOCAL_CLIENT_ID": "local-client",
+                "MINDROOM_LOCAL_CLIENT_SECRET": "local-secret",
+                "MATRIX_HOMESERVER": "https://matrix.example.org",
+            },
+            "Google OAuth bootstrap requires MINDROOM_PROVISIONING_URL",
+        ),
+    ],
+    ids=["no-secret", "no-provisioning-url"],
+)
+def test_google_oauth_provider_refuses_a_partial_pairing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_env: dict[str, str],
+    message: str,
+) -> None:
+    """A pairing that lost part of its settings is a broken pairing to restore, not an install without a client."""
+    requests = _install_provisioning_transport(monkeypatch)
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=process_env,
+    )
+
+    with pytest.raises(OAuthProviderError, match=message):
+        asyncio.run(google_oauth_provider("google_drive").client_config_resolution_async(runtime_paths))
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    ("status_code", "message"),
+    [
+        (401, "MindRoom pairing credentials are invalid or revoked"),
+        (403, "MindRoom pairing credentials are invalid or revoked"),
+        (503, "The MindRoom provisioning service has not configured the Google OAuth client yet"),
+    ],
+)
+def test_google_oauth_provider_refuses_a_failed_fetch_with_nothing_cached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    message: str,
+) -> None:
+    """A revoked or unready pairing with no cached client fails instead of looking like an install without a client."""
+    requests = _install_provisioning_transport(monkeypatch, status_code=status_code)
+    runtime_paths = _paired_runtime_paths(tmp_path)
+
+    with pytest.raises(OAuthProviderError, match=message):
+        asyncio.run(google_oauth_provider("google_drive").client_config_resolution_async(runtime_paths))
+    assert len(requests) == 1
+    assert get_runtime_credentials_manager(runtime_paths).load_credentials("google_oauth_client") is None
 
 
 def test_oauth_connection_required_payload_preserves_structured_fields() -> None:

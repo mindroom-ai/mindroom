@@ -6,7 +6,7 @@ import base64
 import copy
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -180,11 +180,20 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
     assert requested == ["gemini"]
 
 
+@pytest.mark.parametrize(
+    "exported",
+    [{}, {"GOOGLE_CLOUD_PROJECT": "", "GOOGLE_CLOUD_LOCATION": ""}],
+    ids=["unset", "blank"],
+)
 def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runtime_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    exported: dict[str, str],
 ) -> None:
-    """A Vertex AI model the config gives no project, location, or credentials takes them from ``.env``."""
+    """A Vertex AI model the config gives no project, location, or credentials takes them from ``.env``.
+
+    A blank export of the project or location is unset, so it does not hide the ``.env`` value.
+    """
     credentials = Credentials(token="env-token")  # noqa: S106 - synthetic SDK credential
     loaded: list[str] = []
 
@@ -197,7 +206,7 @@ def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runti
         "GOOGLE_CLOUD_PROJECT=env-project\nGOOGLE_CLOUD_LOCATION=europe-west4\nGOOGLE_APPLICATION_CREDENTIALS=adc.json\n",
         encoding="utf-8",
     )
-    runtime_paths = runtime_paths_for(tmp_path)
+    runtime_paths = replace(runtime_paths_for(tmp_path), process_env=exported)
 
     vertex = gemini_adapter.build_provider(
         ModelConfig(**_config({"provider": "gemini", "id": "gemini-3.8-flash"}, vertexai=True)),

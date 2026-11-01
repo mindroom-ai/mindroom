@@ -253,7 +253,7 @@ Admins see the last run, instances pending teardown, and stuck states on the adm
 
 A failed step is stored in `instances.lifecycle_error` and retried on the next run.
 For Stripe-billed subscriptions the lifecycle rechecks the subscription with Stripe, so a lost or out-of-order webhook converges by the next night; if Stripe cannot be reached, nothing is stopped except the instances of an account pending deletion.
-When a price cannot be mapped to a tier, the lifecycle logs a warning and still refreshes status and trial end so inactive subscriptions are held.
+When a price cannot be mapped to a tier and billing cycle, the lifecycle logs a warning and still refreshes status and trial end so inactive subscriptions are held.
 Changing a plan's `included_ai_budget_usd` redeploys every running instance of that tier, one after another, on its next reconcile.
 Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
 If an instance's OpenRouter key was deleted in OpenRouter or is missing from its instance Secret, re-provisioning replaces it.
@@ -264,8 +264,8 @@ Each subscription has at most one instance, so a concurrent second provision req
 Plan prices are the `price_monthly` and `price_yearly` amounts, in US cents, in `saas-platform/pricing-config.yaml`.
 Keep each `price_yearly` at twelve monthly payments less `discounts.annual_percentage`, because the upgrade page advertises that percentage as the yearly saving of every plan.
 To change a price, edit the amount and run `cluster/scripts/sync-stripe-prices.py` with a test-mode `STRIPE_SECRET_KEY` exported in your shell, which overrides the key in `saas-platform/.env`; it finds or creates a test-mode price for each amount and writes its ID to `stripe_price_id_monthly` or `stripe_price_id_yearly`.
-The script refuses a live key, so create the live price by hand on the MindRoom product with the new amount, the test-mode price's billing interval, and `tier` and `billing_cycle` metadata (for example `byok` and `monthly`), then set its ID in `stripe_price_id_monthly_live` or `stripe_price_id_yearly_live`.
-Existing subscribers keep the price they bought, which maps to their plan only through its `tier` and `billing_cycle` metadata once its ID leaves the YAML, so add that metadata to the old live price before deploying if it lacks it.
+The script refuses a live key, so create the live price by hand on the MindRoom product with the new amount, the test-mode price's billing interval, and `tier` and `billing_cycle` metadata (for example `byok` and `monthly`; `billing_cycle` is `monthly` or `yearly`), then set its ID in `stripe_price_id_monthly_live` or `stripe_price_id_yearly_live`.
+Existing subscribers keep the price they bought, which maps to their plan only through its `tier` and `billing_cycle` metadata once its ID leaves the YAML, so before deploying, add that metadata to the old live price if it lacks it or its `billing_cycle` is not `monthly` or `yearly`.
 Subscribers switch plans in the Stripe customer portal, so if it offers plan switching, replace the old price with the new one in its product list in both modes.
 The public landing page lists the monthly prices separately in `saas-platform/platform-frontend/src/app/page.tsx`, so update them there too.
 Checkout, the upgrade page, and the landing page use the new prices once a release with these changes is deployed (see [Release Deployment](#release-deployment)).

@@ -132,6 +132,9 @@ Returns JSON {"value": <rendered>} so scalars survive fromJson.
 {{- with .Values.bugReports.admins -}}
 {{- $_ := set $wellKnown "io.mindroom.bug_reports" (dict "admins" .) -}}
 {{- end -}}
+{{- with .Values.serverEmoji.room -}}
+{{- $_ := set $wellKnown "io.mindroom.emoji" (dict "room" .) -}}
+{{- end -}}
 {{- $wellKnown | toJson -}}
 {{- end -}}
 
@@ -264,7 +267,7 @@ server {
     alias /usr/share/nginx/html/.well-known/apple-app-site-association;
     default_type application/json;
   }
-{{- if or .Values.matrixRTC.enabled .Values.bugReports.admins }}
+{{- if or .Values.matrixRTC.enabled .Values.bugReports.admins .Values.serverEmoji.room }}
 {{- if .Values.matrixRTC.enabled }}
 
   # MatrixRTC backend discovery for Matrix voice and video calls.
@@ -272,6 +275,10 @@ server {
 {{- if .Values.bugReports.admins }}
 
   # Bug-report administrators for the client's Report a bug menu item.
+{{- end }}
+{{- if .Values.serverEmoji.room }}
+
+  # Server custom emoji room for the client's emoji picker.
 {{- end }}
   location = /.well-known/matrix/client {
     default_type application/json;

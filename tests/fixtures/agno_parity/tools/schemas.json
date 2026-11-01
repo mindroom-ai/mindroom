@@ -17368,7 +17368,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Room ID or configured room name; current room by default."
+              "description": "Room ID, alias, or configured room name; current room by default."
             },
             "thread_id": {
               "anyOf": [

@@ -59,6 +59,7 @@ describe('dashboard authentication', () => {
     back: jest.fn(),
     forward: jest.fn(),
     prefetch: jest.fn(),
+    bfcacheId: 'test-bfcache-id',
   }
   const listeners = new Set<AuthListener>()
   const getUser = jest.fn<Promise<UserResponse>, []>()

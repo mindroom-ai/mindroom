@@ -349,7 +349,8 @@ Call `action="help"` or `action="actions"` to list the actions and `act` request
 
 On the host target, `snapshot()` returns `ai` or `aria` format with element refs that later `act()` and `screenshot()` calls can use.
 `act()` takes `request.kind` set to `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, or `close`.
-A host-target call that has not finished after 120 seconds fails with an error, and the reply continues.
+A host-target call that has not finished after 120 seconds fails with an error and the reply continues, but work it already sent to the page, such as a running script or a pending upload, may keep going.
+After such a failure, check the tab with `tabs()`: close it with `close()` if it is marked unresponsive, and otherwise take a new `snapshot()` before acting on it again.
 The desktop target returns the browser's native accessibility snapshot and rejects `targetId` and host-only options such as `profile`, snapshot format hints, `inputRef`, and `timeoutMs`.
 Desktop-target calls always run in the primary process, so routing `browser` to a worker isolates only host-target calls.
 To show the worker browser to the user, see [Agent Chat UI Actions](chat-ui.md#show-the-worker-browser).

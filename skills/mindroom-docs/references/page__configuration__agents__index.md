@@ -66,7 +66,7 @@ agents:
 | `skill_learning` | object | disabled | [Automatic skill learning](https://docs.mindroom.chat/skills/#settings), separate from `learning` |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `minimal_instructions` | list | `[]` | Guidance included on every minimal-mode request; see [Prompt and `minimal_instructions`](https://docs.mindroom.chat/tools/agent-cli/#prompt-and-minimal_instructions) |
-| `rooms` | list | `[]` | Room keys, aliases, or Matrix room IDs to join; missing managed rooms are created (see [Rooms](https://docs.mindroom.chat/rooms/)) |
+| `rooms` | list | `[]` | Room keys or Matrix room IDs to join; missing managed rooms are created (see [Rooms](https://docs.mindroom.chat/rooms/#configuration)) |
 | `accept_invites` | bool or list | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID. Rooms joined this way are kept across restarts. Joining a room never grants its members access; see [Authorization](https://docs.mindroom.chat/authorization/) |
 | `access` | object | `null` | Who may converse with the agent: `current_room_members`, `members_of_rooms`, and `users`. When omitted, members of the agent's own managed `rooms` have access. See [Responder access](https://docs.mindroom.chat/authorization/#responder-access) |
 | `credential_managers` | list | `[]` | Concrete Matrix user IDs (no wildcards) allowed to manage this agent's credentials and shared OAuth connections; grants no conversation access. See [OAuth](https://docs.mindroom.chat/oauth-framework/) |
@@ -76,7 +76,7 @@ agents:
 | `cold_cache` | object | `null` | Move an idle thread to `cheap_model` for good when a judge accepts it; see [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `contacts` | object | `null` | Let a personal agent talk to other people's personal agents and people after both owners approve; see [Agent Contacts](https://docs.mindroom.chat/agent-contacts/) |
 | `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
-| `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
+| `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
 | `markdown` | bool | `null` | Tell the agent in its system prompt that its replies are shown as Markdown; chat replies are rendered as Markdown either way. Team leaders follow `defaults.markdown`, and voice calls leave the line out |
 | `knowledge_graph` | bool | `null` | Build a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) from this agent's conversations and give it the `knowledge_graph` tool |
 | `knowledge_graph_edits` | bool | `null` | Let the agent correct its knowledge graph: delete wrong facts and entities, merge duplicate entities, and rewrite summaries; needs `knowledge_graph`. See [Letting the Agent Fix Its Graph](https://docs.mindroom.chat/knowledge-graph/#letting-the-agent-fix-its-graph) |

@@ -60,6 +60,8 @@ class TestSubscriptionsEndpoints:
             "tier": "pro",
             "status": "active",
             "stripe_subscription_id": "stripe_sub_123",
+            "billing_cycle": "yearly",
+            "price_cents": 192000,
             "current_period_start": datetime.now(UTC).isoformat(),
             "current_period_end": (datetime.now(UTC) + timedelta(days=30)).isoformat(),
             "created_at": datetime.now(UTC).isoformat(),
@@ -76,6 +78,7 @@ class TestSubscriptionsEndpoints:
         assert data["id"] == "sub_123"
         assert data["tier"] == "pro"
         assert data["status"] == "active"
+        assert (data["billing_cycle"], data["price_cents"]) == ("yearly", 192000)
         assert data["can_run_instances"] is True
         assert data["stripe_subscription_ended"] is False
         assert data["trial_days_remaining"] is None

@@ -14,13 +14,30 @@ from structlog.testing import capture_logs
 
 from mindroom.budgets import monitor as monitor_module
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
-from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model, budget_user_id
+from mindroom.budgets.monitor import (
+    BudgetMonitor,
+    _budget_limit_usd,
+    _BudgetUserStatus,
+    _scan_fingerprint,
+    budget_model,
+    budget_user_id,
+)
+from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.budgets.spend import SpendSnapshot, _UnpricedModelUsage
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig, ModelPricing
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
+from mindroom.providers.registry import build_model_provider
+from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.types import ConversationSession
 from tests.budget_helpers import set_month_spend
+from tests.conftest import persist_session
+from tests.identity_helpers import fixture_entity_matrix_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -29,6 +46,8 @@ if TYPE_CHECKING:
 ALICE = "@alice:example.test"
 ALICE_BRIDGE = "@telegram-alice:example.test"
 BOB = "@bob:example.test"
+CAROL = "@carol:example.test"
+BRIDGE_BOT = "@bridgebot:example.test"
 OCTOBER = datetime(2026, 10, 9, 12, tzinfo=UTC)
 
 
@@ -94,13 +113,19 @@ class _Scans:
         return _snapshot(self.spend, start=start, unavailable=self.unavailable)
 
 
-def _monitor(tmp_path: Path, config: Config, clock: _Clock | None = None) -> tuple[BudgetMonitor, list[Config]]:
+def _monitor(
+    tmp_path: Path,
+    config: Config,
+    clock: _Clock | None = None,
+    **timing: float,
+) -> tuple[BudgetMonitor, list[Config]]:
     current = [config]
     monitor = BudgetMonitor(
         runtime_paths=_paths(tmp_path),
         config_provider=lambda: current[0],
         clock=clock or _Clock(),
         min_scan_interval_seconds=0,
+        **timing,
     )
     return monitor, current
 
@@ -266,7 +291,7 @@ async def test_refreshes_are_debounced_with_one_trailing_scan(tmp_path: Path, mo
     await _until(lambda: scans.calls == 1)
 
     for _ in range(5):
-        monitor.response_finished()
+        monitor.response_finished(ALICE, None, OCTOBER)
     scans.release.set()
     await _until(lambda: scans.calls == 2)
     await _quiet()
@@ -276,15 +301,20 @@ async def test_refreshes_are_debounced_with_one_trailing_scan(tmp_path: Path, mo
 
 
 @pytest.mark.asyncio
-async def test_scan_failure_keeps_previous_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_scan_failure_keeps_previous_snapshot_and_reply_costs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0})
     scans.error = RuntimeError("database locked")
+    monitor.response_finished(ALICE, 1.0, OCTOBER)
 
-    monitor.response_finished()
+    monitor.response_finished(BOB, None, OCTOBER)
     await _until(lambda: scans.calls == 2)
     await _quiet()
+    monitor.response_finished(ALICE, 0.5, OCTOBER)
 
-    assert monitor._spend_usd(ALICE) == 12.0
+    assert monitor._spend_usd(ALICE) == 13.5
     await monitor.stop()
 
 
@@ -407,7 +437,7 @@ async def test_rescans_wait_for_the_minimum_interval(tmp_path: Path, monkeypatch
     )
     await monitor.sync(_config())
     await _until(lambda: scans.calls == 1)
-    monitor.response_finished()
+    monitor.response_finished(ALICE, None, OCTOBER)
     await _until(lambda: scans.calls == 2)
 
     # Scans start in a worker thread after a dispatch delay that varies, so allow some slack below the interval.
@@ -437,7 +467,7 @@ async def test_slow_scans_are_spaced_by_their_duration(tmp_path: Path, monkeypat
     )
     await monitor.sync(_config())
     await _until(lambda: scans.calls == 1)
-    monitor.response_finished()
+    monitor.response_finished(ALICE, None, OCTOBER)
     await _until(lambda: scans.calls == 2)
 
     # Five 0.1 s scan durations separate the two starts; allow slack for worker dispatch.
@@ -446,24 +476,55 @@ async def test_slow_scans_are_spaced_by_their_duration(tmp_path: Path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_idle_tick_rescans_usage_no_reply_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Voice calls and helpers add spend without a finished reply, so the tick rescans on its own."""
-    scans = _Scans(monkeypatch, {ALICE: 12.0})
+async def test_reconciliation_interval_schedules_scans_and_finished_replies_do_not(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Voice calls and helpers add spend no reply reports, so only the slow reconciliation rescans for them."""
+    scans = _Scans(monkeypatch, {ALICE: 1.0})
+    replies_only, _current = _monitor(tmp_path, _config(), tick_seconds=0.01)
+    await replies_only.sync(_config())
+    await _until(lambda: scans.calls == 1)
+
+    for _ in range(5):
+        replies_only.response_finished(ALICE, 1.0, OCTOBER)
+    await _quiet()
+
+    assert scans.calls == 1
+    assert replies_only._spend_usd(ALICE) == 6.0
+    await replies_only.stop()
+
+    reconciling, _current = _monitor(tmp_path, _config(), tick_seconds=0.01, reconcile_seconds=0.05)
+    await reconciling.sync(_config())
+    await _until(lambda: scans.calls >= 4)
+    await reconciling.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_new_month_drops_last_months_spend_and_scans_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     clock = _Clock()
-    monitor = BudgetMonitor(
-        runtime_paths=_paths(tmp_path),
-        config_provider=_config,
-        clock=clock,
-        min_scan_interval_seconds=0,
-        tick_seconds=0.05,
-    )
+    scans = _Scans(monkeypatch, {ALICE: 9.0})
+    monitor, _current = _monitor(tmp_path, _config(), clock, tick_seconds=0.01)
     await monitor.sync(_config())
-    await _until(lambda: scans.calls >= 2)
+    await _until(lambda: monitor.status().snapshot is not None)
+    monitor.response_finished(ALICE, 2.0, OCTOBER)
+    assert _decide(monitor, ALICE, "astra") == "luna"
+    scans.release.clear()
+    scans.spend = {ALICE: 0.5}
 
     clock.now = datetime(2026, 11, 1, 0, 5, tzinfo=UTC)
+
+    assert monitor._spend_usd(ALICE) == 0.0
+    assert _decide(monitor, ALICE, "astra") == "astra"
+    await _until(lambda: scans.calls == 2)
+    scans.release.set()
     await _until(
         lambda: (snapshot := monitor.status().snapshot) is not None and snapshot.period_start == date(2026, 11, 1),
     )
+    assert monitor._spend_usd(ALICE) == 0.5
     await monitor.stop()
 
 
@@ -483,15 +544,37 @@ async def test_status_lists_only_people(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_a_reply_that_started_last_month_adds_nothing_and_requests_a_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scan dates usage by request, so the part of a reply spent before the month began belongs to the month before."""
+    clock = _Clock()
+    clock.now = datetime(2026, 11, 1, 0, 30, tzinfo=UTC)
+    scans = _Scans(monkeypatch, {ALICE: 1.0})
+    monitor, _current = _monitor(tmp_path, _config(), clock)
+    await monitor.sync(_config())
+    await _until(lambda: monitor.status().snapshot is not None)
+
+    monitor.response_finished(ALICE, 6.0, datetime(2026, 10, 31, 23, 50, tzinfo=UTC))
+
+    assert monitor._spend_usd(ALICE) == 1.0
+    await _until(lambda: scans.calls == 2)
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
 async def test_lower_spend_applies_even_while_some_stores_are_unread(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Agents nobody has used yet have no store, so a price cut must still lower spend."""
-    monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0})
+    monitor, scans, current = await _started(tmp_path, monkeypatch, {ALICE: 12.0})
     scans.spend, scans.unavailable = {ALICE: 3.0}, 1
+    current[0] = _config()
+    current[0].models["astra"].pricing = ModelPricing(input=1, output=6)
 
-    monitor.response_finished()
+    await monitor.sync(current[0])
     await _until(lambda: monitor._spend_usd(ALICE) == 3.0)
     await monitor.stop()
 
@@ -540,3 +623,299 @@ def test_checking_the_budget_quietly_logs_no_fallback(tmp_path: Path) -> None:
     assert [entry["event"] for entry in logs if entry["event"] == "budget_fallback_applied"] == [
         "budget_fallback_applied",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_finished_replys_cost_can_apply_the_fallback_without_a_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 9.0})
+    assert _decide(monitor, ALICE, "astra") == "astra"
+
+    monitor.response_finished(ALICE, 1.5, OCTOBER)
+    await _quiet()
+
+    assert monitor._spend_usd(ALICE) == 10.5
+    assert _decide(monitor, ALICE, "astra") == "luna"
+    assert scans.calls == 1
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_rescan_replaces_the_costs_recorded_before_it_started_and_keeps_later_ones(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 5.0})
+    monitor.response_finished(ALICE, 2.0, OCTOBER)
+    scans.release.clear()
+    scans.spend = {ALICE: 6.5}
+
+    monitor.response_finished(BOB, None, OCTOBER)
+    await _until(lambda: scans.calls == 2)
+    monitor.response_finished(ALICE, 1.0, OCTOBER)
+
+    # Until the scan completes, the last scan and both replies count.
+    assert monitor._spend_usd(ALICE) == 8.0
+    scans.release.set()
+    await _until(lambda: monitor._spend_usd(ALICE) == 7.5)
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_counts_for_the_person_a_scan_charges(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An alias counts for its canonical user, and a reply requested by an agent or a bot counts for nobody."""
+    config = _config().model_copy(update={"bot_accounts": [BRIDGE_BOT]})
+    monitor, scans, _current = await _started(tmp_path, monkeypatch, {}, config)
+    paths = monitor.runtime_paths
+    router = fixture_entity_matrix_id(ROUTER_AGENT_NAME, config.get_domain(paths), paths).full_id
+    assert budget_user_id(router, config, paths) is None
+
+    monitor.response_finished(ALICE_BRIDGE, 2.0, OCTOBER)
+    for requester_id in (BRIDGE_BOT, router, None):
+        monitor.response_finished(requester_id, 4.0, OCTOBER)
+        # Nobody is charged for such a reply, so not knowing its cost needs no scan.
+        monitor.response_finished(requester_id, None, OCTOBER)
+    await _quiet()
+
+    assert scans.calls == 1
+    assert monitor._spend_usd(ALICE) == 2.0
+    assert monitor._spend_usd(BRIDGE_BOT) == 0.0
+    assert monitor._spend_usd(router) == 0.0
+    assert [(user.user_id, user.spend_usd) for user in monitor.status().users] == [(ALICE, 2.0)]
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_completed_unpriced_reply_neither_adds_nor_scans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 3.0})
+
+    monitor.response_finished(ALICE, 0.0, OCTOBER)
+    monitor.response_finished(BOB, 0.0, OCTOBER)
+    await _quiet()
+
+    assert scans.calls == 1
+    assert [(user.user_id, user.spend_usd) for user in monitor.status().users] == [(ALICE, 3.0)]
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_reply_adds_nothing_and_requests_a_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stopped, failed, or resumed reply reports no exact cost, but its run's usage is stored, so a scan counts it."""
+    monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 5.0})
+    scans.release.clear()
+    scans.spend = {ALICE: 7.0}
+
+    monitor.response_finished(ALICE, None, OCTOBER)
+
+    assert monitor._spend_usd(ALICE) == 5.0
+    await _until(lambda: scans.calls == 2)
+    scans.release.set()
+    await _until(lambda: monitor._spend_usd(ALICE) == 7.0)
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_replies_before_the_first_scan_count_nothing_until_it_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first scan covers replies that finished before it started, so they are not added on top of it."""
+    scans = _Scans(monkeypatch, {ALICE: 3.0})
+    monitor, _current = _monitor(tmp_path, _config())
+    monitor.response_finished(ALICE, 20.0, OCTOBER)
+
+    assert monitor._spend_usd(ALICE) == 0.0
+    assert _decide(monitor, ALICE, "astra") == "astra"
+    await monitor.sync(_config())
+    await _until(lambda: scans.calls == 1 and monitor.status().snapshot is not None)
+    assert monitor._spend_usd(ALICE) == 3.0
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_shows_the_latest_scan_plus_finished_replies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor, _scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0, BOB: 3.0})
+
+    monitor.response_finished(BOB, 8.0, OCTOBER)
+    monitor.response_finished(CAROL, 1.5, OCTOBER)
+    status = monitor.status()
+
+    assert [(user.user_id, user.spend_usd, user.over_budget) for user in status.users] == [
+        (ALICE, 12.0, True),
+        (BOB, 11.0, True),
+        (CAROL, 1.5, False),
+    ]
+    assert status.to_dict()["generated_at"] == OCTOBER.isoformat()
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_rescan_keeps_the_total_a_finished_reply_added(tmp_path: Path) -> None:
+    """A reply's own cost and the scan of its stored run charge the same person the same amount."""
+    config = _config()
+    config.agents["code"] = AgentConfig(display_name="Code")
+    paths = _paths(tmp_path)
+    monitor = BudgetMonitor(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        clock=_Clock(),
+        min_scan_interval_seconds=0,
+    )
+    await monitor.sync(config)
+    await _until(lambda: monitor.status().snapshot is not None)
+    model = build_model_provider(config, paths, "astra").identity
+    tokens = TokenCounts(input_tokens=1_000_000, output_tokens=100_000, total_tokens=1_100_000)
+    metrics = RunMetrics(
+        tokens=tokens,
+        details={"model": [ModelMetrics(tokens=tokens, id=model.id, provider=model.provider)]},
+    )
+    persist_session(
+        create_agent_state_storage("code", paths.storage_root / "agents" / "code"),
+        ConversationSession(
+            kind="agent",
+            session_id="session-1",
+            owner_id="code",
+            runs=[
+                RunRecord(
+                    run_id="run-1",
+                    user_id=ALICE_BRIDGE,
+                    model_provider=model.provider,
+                    model=model.id,
+                    created_at=int(datetime(2026, 10, 3, tzinfo=UTC).timestamp()),
+                    metrics=metrics,
+                ),
+            ],
+        ),
+    )
+    cost = run_cost_usd(metrics, model_provider=model.provider, model_id=model.id, prices=model_prices(config))
+    monitor.response_finished(ALICE_BRIDGE, cost, OCTOBER)
+    assert monitor._spend_usd(ALICE) == pytest.approx(8.0)
+    first_scan = monitor.status().snapshot
+
+    monitor.response_finished(ALICE, None, OCTOBER)
+    await _until(lambda: monitor.status().snapshot is not first_scan)
+
+    assert monitor._spend_usd(ALICE) == pytest.approx(8.0)
+    await monitor.stop()
+
+
+def _edited(edit: str) -> Config:
+    """Return a config with one shared agent, changed as ``edit`` names."""
+    config = _config(
+        monthly_limit_usd=20 if edit == "limit" else 10,
+        fallback_model="local" if edit == "fallback_model" else "luna",
+    )
+    config.agents["code"] = AgentConfig(
+        display_name="Coder" if edit == "display_name" else "Code",
+        instructions=["Review code."] if edit == "prompt" else ["Write code."],
+        private=AgentPrivateConfig(per="user") if edit == "private_agent" else None,
+    )
+    if edit == "price":
+        config.models["luna"].pricing = ModelPricing(input=0.1, output=1)
+    elif edit == "agent_added":
+        config.agents["docs"] = AgentConfig(display_name="Docs")
+    elif edit == "team_added":
+        config.teams["engineering"] = TeamConfig(display_name="Engineering", role="Team", agents=["code"])
+    elif edit == "bot_account":
+        config.bot_accounts = [BRIDGE_BOT]
+    elif edit == "internal_user":
+        config.mindroom_user = MindRoomUserConfig(username="internal")
+    elif edit == "aliases":
+        config.authorization = AuthorizationConfig(aliases={BOB: [ALICE_BRIDGE]})
+    return config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("edit", "rescans"),
+    [
+        ("unchanged", False),
+        ("prompt", False),
+        ("display_name", False),
+        # Caps and the fallback model apply when spend is read, so they change nothing a scan counts.
+        ("limit", False),
+        ("fallback_model", False),
+        ("price", True),
+        ("agent_added", True),
+        ("private_agent", True),
+        ("team_added", True),
+        ("bot_account", True),
+        ("internal_user", True),
+        ("aliases", True),
+    ],
+)
+async def test_a_config_reload_rescans_only_when_it_changes_what_a_scan_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: str,
+    rescans: bool,
+) -> None:
+    monitor, scans, current = await _started(tmp_path, monkeypatch, {ALICE: 9.0}, _edited("unchanged"))
+    assert scans.calls == 1
+    current[0] = _edited(edit)
+
+    await monitor.sync(current[0])
+    if rescans:
+        await _until(lambda: scans.calls == 2)
+    await _quiet()
+
+    assert scans.calls == 1 + rescans
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_turning_budgets_off_and_on_again_rescans(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replies add nothing while budgets are off, so the spend counted before them is stale once budgets are back on."""
+    monitor, scans, current = await _started(tmp_path, monkeypatch, {ALICE: 9.0})
+    current[0] = _config().model_copy(update={"budgets": None})
+    await monitor.sync(current[0])
+    await _quiet()
+    assert scans.calls == 1
+
+    current[0] = _config()
+    await monitor.sync(current[0])
+
+    await _until(lambda: scans.calls == 2)
+    await monitor.stop()
+
+
+def test_the_scan_fingerprint_follows_what_a_scan_reads_not_how_the_config_is_written(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    config = _edited("team_added")
+    config.agents["docs"] = AgentConfig(display_name="Docs")
+    config.teams["research"] = TeamConfig(display_name="Research", role="Team", agents=["docs"])
+    config.bot_accounts = [BRIDGE_BOT, "@otherbot:example.test"]
+    config.authorization = AuthorizationConfig(
+        aliases={ALICE: [ALICE_BRIDGE, "@slack-alice:example.test"], BOB: ["@telegram-bob:example.test"]},
+    )
+    reordered = config.model_copy(
+        update={
+            "models": dict(reversed(config.models.items())),
+            "agents": dict(reversed(config.agents.items())),
+            "teams": dict(reversed(config.teams.items())),
+            "bot_accounts": list(reversed(config.bot_accounts)),
+            "authorization": AuthorizationConfig(
+                aliases={BOB: ["@telegram-bob:example.test"], ALICE: ["@slack-alice:example.test", ALICE_BRIDGE]},
+            ),
+        },
+    )
+    moved_sessions = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SESSION_STORAGE_PATH": str(tmp_path / "sessions")},
+    )
+
+    assert _scan_fingerprint(reordered, paths) == _scan_fingerprint(config, paths)
+    # A scan reads the sessions where they are stored.
+    assert _scan_fingerprint(config, moved_sessions) != _scan_fingerprint(config, paths)

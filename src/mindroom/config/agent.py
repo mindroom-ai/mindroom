@@ -271,7 +271,7 @@ class AgentConfig(BaseModel):
     )
     rooms: list[str] = Field(
         default_factory=list,
-        description="List of room IDs or names to auto-join",
+        description="Room keys or Matrix room IDs to join",
         json_schema_extra=dashboard_hint(reference="room"),
     )
     participation: ParticipationConfig | None = Field(
@@ -381,7 +381,7 @@ class AgentConfig(BaseModel):
     )
     room_thread_modes: dict[str, Literal["thread", "room"]] = Field(
         default_factory=dict,
-        description="Per-room thread mode overrides keyed by room alias/name or Matrix room ID",
+        description="Per-room thread mode overrides keyed by room key or Matrix room ID",
         json_schema_extra=dashboard_hint(key_reference="room"),
     )
     num_history_runs: int | None = Field(
@@ -522,7 +522,7 @@ class TeamConfig(BaseModel):
     )
     rooms: list[str] = Field(
         default_factory=list,
-        description="List of room IDs or names to auto-join",
+        description="Room keys or Matrix room IDs to join",
         json_schema_extra=dashboard_hint(reference="room"),
     )
     access: ResponderAccessConfig | None = Field(

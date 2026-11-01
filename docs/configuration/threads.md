@@ -11,7 +11,7 @@ See also [Routing & Responder Selection](router.md), [Access Control](../authori
 
 Each agent's `thread_mode` and `room_thread_modes` fields (see [Agent Configuration](agents.md)) choose between Matrix threads and one continuous conversation per room.
 A room override set with [`!thread_mode`](#thread_mode) takes precedence for every agent, team, and the router in that room.
-Without one, an agent uses the `room_thread_modes` entry matching the current room by Matrix room ID, room key, or alias, and otherwise its `thread_mode`.
+Without one, an agent uses the `room_thread_modes` entry matching the current room by Matrix room ID, room key, or a managed room's full alias, and otherwise its `thread_mode`.
 
 A team uses its members' mode for the room when all members agree, and `thread` when they differ.
 The router uses the mode shared by all agents relevant to the room, including agents that join through `teams.<name>.rooms`, and `thread` when they differ.

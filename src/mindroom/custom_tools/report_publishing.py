@@ -14,6 +14,7 @@ from mindroom.custom_tools.dynamic_workflow_context import (
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.dynamic_workflows.spec import DynamicWorkflowError
 from mindroom.dynamic_workflows.store import AGENT_SCOPE
+from mindroom.origins import configured_public_url
 from mindroom.report_publishing.store import (
     ARTIFACT_KIND_STATIC_SITE,
     PublishableReport,
@@ -74,7 +75,7 @@ class ReportPublishingTools(Toolkit):
                     store.publish_report,
                     source=publishable,
                     published_by=context.requester_id,
-                    base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+                    base_url=configured_public_url(context.runtime_paths),
                 ),
                 lambda published: store.revoke_public_report(published.slug, revoked_by=context.requester_id),
             )

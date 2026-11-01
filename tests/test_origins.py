@@ -7,6 +7,7 @@ import pytest
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.origins import (
     allowed_client_origins,
+    configured_public_url,
     connections_client_origin_allowed,
     connections_sign_in_enabled,
     local_api_origin,
@@ -220,3 +221,19 @@ def test_the_api_port_is_the_local_origin_unless_the_operator_set_one(
     # The process env stays a read-only snapshot, as every other constructor leaves it.
     with pytest.raises(TypeError):
         ported.process_env["MINDROOM_PORT"] = "1"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("  ", None),
+        ("https://mindroom.example.org/", "https://mindroom.example.org"),
+        (" https://mindroom.example.org/ ", "https://mindroom.example.org"),
+    ],
+    ids=["unset", "blank", "trailing-slash", "padded"],
+)
+def test_configured_public_url_is_the_link_base(tmp_path: Path, value: str | None, expected: str | None) -> None:
+    """Links, callbacks, and gateway URLs all start from one trimmed `MINDROOM_PUBLIC_URL` without its trailing slash."""
+    env = {} if value is None else {"MINDROOM_PUBLIC_URL": value}
+    assert configured_public_url(_paths(tmp_path, **env)) == expected

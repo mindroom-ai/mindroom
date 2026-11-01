@@ -48,15 +48,15 @@ class TestResponderCandidateSelection:
                 agents={
                     "calculator": AgentConfig(
                         display_name="Calculator",
-                        rooms=["#math:localhost", "#general:localhost"],
+                        rooms=["math", "general"],
                     ),
                     "research": AgentConfig(
                         display_name="Research Assistant",
-                        rooms=["#research:localhost", "#general:localhost"],
+                        rooms=["research", "general"],
                     ),
                     "writer": AgentConfig(
                         display_name="Writer",
-                        rooms=["#writing:localhost"],  # NOT in general room
+                        rooms=["writing"],  # NOT in general room
                     ),
                 },
                 teams={},
@@ -258,14 +258,14 @@ class TestResponderCandidateSelection:
             Config(
                 agents={
                     "calculator": AgentConfig(display_name="Calculator"),
-                    "writer": AgentConfig(display_name="Writer", rooms=["#writing:localhost"]),
+                    "writer": AgentConfig(display_name="Writer", rooms=["writing"]),
                 },
                 teams={
                     "ops": TeamConfig(
                         display_name="Ops Team",
                         role="Operations team",
                         agents=["calculator"],
-                        rooms=["#ops:localhost"],
+                        rooms=["ops"],
                     ),
                 },
                 room_models={},
@@ -444,7 +444,7 @@ class TestResponderCandidateSelection:
                 agents={
                     "calculator": AgentConfig(
                         display_name="Calculator",
-                        rooms=["#general:localhost"],
+                        rooms=["general"],
                     ),
                 },
                 teams={},

@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
+import threading
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from agno.media import Image as AgnoImage
@@ -14,6 +18,7 @@ from agno.tools.function import ToolResult
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.tools import (
+    _PROGRESS_FLUSH_SECONDS,
     MEDIA_FOLLOW_UP_TEXT,
     PreparedTools,
     RefusedCall,
@@ -24,7 +29,10 @@ from mindroom.agent_loop.tools import (
     plan_tool_batch,
     toolkit_instructions,
 )
+from mindroom.llm.events import ToolProgress
+from mindroom.redaction import REDACTION_FAILED, redact_sensitive_text
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
+from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
 from tests.agent_loop.helpers import add, boom, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import ScriptedModel, raw_tool_call, tool_call
 
@@ -259,6 +267,275 @@ def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
 async def _dispatch(calls: Sequence[PlannedCall], *, middleware: Sequence[ToolMiddleware] = ()) -> list[Message]:
     """Run ``calls`` and return the result messages of those that ran, in the order they finished."""
     return [result async for _, result in dispatch_tool_calls(calls, run=context(), middleware=middleware)]
+
+
+def _planned(functions: dict, *calls: object) -> list[PlannedCall]:
+    return plan_tool_batch(list(calls), functions, calls_so_far=0, max_tool_calls_per_turn=None, entity="code").planned
+
+
+@pytest.mark.asyncio
+async def test_a_running_call_streams_its_progress_before_it_finishes() -> None:
+    """A call's latest report reaches the batch's stream before the call's result."""
+
+    def build(target: str) -> str:
+        """Report two steps, then finish.
+
+        Args:
+            target: What to build.
+
+        """
+        report_tool_progress(f"{target}: step 1")
+        report_tool_progress(f"{target}: step 2")
+        return f"{target} built"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(build)).functions, tool_call("build", "c1", target="app"))
+
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    *reports, (call, result) = items
+    assert reports
+    assert all(isinstance(report, ToolProgress) and report.tool_call_id == "c1" for report in reports)
+    assert reports[-1].text == "app: step 2"
+    assert (call.execution.tool_call_id, result.content) == ("c1", "app built")
+
+
+@pytest.mark.asyncio
+async def test_a_running_calls_output_is_redacted_before_it_leaves_the_call() -> None:
+    """Credentials a tool prints while it runs are masked as in its result preview."""
+    secret = "hunter2" * 3
+
+    def deploy(target: str) -> str:
+        """Print the deploy command, then finish.
+
+        Args:
+            target: Where to deploy.
+
+        """
+        report_tool_progress(f"deploying {target} with API_KEY={secret}")
+        return "deployed"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(deploy)).functions, tool_call("deploy", "c1", target="prod"))
+
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    [progress] = [item for item in items if isinstance(item, ToolProgress)]
+    assert secret not in progress.text
+    assert progress.text == "deploying prod with API_KEY=***redacted***"
+
+
+@pytest.mark.asyncio
+async def test_a_credential_longer_than_the_shown_output_stays_masked() -> None:
+    """The output is masked before it is cut to its latest characters, which would drop a long credential's label."""
+    secret = "".join(f"{index:04x}" for index in range(800))
+
+    def export(name: str) -> str:
+        """Print a long key, then finish.
+
+        Args:
+            name: The variable to export.
+
+        """
+        report_tool_progress(f"export {name}={secret}\nready")
+        return "exported"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(export)).functions, tool_call("export", "c1", name="API_KEY"))
+
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    [progress] = [item for item in items if isinstance(item, ToolProgress)]
+    assert secret[-40:] not in progress.text
+    assert progress.text.endswith("\nready")
+
+
+@pytest.mark.asyncio
+async def test_output_longer_than_redaction_accepts_still_shows_its_latest_characters() -> None:
+    """Huge output, such as long compile lines and template errors together, shows its tail rather than a failure."""
+
+    def compile_all(unit: str) -> str:
+        """Compile everything.
+
+        Args:
+            unit: The unit to compile.
+
+        """
+        report_tool_progress(f"g++ -c {unit} " * 6000 + "\nerror: no matching call")
+        return "failed"
+
+    planned = _planned(
+        spec(ScriptedModel([]), toolkit(compile_all)).functions,
+        tool_call("compile_all", "c1", unit="a.cpp"),
+    )
+
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    [progress] = [item for item in items if isinstance(item, ToolProgress)]
+    assert progress.text != REDACTION_FAILED
+    assert progress.text.endswith("\nerror: no matching call")
+
+
+@pytest.mark.asyncio
+async def test_a_calls_progress_stays_with_the_call() -> None:
+    """A call run inside another call, as a delegated agent's is, reports its output only for itself."""
+    outer: list[str] = []
+
+    def build(app: str) -> str:
+        """Build an app.
+
+        Args:
+            app: Which app to build.
+
+        """
+        report_tool_progress(f"{app}: compiling")
+        return "built"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(build)).functions, tool_call("build", "c1", app="app"))
+
+    with tool_progress_reporter(outer.append):
+        items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    assert [item for item in items if isinstance(item, ToolProgress)] == [ToolProgress("c1", "app: compiling")]
+    assert outer == []
+
+
+@pytest.mark.asyncio
+async def test_a_call_reporting_faster_than_frames_go_out_yields_at_most_ten_events_a_second() -> None:
+    """Live frames go out ten times a second, so more reports than that only cost the loop events nobody sees."""
+
+    async def stream(count: int) -> str:
+        """Report every hundredth of a second, then finish.
+
+        Args:
+            count: How many reports to make.
+
+        """
+        for index in range(count):
+            report_tool_progress(f"report {index}")
+            await asyncio.sleep(0.01)
+        return "done"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(stream)).functions, tool_call("stream", "c1", count=40))
+
+    started = time.monotonic()
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+    elapsed = time.monotonic() - started
+
+    reports = [item for item in items if isinstance(item, ToolProgress)]
+    assert len(reports) <= int(elapsed / 0.1) + 2
+    assert reports[-1].text == "report 39"
+
+
+@pytest.mark.asyncio
+async def test_a_flood_of_progress_reports_costs_a_few_events_and_keeps_the_latest() -> None:
+    """A call that reports far faster than the loop turns, as untrusted worker code can, yields only its newest reports."""
+
+    def flood(count: int) -> str:
+        """Report many times from this thread, then finish.
+
+        Args:
+            count: How many reports to make.
+
+        """
+        for index in range(count):
+            report_tool_progress(f"report {index}")
+        return "done"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(flood)).functions, tool_call("flood", "c1", count=20000))
+
+    loop = asyncio.get_running_loop()
+    with (
+        patch("mindroom.tool_system.progress.redact_sensitive_text", wraps=redact_sensitive_text) as redact,
+        patch.object(loop, "call_soon_threadsafe", wraps=loop.call_soon_threadsafe) as hop,
+    ):
+        items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    reports = [item for item in items if isinstance(item, ToolProgress)]
+    assert 0 < len(reports) < 1000
+    assert redact.call_count == len(reports)
+    assert hop.call_count < 1000
+    assert reports[-1].text == "report 19999"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_report_only_their_own_progress() -> None:
+    """Calls of one batch that report at the same time each report under their own call ID."""
+    started = {"one": asyncio.Event(), "two": asyncio.Event()}
+
+    async def step(who: str) -> str:
+        """Report this call's name once both calls run.
+
+        Args:
+            who: This call's name.
+
+        """
+        started[who].set()
+        await asyncio.wait_for(started["two" if who == "one" else "one"].wait(), timeout=5)
+        report_tool_progress(f"{who} working")
+        return who
+
+    planned = _planned(
+        spec(ScriptedModel([]), toolkit(step)).functions,
+        tool_call("step", "c1", who="one"),
+        tool_call("step", "c2", who="two"),
+    )
+
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    reports = sorted((item.tool_call_id, item.text) for item in items if isinstance(item, ToolProgress))
+    assert reports == [("c1", "one working"), ("c2", "two working")]
+
+
+@pytest.mark.asyncio
+async def test_progress_a_call_reports_after_it_returned_is_dropped() -> None:
+    """A thread a call leaves behind cannot report for it once the call has returned."""
+    report_later = threading.Event()
+    reported = threading.Event()
+    release_other = asyncio.Event()
+
+    def start(name: str) -> str:
+        """Leave a thread that reports after this call returned.
+
+        Args:
+            name: The work's name.
+
+        """
+        context_of_call = contextvars.copy_context()
+
+        def late() -> None:
+            report_later.wait(timeout=5)
+            context_of_call.run(report_tool_progress, f"{name} late")
+            reported.set()
+
+        threading.Thread(target=late, daemon=True).start()
+        return f"{name} started"
+
+    async def hold(name: str) -> str:
+        """Keep the batch running until released.
+
+        Args:
+            name: The work's name.
+
+        """
+        await asyncio.wait_for(release_other.wait(), timeout=5)
+        return f"{name} done"
+
+    planned = _planned(
+        spec(ScriptedModel([]), toolkit(start, hold)).functions,
+        tool_call("start", "c1", name="build"),
+        tool_call("hold", "c2", name="watch"),
+    )
+    stream = dispatch_tool_calls(planned, run=context(), middleware=())
+
+    first = await anext(stream)
+    report_later.set()
+    await asyncio.to_thread(reported.wait, 5)
+    await asyncio.sleep(2 * _PROGRESS_FLUSH_SECONDS)
+    release_other.set()
+    rest = [item async for item in stream]
+
+    assert isinstance(first, tuple)
+    assert first[1].content == "build started"
+    assert [item for item in rest if isinstance(item, ToolProgress)] == []
+    assert [result.content for _, result in rest] == ["watch done"]
 
 
 @pytest.mark.asyncio

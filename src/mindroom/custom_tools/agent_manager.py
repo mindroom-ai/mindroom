@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.config.main import config_validation_summary
 from mindroom.custom_tools.attachments import read_context_attachment
 from mindroom.media_delivery import MAX_SOURCE_BYTES
 from mindroom.personal_agents import (
@@ -128,7 +129,7 @@ class AgentManagerTools(Toolkit):
         try:
             await self._run(update_generated_agent, agent_name=self.agent_name, changes=changes)
         except ValueError as exc:
-            return f"Error: {exc}"
+            return f"Error: {config_validation_summary(exc)}"
         return f"Updated {self.agent_name}: {', '.join(changes)}."
 
     async def set_avatar(self, attachment_id: str) -> str:

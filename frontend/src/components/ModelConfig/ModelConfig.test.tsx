@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ModelConfig } from "./ModelConfig";
 import { useConfigStore } from "@/store/configStore";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
+import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
 
 vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
@@ -657,6 +658,38 @@ describe("ModelConfig", () => {
     });
   });
 
+  it("asks before leaving the page drops an edited row", () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<ModelConfig />);
+
+    fireEvent.click(screen.getByText("anthropic"));
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+
+    fireEvent.change(screen.getByDisplayValue("claude-haiku-4-5"), {
+      target: { value: "claude-sonnet-5" },
+    });
+
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+    confirmSpy.mockRestore();
+  });
+
+  it("asks before leaving the page drops a model being added", () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<ModelConfig />);
+
+    fireEvent.click(screen.getByRole("button", { name: /add model/i }));
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+
+    fireEvent.change(screen.getByPlaceholderText("model name"), {
+      target: { value: "new-model" },
+    });
+
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+    confirmSpy.mockRestore();
+  });
+
   it("adds a model using the top add row", async () => {
     render(<ModelConfig />);
 
@@ -692,7 +725,7 @@ describe("ModelConfig", () => {
     });
   });
 
-  it("accepts empty base URL for OpenAI and uses default endpoint", async () => {
+  it("accepts empty base URL for OpenAI and saves no endpoint of its own", async () => {
     render(<ModelConfig />);
 
     fireEvent.click(screen.getByRole("button", { name: /add model/i }));
@@ -712,6 +745,9 @@ describe("ModelConfig", () => {
     expect(
       within(addRow).getByPlaceholderText("https://api.openai.com/v1"),
     ).toBeTruthy();
+    expect(within(addRow).getByText(/^Empty uses/).textContent).toBe(
+      "Empty uses OPENAI_BASE_URL, else https://api.openai.com/v1.",
+    );
     fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
 
     await waitFor(() => {

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import gc
 import importlib.util
+import os
 import sys
 import threading
 import time
@@ -37,6 +38,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.event_journal import IngestionRecordAdmission, IngestionRecordDisposition
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.llm.usage import TokenCounts
+from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_backends import (
@@ -447,6 +449,7 @@ def _manager(
     tool_support: object = object(),
     clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     invited_rooms_by_agent: dict[str, set[str]] | None = None,
+    get_invited_rooms_by_agent: Callable[[], dict[str, set[str]]] | None = None,
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]] | None = None,
@@ -466,7 +469,7 @@ def _manager(
         ssl_verify=True,
         bridge_factory=bridge_factory or (lambda _identity, _e2ee: bridge),
         tool_support=tool_support,  # type: ignore[arg-type]
-        get_invited_rooms_by_agent=lambda: invited_rooms_by_agent or {},
+        get_invited_rooms_by_agent=get_invited_rooms_by_agent or (lambda: invited_rooms_by_agent or {}),
         clock_ms=clock_ms,
         agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
         **_admission(admission_gate, wait_for_admission_or_shutdown or wait_for_admission),
@@ -661,6 +664,24 @@ async def test_manager_joins_call_in_authorized_ad_hoc_invited_room(tmp_path: Pa
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant == GRANT
+
+
+@pytest.mark.asyncio
+async def test_manager_damaged_invited_room_record_stops_call_joins_without_failing(tmp_path: Path) -> None:
+    """A damaged invited-room record makes room ownership ambiguous instead of failing the room's events."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+
+    def read_damaged_record() -> dict[str, set[str]]:
+        msg = "Invalid invited-room retention file"
+        raise ValueError(msg)
+
+    manager = _manager(client, bridge, tmp_path, get_invited_rooms_by_agent=read_damaged_record)
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert bridge.connected_grant is None
 
 
 @pytest.mark.parametrize("invited_room", [False, True])
@@ -1764,6 +1785,47 @@ async def test_positive_call_reconciliation_waits_for_admission_and_rechecks_pol
     assert _call_state(manager).session is None
 
 
+@pytest.mark.asyncio
+async def test_full_reconciliation_rereads_room_ownership_after_admission_wait(tmp_path: Path) -> None:
+    """An invite another calls agent accepts while a full pass waits for admission must stop the join."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    config.agents["helper"].rooms = []
+    config.agents["other"] = AgentConfig(display_name="Other")
+    config.calls.agents["other"] = config.calls.agents["helper"]
+    invited = {"helper": {ROOM_ID}}
+    gate = ResponseAdmissionGate()
+    assert gate.close_if_idle()
+    wait_started = asyncio.Event()
+
+    async def wait_for_admission() -> bool:
+        wait_started.set()
+        await gate.wait_until_open()
+        return True
+
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        get_invited_rooms_by_agent=lambda: {agent: set(rooms) for agent, rooms in invited.items()},
+        response_admission_gate=gate,
+        wait_for_admission_or_shutdown=wait_for_admission,
+    )
+    reconcile = asyncio.create_task(manager.reconcile_joined_rooms())
+    await asyncio.wait_for(wait_started.wait(), timeout=1)
+
+    invited["other"] = {ROOM_ID}
+    gate.reopen()
+    await reconcile
+
+    client.room_get_state.assert_not_awaited()
+    assert bridge.connected_grant is None
+
+
 class _BlockingConnectBridge(FakeBridge):
     """Hold the SFU connect step until the test releases it, and count closes."""
 
@@ -2408,6 +2470,45 @@ async def test_manager_full_reconciliation_visits_every_configured_room(tmp_path
     await manager.reconcile_joined_rooms()
 
     assert {request.args[0] for request in client.room_get_state.await_args_list} == {ROOM_ID, other_room_id}
+
+
+@pytest.mark.asyncio
+async def test_manager_full_reconciliation_reads_room_ownership_once_per_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full pass reads room ownership once for every joined room, and again only inside each owned room's lock."""
+    other_room_id = "!other-call:example.org"
+    unrelated_room_id = "!unrelated:example.org"
+    config = _config()
+    config.agents["helper"].rooms.append(other_room_id)
+    client = _client()
+    client.rooms = {
+        ROOM_ID: _room(),
+        other_room_id: _room(room_id=other_room_id),
+        unrelated_room_id: _room(room_id=unrelated_room_id),
+    }
+    client.room_get_state.return_value = nio.RoomGetStateResponse([], ROOM_ID)
+    invited_reads: list[None] = []
+    personal_reads: list[str] = []
+
+    def read_invited_rooms() -> dict[str, set[str]]:
+        invited_reads.append(None)
+        return {}
+
+    def read_personal_rooms(_runtime_paths: RuntimePaths, agent_name: str) -> frozenset[str]:
+        personal_reads.append(agent_name)
+        return frozenset()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.personal_room_ids", read_personal_rooms)
+    manager = _manager(client, FakeBridge(), tmp_path, config, get_invited_rooms_by_agent=read_invited_rooms)
+
+    await manager.reconcile_joined_rooms()
+
+    assert {request.args[0] for request in client.room_get_state.await_args_list} == {ROOM_ID, other_room_id}
+    # One read for the pass, then one per owned room inside its lock.
+    assert len(invited_reads) == 3
+    assert personal_reads == ["helper"] * 3
 
 
 @pytest.mark.asyncio
@@ -5737,7 +5838,7 @@ def test_calls_config_rejects_equivalent_room_refs_before_matrix_state(tmp_path:
             {
                 "agents": {
                     "one": {"display_name": "One", "rooms": ["voice"]},
-                    "two": {"display_name": "Two", "rooms": ["#voice:example.org"]},
+                    "two": {"display_name": "Two", "rooms": ["#voice:localhost"]},
                 },
                 "calls": {
                     "enabled": True,
@@ -5876,3 +5977,132 @@ async def test_join_retries_when_the_audio_process_cannot_start(tmp_path: Path) 
 
     assert _call_state(manager).retry_task is not None
     await manager.shutdown()
+
+
+def test_manager_joins_calls_in_its_own_personal_room(tmp_path: Path) -> None:
+    """An agent creates its owner's personal room itself, so that room is its call room without configured rooms."""
+    config = Config(
+        models={},
+        agents={"helper": AgentConfig(display_name="Helper")},
+        calls=CallsConfig(
+            enabled=True,
+            profiles={
+                "voice": RealtimeCallProfile(
+                    backend="realtime",
+                    model="gpt-realtime",
+                    credentials_service="openai",
+                    voice="marin",
+                ),
+            },
+            agents={"helper": "voice"},
+        ),
+    )
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
+    assert not manager._is_configured_call_room(_room())
+    write_personal_room(
+        personal_room_record_path(test_runtime_paths(tmp_path), "helper", "@alice:example.org"),
+        PersonalRoomRecord(
+            user_id="@alice:example.org",
+            alias="#personal_alice:example.org",
+            source_room_id="!lobby:example.org",
+            room_id=ROOM_ID,
+        ),
+    )
+    assert manager._is_configured_call_room(_room())
+
+
+def test_manager_keeps_its_configured_room_when_another_call_agents_record_is_damaged(tmp_path: Path) -> None:
+    """A damaged record of another call agent leaves out only that record's room."""
+    config = Config(
+        models={},
+        agents={
+            "helper": AgentConfig(display_name="Helper", rooms=[ROOM_ID]),
+            "other": AgentConfig(display_name="Other"),
+        },
+        calls=CallsConfig(
+            enabled=True,
+            profiles={
+                "voice": RealtimeCallProfile(
+                    backend="realtime",
+                    model="gpt-realtime",
+                    credentials_service="openai",
+                    voice="marin",
+                ),
+            },
+            agents={"helper": "voice", "other": "voice"},
+        ),
+    )
+    record = personal_room_record_path(test_runtime_paths(tmp_path), "other", "@bob:example.org")
+    record.parent.mkdir(parents=True)
+    record.write_text('{"user_id": "@bob:example.org", "field_from_a_newer_release": true}')
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
+    assert manager._is_configured_call_room(_room())
+
+
+def _two_call_agents(**helper: object) -> Config:
+    return Config(
+        models={},
+        agents={"helper": AgentConfig(display_name="Helper", **helper), "other": AgentConfig(display_name="Other")},
+        calls=CallsConfig(
+            enabled=True,
+            profiles={
+                "voice": RealtimeCallProfile(
+                    backend="realtime",
+                    model="gpt-realtime",
+                    credentials_service="openai",
+                    voice="marin",
+                ),
+            },
+            agents={"helper": "voice", "other": "voice"},
+        ),
+    )
+
+
+def _write_personal_room(tmp_path: Path, agent_name: str, user_id: str, room_id: str) -> None:
+    write_personal_room(
+        personal_room_record_path(test_runtime_paths(tmp_path), agent_name, user_id),
+        PersonalRoomRecord(
+            user_id=user_id,
+            alias=f"#personal_{agent_name}:example.org",
+            source_room_id="!lobby:example.org",
+            room_id=room_id,
+        ),
+    )
+
+
+def test_invited_call_agent_does_not_answer_in_another_agents_personal_room(tmp_path: Path) -> None:
+    """A personal room's own agent and an invited call agent leave the room to neither, as for two invited agents.
+
+    The room's members are not consulted: lazy-loaded membership may not list the personal room's agent yet.
+    """
+    _write_personal_room(tmp_path, "other", "@alice:example.org", ROOM_ID)
+    manager = _manager(
+        _client(),
+        FakeBridge(),
+        tmp_path,
+        _two_call_agents(accept_invites=True),
+        invited_rooms_by_agent={"helper": {ROOM_ID}},
+    )
+    assert not manager._is_configured_call_room(_room())
+
+
+def test_manager_keeps_its_configured_room_when_one_of_its_records_is_damaged(tmp_path: Path) -> None:
+    """A damaged personal-room record leaves out only its own room."""
+    record = personal_room_record_path(test_runtime_paths(tmp_path), "helper", "@bob:example.org")
+    record.parent.mkdir(parents=True)
+    record.write_text('{"user_id": "@bob:example.org", "field_from_a_newer_release": true}')
+    manager = _manager(_client(), FakeBridge(), tmp_path, _two_call_agents(rooms=[ROOM_ID]))
+    assert manager._is_configured_call_room(_room())
+
+
+def test_manager_sees_a_personal_room_written_after_its_last_check(tmp_path: Path) -> None:
+    """Writing a record makes its room a call room at the next check, whatever the directory's mtime resolution."""
+    _write_personal_room(tmp_path, "helper", "@alice:example.org", "!earlier:example.org")
+    manager = _manager(_client(), FakeBridge(), tmp_path, _two_call_agents())
+    assert not manager._is_configured_call_room(_room())
+    directory = personal_room_record_path(test_runtime_paths(tmp_path), "helper", "").parent
+    version = directory.stat().st_mtime_ns
+    _write_personal_room(tmp_path, "helper", "@bob:example.org", ROOM_ID)
+    # A coarse clock can leave the directory's mtime where the last check saw it.
+    os.utime(directory, ns=(version, version))
+    assert manager._is_configured_call_room(_room())

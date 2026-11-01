@@ -22,6 +22,7 @@ Agents also show a typing indicator while they work on a response.
 ## Live Updates
 
 When the homeserver relays live updates, as MindRoom's Tuwunel fork (`mindroom-tuwunel`) does for mindroom.chat, hosted MindRoom, and `mindroom-stack`, MindRoom Chat shows a streamed reply about ten times a second, including its tool calls, worker progress, and [reasoning](#reasoning), without editing the message each time.
+While a tool such as `shell` runs, MindRoom Chat also shows the last lines of its output under the call, with credentials masked as in tool results; the message keeps only the tool's result, and team replies do not show it.
 The message itself is then edited only every `update_interval` seconds (5 by default) and once at the end, so Element, bridges, and other clients show the reply in steps of about five seconds and end with the same final message.
 A reply that grows too large for a live update, as a very long reply with many tool calls can, switches to the progressive edits below for the rest of the reply.
 Live updates are encrypted like the reply in an encrypted room.

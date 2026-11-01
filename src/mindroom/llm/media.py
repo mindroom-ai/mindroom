@@ -209,15 +209,16 @@ def canonical_mime_type(mime_type: str | None) -> str | None:
 
 # The longest attachment name or type that model-facing text prints.
 _MAX_RENDERED_LABEL_LENGTH = 80
+_RENDERED_LABEL_REPLACEMENTS = str.maketrans({'"': "'", "<": "\u2039", ">": "\u203a"})
 
 
 def rendered_label(value: str) -> str:
-    """Return a sender-chosen attachment name or type as text the model reads, so it cannot forge lines or quotes.
+    """Return a sender-chosen attachment name or type as text the model reads, so it cannot forge lines, quotes or tags.
 
-    Characters that do not print, such as newlines, are dropped, double quotes become single ones, and long values
-    are cut short.
+    Characters that do not print, such as newlines, are dropped, double quotes become single ones, angle brackets
+    become single angle quotation marks, so no ``<msg>`` tag can form, and long values are cut short.
     """
-    sanitized = "".join(char for char in value if char.isprintable()).replace('"', "'").strip()
+    sanitized = "".join(char for char in value if char.isprintable()).translate(_RENDERED_LABEL_REPLACEMENTS).strip()
     if len(sanitized) > _MAX_RENDERED_LABEL_LENGTH:
         sanitized = f"{sanitized[: _MAX_RENDERED_LABEL_LENGTH - 1]}…"
     return sanitized

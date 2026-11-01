@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
-import nio
-
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -20,7 +18,6 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_current_room_thread_root,
     resolve_requested_room_id,
     room_access_allowed,
-    unknown_room_error,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.entity_resolution import entity_identity_registry
@@ -43,6 +40,8 @@ from mindroom.tool_system.events import is_visible_tool_marker_line
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+
+    import nio
 
     from mindroom.entity_resolution import EntityIdentityRegistry
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -222,7 +221,7 @@ async def _prepare_move(  # noqa: PLR0911
     if thread_error is not None:
         return thread_error
     assert root_id is not None
-    target_room_id, room_error = await _target_room_id(context, room_id)
+    target_room_id, room_error = await resolve_requested_room_id(context, room_id)
     if room_error is not None:
         return room_error
     assert target_room_id is not None
@@ -258,21 +257,6 @@ async def _prepare_move(  # noqa: PLR0911
         skipped=len(history) - len(plan),
         poster_clients=poster_clients,
     )
-
-
-async def _target_room_id(context: ToolRuntimeContext, room_id: str) -> tuple[str | None, str | None]:
-    """Resolve the target room from a room ID, a configured room name, or any Matrix alias."""
-    target_room_id, error = resolve_requested_room_id(context, room_id)
-    if error is not None:
-        return None, error
-    assert target_room_id is not None
-    # Only aliases of configured rooms resolve locally; the user's own rooms resolve through Matrix.
-    if target_room_id.startswith("#"):
-        response = await context.client.room_resolve_alias(target_room_id)
-        if not isinstance(response, nio.RoomResolveAliasResponse):
-            return None, unknown_room_error(target_room_id)
-        target_room_id = response.room_id
-    return target_room_id, None
 
 
 async def _target_poster_clients(

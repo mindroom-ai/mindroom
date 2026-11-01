@@ -111,7 +111,13 @@ def _frozen_delivery(*, body: str = "scheduled", delivery_id: str = "scheduled-t
     }
 
 
-def _opaque_reply_event(event_id: str, *, replies_to: str, timestamp: int) -> nio.Event:
+def _opaque_reply_event(
+    event_id: str,
+    *,
+    replies_to: str,
+    timestamp: int,
+    relation_key: str = "m.in_reply_to",
+) -> nio.Event:
     """Return ciphertext this client could not decrypt, with its reply relation left in cleartext."""
     return raw_nio_event(
         {
@@ -126,7 +132,7 @@ def _opaque_reply_event(event_id: str, *, replies_to: str, timestamp: int) -> ni
                 "device_id": "DEVICE",
                 "sender_key": "sender-key",
                 "session_id": "session",
-                "m.relates_to": {"m.in_reply_to": {"event_id": replies_to}},
+                "m.relates_to": {relation_key: {"event_id": replies_to}},
             },
         },
     )
@@ -185,11 +191,17 @@ async def test_response_recovery_scan_finds_exact_original_before_source() -> No
 
 
 @pytest.mark.asyncio
-async def test_response_recovery_scan_finds_opaque_encrypted_reply() -> None:
-    """The exposed reply relation recovers a bot response even without its Megolm key."""
+@pytest.mark.parametrize("relation_key", ["m.in_reply_to", "io.mindroom.in_reply_to"])
+async def test_response_recovery_scan_finds_opaque_encrypted_reply(relation_key: str) -> None:
+    """The exposed reply relation, quoted by clients or not, recovers a bot response even without its Megolm key."""
     source_event_id = "$source:localhost"
     response_event_id = "$response:localhost"
-    response_event = _opaque_reply_event(response_event_id, replies_to=source_event_id, timestamp=2000)
+    response_event = _opaque_reply_event(
+        response_event_id,
+        replies_to=source_event_id,
+        timestamp=2000,
+        relation_key=relation_key,
+    )
     response_event.source["sender"] = "@bot:localhost"
     client = AsyncMock()
     client.room_messages = AsyncMock(

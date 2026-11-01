@@ -78,15 +78,17 @@ def _build_skills(
     *,
     roots: Sequence[Path] | None = None,
     env: Mapping[str, str] | None = None,
+    env_file: Mapping[str, str] | None = None,
     credentials: Collection[str] = (),
     **kwargs: Any,  # noqa: ANN401
 ) -> SkillsToolkit | None:
-    """Build the toolkit with ``roots`` as the default skill roots, only ``env`` in the environment, and stored keys.
+    """Build the toolkit with ``roots`` as the default skill roots, only ``env`` and ``env_file`` in the environment.
 
-    ``credentials`` names the keys a stored credential carries; without ``roots`` the default roots stay as they are.
-    Without a ``workspace_root`` in ``kwargs``, the toolkit reads the agent's canonical workspace under the storage root.
+    ``env`` is the process environment and ``env_file`` the ``.env`` values. ``credentials`` names the keys a stored
+    credential carries; without ``roots`` the default roots stay as they are. Without a ``workspace_root`` in
+    ``kwargs``, the toolkit reads the agent's canonical workspace under the storage root.
     """
-    runtime_paths = replace(runtime_paths, process_env=dict(env or {}), env_file_values={})
+    runtime_paths = replace(runtime_paths, process_env=dict(env or {}), env_file_values=dict(env_file or {}))
     if credentials:
         get_runtime_credentials_manager(runtime_paths).save_credentials("skill_test", dict.fromkeys(credentials, "set"))
     options = {"workspace_root": agent_workspace_root_path(runtime_paths.storage_root, agent_name)} | kwargs
@@ -219,6 +221,37 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
         credentials={"TEST_ENV"},
     )
     assert _skill_names(eligible_with_credentials) == ["envconfig"]
+
+
+@pytest.mark.parametrize(
+    ("env", "env_file", "eligible"),
+    [
+        ({"TEST_ENV_FILE": "test-env-value"}, {}, True),
+        ({"TEST_ENV": ""}, {"TEST_ENV": "1"}, True),
+        ({"TEST_ENV": " "}, {}, False),
+    ],
+    ids=["file", "env-file-under-blank-export", "blank-export-only"],
+)
+def test_skill_env_requirement_reads_variables_as_provider_keys_are_read(
+    tmp_path: Path,
+    env: dict[str, str],
+    env_file: dict[str, str],
+    eligible: bool,
+) -> None:
+    """A ``<NAME>_FILE`` variable meets ``requires.env``, and a blank export is unset, so it does not hide ``.env``."""
+    _write_skill(tmp_path, "envskill", "Requires env", '{openclaw:{requires:{env:["TEST_ENV"]}}}')
+    (tmp_path / "test-env-value").write_text("1\n", encoding="utf-8")
+
+    skills = _build_skills(
+        "code",
+        _base_config(["envskill"]),
+        _runtime_paths(tmp_path),
+        roots=[tmp_path],
+        env=env,
+        env_file=env_file,
+    )
+
+    assert _skill_names(skills) == (["envskill"] if eligible else [])
 
 
 def test_skill_eligibility_requires_bins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

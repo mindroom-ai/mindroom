@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useEffectEvent } from "react";
 import {
   Home,
   Loader2,
@@ -119,10 +119,6 @@ export function HomeAssistantIntegration({
       executionScope,
     );
 
-  useEffect(() => {
-    checkStatus();
-  }, []);
-
   const checkStatus = async () => {
     setLoading(true);
     try {
@@ -138,16 +134,12 @@ export function HomeAssistantIntegration({
     }
   };
 
-  const connectOAuth = async () => {
-    if (!instanceUrl) {
-      toast({
-        title: "Missing Information",
-        description: "Please enter your Home Assistant instance URL",
-        variant: "destructive",
-      });
-      return;
-    }
+  const checkStatusOnOpen = useEffectEvent(checkStatus);
+  useEffect(() => {
+    checkStatusOnOpen();
+  }, []);
 
+  const connectOAuth = async () => {
     setConnecting(true);
     try {
       const response = await fetch(homeAssistantUrl("connect/oauth"), {
@@ -218,24 +210,6 @@ export function HomeAssistantIntegration({
   };
 
   const connectToken = async () => {
-    if (!instanceUrl) {
-      toast({
-        title: "Missing Information",
-        description: "Please enter your Home Assistant instance URL",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    if (!longLivedToken) {
-      toast({
-        title: "Missing Information",
-        description: "Please enter your long-lived access token",
-        variant: "destructive",
-      });
-      return;
-    }
-
     setConnecting(true);
     try {
       const response = await fetch(homeAssistantUrl("connect/token"), {

@@ -2233,7 +2233,7 @@ class TestUserIdPassthrough:
             tmp_path,
             Config(
                 agents={"general": AgentConfig(display_name="General", model="default")},
-                room_models={"lobby": "large"},
+                room_models={"!test:localhost": "large"},
                 models={
                     "default": ModelConfig(provider="openai", id="default-model", context_window=2000),
                     "large": ModelConfig(provider="openai", id="large-model", context_window=48000),
@@ -2244,12 +2244,11 @@ class TestUserIdPassthrough:
         large = _scripted_like(config, runtime_paths, [answer("Response", usage(800, 50))], "large")
         _install_by_name(monkeypatch, {"large": large}, built)
 
-        with patch("mindroom.matrix.state.get_room_alias_from_id", return_value="lobby"):
-            result = await _respond(
-                make_turn_context("general", session_id="session1", room_id="!test:localhost"),
-                config,
-                runtime_paths,
-            )
+        result = await _respond(
+            make_turn_context("general", session_id="session1", room_id="!test:localhost"),
+            config,
+            runtime_paths,
+        )
 
         assert built == ["large"]
         payload = result.run_metadata[AI_RUN_METADATA_KEY]

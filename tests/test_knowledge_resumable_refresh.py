@@ -2445,6 +2445,8 @@ async def test_isolated_failures_between_successes_do_not_stop_the_refresh(
 ) -> None:
     """A success between two rejections resets the streak, so isolated rejections never stop a refresh."""
     monkeypatch.setattr(knowledge_file_indexer, "_GLOBAL_EMBEDDER_FAILURE_STREAK", 2)
+    # Concurrent indexing could finish both rejections back to back, so index one file at a time.
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=1\n", encoding="utf-8")
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 12)
     config = _config(tmp_path, docs_path)

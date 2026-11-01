@@ -1,14 +1,13 @@
 import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 import { getServerRuntimeConfig } from '@/lib/runtime-config'
-import type { Database } from './types'
 
 export async function createServerClientSupabase() {
   const cookieStore = await cookies()
 
   const { supabaseUrl, supabaseAnonKey } = getServerRuntimeConfig()
 
-  return createServerClient<Database>(
+  return createServerClient(
     supabaseUrl,
     supabaseAnonKey,
     {

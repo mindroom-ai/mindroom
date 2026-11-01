@@ -4,6 +4,7 @@ import { Knowledge } from "./Knowledge";
 import { API_ENDPOINTS } from "@/lib/api";
 import { useConfigStore } from "@/store/configStore";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
+import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
 import type { SaveConfigResult } from "@/store/configStore";
 import type { Config, KnowledgeBaseConfig } from "@/types/config";
 
@@ -507,6 +508,62 @@ describe("Knowledge", () => {
     });
   });
 
+  async function renderCreateForm() {
+    mockStore({});
+    setKnowledgeApiMock({});
+    render(<Knowledge />);
+    await screen.findByText("Knowledge Bases");
+  }
+
+  it("asks before leaving the page drops a typed Create form name", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await renderCreateForm();
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Base Name"), {
+      target: { value: "docs_git" },
+    });
+
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+    confirmSpy.mockRestore();
+  });
+
+  it("counts a changed Git branch in the Create form as unsaved until the form is back to empty", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await renderCreateForm();
+    fireEvent.click(screen.getByRole("button", { name: "Create git source" }));
+    fireEvent.change(screen.getByLabelText("Branch"), {
+      target: { value: "release" },
+    });
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+
+    fireEvent.change(screen.getByLabelText("Branch"), {
+      target: { value: "main" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create local source" }),
+    );
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    confirmSpy.mockRestore();
+  });
+
+  it("counts a changed access mode in the Create form as unsaved", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await renderCreateForm();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create files-only access" }),
+    );
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create semantic search access" }),
+    );
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    confirmSpy.mockRestore();
+  });
+
   it("creates a git-based knowledge base in one step", async () => {
     mockStore({});
     setKnowledgeApiMock({
@@ -591,6 +648,11 @@ describe("Knowledge", () => {
         }),
       );
     });
+    // A created base leaves an empty Create form, which is no unsaved draft.
+    await waitFor(() =>
+      expect(screen.getByLabelText("Base Name")).toHaveValue(""),
+    );
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
   });
 
   it("creates a files-only knowledge base", async () => {
@@ -1321,7 +1383,8 @@ describe("Knowledge", () => {
     );
 
     const update = mockUpdateKnowledgeBase.mock.lastCall?.[1] as
-      KnowledgeBaseConfig | undefined;
+      | KnowledgeBaseConfig
+      | undefined;
     expect(update?.git).toBeDefined();
     // The store merges updates into the existing base, then JSON.stringify drops undefined keys.
     const savedBase = JSON.parse(
