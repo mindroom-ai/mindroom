@@ -2328,6 +2328,7 @@ path = "mindroom.api.schedules"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
+    "mindroom.matrix.client_room_admin",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
     "mindroom.scheduling.tasks",
@@ -2422,7 +2423,6 @@ path = "mindroom.custom_tools.attachment_helpers"
 depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.projected_thread_membership",
-    "mindroom.matrix.state",
 ]
 
 [[modules]]
@@ -3978,9 +3978,11 @@ path = "mindroom.matrix.client_room_admin"
 depends_on = [
     "mindroom.matrix.room_power",
     "mindroom.matrix.room_reconciliation",
+    "mindroom.matrix.state",
     "mindroom.thread_tags",
 ]
 visibility = [
+    "mindroom.api.schedules",
     "mindroom.custom_tools.thread_move",
     "mindroom.matrix.personal_rooms",
     "mindroom.api.matrix_operations",
@@ -6650,6 +6652,7 @@ expose = [
     "invite_to_room",
     "join_room",
     "leave_room",
+    "resolve_room_reference",
     "room_admin_power_user",
     "room_encryption_enabled",
 ]

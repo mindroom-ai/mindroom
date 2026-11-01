@@ -45,7 +45,7 @@ class ThreadSummaryTools(Toolkit):
         """
         if isinstance(context := tool_context_or_error(self._payload, "Thread summary", action="set"), str):
             return context
-        resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
+        resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
         if room_error is not None:
             return self._payload(
                 "error",
