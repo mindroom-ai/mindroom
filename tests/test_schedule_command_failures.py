@@ -48,6 +48,7 @@ TASK_ID = "task123"
 _STATE_ERROR = nio.RoomGetStateError.from_dict({"errcode": "M_FORBIDDEN", "error": "Not authorized"}, room_id=ROOM_ID)
 _STATE_WRITE_REFUSED = nio.RoomPutStateError(message="denied", status_code="M_FORBIDDEN")
 _TASK_READ_LIMITED = nio.RoomGetStateEventError(message="rate limited", status_code="M_LIMIT_EXCEEDED")
+_BROKEN_RESPONSE = aiohttp.ClientPayloadError("Response payload is not completed")
 _PARSE_FAILURE = (
     "Could not determine when to run the one-time task.\n\n"
     '💡 Include an explicit time like "today at 11:45 PM" or "in 10 minutes".'
@@ -182,10 +183,7 @@ async def test_schedule_mentioning_an_unavailable_agent(tmp_path: Path) -> None:
     ("read", "reason"),
     [
         (AsyncMock(return_value=_STATE_ERROR), str(_STATE_ERROR)),
-        (
-            AsyncMock(side_effect=aiohttp.ClientPayloadError("Response payload is not completed")),
-            "ClientPayloadError: Response payload is not completed",
-        ),
+        (AsyncMock(side_effect=_BROKEN_RESPONSE), "ClientPayloadError: Response payload is not completed"),
     ],
     ids=["error response", "broken-off response"],
 )
@@ -312,12 +310,9 @@ async def test_edit_of_a_task_whose_state_no_longer_parses(tmp_path: Path) -> No
     ("failure", "reason"),
     [
         (_TASK_READ_LIMITED, str(_TASK_READ_LIMITED)),
-        (
-            aiohttp.ClientPayloadError("Response payload is not completed"),
-            "ClientPayloadError: Response payload is not completed",
-        ),
+        (_BROKEN_RESPONSE, "ClientPayloadError: Response payload is not completed"),
     ],
-    ids=["error_response", "broken_response"],
+    ids=["error response", "broken-off response"],
 )
 async def test_edit_or_cancel_whose_task_cannot_be_read(
     tmp_path: Path,

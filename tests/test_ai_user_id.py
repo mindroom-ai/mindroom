@@ -1002,7 +1002,6 @@ class TestUserIdPassthrough:
         """The shared agent-build helper should preserve an explicit orchestrator config path."""
         config_path = tmp_path / "custom-config.yaml"
         config, runtime_paths = _bound(tmp_path, config_path=config_path)
-        persist_entity_accounts(config, runtime_paths)
         _install(monkeypatch)
 
         with (
@@ -1042,7 +1041,6 @@ class TestUserIdPassthrough:
         """Routine logs stay content-safe while debug logs retain the prepared prompt."""
         sensitive_marker = "sensitive prompt marker"
         config, runtime_paths = _bound(tmp_path)
-        persist_entity_accounts(config, runtime_paths)
         _install(monkeypatch)
         prepared_execution = _PreparedExecutionContext(
             turn=TurnMessages(

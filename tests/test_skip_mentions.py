@@ -118,11 +118,7 @@ def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
 @pytest.mark.asyncio
 async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
     """Test that the delivery gateway's send_text adds metadata when skip_mentions is True."""
-    config = bind_runtime_paths(
-        Config(agents={"email_agent": AgentConfig(display_name="Email Agent")}),
-        test_runtime_paths(tmp_path),
-    )
-    bot = _context_bot(tmp_path, config)
+    bot = _context_bot(tmp_path)
 
     # Mock the format_message_with_mentions to return a dict we can check
     mock_content = {"body": "test", "msgtype": "m.text"}

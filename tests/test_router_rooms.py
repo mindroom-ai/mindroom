@@ -31,14 +31,7 @@ from tests.matrix_state_helpers import save_matrix_state
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    runtime_paths = orchestrator_runtime_paths(
-        tmp_path,
-        config_path=tmp_path / "config.yaml",
-    )
-    return bind_runtime_paths(
-        config,
-        runtime_paths,
-    )
+    return bind_runtime_paths(config, orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
 
 
 @pytest.fixture

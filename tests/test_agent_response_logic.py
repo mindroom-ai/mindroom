@@ -53,11 +53,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
 
 
-def _bind_runtime_config(config: Config) -> Config:
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    return bind_runtime_paths(config, runtime_paths)
-
-
 def _message(
     *,
     sender: str,
@@ -97,7 +92,7 @@ class TestAgentResponseLogic:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = _bind_runtime_config(
+        self.config = bind_runtime_paths(
             Config(
                 agents={
                     name: AgentConfig(
@@ -116,6 +111,7 @@ class TestAgentResponseLogic:
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
+            test_runtime_paths(Path(tempfile.mkdtemp())),
         )
         self.runtime_paths = runtime_paths_for(self.config)
         self.domain = self.config.get_domain(self.runtime_paths)

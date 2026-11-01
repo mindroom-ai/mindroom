@@ -32,12 +32,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _bind_runtime_paths(config: Config, path: Path) -> Config:
-    return bind_runtime_paths(config, test_runtime_paths(path))
-
-
 def _config(path: Path, **kwargs: object) -> Config:
-    return _bind_runtime_paths(Config(**kwargs), path)
+    return bind_runtime_paths(Config(**kwargs), test_runtime_paths(path))
 
 
 class TestDMResponseLogic:
@@ -45,11 +41,9 @@ class TestDMResponseLogic:
 
     def test_should_respond_in_dm_mode_no_mention(self, tmp_path: Path) -> None:
         """Test that agents respond in DM mode without mentions."""
-        config = _bind_runtime_paths(
-            Config(
-                agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
-            ),
+        config = _config(
             tmp_path,
+            agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
         )
 
         # Mock room with single agent - use the correct domain from config
@@ -76,11 +70,9 @@ class TestDMResponseLogic:
 
     def test_should_respond_in_dm_mode_when_mentioned(self, tmp_path: Path) -> None:
         """Test that agents respond in DM mode when mentioned."""
-        config = _bind_runtime_paths(
-            Config(
-                agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
-            ),
+        config = _config(
             tmp_path,
+            agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
         )
 
         # Mock room with single agent - use the correct domain from config
@@ -106,14 +98,12 @@ class TestDMResponseLogic:
 
     def test_should_not_respond_in_dm_mode_when_other_mentioned(self, tmp_path: Path) -> None:
         """Test that agents don't respond when other agents are mentioned."""
-        config = _bind_runtime_paths(
-            Config(
-                agents={
-                    "test_agent": AgentConfig(display_name="Test Agent", role="Test"),
-                    "other_agent": AgentConfig(display_name="Other Agent", role="Other"),
-                },
-            ),
+        config = _config(
             tmp_path,
+            agents={
+                "test_agent": AgentConfig(display_name="Test Agent", role="Test"),
+                "other_agent": AgentConfig(display_name="Other Agent", role="Other"),
+            },
         )
 
         # Mock room with multiple agents - use the correct domains from config
@@ -142,14 +132,12 @@ class TestDMResponseLogic:
 
     def test_multi_agent_dm_does_not_respond_individually(self, tmp_path: Path) -> None:
         """Test that multiple agents in DM room without mentions don't respond individually."""
-        config = _bind_runtime_paths(
-            Config(
-                agents={
-                    "test_agent": AgentConfig(display_name="Test Agent", role="Test"),
-                    "other_agent": AgentConfig(display_name="Other Agent", role="Other"),
-                },
-            ),
+        config = _config(
             tmp_path,
+            agents={
+                "test_agent": AgentConfig(display_name="Test Agent", role="Test"),
+                "other_agent": AgentConfig(display_name="Other Agent", role="Other"),
+            },
         )
 
         # Mock room with multiple agents - use the correct domains from config
@@ -195,7 +183,7 @@ class TestDMMessageContext:
 
     async def test_extract_dm_context(self, tmp_path: Path) -> None:
         """Test extracting message context in DM mode."""
-        config = _bind_runtime_paths(Config(), tmp_path)
+        config = _config(tmp_path)
 
         # Create a bot with mocked components
         # Use the correct MatrixID from config

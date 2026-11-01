@@ -31,8 +31,7 @@ from tests.scheduling_helpers import serve_full_room_state
 
 def _runtime_bound_config(config: Config) -> Config:
     """Return a runtime-bound config for scheduling tests."""
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    return bind_runtime_paths(config, runtime_paths)
+    return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
 
 
 def _test_room(config: Config, *agent_names: str) -> nio.MatrixRoom:

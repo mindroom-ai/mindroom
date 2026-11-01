@@ -41,8 +41,7 @@ def _is_entity_id(sender_id: str, config: Config, runtime_paths: constants_mod.R
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    runtime_paths = test_runtime_paths(tmp_path)
-    return bind_runtime_paths(config, runtime_paths)
+    return bind_runtime_paths(config, test_runtime_paths(tmp_path))
 
 
 class TestMatrixID:

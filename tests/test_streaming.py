@@ -130,7 +130,6 @@ class _FakeGateway:
 @pytest.fixture
 def config() -> Config:
     """Minimal bound config for direct streaming tests."""
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
     return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"])},
@@ -139,7 +138,7 @@ def config() -> Config:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
         ),
-        runtime_paths,
+        test_runtime_paths(Path(tempfile.mkdtemp())),
     )
 
 

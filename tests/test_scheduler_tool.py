@@ -42,8 +42,7 @@ from tests.identity_helpers import entity_ids
 
 
 def _bind_runtime_paths(config: Config) -> Config:
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    return bind_runtime_paths(config, runtime_paths)
+    return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
 
 
 def _general_config() -> Config:
