@@ -1279,8 +1279,8 @@ async def test_an_approval_resume_repeats_the_request_the_leader_and_the_member_
 ) -> None:
     """The leader and the member resume with the request each paused on, then the paused turn, its result, the receipt.
 
-    The leader's turn context comes back where the paused request sent it; each run's
-    receipt follows its decided result and stays there for the run's later requests.
+    The leader's turn context comes back where the paused request sent it; each run's receipt follows its decided result
+    and stays there for the run's later requests.
     """
     team = squad_turn(
         tmp_path,

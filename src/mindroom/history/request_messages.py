@@ -183,11 +183,10 @@ def build_resume_request(
 
     ``paused`` holds the paused run's stored messages, which never include history copies. Its stored system messages
     are reused, and the turn context the paused request sent (``add_to_agent_memory=False``), such as memory results,
-    stays where it was. So when the summary and history replay as they did for the paused request, this request
-    repeats that one up to its last assistant turn: a signed reasoning block there stays valid against an unchanged
-    prefix, and the provider's prompt cache still matches. A queued-message notice the paused run
-    holds is left out: it told the reply that paused about a newer message, and the resume's own hooks decide again
-    whether one waits.
+    stays where it was. So when the summary and history replay as they did for the paused request, this request repeats
+    that one up to its last assistant turn: a signed reasoning block there stays valid against an unchanged prefix, and
+    the provider's prompt cache still matches. A queued-message notice the paused run holds is left out: it told the
+    reply that paused about a newer message, and the resume's own hooks decide again whether one waits.
     """
     # LEGACY_COMPAT: Paused runs stored without the context their paused request sent.
     # Legacy format: a paused run whose stored messages, an Agno-layout ``run_data`` row the storage v2 conversion
