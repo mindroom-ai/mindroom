@@ -103,7 +103,7 @@ repos:
   - repo: local
     hooks:
       # Each hook must bootstrap a fresh checkout without downloading Puppeteer's browser.
-      # Prettier reads `frontend/.prettierignore`, so `bunx prettier` in `frontend/` formats exactly like this hook.
+      # Prettier reads `frontend/.prettierignore`, so this hook needs no exclude list.
       - id: prettier
         name: Prettier
         entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bunx prettier --write "${@#frontend/}"' --

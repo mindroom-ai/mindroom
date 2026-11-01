@@ -15,7 +15,7 @@ import { EditorPanelEmptyState } from "@/components/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useToast } from "@/components/ui/use-toast";
+import { toast } from "@/components/ui/toaster";
 import { useTheme } from "@/contexts/ThemeContext";
 import { useSwipeBack } from "@/hooks/useSwipeBack";
 import {
@@ -34,8 +34,6 @@ interface SkillListItem extends ListItem {
 }
 
 export function Skills() {
-  const { toast } = useToast();
-
   const { resolvedTheme } = useTheme();
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -72,7 +70,7 @@ export function Skills() {
     } finally {
       setLoadingList(false);
     }
-  }, [toast]);
+  }, []);
 
   useEffect(() => {
     refreshSkills();
@@ -109,7 +107,7 @@ export function Skills() {
     return () => {
       isActive = false;
     };
-  }, [selectedName, toast]);
+  }, [selectedName]);
 
   const handleSelect = (name: string) => {
     if (isDirty && selectedName !== name) {

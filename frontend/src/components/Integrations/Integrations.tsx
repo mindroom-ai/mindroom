@@ -216,10 +216,10 @@ const manualOAuthFallbackLabel = (integration: Integration) => {
 
 const IntegrationCard = ({
   integration,
-  renderAction,
+  action,
 }: {
   integration: Integration;
-  renderAction: (integration: Integration) => ReactNode;
+  action: ReactNode;
 }) => {
   const isConnected = integration.status === "connected";
   const usesGoogleUserData = integration.id.startsWith("google_");
@@ -283,7 +283,7 @@ const IntegrationCard = ({
 
       <CardContent>
         <div className="space-y-3">
-          <div className="flex gap-2">{renderAction(integration)}</div>
+          <div className="flex gap-2">{action}</div>
         </div>
       </CardContent>
     </Card>
@@ -685,6 +685,11 @@ export function Integrations() {
       return { title: integration.name, description: message };
     });
 
+  const integrations =
+    integrationsState.scopeKey === currentScopeKey
+      ? integrationsState.integrations
+      : NO_INTEGRATIONS;
+
   const getActionButton = (integration: Integration) => {
     if (blocksScopedDashboardCredentials(integration)) {
       return (
@@ -1019,11 +1024,6 @@ export function Integrations() {
     );
   };
 
-  const integrations =
-    integrationsState.scopeKey === currentScopeKey
-      ? integrationsState.integrations
-      : NO_INTEGRATIONS;
-
   const filteredIntegrations = useMemo(() => {
     let filtered = integrations;
 
@@ -1196,7 +1196,7 @@ export function Integrations() {
                     <IntegrationCard
                       key={integration.id}
                       integration={integration}
-                      renderAction={getActionButton}
+                      action={getActionButton(integration)}
                     />
                   ))}
                 </div>
