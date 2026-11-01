@@ -17,6 +17,7 @@ from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
+    ensure_server_emoji_room,
     ensure_user_in_rooms,
     reconcile_managed_rooms,
 )
@@ -118,6 +119,7 @@ class RoomSetup:
         # Ensure all configured rooms exist before reconciling memberships.
         room_ids = await self.ensure_rooms_exist()
         await self.link_root_space(room_ids)
+        await self.ensure_server_emoji_room()
 
         # Resolve room aliases now that any missing rooms have been created.
         config = self.config_provider()
@@ -179,6 +181,12 @@ class RoomSetup:
             logger.warning("room_invitations_skipped_members_unavailable", room_id=root_space_id)
             return
         await _invite_missing(client, root_space_id, invite_user_ids, current_members)
+
+    async def ensure_server_emoji_room(self) -> None:
+        """Create and maintain the optional server custom emoji room through the router."""
+        client = self.router_client()
+        if client is not None:
+            await ensure_server_emoji_room(client, self.config_provider(), self.runtime_paths)
 
     async def _ensure_room_invitations(self, snapshots: dict[str, RoomStateSnapshot]) -> None:
         """Ensure all agents and the internal user are invited to their configured rooms.

@@ -4595,6 +4595,32 @@
       "title": "RouterConfig",
       "type": "object"
     },
+    "ServerEmojiConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for the optional room whose emoji packs every MindRoom Chat user on the homeserver can use.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Whether to create and maintain the server custom emoji room for MindRoom Chat",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "name": {
+          "default": "Emoji",
+          "description": "Display name for the emoji room and its first emoji pack when MindRoom creates them",
+          "title": "Name",
+          "type": "string"
+        },
+        "moderators_only": {
+          "default": false,
+          "description": "Whether only moderators (power level 50) may add, rename, or remove server emoji",
+          "title": "Moderators Only",
+          "type": "boolean"
+        }
+      },
+      "title": "ServerEmojiConfig",
+      "type": "object"
+    },
     "SkillLearningConfig": {
       "additionalProperties": false,
       "description": "Periodically review standalone agent conversations and maintain learned workspace skills.",
@@ -5837,6 +5863,15 @@
         "name": "MindRoom"
       },
       "description": "Optional root Matrix Space for grouping managed rooms"
+    },
+    "server_emoji": {
+      "$ref": "#/$defs/ServerEmojiConfig",
+      "default": {
+        "enabled": false,
+        "name": "Emoji",
+        "moderators_only": false
+      },
+      "description": "Optional room whose emoji packs every MindRoom Chat user on the homeserver can use"
     },
     "authorization": {
       "$ref": "#/$defs/AuthorizationConfig",
