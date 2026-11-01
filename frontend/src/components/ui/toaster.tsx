@@ -30,7 +30,13 @@ export function Toaster() {
   const shown = useToasts((state) => state.toasts);
 
   return (
-    <div className="fixed bottom-0 right-0 z-50 p-4 space-y-2">
+    <div
+      role="status"
+      // The role implies it, but an open Radix dialog hides all but [aria-live] elements from screen readers.
+      aria-live="polite"
+      aria-atomic="false"
+      className="fixed bottom-0 right-0 z-50 p-4 space-y-2"
+    >
       {shown.map((toast) => (
         <div
           key={toast.id}
@@ -50,6 +56,7 @@ export function Toaster() {
             )}
           </div>
           <button
+            aria-label="Dismiss notification"
             onClick={() => dismiss(toast.id)}
             className="absolute right-2 top-2 rounded-md p-1 opacity-0 hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring"
           >
