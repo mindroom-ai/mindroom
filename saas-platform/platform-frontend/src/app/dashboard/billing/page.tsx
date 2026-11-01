@@ -5,16 +5,14 @@ import { useSubscription, type Subscription } from '@/hooks/useSubscription'
 import { createPortalSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
 import Link from 'next/link'
-import { isDowngrade, trialDays } from '@/lib/pricing-config'
+import { formatRecordedPrice, isDowngrade, trialDays } from '@/lib/pricing-config'
 import { currentPlanTier, planState } from '@/lib/plan-state'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, Check, RefreshCw } from 'lucide-react'
 
 /** What the subscription pays per billing cycle, or its plan's monthly price before Stripe records one. */
 function formatPrice(subscription: Subscription | null, plan: PricingConfig['plans'][string] | undefined): string {
-  if (subscription?.price_cents != null) {
-    return `$${subscription.price_cents / 100}/${subscription.billing_cycle === 'yearly' ? 'year' : 'month'}`
-  }
+  if (subscription?.price_cents != null) return formatRecordedPrice(subscription.price_cents, subscription.billing_cycle)
   if (!plan) return '$0/month'
   return plan.price_monthly === 'custom' ? 'Custom' : `${plan.price_monthly}/month`
 }

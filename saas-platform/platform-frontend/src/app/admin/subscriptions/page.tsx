@@ -3,8 +3,9 @@
 import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/button'
-import { apiCall } from '@/lib/api'
+import { apiCall, type Subscription as SubscriptionOut } from '@/lib/api'
 import { logger } from '@/lib/logger'
+import { formatRecordedPrice } from '@/lib/pricing-config'
 
 interface Subscription {
   id: string
@@ -12,8 +13,8 @@ interface Subscription {
   price_tier: string
   tier: string
   status: string
-  price: number
-  billing_period: string
+  price_cents: number | null
+  billing_cycle: SubscriptionOut['billing_cycle']
   current_period_end: string | null
   created_at: string
   accounts?: {
@@ -46,13 +47,6 @@ export default function SubscriptionsPage() {
 
     fetchSubscriptions()
   }, [])
-
-  const formatPrice = (amount: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-    }).format(amount / 100)
-  }
 
   if (loading) {
     return (
@@ -125,17 +119,12 @@ export default function SubscriptionsPage() {
                         )}
                       </td>
                       <td className="py-3 px-4">
-                        {noPlan ? (
+                        {noPlan || subscription.price_cents == null ? (
                           <span className="text-gray-500 dark:text-gray-400">—</span>
                         ) : (
-                          <>
-                            <span className="text-gray-900 dark:text-gray-100">
-                              {formatPrice(subscription.price || 0)}
-                            </span>
-                            <span className="text-gray-500 dark:text-gray-400 text-sm">
-                              /{subscription.billing_period || 'month'}
-                            </span>
-                          </>
+                          <span className="text-gray-900 dark:text-gray-100">
+                            {formatRecordedPrice(subscription.price_cents, subscription.billing_cycle)}
+                          </span>
                         )}
                       </td>
                       <td className="py-3 px-4 text-sm text-gray-500 dark:text-gray-400">

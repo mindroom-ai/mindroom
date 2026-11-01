@@ -95,6 +95,7 @@ describe('BillingPage', () => {
   it.each([
     ['the yearly price a yearly subscriber pays', { price_cents: 9600, billing_cycle: 'yearly' }, '$96/year'],
     ['the monthly price a monthly subscriber pays', { price_cents: 800, billing_cycle: 'monthly' }, '$8/month'],
+    ['a recorded price with cents', { price_cents: 18240, billing_cycle: 'yearly' }, '$182.40/year'],
     ["the plan's monthly price before Stripe records one", { price_cents: null, billing_cycle: null }, '$10/month'],
   ])('shows %s', async (_case, recordedPrice, shown) => {
     ;(useSubscription as jest.Mock).mockReturnValue({

@@ -5,8 +5,9 @@ import { useParams, useRouter } from 'next/navigation'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/button'
 import { ArrowLeft, User, Mail, Building, Calendar, Shield } from 'lucide-react'
-import { apiCall } from '@/lib/api'
+import { apiCall, type Subscription } from '@/lib/api'
 import { logger } from '@/lib/logger'
+import { formatRecordedPrice } from '@/lib/pricing-config'
 
 interface AccountDetails {
   id: string
@@ -21,8 +22,8 @@ interface AccountDetails {
     id: string
     tier: string
     status: string
-    price: number
-    billing_period: string
+    price_cents: number | null
+    billing_cycle: Subscription['billing_cycle']
   }
   instances?: Array<{
     id: string
@@ -173,7 +174,9 @@ export default function AccountDetailsPage() {
                   <span className="text-gray-900 dark:text-gray-100">
                     {account.subscription.tier === 'free'
                       ? 'No plan'
-                      : `${account.subscription.tier} - $${(account.subscription.price / 100).toFixed(2)}/${account.subscription.billing_period}`}
+                      : account.subscription.price_cents == null
+                        ? account.subscription.tier
+                        : `${account.subscription.tier} - ${formatRecordedPrice(account.subscription.price_cents, account.subscription.billing_cycle)}`}
                   </span>
                 </div>
               </div>
