@@ -356,6 +356,7 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         IngressValidatorDeps(
             runtime=runtime,
             runtime_paths=runtime_paths,
+            agent_name="secret",
             matrix_id=ids["secret"],
             turn_store=turn_store,
             turn_policy=TurnPolicy(

@@ -33,12 +33,14 @@ class IngressFacts:
 
     physical_sender: str
     source_kind: str
-    # The requester-promotion result, alias-resolved: lanes, coalescing keys, and the self-echo drop use it.
+    # The requester-promotion result, alias-resolved, or the owner of an agent party in its contact room: lanes,
+    # coalescing keys, and the self-echo drop use it.
     lane_requester_id: str
     # Trusted relay metadata: a human or configured bot account a managed sender relayed.
     original_sender: str | None = None
     original_sender_is_human: bool = False
-    # The human or bot account a managed non-router sender wrote this reply for.
+    # Whom another sender's message runs for: the human or bot account a managed non-router sender wrote this
+    # reply for, or the owner of an agent party in its contact room when someone else wrote it.
     acting_requester_id: str | None = None
     hook_source: str | None = None
     message_received_depth: int = 0
@@ -47,6 +49,10 @@ class IngressFacts:
     sender_entity_name: str | None = None
     # The entity behind the run requester, if one is.
     requester_entity_name: str | None = None
+    # The active contact whose room this is, when the responder is one of its agent parties.
+    contact_id: str | None = None
+    # Whether that contact refuses the sender: only the counterparty and the responder's owner start its turns.
+    contact_refused: bool = False
 
     @property
     def run_requester_id(self) -> str:
@@ -55,7 +61,7 @@ class IngressFacts:
 
     @property
     def acts_for_requester(self) -> bool:
-        """Return whether the sender wrote this for the run requester, so it stays the message's speaker."""
+        """Return whether the turn runs for a requester other than the sender, so the sender stays its speaker."""
         return self.acting_requester_id is not None
 
     @property
@@ -88,6 +94,7 @@ class IngressFacts:
             source_kind=self.source_kind,
             original_sender=self.original_sender,
             trusted_user_relay=self.trusted_user_relay,
+            acts_for_requester=self.acts_for_requester,
         )
 
 

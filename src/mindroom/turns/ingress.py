@@ -646,7 +646,11 @@ class TurnIngress:
         final_reply = self._mentioned_entity_final_reply(room, event) if event_info.is_edit else None
         is_edit = event_info.is_edit and final_reply is None
         turn_event = event if final_reply is None else final_reply
-        facts = self.deps.ingress.classify(turn_event, source_kind=EDIT_SOURCE_KIND if is_edit else None)
+        facts = self.deps.ingress.classify(
+            turn_event,
+            source_kind=EDIT_SOURCE_KIND if is_edit else None,
+            room_id=room.room_id,
+        )
         if await self.deps.personal_room_command(room, event, facts.lane_requester_id):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         self._log_callback_started(room, event, callback_name="message")
@@ -822,7 +826,7 @@ class TurnIngress:
         receipt_time: float,
     ) -> TurnDispatchOutcome:
         """Handle one media event inside the per-turn conversation lookup scope."""
-        facts = self.deps.ingress.classify(event, source_kind=_media_source_kind(event))
+        facts = self.deps.ingress.classify(event, source_kind=_media_source_kind(event), room_id=room.room_id)
         if not await self._precheck_dispatch_event(room, event, facts):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         dispatch_timing = create_dispatch_pipeline_timing(

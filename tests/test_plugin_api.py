@@ -245,7 +245,7 @@ _SIGNATURES = {
     "TranscriptLine": "(role, sender, display_name, text)",
     "TurnOrigin": (
         "(transport_sender_id, requester_id, sender_entity_name, requester_entity_name, sender_kind, requester_kind, "
-        "intent, source_kind, trust)"
+        "intent, source_kind, trust, acts_for_requester)"
     ),
     "atlassian_connection_oauth_provider": "(connection)",
     "automation": "(name, *, requires_file_memory)",

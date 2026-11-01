@@ -419,7 +419,7 @@ class TurnDispatcher:
                 thread_id=thread_id,
                 may_be_superseded_by_newer_requester_turn=may_be_superseded,
                 pending_turns=self.deps.pending_turns,
-                classify=self.deps.ingress.classify_source,
+                classify=partial(self.deps.ingress.classify_source, room_id=room.room_id),
                 is_handled=partial(self.deps.turn_store.handled_among, room.room_id),
                 logger=self.deps.logger,
             )
@@ -596,7 +596,7 @@ class TurnDispatcher:
             requester_user_id,
             thread_history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
-            classify=self.deps.ingress.classify_source,
+            classify=partial(self.deps.ingress.classify_source, room_id=room_id),
             is_handled=partial(self.deps.turn_store.handled_among, room_id),
             logger=self.deps.logger,
         )

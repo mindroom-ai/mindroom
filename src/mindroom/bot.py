@@ -646,6 +646,7 @@ class AgentBot:
             IngressValidatorDeps(
                 runtime=self._runtime_view,
                 runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
                 turn_store=self._turn_store,
                 turn_policy=self._turn_policy,

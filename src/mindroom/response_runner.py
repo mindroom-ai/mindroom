@@ -929,7 +929,7 @@ class ResponseRunner:
             thread_id=target.resolved_thread_id,
             requester_id=requester_id,
             matrix_run_metadata=_turn_run_metadata(request),
-            current_sender_id=request.response_envelope.origin.acting_sender_id,
+            current_sender_id=request.response_envelope.origin.speaker_id,
             history_boundary_event_id=request.history_boundary_event_id,
             member_display_names=request.member_display_names,
             transient_enrichment_items=with_matrix_message_target(

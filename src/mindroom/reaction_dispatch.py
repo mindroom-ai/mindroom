@@ -279,7 +279,7 @@ class ReactionDispatcher:
             )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-        facts = self.deps.ingress.classify(event)
+        facts = self.deps.ingress.classify(event, room_id=room.room_id)
         requester_user_id = facts.lane_requester_id
         ticket = self.deps.reserve_prompt_ingress_order(
             room,
@@ -350,7 +350,7 @@ class ReactionDispatcher:
         """Route one reaction to its sole durable semantic consumer."""
         semantic_consumer = self.deps.journal_dispatcher.semantic_consumer()
         if semantic_consumer is SemanticConsumer.REACTION_HOOKS:
-            requester_user_id = self.deps.ingress.classify(event).lane_requester_id
+            requester_user_id = self.deps.ingress.classify(event, room_id=room.room_id).lane_requester_id
             await self._emit_authorized_reaction_hooks(room, event, requester_user_id)
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         return await self._route_reaction(room, event, semantic_consumer)

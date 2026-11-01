@@ -111,6 +111,7 @@ class World:
             IngressValidatorDeps(
                 runtime=runtime,
                 runtime_paths=self.paths,
+                agent_name="launch",
                 matrix_id=launch_id,
                 turn_store=MagicMock(),
                 turn_policy=MagicMock(),

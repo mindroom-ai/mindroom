@@ -497,6 +497,7 @@ TurnOrigin(
     intent: TurnIntent,            # see below
     source_kind: str,
     trust: TurnTrust,              # "external", "trusted_internal", or "trusted_user_relay"
+    acts_for_requester: bool,      # the sender's message runs for another requester, as in a contact room
 )
 
 ResponseDraft(

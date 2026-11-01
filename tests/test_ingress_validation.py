@@ -91,6 +91,7 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
         IngressValidatorDeps(
             runtime=runtime,
             runtime_paths=runtime_paths,
+            agent_name="test_agent",
             matrix_id=ids["test_agent"],
             turn_store=turn_store,
             turn_policy=turn_policy,
@@ -197,6 +198,7 @@ def _validator(tmp_path: Path) -> tuple[IngressValidator, dict[str, MatrixID]]:
         IngressValidatorDeps(
             runtime=runtime,
             runtime_paths=runtime_paths,
+            agent_name="general",
             matrix_id=ids["general"],
             turn_store=MagicMock(),
             turn_policy=MagicMock(),
@@ -274,6 +276,8 @@ def test_classification_keeps_the_four_identities_apart(tmp_path: Path) -> None:
     )
     assert agent_reply.acts_for_requester
     assert agent_reply.origin.acting_sender_id == research
+    assert agent_reply.origin.speaker_id == research
+    assert agent_reply.contact_id is None
 
     human_relay = validator.classify(
         _text(
@@ -286,6 +290,18 @@ def test_classification_keeps_the_four_identities_apart(tmp_path: Path) -> None:
     assert human_relay.router_relay
     assert human_relay.trusted_user_relay
     assert human_relay.origin.intent is TurnIntent.ROUTER_HANDOFF
+    # The relayed human speaks the message the router relayed.
+    assert human_relay.origin.speaker_id is None
+
+
+def test_a_room_that_is_no_contact_room_changes_no_identity(tmp_path: Path) -> None:
+    """Only an agent party's contact room changes who a turn runs as; every other room classifies as before."""
+    validator, ids = _validator(tmp_path)
+    for event in (
+        _text("@user:localhost", "hello"),
+        _text(ids["research"].full_id, "@general over to you", **{ACTING_REQUESTER_KEY: "@user:localhost"}),
+    ):
+        assert validator.classify(event, room_id="!room:localhost") == validator.classify(event)
 
 
 def _entity_final_reply_with_tool_markers(validator: IngressValidator, sender: str) -> nio.RoomMessageFormatted:

@@ -697,6 +697,7 @@ def _build_harness(
         IngressValidatorDeps(
             runtime=runtime,
             runtime_paths=runtime_paths,
+            agent_name=agent_name,
             matrix_id=matrix_id,
             turn_store=turn_store,
             turn_policy=policy,
