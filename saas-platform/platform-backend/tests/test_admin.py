@@ -509,6 +509,7 @@ class TestAdminEndpoints:
             data=[
                 {"tier": "byok", "billing_cycle": "monthly", "price_cents": 1000},
                 {"tier": "byok", "billing_cycle": "yearly", "price_cents": 9600},
+                {"tier": "hobby", "billing_cycle": "yearly", "price_cents": 19990},
                 {"tier": "pro", "billing_cycle": None, "price_cents": None},
             ]
         )
@@ -560,7 +561,7 @@ class TestAdminEndpoints:
         subs_data_mock.neq.assert_called_with("tier", "free")
         assert data["active_subscriptions"] == 70
         assert data["total_instances"] == 2  # We have 2 instances total in the mock
-        assert data["subscription_revenue"] == 18.0
+        assert data["subscription_revenue"] == 34.66  # 10 + 8 + 16.66 (199.90 / 12, rounded to cents)
 
     def test_admin_resource_not_in_allowlist(self, client: TestClient, mock_verify_admin: Mock):
         """Test admin accessing resource not in allowlist."""
