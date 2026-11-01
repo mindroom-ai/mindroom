@@ -206,14 +206,14 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
     sized: dict[str, Any] = {}
     real_estimator = execution_preparation.build_static_token_estimator
 
-    def capture_estimator(
+    async def capture_estimator(
         counter: TokenCounter,
         system_messages: tuple[Message, ...],
         tools: Any,  # noqa: ANN401
         deferred_tool_names: frozenset[str],
     ) -> Any:  # noqa: ANN401
         sized["system_messages"], sized["tools"] = system_messages, list(tools)
-        return real_estimator(counter, system_messages, tools, deferred_tool_names)
+        return await real_estimator(counter, system_messages, tools, deferred_tool_names)
 
     monkeypatch.setattr(execution_preparation, "build_static_token_estimator", capture_estimator)
 

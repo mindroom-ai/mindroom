@@ -747,7 +747,7 @@ async def prepare_history_for_run_for_test(
     """
     resolved_scope = scope or HistoryScope(kind="agent", scope_id=agent_name)
     model = model or estimate_only_model()
-    static_token_estimator = build_static_token_estimator(model.token_counter, (), (), frozenset())
+    static_token_estimator = await build_static_token_estimator(model.token_counter, (), (), frozenset())
     if static_prompt_tokens is None:
         static_prompt_tokens = static_token_estimator.estimate(full_prompt)
     resolved_inputs = resolve_entity_preparation_inputs(

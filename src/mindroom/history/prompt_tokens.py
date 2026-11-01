@@ -7,12 +7,12 @@ they change at different times and a counting endpoint's exact count of each is 
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass
-from functools import cached_property
 from typing import TYPE_CHECKING
 
 from mindroom.llm.messages import stable_serialize, system_texts
-from mindroom.token_counting.counts import count
+from mindroom.token_counting.counts import count, measure
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -26,20 +26,15 @@ class _StaticTokenEstimator:
     """Request-local static-token counts, as one route counts them."""
 
     counter: TokenCounter
-    # Each system message's text and the serialized tool definitions.
-    parts: tuple[str, ...]
-
-    @cached_property
-    def non_prompt_tokens(self) -> int:
-        """The parts' tokens, which do not depend on the prompt text; counted once, on first use."""
-        return sum(count(self.counter, part).tokens for part in self.parts)
+    # The system messages' and tool definitions' tokens, which do not depend on the prompt text.
+    non_prompt_tokens: int
 
     def estimate(self, full_prompt: str) -> int:
         """Count the prompt text's tokens plus the non-prompt cost."""
         return count(self.counter, full_prompt).tokens + self.non_prompt_tokens
 
 
-def build_static_token_estimator(
+async def build_static_token_estimator(
     counter: TokenCounter,
     system_messages: Sequence[Message],
     tools: Sequence[ToolSpec],
@@ -47,10 +42,18 @@ def build_static_token_estimator(
 ) -> _StaticTokenEstimator:
     """Return the static-token counts of one rendered system prompt and its tools, as ``counter``'s route counts them.
 
-    Deferred tools stay off the request until tool search loads them, so they are left out.
+    They are stable inputs, so the reply waits for the provider to count each part it has not counted yet. Deferred
+    tools stay off the request until tool search loads them, so they are left out.
     """
     definitions = tool_definitions_text(tools, deferred_tool_names)
-    return _StaticTokenEstimator(counter, (*system_texts(system_messages), *((definitions,) if definitions else ())))
+    parts = (*system_texts(system_messages), *((definitions,) if definitions else ()))
+    await measure(counter, *parts)
+    # Encoding a long prompt would stall the replies sharing the event loop.
+    return _StaticTokenEstimator(counter, await asyncio.to_thread(_parts_tokens, counter, parts))
+
+
+def _parts_tokens(counter: TokenCounter, parts: Sequence[str]) -> int:
+    return sum(count(counter, part).tokens for part in parts)
 
 
 def tool_definitions_text(tools: Sequence[ToolSpec], deferred_tool_names: frozenset[str]) -> str:

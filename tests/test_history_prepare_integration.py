@@ -228,7 +228,7 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
 
     assert prepare.await_args is not None
     build = prepared.build
-    estimator = build_static_token_estimator(
+    estimator = await build_static_token_estimator(
         build.spec.model.token_counter,
         prepared.spec.system_messages,
         PreparedTools(functions=build.spec.functions).specs(),
@@ -358,14 +358,14 @@ class _TextOnlyEstimator:
     """A static estimate of the prompt text alone, so the thread fallback must fit the window by itself."""
 
     counter = fake_token_counter()
-    parts = ()
     non_prompt_tokens = 0
-
-    def __init__(self, *_args: object) -> None:
-        pass
 
     def estimate(self, full_prompt: str) -> int:
         return quarter_tokens(full_prompt)
+
+
+async def _text_only_estimator(*_args: object) -> _TextOnlyEstimator:
+    return _TextOnlyEstimator()
 
 
 @pytest.mark.asyncio
@@ -383,7 +383,7 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
 
     with (
         _no_memory(),
-        patch("mindroom.execution_preparation.build_static_token_estimator", _TextOnlyEstimator),
+        patch("mindroom.execution_preparation.build_static_token_estimator", _text_only_estimator),
         _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)),
     ):
         prepared_run = await prepare_agent_and_prompt_for_test(

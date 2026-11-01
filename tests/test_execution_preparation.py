@@ -889,7 +889,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
     tools = PreparedTools(functions=build.spec.functions).specs()
     assert tools
     counter = build.spec.model.token_counter
-    estimator = build_static_token_estimator(
+    estimator = await build_static_token_estimator(
         counter,
         system_messages,
         tools,
@@ -902,7 +902,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
     assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens
     assert (
         estimator.non_prompt_tokens
-        > build_static_token_estimator(counter, system_messages, (), frozenset()).non_prompt_tokens
+        > (await build_static_token_estimator(counter, system_messages, (), frozenset())).non_prompt_tokens
     )
 
 
@@ -913,8 +913,10 @@ async def test_reply_preparation_sizes_the_static_prompt_by_the_providers_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The reply waits for the provider to count the system prompt and tools, and sizes them by that count."""
+    counted: list[str] = []
 
     async def endpoint(text: str) -> int:
+        counted.append(text)
         return len(text)
 
     config, runtime_paths = _bound_agent_config(tmp_path, tools=("calculator",))
@@ -942,14 +944,9 @@ async def test_reply_preparation_sizes_the_static_prompt_by_the_providers_count(
         resolved_runtime_model=resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent"), None),
     )
 
-    parts = build_static_token_estimator(
-        counter,
-        system_messages,
-        PreparedTools(functions=build.spec.functions).specs(),
-        build.request_template.deferred_tools.names,
-    ).parts
-    assert all(count(counter, part) == TokenCount(len(part), "exact") for part in parts)
-    assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == sum(len(part) for part in parts)
+    assert counted
+    assert all(count(counter, text) == TokenCount(len(text), "exact") for text in counted)
+    assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == sum(len(text) for text in counted)
 
 
 @pytest.mark.asyncio
@@ -1044,7 +1041,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     )
 
     assert [message.role for message in prepared.turn.context] == ["user", "assistant"]
-    estimator = build_static_token_estimator(fake_token_counter(), leader_system_messages, (), frozenset())
+    estimator = await build_static_token_estimator(fake_token_counter(), leader_system_messages, (), frozenset())
     # Persisted replay is budgeted around the turn's estimate; fallback replay records the estimate of its own turn.
     sized = static_prompt_tokens[0] if replays_persisted_history else prepared.prepared_history.prepared_context_tokens
     assert sized == estimator.estimate(render_prepared_messages_text(prepared.turn.in_request_order()))

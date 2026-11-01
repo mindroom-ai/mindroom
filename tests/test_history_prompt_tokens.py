@@ -7,6 +7,8 @@ import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.replay import (
     estimate_prompt_visible_history_tokens,
@@ -28,6 +30,9 @@ from tests.session_storage.agno_layout import SESSION_ID, converted_store
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.history.prompt_tokens import _StaticTokenEstimator
+    from mindroom.llm.provider import TokenCounter
 
 _SYSTEM_MESSAGE = Message(role="system", content="You are a careful engineer.\n\nStay concise.")
 _SEARCH_PARAMETERS = {
@@ -55,8 +60,17 @@ _EXPORT_NOTES = ToolSpec(
 )
 
 
+def _estimator(
+    counter: TokenCounter,
+    system_messages: tuple[Message, ...],
+    tools: tuple[ToolSpec, ...],
+    deferred_tool_names: frozenset[str],
+) -> _StaticTokenEstimator:
+    return asyncio.run(build_static_token_estimator(counter, system_messages, tools, deferred_tool_names))
+
+
 def test_static_estimate_counts_the_system_message_and_the_prompt() -> None:
-    estimator = build_static_token_estimator(fake_token_counter(), (_SYSTEM_MESSAGE,), (), frozenset())
+    estimator = _estimator(fake_token_counter(), (_SYSTEM_MESSAGE,), (), frozenset())
 
     assert estimator.non_prompt_tokens == quarter_tokens(str(_SYSTEM_MESSAGE.content))
     assert estimator.estimate("Current prompt") == quarter_tokens("Current prompt") + quarter_tokens(
@@ -64,11 +78,18 @@ def test_static_estimate_counts_the_system_message_and_the_prompt() -> None:
     )
 
 
+@pytest.mark.usefixtures("provider_token_counts")
 def test_static_estimate_counts_each_system_message_and_the_tools_as_separate_parts() -> None:
-    """Each part changes on its own schedule, so each is counted, and its exact count cached, on its own."""
+    """Each part changes on its own schedule, so the provider counts each, and its exact count is cached, on its own."""
+    counted: list[str] = []
+
+    async def endpoint(text: str) -> int:
+        counted.append(text)
+        return len(text)
+
     turn_context = Message(role="system", content="Today is Friday.")
-    estimator = build_static_token_estimator(
-        fake_token_counter(),
+    estimator = _estimator(
+        fake_token_counter(count=endpoint),
         (_SYSTEM_MESSAGE, turn_context),
         (_SEARCH_DOCS,),
         frozenset(),
@@ -83,8 +104,8 @@ def test_static_estimate_counts_each_system_message_and_the_tools_as_separate_pa
             },
         ],
     )
-    assert estimator.parts == (str(_SYSTEM_MESSAGE.content), "Today is Friday.", definitions)
-    assert estimator.non_prompt_tokens == sum(quarter_tokens(part) for part in estimator.parts)
+    assert sorted(counted) == sorted([str(_SYSTEM_MESSAGE.content), "Today is Friday.", definitions])
+    assert estimator.non_prompt_tokens == sum(len(part) for part in counted)
 
 
 def test_static_estimate_reads_exact_counts_the_endpoint_already_made() -> None:
@@ -92,15 +113,15 @@ def test_static_estimate_reads_exact_counts_the_endpoint_already_made() -> None:
         return len(text)
 
     counter = fake_token_counter(count=endpoint)
-    estimator = build_static_token_estimator(counter, (_SYSTEM_MESSAGE,), (), frozenset())
     asyncio.run(count_exact(counter, str(_SYSTEM_MESSAGE.content)))
+    estimator = _estimator(counter, (_SYSTEM_MESSAGE,), (), frozenset())
 
     assert estimator.non_prompt_tokens == len(str(_SYSTEM_MESSAGE.content))
 
 
 def test_static_estimate_counts_each_offered_tool_definition_as_the_request_sends_it() -> None:
     """Tool definitions count with every field the tool set; fields it left unset are not sent, so they do not count."""
-    estimator = build_static_token_estimator(
+    estimator = _estimator(
         fake_token_counter(),
         (_SYSTEM_MESSAGE,),
         (_SEARCH_DOCS, _EXPORT_NOTES),
@@ -129,9 +150,9 @@ def test_static_estimate_leaves_deferred_tools_out() -> None:
     """A tool that tool search keeps off the request until it is found costs nothing up front."""
     counter = fake_token_counter()
     tools = (_SEARCH_DOCS, _EXPORT_NOTES)
-    nothing_deferred = build_static_token_estimator(counter, (_SYSTEM_MESSAGE,), tools, frozenset())
-    export_deferred = build_static_token_estimator(counter, (_SYSTEM_MESSAGE,), tools, frozenset({"export_notes"}))
-    all_deferred = build_static_token_estimator(
+    nothing_deferred = _estimator(counter, (_SYSTEM_MESSAGE,), tools, frozenset())
+    export_deferred = _estimator(counter, (_SYSTEM_MESSAGE,), tools, frozenset({"export_notes"}))
+    all_deferred = _estimator(
         counter,
         (_SYSTEM_MESSAGE,),
         tools,
@@ -139,13 +160,13 @@ def test_static_estimate_leaves_deferred_tools_out() -> None:
     )
 
     assert export_deferred.non_prompt_tokens < nothing_deferred.non_prompt_tokens
-    assert export_deferred.estimate("Current prompt") == build_static_token_estimator(
+    assert export_deferred.estimate("Current prompt") == _estimator(
         counter,
         (_SYSTEM_MESSAGE,),
         (_SEARCH_DOCS,),
         frozenset(),
     ).estimate("Current prompt")
-    assert all_deferred.parts == (str(_SYSTEM_MESSAGE.content),)
+    assert all_deferred.non_prompt_tokens == quarter_tokens(str(_SYSTEM_MESSAGE.content))
 
 
 def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import TYPE_CHECKING, Any, cast
@@ -1859,12 +1860,13 @@ def test_static_prompt_estimate_leaves_out_hidden_deferred_definitions(
         raw["agents"]["code"]["tools"] = tools  # type: ignore[index]
         config = _validated_config(tmp_path, raw)
         agent = _code_agent(config, tmp_path)
-        return build_static_token_estimator(
+        estimator = build_static_token_estimator(
             fake_token_counter(),
             prompt_for_turn(agent),
             PreparedTools(functions=agent.spec.functions).specs(),
             agent.request_template.deferred_tools.names,
-        ).non_prompt_tokens
+        )
+        return asyncio.run(estimator).non_prompt_tokens
 
     base = estimate(["sleep"])
     eager = estimate(["sleep", "github"])

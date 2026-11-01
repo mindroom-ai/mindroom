@@ -519,7 +519,7 @@ def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None
         strict=None,
     )
     counter = fake_token_counter()
-    static = build_static_token_estimator(counter, (), [lookup], frozenset())
+    static = asyncio.run(build_static_token_estimator(counter, (), [lookup], frozenset()))
 
     assert mid_turn_compaction._tool_tokens([lookup], [], frozenset(), counter) == static.estimate("")
 
