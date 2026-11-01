@@ -267,11 +267,16 @@ def drop_inert_session_totals(observed: dict[str, Any]) -> None:
         data.pop("session_metrics", None)
 
 
-def empty_missing_metadata(observed: dict[str, Any]) -> None:
-    """Show a session without metadata as one with empty metadata, which an old store's redaction rewrote it to."""
+def empty_missing_metadata(observed: dict[str, Any]) -> bool:
+    """Show a session without metadata as one with empty metadata, which an old store's redaction rewrote it to.
+
+    Returns whether the session had no metadata.
+    """
     session = observed["session"]
     if isinstance(session, dict) and session["metadata"] is None:
         session["metadata"] = {}
+        return True
+    return False
 
 
 def readers_in_creation_order(observed: dict[str, Any], used: set[str]) -> None:
@@ -998,15 +1003,11 @@ class MaskedBackend(StoreBackend):
 
     def _old_rewritten_metadata(self, view: dict[str, Any]) -> None:
         """Show the empty metadata a redaction left in the old store, and the update time its rewrite moved the row to."""
-        session, row = view["session"], view["row"]
-        if self.metadata_rewritten_at is None or not isinstance(session, dict):
+        if self.metadata_rewritten_at is None or not isinstance(view["session"], dict):
             return
-        if session["metadata"] is None:
-            session["metadata"] = {}
+        if empty_missing_metadata(view):
             self.used.add("preserved_seen_ids_not_read")
-        if isinstance(row, dict) and row.get("updated_at", self.metadata_rewritten_at) < self.metadata_rewritten_at:
-            row["updated_at"] = self.metadata_rewritten_at
-            self.used.add("preserved_seen_ids_not_read")
+        self._old_update_time(view["row"], self.metadata_rewritten_at, "preserved_seen_ids_not_read")
 
     def _old_history_metadata(self, view: dict[str, Any]) -> None:
         """Show the owner's history state as the per-scope maps the Agno-layout store kept it in."""
@@ -1031,12 +1032,13 @@ class MaskedBackend(StoreBackend):
             for state in (session.get("session_state"), row.get("session_data", {}).get("session_state")):
                 state[_PENDING_KEY] = [self.scope.key]
             self.used.add("force_request_only_in_metadata")
-        if (
-            self.pending_written_at is not None
-            and row.get("updated_at", self.pending_written_at) < self.pending_written_at
-        ):
-            row["updated_at"] = self.pending_written_at
-            self.used.add("force_request_only_in_metadata")
+        self._old_update_time(row, self.pending_written_at, "force_request_only_in_metadata")
+
+    def _old_update_time(self, row: dict[str, Any], at: int | None, mask: str) -> None:
+        """Show the update time ``at`` a write only the old store made, unless a later write moved the row further."""
+        if at is not None and row.get("updated_at", at) < at:
+            row["updated_at"] = at
+            self.used.add(mask)
 
     def _old_loaded(self, runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows = self._rows()

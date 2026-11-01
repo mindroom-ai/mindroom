@@ -2219,6 +2219,7 @@ def make_relation_lookup(
     *,
     threads: dict[str, str | None] | None = None,
     client: object | None = None,
+    failure: Exception | None = None,
 ) -> RelationLookup:
     """Return a real relation lookup over an in-memory set of admitted events.
 
@@ -2230,9 +2231,42 @@ def make_relation_lookup(
     """
     resolved_client = SimpleNamespace(client=client) if client is not None else _serving_client()
     return RelationLookup(
-        store=cast("RelationView", FakeRelationStore(threads=dict(threads or {}))),
+        store=cast("RelationView", FakeRelationStore(threads=dict(threads or {}), failure=failure)),
         runtime=resolved_client,  # type: ignore[arg-type]
     )
+
+
+def event_serving_client(
+    event_id: str,
+    *,
+    content: dict[str, object],
+    event_type: str = "m.room.message",
+) -> MagicMock:
+    """Return a homeserver that serves one event for every point lookup."""
+    client = MagicMock()
+    client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "event_id": event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "type": event_type,
+                "content": content,
+            },
+        ),
+    )
+    return client
+
+
+def make_thread_reply_lookup(reply_event_id: str, thread_root_id: str) -> RelationLookup:
+    """Return a relation lookup whose homeserver answers every event lookup with one reply inside a thread."""
+    content = {
+        "msgtype": "m.text",
+        "body": "reply",
+        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
+    }
+    return make_relation_lookup(client=event_serving_client(reply_event_id, content=content))
 
 
 def _serving_client() -> SimpleNamespace:
@@ -4021,7 +4055,7 @@ def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Ge
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Keep Google client libraries from authenticating as the developer.
+    """Keep Google client libraries and Git from acting as the developer.
 
     With no credentials named, google-auth reads gcloud's application default credentials file and asks the GCE
     metadata server, and it refreshes tokens through ``requests``, which the network guard does not cover. An
@@ -4030,10 +4064,14 @@ def pytest_configure(config: pytest.Config) -> None:
     Google keys that MindRoom and google-genai read.
     This is a configure hook, not a fixture, because google-auth reads ``NO_GCE_CHECK`` once, when collection first
     imports ``google.auth.compute_engine``.
+    Git also ignores the developer's global and system config, so commits in test repositories never sign or run
+    template hooks.
     """
     gcloud_config = tempfile.mkdtemp(prefix="mindroom-test-gcloud-")
     config.add_cleanup(lambda: shutil.rmtree(gcloud_config, ignore_errors=True))
     hide_developer_google_credentials(os.environ, gcloud_config)
+    os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+    os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 
 
 def hide_developer_google_credentials(environ: MutableMapping[str, str], gcloud_config: str) -> None:

@@ -56,7 +56,6 @@ class AgentReplyMembershipSync:
     ) -> None:
         self._memberships = memberships
         self._bots = bots
-        self._refresh_pending = False
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
         self._live_transition_lock = asyncio.Lock()
@@ -100,11 +99,12 @@ class AgentReplyMembershipSync:
             self._grants_lost()
 
     def _grants_lost(self) -> None:
-        """Request an authoritative rebuild and end every bot's denied calls without waiting; this never starts a call."""
-        if not self._refresh_pending:
-            self._refresh_pending = True
-            self._refresh_attempt = 0
-            self._refresh_retry_at = 0.0
+        """Rebuild at the next due check without an earlier backoff, and end every bot's denied calls without waiting.
+
+        This never starts a call.
+        """
+        self._refresh_attempt = 0
+        self._refresh_retry_at = 0.0
         for bot in self._bots():
             bot.schedule_reply_authorized_call_revocation()
 
@@ -117,13 +117,11 @@ class AgentReplyMembershipSync:
         # A sync gap cannot invalidate explicit-user grants. Do not turn a
         # no-op rebuild into downstream room and call reconciliation scans.
         if not self._memberships.needs_refresh(config):
-            self._refresh_pending = False
             return
         if time.monotonic() < self._refresh_retry_at:
             return
         await refresh()
-        self._refresh_pending = self._memberships.needs_refresh(config)
-        if not self._refresh_pending:
+        if not self._memberships.needs_refresh(config):
             self._refresh_attempt = 0
             self._refresh_retry_at = 0.0
             return
@@ -133,10 +131,6 @@ class AgentReplyMembershipSync:
             _REFRESH_BACKOFF_MAX_SECONDS,
         )
         self._refresh_retry_at = time.monotonic() + backoff_seconds
-
-    async def apply_authoritative_refresh(self, config: Config) -> None:
-        """Apply what an authoritative refresh attempt changed, whether it published or was voided."""
-        await self._apply_grant_change(config, refreshed=True)
 
     async def apply_live_transition(
         self,
@@ -162,14 +156,14 @@ class AgentReplyMembershipSync:
                 self._live_effects_pending = True
             if not self._live_effects_pending:
                 return
-            await self._apply_grant_change(config, refreshed=False)
+            await self.apply_grant_change()
             self._live_effects_pending = False
 
-    async def _apply_grant_change(self, config: Config, *, refreshed: bool) -> None:
-        """Recheck every bot's invites and calls: denied calls end before any allowed call starts.
+    async def apply_grant_change(self) -> None:
+        """Recheck every bot's invites and calls after a grant change: denied calls end before any allowed call starts.
 
-        A refresh that still leaves a refresh owed starts no call, because its retry reconciles again. A live
-        transition starts calls at once, because each call start rechecks its requester against the current grants.
+        An authoritative refresh attempt runs this whether it published or was voided. Calls start even while a grant
+        room still awaits a refresh, because each call start rechecks its requester against the current grants.
         Invite acceptance does not depend on grants; the invite recheck rides here because the authoritative refresh
         that room setup runs at startup and on reload is what retries invites recorded before a bot started or whose
         join failed.
@@ -178,7 +172,5 @@ class AgentReplyMembershipSync:
         for bot in bots:
             bot.schedule_pending_invite_reconciliation()
         await asyncio.gather(*(bot.revoke_reply_authorized_calls() for bot in bots))
-        if refreshed and self._memberships.needs_refresh(config):
-            return
         for bot in bots:
             bot.schedule_reply_authorized_call_reconciliation()

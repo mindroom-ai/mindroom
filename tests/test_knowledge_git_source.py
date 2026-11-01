@@ -175,7 +175,6 @@ def _committed_remote(tmp_path: Path, content: str) -> tuple[Path, Path]:
     _git(remote_work, "init", "-b", "main")
     _git(remote_work, "config", "user.email", "tests@example.com")
     _git(remote_work, "config", "user.name", "MindRoom Tests")
-    _git(remote_work, "config", "commit.gpgsign", "false")
     (remote_work / "doc.md").write_text(content, encoding="utf-8")
     _git(remote_work, "add", "doc.md")
     _git(remote_work, "commit", "-m", "initial")
@@ -1658,7 +1657,6 @@ async def test_git_sync_does_not_run_automatic_maintenance(
     await git(remote, "init", "-b", "main")
     await git(remote, "config", "user.email", "tests@example.com")
     await git(remote, "config", "user.name", "MindRoom Tests")
-    await git(remote, "config", "commit.gpgsign", "false")
 
     async def commit(content: str) -> None:
         (remote / "doc.md").write_text(content, encoding="utf-8")
@@ -2032,7 +2030,6 @@ async def test_lfs_sync_hydrates_from_absolute_local_path_remote(tmp_path: Path,
     _git(remote_work, "init", "-b", "main")
     _git(remote_work, "config", "user.email", "tests@example.com")
     _git(remote_work, "config", "user.name", "MindRoom Tests")
-    _git(remote_work, "config", "commit.gpgsign", "false")
     _git(remote_work, "lfs", "install", "--local", "--skip-repo")
     _git(remote_work, "lfs", "track", "*.md")
     (remote_work / "doc.md").write_text("large file content", encoding="utf-8")

@@ -205,6 +205,82 @@ const manualOAuthFallbackLabel = (integration: Integration) => {
   );
 };
 
+const IntegrationCard = ({
+  integration,
+  action,
+}: {
+  integration: Integration;
+  action: ReactNode;
+}) => {
+  const isConnected = integration.status === "connected";
+  const usesGoogleUserData = integration.id.startsWith("google_");
+  const statusLabel = integration.status_error
+    ? "Status error"
+    : integration.status === "not_connected"
+      ? "Needs setup"
+      : "Available";
+
+  return (
+    <Card className="h-full">
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            {integration.icon}
+            <CardTitle className="text-lg">{integration.name}</CardTitle>
+          </div>
+          {isConnected ? (
+            <SuccessBadge icon={CheckCircle2}>Connected</SuccessBadge>
+          ) : (
+            <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 border-amber-500/20">
+              <Circle className="h-3 w-3 mr-1" />
+              {statusLabel}
+            </Badge>
+          )}
+        </div>
+        <CardDescription>{integration.description}</CardDescription>
+        {usesGoogleUserData ? (
+          <p className="text-xs text-muted-foreground">
+            By connecting, you authorize this MindRoom installation to access
+            Google data for the selected agent and credential scope. Shared or
+            unscoped agents can use the connected account for any user
+            authorized to invoke them. Relevant results may be sent to your
+            configured AI model and retained in session or Matrix history. The
+            installation operator and anyone with administrative or filesystem
+            access may be able to access stored credentials and data. Project
+            maintainers have no automatic access merely because they maintain
+            MindRoom; if they also operate this installation, they may have
+            operator access.{" "}
+            <a
+              href="https://docs.mindroom.chat/privacy/"
+              target="_blank"
+              rel="noreferrer"
+              className="underline underline-offset-2"
+            >
+              Privacy policy
+            </a>
+            .
+          </p>
+        ) : null}
+        {integration.status_error ? (
+          <p className="text-xs text-muted-foreground">
+            Status error: {integration.status_error}
+          </p>
+        ) : integration.helper_text ? (
+          <p className="text-xs text-muted-foreground">
+            {integration.helper_text}
+          </p>
+        ) : null}
+      </CardHeader>
+
+      <CardContent>
+        <div className="space-y-3">
+          <div className="flex gap-2">{action}</div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+};
+
 export function Integrations() {
   const { agents, agentPoliciesByAgent } = useConfigStore();
   const [scopeAgentName, setScopeAgentName] = useState<string | null>(null);
@@ -311,7 +387,6 @@ export function Integrations() {
         return;
       }
 
-      const loadedIntegrations: Integration[] = [];
       const sharedProviderIds = providersSharedByTools(backendTools);
       // The tool named after a provider stands for its card, else the provider's only tool.
       const providerToolFor = (providerId: string) =>
@@ -327,20 +402,23 @@ export function Integrations() {
           .filter((providerId): providerId is string => Boolean(providerId)),
       ]);
 
-      for (const providerId of providerIds) {
-        if (
-          hidesSharedOnlyIntegrations &&
-          SHARED_ONLY_PROVIDER_IDS.has(providerId)
-        ) {
-          continue;
-        }
-        const providerTool = providerToolFor(providerId);
-        const card =
-          builtInCardsById.get(providerId) ??
-          discoveredOAuthCard(providerId, providerTool);
-        const status = await providerForIntegration(card)!.loadStatus(scope);
-        loadedIntegrations.push(withProviderState(card, providerTool, status));
-      }
+      const loadedIntegrations = await Promise.all(
+        [...providerIds]
+          .filter(
+            (providerId) =>
+              !hidesSharedOnlyIntegrations ||
+              !SHARED_ONLY_PROVIDER_IDS.has(providerId),
+          )
+          .map(async (providerId) => {
+            const providerTool = providerToolFor(providerId);
+            const card =
+              builtInCardsById.get(providerId) ??
+              discoveredOAuthCard(providerId, providerTool);
+            const status =
+              await providerForIntegration(card)!.loadStatus(scope);
+            return withProviderState(card, providerTool, status);
+          }),
+      );
 
       // Tool cards for every tool no provider card stands for
       const backendIntegrations = backendTools
@@ -723,7 +801,6 @@ export function Integrations() {
       );
       if (
         integration.status !== "connected" &&
-        integration.status !== "available" &&
         authProvider?.status !== "connected"
       ) {
         return (
@@ -775,29 +852,6 @@ export function Integrations() {
     if (integration.setup_type === "none") {
       if (!hasConfigFields(integration)) {
         return <SuccessBadge icon={CheckCircle2}>Ready to Use</SuccessBadge>;
-      }
-      if (integration.status === "connected") {
-        return (
-          <div className="flex gap-2">
-            <Button
-              onClick={() => handleIntegrationAction(integration)}
-              disabled={loading}
-              variant="outline"
-              size="sm"
-            >
-              <Settings className="h-4 w-4 mr-1" />
-              Settings
-            </Button>
-            <Button
-              onClick={() => handleStoredCredentialDelete(integration)}
-              disabled={loading}
-              variant="ghost"
-              size="sm"
-            >
-              Reset
-            </Button>
-          </div>
-        );
       }
       return (
         <div className="flex gap-2 items-center">
@@ -947,76 +1001,6 @@ export function Integrations() {
       </div>
     ) : (
       actionButton
-    );
-  };
-
-  const IntegrationCard = ({ integration }: { integration: Integration }) => {
-    const isConnected = integration.status === "connected";
-    const usesGoogleUserData = integration.id.startsWith("google_");
-    const statusLabel = integration.status_error
-      ? "Status error"
-      : integration.status === "not_connected"
-        ? "Needs setup"
-        : "Available";
-
-    return (
-      <Card className="h-full">
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              {integration.icon}
-              <CardTitle className="text-lg">{integration.name}</CardTitle>
-            </div>
-            {isConnected ? (
-              <SuccessBadge icon={CheckCircle2}>Connected</SuccessBadge>
-            ) : (
-              <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 border-amber-500/20">
-                <Circle className="h-3 w-3 mr-1" />
-                {statusLabel}
-              </Badge>
-            )}
-          </div>
-          <CardDescription>{integration.description}</CardDescription>
-          {usesGoogleUserData ? (
-            <p className="text-xs text-muted-foreground">
-              By connecting, you authorize this MindRoom installation to access
-              Google data for the selected agent and credential scope. Shared or
-              unscoped agents can use the connected account for any user
-              authorized to invoke them. Relevant results may be sent to your
-              configured AI model and retained in session or Matrix history. The
-              installation operator and anyone with administrative or filesystem
-              access may be able to access stored credentials and data. Project
-              maintainers have no automatic access merely because they maintain
-              MindRoom; if they also operate this installation, they may have
-              operator access.{" "}
-              <a
-                href="https://docs.mindroom.chat/privacy/"
-                target="_blank"
-                rel="noreferrer"
-                className="underline underline-offset-2"
-              >
-                Privacy policy
-              </a>
-              .
-            </p>
-          ) : null}
-          {integration.status_error ? (
-            <p className="text-xs text-muted-foreground">
-              Status error: {integration.status_error}
-            </p>
-          ) : integration.helper_text ? (
-            <p className="text-xs text-muted-foreground">
-              {integration.helper_text}
-            </p>
-          ) : null}
-        </CardHeader>
-
-        <CardContent>
-          <div className="space-y-3">
-            <div className="flex gap-2">{getActionButton(integration)}</div>
-          </div>
-        </CardContent>
-      </Card>
     );
   };
 
@@ -1197,6 +1181,7 @@ export function Integrations() {
                     <IntegrationCard
                       key={integration.id}
                       integration={integration}
+                      action={getActionButton(integration)}
                     />
                   ))}
                 </div>

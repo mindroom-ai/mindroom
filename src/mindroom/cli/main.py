@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import typer
 from rich.markup import escape
 
-from mindroom.constants import ensure_writable_config_path, runtime_matrix_homeserver
+from mindroom.constants import RuntimeEnvFileError, ensure_writable_config_path, runtime_matrix_homeserver
 from mindroom.origins import with_api_port
 
 from .api import is_loopback_host
@@ -891,7 +891,12 @@ def main() -> None:
     # Shell completion runs this program without arguments and evaluates what it prints.
     if "_MINDROOM_COMPLETE" not in os.environ:
         _prepare_help_output(sys.argv[1:])
-    app()
+    try:
+        app()
+    except RuntimeEnvFileError as exc:
+        # Commands that report runtime errors their own way catch it first; any other command names the file here.
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        sys.exit(1)
 
 
 def _prepare_help_output(args: list[str]) -> None:
