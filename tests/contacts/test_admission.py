@@ -12,7 +12,7 @@ from structlog.testing import capture_logs
 
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.constants import ACTING_REQUESTER_KEY, ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
-from mindroom.contacts.admission import ContactAdmission, contact_admission
+from mindroom.contacts.admission import _ContactAdmission, contact_admission
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.contacts.store import ContactStatus
+    from mindroom.contacts.store import _ContactStatus
     from mindroom.turns.facts import IngressFacts
 
 ADMIN = "@admin:localhost"
@@ -63,7 +63,7 @@ def _contact(
     paths: RuntimePaths,
     *,
     requester: ContactParty = ALICE_AGENT,
-    status: ContactStatus = "active",
+    status: _ContactStatus = "active",
 ) -> None:
     """Store contact ``c1`` between ``requester`` and Bob's agent, with its room."""
     record = ContactRecord(
@@ -94,8 +94,8 @@ def test_the_counterparty_and_the_owner_start_turns_that_run_as_the_owner(tmp_pa
     """The other agent, its owner, and this agent's owner are admitted as the owner; anyone else is refused."""
     config, paths = _setup(tmp_path)
     _contact(paths)
-    admitted = ContactAdmission("c1", CO_OWNER)
-    refused = ContactAdmission("c1", None)
+    admitted = _ContactAdmission("c1", CO_OWNER)
+    refused = _ContactAdmission("c1", None)
 
     assert _admission(config, paths, _agent(paths, "mind_alice")) == admitted
     assert _admission(config, paths, OWNER) == admitted
@@ -105,7 +105,7 @@ def test_the_counterparty_and_the_owner_start_turns_that_run_as_the_owner(tmp_pa
     # Any identity the event speaks for admits it, such as the original sender a managed relay names.
     assert _admission(config, paths, _agent(paths, "mind_carol"), OWNER) == admitted
     # The other side runs as its own owner in the same room.
-    assert _admission(config, paths, CO_OWNER, agent_name="mind_alice") == ContactAdmission("c1", OWNER)
+    assert _admission(config, paths, CO_OWNER, agent_name="mind_alice") == _ContactAdmission("c1", OWNER)
 
 
 def test_a_person_counterparty_is_admitted_under_any_of_their_aliases(tmp_path: Path) -> None:
@@ -113,13 +113,13 @@ def test_a_person_counterparty_is_admitted_under_any_of_their_aliases(tmp_path: 
     config, paths = _setup(tmp_path)
     _contact(paths, requester=DAVE_PERSON)
 
-    assert _admission(config, paths, DAVE) == ContactAdmission("c1", CO_OWNER)
-    assert _admission(config, paths, DAVE_BRIDGE) == ContactAdmission("c1", CO_OWNER)
-    assert _admission(config, paths, _agent(paths, "mind_alice")) == ContactAdmission("c1", None)
+    assert _admission(config, paths, DAVE) == _ContactAdmission("c1", CO_OWNER)
+    assert _admission(config, paths, DAVE_BRIDGE) == _ContactAdmission("c1", CO_OWNER)
+    assert _admission(config, paths, _agent(paths, "mind_alice")) == _ContactAdmission("c1", None)
 
 
 @pytest.mark.parametrize("status", ["pending", "declined", "removed"])
-def test_no_contact_room_admits_nothing(tmp_path: Path, status: ContactStatus) -> None:
+def test_no_contact_room_admits_nothing(tmp_path: Path, status: _ContactStatus) -> None:
     """Another room, an agent that is no party, and a contact that is not active leave the event as it is."""
     config, paths = _setup(tmp_path)
     _contact(paths)

@@ -13,7 +13,7 @@ from mindroom import agents as agents_module
 from mindroom import ai
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, contacts_path, update_contacts
+from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, _contacts_path, update_contacts
 from mindroom.contacts.turns import contact_turn, contact_turn_instructions, contact_turn_tools
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import ResponseIdentity
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.contacts.store import ContactStatus
+    from mindroom.contacts.store import _ContactStatus
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.response_turn import ResponseTurnContext
 
@@ -110,7 +110,7 @@ def _record(
     *,
     requester: ContactParty = ALICE_AGENT,
     target_side: ContactSide | None = None,
-    status: ContactStatus = "active",
+    status: _ContactStatus = "active",
 ) -> ContactRecord:
     """Return contact ``c1`` between ``requester`` and Bob's agent, with its room."""
     return ContactRecord(
@@ -157,8 +157,8 @@ def test_a_contact_turn_is_a_turn_of_an_agent_party_in_its_active_contact_room(t
 def test_only_an_agent_that_can_be_a_party_reads_the_contacts_store(tmp_path: Path) -> None:
     """A corrupt store stops only the turns of agents with contacts, not the turns of every other agent."""
     config, paths = _setup(tmp_path)
-    contacts_path(paths).parent.mkdir(parents=True, exist_ok=True)
-    contacts_path(paths).write_text("not json", encoding="utf-8")
+    _contacts_path(paths).parent.mkdir(parents=True, exist_ok=True)
+    _contacts_path(paths).write_text("not json", encoding="utf-8")
 
     assert contact_turn(config, paths, CONTACT_ROOM, "creator") is None
     with pytest.raises(ValueError, match="Contacts file"):

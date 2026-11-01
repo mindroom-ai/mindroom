@@ -11,10 +11,10 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.contacts.policy import (
-    CONTACT_RULES_QUESTION_ID,
+    _CONTACT_RULES_QUESTION_ID,
     ContactVerdict,
+    _contact_rules_question,
     check_contact_message,
-    contact_rules_question,
     effective_rules,
 )
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide
@@ -144,7 +144,7 @@ def _judged(model: ScriptedModel) -> dict[str, Any]:
     """Return the request the judge model received: its question, its guidance, and the one message it judged."""
     (request,) = model.requests
     body = json.loads(request.messages[1].content)
-    assert body["question"]["id"] == CONTACT_RULES_QUESTION_ID
+    assert body["question"]["id"] == _CONTACT_RULES_QUESTION_ID
     (message,) = body["state"]["conversation"]
     return {"guidance": body["guidance"], "role": message["role"], "text": message["text"]}
 
@@ -170,9 +170,9 @@ def test_effective_rules_are_empty_without_any_rule(tmp_path: Path) -> None:
 
 def test_contact_rules_question_asks_whether_the_message_follows_every_rule() -> None:
     """The judge answers true only for a message that follows every rule."""
-    question = contact_rules_question()
+    question = _contact_rules_question()
 
-    assert question.id == CONTACT_RULES_QUESTION_ID == "contact_rules"
+    assert question.id == _CONTACT_RULES_QUESTION_ID == "contact_rules"
     assert question.instructions == (
         "An assistant acting for its owner wants to send the message below to an outside party. "
         "Decide whether the message follows every rule."
@@ -455,11 +455,11 @@ async def test_probability_judge_threshold_is_applied_once(
     )
 
     async def post(_self: JudgmentClient, body: bytes) -> bytes:
-        assert json.loads(body)["questions"][CONTACT_RULES_QUESTION_ID]["type"] == "noul"
+        assert json.loads(body)["questions"][_CONTACT_RULES_QUESTION_ID]["type"] == "noul"
         return json.dumps(
             {
                 "model": _PINNED_MODEL,
-                "answers": {CONTACT_RULES_QUESTION_ID: {"type": "noul", "noul": probability}},
+                "answers": {_CONTACT_RULES_QUESTION_ID: {"type": "noul", "noul": probability}},
                 "usage": {"input_tokens": 1, "output_tokens": 1},
             },
         ).encode()

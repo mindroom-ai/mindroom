@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from mindroom.contacts.store import ContactRecord, ContactSide, SideName
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-CONTACT_RULES_QUESTION_ID = "contact_rules"
+_CONTACT_RULES_QUESTION_ID = "contact_rules"
 
 NO_CONTACT_RULES = "No extra rules; share only what the owner would expect."
 _HOOK_GAVE_NO_REASON = "A contact policy hook stopped this message without saying why."
@@ -49,10 +49,10 @@ def effective_rules(config: Config, agent_name: str, side: ContactSide) -> str:
     return "\n".join(f"- {rule}" for rule in rules)
 
 
-def contact_rules_question() -> JudgmentQuestion:
+def _contact_rules_question() -> JudgmentQuestion:
     """Return the question the judge answers about each message: does it follow every rule."""
     return JudgmentQuestion(
-        id=CONTACT_RULES_QUESTION_ID,
+        id=_CONTACT_RULES_QUESTION_ID,
         instructions=(
             "An assistant acting for its owner wants to send the message below to an outside party. "
             "Decide whether the message follows every rule."
@@ -164,7 +164,7 @@ async def _judge_refusal(
     text: str,
 ) -> tuple[Literal["revise", "deny"], str] | None:
     """Return why the judge keeps ``text`` from being sent, or None when it follows the rules."""
-    request = build_judgment_request(contact_rules_question(), (JudgmentMessage("user", text),), instructions=rules)
+    request = build_judgment_request(_contact_rules_question(), (JudgmentMessage("user", text),), instructions=rules)
     if not request.complete:
         return "deny", f"The message cannot be checked ({request.incomplete_reason})."
     evaluate = create_judgment_evaluator(
@@ -172,7 +172,7 @@ async def _judge_refusal(
         config,
         runtime_paths,
         owner=f"{runtime_paths.storage_root}:{agent_name}",
-        question_id=CONTACT_RULES_QUESTION_ID,
+        question_id=_CONTACT_RULES_QUESTION_ID,
     )
     if evaluate is None:
         return "deny", _UNCHECKED

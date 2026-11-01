@@ -12,9 +12,9 @@ from mindroom.contacts.store import (
     ContactParty,
     ContactRecord,
     ContactSide,
-    contact_in_room,
+    _contact_in_room,
+    _contacts_path,
     contact_party_in_room,
-    contacts_path,
     read_contacts,
     update_contacts,
 )
@@ -54,8 +54,8 @@ def paths(tmp_path: Path) -> RuntimePaths:
 def test_a_missing_file_is_an_empty_book(paths: RuntimePaths) -> None:
     """Before the first contact, the book is empty and no file is created by reading."""
     assert read_contacts(paths) == ContactBook()
-    assert not contacts_path(paths).exists()
-    assert contact_in_room(paths, "!room:localhost") is None
+    assert not _contacts_path(paths).exists()
+    assert _contact_in_room(paths, "!room:localhost") is None
 
 
 def test_update_contacts_round_trips_and_read_sees_new_mtime(paths: RuntimePaths) -> None:
@@ -95,7 +95,7 @@ def test_update_contacts_leaves_the_file_alone_when_the_change_raises(paths: Run
 
 def test_invalid_contacts_file_raises(paths: RuntimePaths) -> None:
     """A corrupt file is reported with its path instead of reading as no contacts."""
-    path = contacts_path(paths)
+    path = _contacts_path(paths)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError, match=f"^Contacts file {re.escape(str(path))} is invalid: "):
@@ -106,7 +106,7 @@ def test_invalid_contacts_file_raises(paths: RuntimePaths) -> None:
 
 def test_contact_files_reject_unknown_fields(paths: RuntimePaths) -> None:
     """A file with a field this version does not know is invalid."""
-    path = contacts_path(paths)
+    path = _contacts_path(paths)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('{"contacts": [], "extra": 1}', encoding="utf-8")
     with pytest.raises(ValueError, match=r"^Contacts file"):
@@ -123,14 +123,14 @@ def test_contact_party_in_room_only_matches_active(paths: RuntimePaths) -> None:
         )
 
     update_contacts(paths, store)
-    assert contact_in_room(paths, "!room:localhost") is None
+    assert _contact_in_room(paths, "!room:localhost") is None
     assert contact_party_in_room(paths, "!room:localhost", "mind_bob") is None
 
     def activate(book: ContactBook) -> None:
         book.contacts.append(_record("c4", status="active", room_id="!room:localhost"))
 
     update_contacts(paths, activate)
-    record = contact_in_room(paths, "!room:localhost")
+    record = _contact_in_room(paths, "!room:localhost")
     assert record is not None
     assert record.id == "c4"
     assert contact_party_in_room(paths, "!room:localhost", "mind_bob") == (record, "target")

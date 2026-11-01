@@ -393,8 +393,8 @@ async def test_request_refuses_unknown_or_refused_tools(tmp_path: Path) -> None:
 def test_validate_side_tools_keeps_no_choice_as_none(tmp_path: Path) -> None:
     """No list means the agent's default tools, and an empty list means none."""
     config, _ = _setup(tmp_path)
-    assert flow.validate_side_tools(config, "mind_alice", None) is None
-    assert flow.validate_side_tools(config, "mind_alice", []) == []
+    assert flow._validate_side_tools(config, "mind_alice", None) is None
+    assert flow._validate_side_tools(config, "mind_alice", []) == []
 
 
 @pytest.mark.asyncio

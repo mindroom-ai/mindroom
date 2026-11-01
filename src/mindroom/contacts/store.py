@@ -16,8 +16,8 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-type PartyKind = Literal["agent", "person"]
-type ContactStatus = Literal["pending", "active", "declined", "removed"]
+type _PartyKind = Literal["agent", "person"]
+type _ContactStatus = Literal["pending", "active", "declined", "removed"]
 type SideName = Literal["requester", "target"]
 
 _SIDES: tuple[SideName, SideName] = ("requester", "target")
@@ -28,7 +28,7 @@ class ContactParty(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: PartyKind
+    kind: _PartyKind
     id: str
     owner: str
 
@@ -48,7 +48,7 @@ class ContactRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    status: ContactStatus
+    status: _ContactStatus
     requester: ContactParty
     target: ContactParty
     reason: str
@@ -99,7 +99,7 @@ class ContactBook(BaseModel):
 _BOOKS: dict[Path, tuple[int, ContactBook]] = {}
 
 
-def contacts_path(runtime_paths: RuntimePaths) -> Path:
+def _contacts_path(runtime_paths: RuntimePaths) -> Path:
     """Return the primary-only file of contacts, which no worker mounts."""
     return tracking_dir(runtime_paths) / "contacts.json"
 
@@ -118,7 +118,7 @@ def _parse(path: Path, text: str) -> ContactBook:
 
 def read_contacts(runtime_paths: RuntimePaths) -> ContactBook:
     """Return the cached book, or an empty one before the first contact; callers must not change it."""
-    path = contacts_path(runtime_paths)
+    path = _contacts_path(runtime_paths)
     try:
         mtime_ns = path.stat().st_mtime_ns
     except FileNotFoundError:
@@ -136,7 +136,7 @@ def update_contacts[T](runtime_paths: RuntimePaths, change: Callable[[ContactBoo
 
     A change that raises stores nothing.
     """
-    path = contacts_path(runtime_paths)
+    path = _contacts_path(runtime_paths)
     with advisory_file_lock(_contacts_lock_path(runtime_paths)):
         try:
             book = _parse(path, path.read_text(encoding="utf-8"))
@@ -149,7 +149,7 @@ def update_contacts[T](runtime_paths: RuntimePaths, change: Callable[[ContactBoo
     return result
 
 
-def contact_in_room(runtime_paths: RuntimePaths, room_id: str) -> ContactRecord | None:
+def _contact_in_room(runtime_paths: RuntimePaths, room_id: str) -> ContactRecord | None:
     """Return the active contact whose room this is."""
     return next(
         (
@@ -176,7 +176,7 @@ def contact_party_in_room(
     agent_name: str,
 ) -> tuple[ContactRecord, SideName] | None:
     """Return the contact of this room and the side this agent is on, or None when the agent is no party of it."""
-    record = contact_in_room(runtime_paths, room_id)
+    record = _contact_in_room(runtime_paths, room_id)
     if record is None:
         return None
     side = record.agent_side(agent_name)

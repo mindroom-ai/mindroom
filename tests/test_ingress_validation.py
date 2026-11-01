@@ -24,7 +24,7 @@ from mindroom.constants import (
     TOOL_TRACE_CONTENT_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
 )
-from mindroom.contacts.store import contacts_path
+from mindroom.contacts.store import _contacts_path
 from mindroom.dispatch_handoff import dispatch_prompt_for_event
 from mindroom.dispatch_source import (
     EDIT_SOURCE_KIND,
@@ -307,7 +307,7 @@ def test_classification_keeps_the_four_identities_apart(tmp_path: Path) -> None:
 def test_an_agent_that_cannot_be_a_contact_party_never_reads_the_contacts_store(tmp_path: Path) -> None:
     """Only a personal agent with contacts reads the store, so an unreadable store leaves every other agent's ingress."""
     validator, _ids = _validator(tmp_path)
-    store = contacts_path(validator.deps.runtime_paths)
+    store = _contacts_path(validator.deps.runtime_paths)
     store.parent.mkdir(parents=True, exist_ok=True)
     store.write_text("not json", encoding="utf-8")
 

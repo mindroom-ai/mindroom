@@ -58,7 +58,7 @@ from tests.test_generated_agents import CO_OWNER, OWNER, _load, _personal, _with
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.contacts.store import ContactStatus
+    from mindroom.contacts.store import _ContactStatus
     from mindroom.history.session_runs import DueConversation, RedactedEventIds
     from mindroom.session_storage.store import ConversationStore
 
@@ -768,7 +768,7 @@ async def test_delegated_task_sessions_are_not_flushed(tmp_path: Path, extractor
 async def test_conversations_in_a_contact_room_are_not_flushed(
     tmp_path: Path,
     extractor: _Extractor,
-    status: ContactStatus,
+    status: _ContactStatus,
 ) -> None:
     """The other side of a contact drove the conversations in its room, even once the contact is removed."""
     data = _with_template()

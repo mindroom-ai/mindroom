@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.contacts.store import ContactStatus
+    from mindroom.contacts.store import _ContactStatus
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 CONTACT_ROOM = "!contact:localhost"
@@ -85,7 +85,7 @@ def _setup(tmp_path: Path, *, administrators: tuple[str, ...] = ()) -> tuple[Con
     return config, paths
 
 
-def _contact(paths: RuntimePaths, status: ContactStatus = "active") -> None:
+def _contact(paths: RuntimePaths, status: _ContactStatus = "active") -> None:
     """Store contact ``c1`` between Alice's and Bob's agents, whose room is the contact room."""
     record = ContactRecord(
         id="c1",

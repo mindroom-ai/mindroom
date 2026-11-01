@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class ContactAdmission:
+class _ContactAdmission:
     """The contact of the room an event arrived in, and the owner its turn runs as, or None when nobody may start it."""
 
     contact_id: str
@@ -31,7 +31,7 @@ def contact_admission(
     room_id: str,
     agent_name: str,
     sender_ids: Iterable[str],
-) -> ContactAdmission | None:
+) -> _ContactAdmission | None:
     """Return who a turn of this agent in its contact room runs as, or None when the room is no contact room of it.
 
     Every such turn runs as the agent's owner, but only the counterparty and the owner may start one.
@@ -48,4 +48,4 @@ def contact_admission(
     owner = record.party(side).owner
     allowed = party_matrix_ids(record.party(record.other(side)), runtime_paths) | {owner}
     resolved = {resolve_human_requester_alias(sender_id, config, runtime_paths) for sender_id in sender_ids}
-    return ContactAdmission(record.id, owner if not allowed.isdisjoint(resolved) else None)
+    return _ContactAdmission(record.id, owner if not allowed.isdisjoint(resolved) else None)

@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-CONTACT_REQUEST_KEY = "io.mindroom.contact_request"
+_CONTACT_REQUEST_KEY = "io.mindroom.contact_request"
 _SOURCE_HOOK = "native:contacts"
 _PERSON_HAS_NO_SIDE = "A person has no rules or tools; only an agent's side can have them"
 _NOT_PENDING = "Only a pending contact can be accepted"
@@ -80,7 +80,7 @@ def _own_party(context: ToolRuntimeContext, agent_name: str) -> ContactParty:
     return party
 
 
-def validate_side_tools(config: Config, agent_name: str, tools: list[str] | None) -> list[str] | None:
+def _validate_side_tools(config: Config, agent_name: str, tools: list[str] | None) -> list[str] | None:
     """Return the tools one side of a contact offers, refusing any the agent lacks or a contact may never offer."""
     if tools is None:
         return None
@@ -130,7 +130,7 @@ def _request_poster(config: Config, runtime_paths: RuntimePaths, owner: str) -> 
     return personal
 
 
-async def post_request_notice(context: ToolRuntimeContext, record: ContactRecord) -> None:
+async def _post_request_notice(context: ToolRuntimeContext, record: ContactRecord) -> None:
     """Post the request as a new thread in the target owner's personal room and store where it landed."""
     config, paths = context.current_config, context.runtime_paths
     poster, room_id = _request_poster(config, paths, record.target.owner)
@@ -140,7 +140,7 @@ async def post_request_notice(context: ToolRuntimeContext, record: ContactRecord
         raise ValueError(msg)
     content = build_message_content(
         _notice_body(config, record),
-        extra_content={"msgtype": "m.notice", SKIP_MENTIONS_KEY: True, CONTACT_REQUEST_KEY: record.id},
+        extra_content={"msgtype": "m.notice", SKIP_MENTIONS_KEY: True, _CONTACT_REQUEST_KEY: record.id},
     )
     delivered = await send_message_result(client, room_id, content, transaction_id=f"contact-request-{record.id}")
     if delivered is None:
@@ -215,7 +215,7 @@ async def request_contact(
         requester, side = person_party(config, paths, context.requester_id), ContactSide()
     else:
         requester = own
-        side = ContactSide(rules=_clean_rules(rules), tools=validate_side_tools(config, agent_name, tools))
+        side = ContactSide(rules=_clean_rules(rules), tools=_validate_side_tools(config, agent_name, tools))
     _check_pair(requester, target_party)
     # The agent of the owner's personal room asks them and accepts for them, which takes the contacts tools.
     poster = personal_room_agent(config, target_party.owner)
@@ -248,7 +248,7 @@ async def request_contact(
 
     record = await run_blocking_until_complete(update_contacts, paths, create)
     if record.status == "pending" and record.notice_event_id is None:
-        await post_request_notice(context, record)
+        await _post_request_notice(context, record)
         return _reload(context, record.id)
     return record
 
@@ -401,7 +401,7 @@ async def accept_contact(
     target = record.target
     if target.kind == "person" and (rules is not None or tools is not None):
         raise ValueError(_PERSON_HAS_NO_SIDE)
-    checked = validate_side_tools(config, target.id, tools) if target.kind == "agent" else None
+    checked = _validate_side_tools(config, target.id, tools) if target.kind == "agent" else None
     agents = _running_agents(context, record)
     _, client = agents[_room_creator(record)]
     room_name = f"{party_name(config, record.requester)} ↔ {party_name(config, target)}"
@@ -482,7 +482,7 @@ async def update_contact(
             raise ValueError(msg)
         if (party := record.party(side)).kind != "agent":
             raise ValueError(_PERSON_HAS_NO_SIDE)
-        _change_side(record.side(side), rules, validate_side_tools(config, party.id, tools))
+        _change_side(record.side(side), rules, _validate_side_tools(config, party.id, tools))
         return record.model_copy(deep=True)
 
     return await run_blocking_until_complete(update_contacts, context.runtime_paths, update)
