@@ -4193,7 +4193,11 @@ depends_on = []
 path = "mindroom.desktop.provider"
 depends_on = [
     "mindroom.desktop.accessibility",
- "mindroom.desktop.displays", "mindroom.desktop.input", "mindroom.desktop.macos_input", "mindroom.desktop.macos_capture"]
+    "mindroom.desktop.displays",
+    "mindroom.desktop.input",
+    "mindroom.desktop.macos_input",
+    "mindroom.desktop.macos_capture",
+]
 
 [[modules]]
 path = "mindroom.desktop.playwright_mcp"
@@ -4938,7 +4942,8 @@ depends_on = [
     "mindroom.desktop.sso",
     "mindroom.matrix.olm_to_device",
     "mindroom.tool_system.dependencies",
- "mindroom.desktop.native_host"]
+    "mindroom.desktop.native_host",
+]
 visibility = ["mindroom.cli.main"]
 
 [[modules]]
@@ -5065,7 +5070,8 @@ depends_on = [
     "mindroom.desktop.credentials",
     "mindroom.desktop.identity",
     "mindroom.desktop.pairing",
- "mindroom.desktop.protocol"]
+    "mindroom.desktop.protocol",
+]
 visibility = [
     "mindroom.commands.handler",
 ]
