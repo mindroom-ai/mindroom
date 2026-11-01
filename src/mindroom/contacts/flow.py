@@ -186,6 +186,30 @@ def _check_pair(requester: ContactParty, target: ContactParty) -> None:
         raise ValueError(msg)
 
 
+def _existing_contact(
+    book: ContactBook,
+    requester: ContactParty,
+    target: ContactParty,
+    *,
+    sets_side: bool,
+) -> ContactRecord | None:
+    """Return the pending or active contact of this pair, refusing a declined pair and a request that sets a side."""
+    for existing in book.contacts:
+        if existing.status == "removed" or not _same_pair(existing, requester, target):
+            continue
+        if existing.status == "declined":
+            msg = f"{existing.target.owner} declined this contact; they can remove it to allow a new request"
+            raise ValueError(msg)
+        if sets_side:
+            msg = (
+                f"Contact {existing.id} with {target.id} already exists and is {existing.status}; "
+                "change your side's rules or tools with update_contact"
+            )
+            raise ValueError(msg)
+        return existing
+    return None
+
+
 async def request_contact(
     context: ToolRuntimeContext,
     agent_name: str,
@@ -195,11 +219,12 @@ async def request_contact(
     rules: str | None,
     tools: list[str] | None,
     party: Literal["agent", "me"],
-) -> ContactRecord:
-    """Record a contact request from ``agent_name`` or its owner and post it to the target owner.
+) -> tuple[ContactRecord, bool]:
+    """Record a contact request from ``agent_name`` or its owner, post it to the target owner, and return it.
 
-    A pending or active contact between the same two parties, in either direction, is returned instead, and its
-    request notice is posted again when it never landed.
+    The flag says whether this call posted a request notice. A pending or active contact between the same two parties,
+    in either direction, is returned unchanged instead, and its request notice is posted when it never landed. Asking
+    again with rules or tools is refused, because only ``update_contact`` changes them.
     """
     config, paths = context.current_config, context.runtime_paths
     own = _own_party(context, agent_name)
@@ -222,12 +247,8 @@ async def request_contact(
         raise ValueError(msg)
 
     def create(book: ContactBook) -> ContactRecord:
-        for existing in book.contacts:
-            if existing.status == "removed" or not _same_pair(existing, requester, target_party):
-                continue
-            if existing.status == "declined":
-                msg = f"{existing.target.owner} declined this contact; they can remove it to allow a new request"
-                raise ValueError(msg)
+        existing = _existing_contact(book, requester, target_party, sets_side=rules is not None or tools is not None)
+        if existing is not None:
             return existing.model_copy(deep=True)
         record = ContactRecord(
             id=uuid4().hex[:12],
@@ -247,8 +268,8 @@ async def request_contact(
     record = await run_blocking_until_complete(update_contacts, paths, create)
     if record.status == "pending" and record.notice_event_id is None:
         await _post_request_notice(context, record)
-        return _reload(context, record.id)
-    return record
+        return _reload(context, record.id), True
+    return record, False
 
 
 def _bot(context: ToolRuntimeContext, agent_name: str) -> AgentBot | None:

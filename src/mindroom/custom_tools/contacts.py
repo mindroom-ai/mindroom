@@ -30,17 +30,16 @@ def _require_context() -> ToolRuntimeContext:
     return context
 
 
-def _asked(context: ToolRuntimeContext, record: ContactRecord) -> str:
-    """Say where a request stands for the owner who just made it."""
+def _asked(context: ToolRuntimeContext, record: ContactRecord, *, posted: bool) -> str:
+    """Say where a request stands for the owner who just made it; only a posted request notice asked anyone."""
     owner = resolve_human_requester_alias(context.requester_id, context.current_config, context.runtime_paths)
-    if record.requester.owner != owner:
-        return f"Contact {record.id} with {record.requester.id} is {record.status}."
-    if record.status == "pending":
+    if posted and record.requester.owner == owner:
         return (
             f"Asked {record.target.owner} to approve contact {record.id} with {record.target.id}; "
             "you are told in this thread when they accept or decline."
         )
-    return f"Contact {record.id} with {record.target.id} is {record.status}."
+    other = record.target if record.requester.owner == owner else record.requester
+    return f"Contact {record.id} with {other.id} already exists and is {record.status}; it is returned unchanged."
 
 
 class ContactsTools(Toolkit):
@@ -94,7 +93,7 @@ class ContactsTools(Toolkit):
         """
         try:
             context = _require_context()
-            record = await flow.request_contact(
+            record, posted = await flow.request_contact(
                 context,
                 self.agent_name,
                 target=target,
@@ -105,7 +104,7 @@ class ContactsTools(Toolkit):
             )
         except ValueError as exc:
             return f"Error: {exc}"
-        return _asked(context, record)
+        return _asked(context, record, posted=posted)
 
     async def accept_contact(
         self,

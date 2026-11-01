@@ -152,12 +152,13 @@ async def _request(
     **options: Any,  # noqa: ANN401
 ) -> ContactRecord:
     fields: dict[str, Any] = {"reason": "Plan the dinner", "rules": None, "tools": None, "party": "agent"}
-    return await flow.request_contact(
+    record, _asked = await flow.request_contact(
         _context(config, paths, agent_name, requester_id, runtime),
         agent_name,
         target=target,
         **(fields | options),
     )
+    return record
 
 
 async def _pending(config: Config, paths: RuntimePaths, runtime: _Runtime, **options: Any) -> ContactRecord:  # noqa: ANN401
@@ -344,6 +345,64 @@ async def test_repeat_request_returns_existing_and_reposts_missing_notice(tmp_pa
         assert (await _request(config, paths, runtime)).status == "active"
     send.assert_not_awaited()
     assert len(_stored(paths)) == 1
+
+
+@pytest.mark.asyncio
+async def test_asking_again_with_rules_or_tools_is_refused_and_changes_nothing(tmp_path: Path) -> None:
+    """Rules or tools on a repeated request would be lost, so the request is refused and points to update_contact."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime, rules="Be brief", tools=["calculator"])
+    refusal = (
+        rf"^Contact {record.id} with mind_bob already exists and is pending; "
+        r"change your side's rules or tools with update_contact$"
+    )
+
+    with _delivered() as send:
+        with pytest.raises(ValueError, match=refusal):
+            await _request(config, paths, runtime, rules="Be kind")
+        with pytest.raises(ValueError, match=refusal):
+            await _request(config, paths, runtime, tools=[])
+        _activate(paths, record.id)
+        reverse = refusal.replace("pending", "active").replace("mind_bob", "mind_alice")
+        with pytest.raises(ValueError, match=reverse):
+            await _request(
+                config,
+                paths,
+                runtime,
+                agent_name="mind_bob",
+                requester_id=CO_OWNER,
+                target="mind_alice",
+                rules="x",
+            )
+    send.assert_not_awaited()
+    (stored,) = _stored(paths)
+    assert (stored.requester_side.rules, stored.requester_side.tools) == ("Be brief", ["calculator"])
+    assert stored.target_side.rules is None
+
+
+@pytest.mark.asyncio
+async def test_asking_again_says_the_existing_contact_is_unchanged(tmp_path: Path) -> None:
+    """A repeated request returns the existing contact unchanged and never claims a new request was sent."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    tool = ContactsTools("mind_alice")
+    with tool_runtime_context(_context(config, paths, "mind_alice", OWNER, runtime)), _delivered() as send:
+        await tool.request_contact("mind_bob", "Plan the dinner")
+        again = await tool.request_contact("mind_bob", "Another reason")
+        with_rules = await tool.request_contact("mind_bob", "Another reason", rules="Be kind")
+    with tool_runtime_context(_context(config, paths, "mind_bob", CO_OWNER, runtime)):
+        reverse = await ContactsTools("mind_bob").request_contact("mind_alice", "Plan it too")
+
+    (record,) = _stored(paths)
+    send.assert_awaited_once()
+    assert again == f"Contact {record.id} with mind_bob already exists and is pending; it is returned unchanged."
+    assert reverse == f"Contact {record.id} with mind_alice already exists and is pending; it is returned unchanged."
+    assert with_rules == (
+        f"Error: Contact {record.id} with mind_bob already exists and is pending; "
+        "change your side's rules or tools with update_contact"
+    )
+    assert (record.reason, record.requester_side.rules) == ("Plan the dinner", None)
 
 
 @pytest.mark.asyncio
