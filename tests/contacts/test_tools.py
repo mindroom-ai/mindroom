@@ -541,9 +541,11 @@ async def test_remove_by_either_owner_leaves_room(tmp_path: Path) -> None:
     assert removed.status == "removed"
     assert _stored(paths) == [removed]
     for name in ("mind_alice", "mind_bob"):
-        runtime.clients[name].room_leave.assert_awaited_once_with(CONTACT_ROOM)
+        runtime.bots[name].change_local_membership.assert_awaited_once_with(CONTACT_ROOM, "leave")
         assert contact_room_ids(paths, name) == frozenset()
-    runtime.clients["mind_carol"].room_leave.assert_not_awaited()
+    runtime.bots["mind_carol"].change_local_membership.assert_not_awaited()
+    for client in runtime.clients.values():
+        client.room_leave.assert_not_awaited()
     with pytest.raises(ValueError, match=r"^The contact is already removed"):
         await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", record.id)
 
@@ -559,7 +561,7 @@ async def test_the_requesting_owner_removes_a_pending_contact_without_leaving_an
 
     assert removed.status == "removed"
     for name in TOOLS:
-        runtime.clients[name].room_leave.assert_not_awaited()
+        runtime.bots[name].change_local_membership.assert_not_awaited()
 
 
 @pytest.mark.asyncio

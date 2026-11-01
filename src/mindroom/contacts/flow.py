@@ -38,7 +38,7 @@ from mindroom.contacts.turns import contact_tool_choices
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.matrix.client_room_admin import create_room, invite_to_room, leave_room
+from mindroom.matrix.client_room_admin import create_room, invite_to_room
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.requester_identity import resolve_human_requester_alias
 
@@ -326,13 +326,10 @@ async def _seat_parties(
 
 
 async def _leave_contact_room(context: ToolRuntimeContext, record: ContactRecord, room_id: str) -> None:
-    """Make the agents of a contact leave its room; they keep only the rooms of active contacts across restarts."""
+    """Make the running agents of a contact leave its room; they keep only the rooms of active contacts across restarts."""
     for party in (record.requester, record.target):
-        if party.kind != "agent":
-            continue
-        client = None if context.orchestrator is None else context.orchestrator.running_entity_client(party.id)
-        if client is not None:
-            await leave_room(client, room_id)
+        if party.kind == "agent" and (bot := _bot(context, party.id)) is not None and bot.running:
+            await bot.change_local_membership(room_id, "leave")
 
 
 async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecord, poster: str) -> None:

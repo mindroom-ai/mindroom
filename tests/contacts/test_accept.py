@@ -98,15 +98,19 @@ def _account(paths: RuntimePaths, agent_name: str) -> str:
     return current_entity_id(agent_name, paths).full_id
 
 
+def _memberships(runtime: _Runtime, target_membership: str) -> set[str]:
+    """Return the agents whose bots changed their membership of the contact room to ``target_membership``."""
+    changed = set()
+    for name in TOOLS:
+        calls = [call.args for call in runtime.bots[name].change_local_membership.await_args_list]
+        if (CONTACT_ROOM, target_membership) in calls:
+            changed.add(name)
+    return changed
+
+
 def _joined(runtime: _Runtime) -> set[str]:
     """Return the agents whose bots joined the contact room."""
-    joined = set()
-    for name in TOOLS:
-        membership = runtime.bots[name].change_local_membership
-        if membership.await_count:
-            membership.assert_awaited_once_with(CONTACT_ROOM, "join")
-            joined.add(name)
-    return joined
+    return _memberships(runtime, "join")
 
 
 def _room_lifecycle(config: Config, paths: RuntimePaths, agent_name: str) -> BotRoomLifecycle:
@@ -354,14 +358,17 @@ async def test_a_room_that_cannot_be_set_up_is_left_and_the_request_stays_pendin
 
     with _matrix(invited=False), pytest.raises(ValueError, match=r"could not be invited to the contact room"):
         await _accept(config, paths, runtime, record.id)
-    runtime.clients["mind_bob"].room_leave.assert_awaited_once_with(CONTACT_ROOM)
+    assert _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
     assert _joined(runtime) == set()
+    for name in ("mind_alice", "mind_bob"):
+        runtime.bots[name].change_local_membership.reset_mock()
 
     runtime.bots["mind_bob"].change_local_membership.return_value = False
     with _matrix(), pytest.raises(ValueError, match=r"^mind_bob could not join the contact room"):
         await _accept(config, paths, runtime, record.id)
-    for name in ("mind_alice", "mind_bob"):
-        runtime.clients[name].room_leave.assert_awaited_with(CONTACT_ROOM)
+    assert _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
+    for client in runtime.clients.values():
+        client.room_leave.assert_not_awaited()
     assert _kept(paths) == set()
     assert [stored.status for stored in _stored(paths)] == ["pending"]
     runtime.sent("mind_alice").assert_not_awaited()
