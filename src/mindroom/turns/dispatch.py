@@ -409,8 +409,8 @@ class TurnDispatcher:
             # requester, or this requester's message for another participant, a
             # newer message from this requester may only be answered after it, so
             # letting it absorb this turn would answer out of receipt order or not at all.
-            # The guards below read a text message's mentions themselves, but a
-            # voice message's come from its transcript, which thread history lacks.
+            # The guards below read a text message's mentions themselves, but a voice
+            # message's mentions live in its transcript, not in the stored audio event.
             and not prepared.turn.queues_other_run(requester_user_id)
         )
         thread_history = prepared.dispatch.context.thread_history

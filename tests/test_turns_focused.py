@@ -1091,11 +1091,7 @@ async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_tur
         timestamp=newer.server_timestamp,
         content=newer.source["content"],
     )
-    harness = _build_harness(
-        config,
-        tmp_path,
-        thread_history=thread_history_result([] if history_degraded else [visible_newer], is_full_history=True),
-    )
+    harness = _build_harness(config, tmp_path)
     if history_degraded:
         # A read that must still refetch a revision cannot prove that no newer message exists.
         reader = harness.ingress.deps.resolver.deps.conversation_reader
@@ -1109,6 +1105,8 @@ async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_tur
         await harness.journal_principal.admit(
             _inbound_event(_ROOM_ID, newer, EventKind.MESSAGE, EventClass.ACTIONABLE),
         )
+    else:
+        _serve_conversation(harness, [visible_newer])
     room = _room_with_members(config, "general", "research")
     event = _text_event("older message for general", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
     event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
