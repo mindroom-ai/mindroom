@@ -59,14 +59,7 @@ def coordination(tmp_path: Path) -> Coordination:
     save_matrix_state(state, paths)
     client = SimpleNamespace(
         user_id="@mindroom_router:localhost",
-        joined_members=AsyncMock(
-            return_value=nio.JoinedMembersResponse.from_dict(
-                {
-                    "joined": {"@alice:localhost": {"display_name": "Alice", "avatar_url": None}},
-                },
-                "!lobby:localhost",
-            ),
-        ),
+        joined_members=AsyncMock(return_value=joined_members_response("!lobby:localhost", "@alice:localhost")),
         room_resolve_alias=AsyncMock(
             return_value=nio.RoomResolveAliasResponse(
                 "#personal_pending:localhost",
@@ -115,12 +108,7 @@ def template_coordination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Te
     save_matrix_state(state, paths)
     client = SimpleNamespace(
         user_id="@mindroom_router:localhost",
-        joined_members=AsyncMock(
-            return_value=nio.JoinedMembersResponse.from_dict(
-                {"joined": {"@alice:localhost": {"display_name": "Alice", "avatar_url": None}}},
-                "!lobby:localhost",
-            ),
-        ),
+        joined_members=AsyncMock(return_value=joined_members_response("!lobby:localhost", "@alice:localhost")),
         get_displayname=AsyncMock(return_value=nio.ProfileGetDisplayNameResponse("Alice")),
     )
     runtime = SimpleNamespace(config=Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths), client=client)
@@ -928,10 +916,7 @@ async def test_reload_during_backfill_keeps_new_onboarding_room_pending(
         if room_id == "!lobby:localhost":
             started.set()
             await release.wait()
-        return nio.JoinedMembersResponse.from_dict(
-            {"joined": {"@alice:localhost": {"display_name": "Alice", "avatar_url": None}}},
-            room_id,
-        )
+        return joined_members_response(room_id, "@alice:localhost")
 
     monkeypatch.setattr(lifecycle.runtime.client, "joined_members", joined_members)
     async with asyncio.timeout(2):

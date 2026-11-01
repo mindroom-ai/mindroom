@@ -13,7 +13,7 @@ import re
 import shutil
 import time
 from collections import defaultdict
-from contextlib import asynccontextmanager, suppress
+from contextlib import suppress
 from dataclasses import dataclass, field
 from itertools import count
 from pathlib import Path
@@ -26,6 +26,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
+from mindroom.browser.call_limit import HOST_CALL_TIMEOUT_SECONDS
 from mindroom.browser.fetch_guard import continue_or_abort_browser_fetch, run_browser_tool_url_check
 from mindroom.browser.profile_locks import clear_stale_singleton_locks
 from mindroom.custom_tools.attachments import resolve_context_attachment_path
@@ -64,7 +65,7 @@ from mindroom.worker_computer.browser_proxy import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import Awaitable, Mapping
     from typing import BinaryIO
 
     from playwright.async_api import Download
@@ -77,9 +78,8 @@ _DEFAULT_PROFILE = "mindroom"
 _DEFAULT_SNAPSHOT_LIMIT = 200
 _DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
 _DEFAULT_TIMEOUT_MS = 30_000
-# Playwright bounds neither a page script nor a wait, so the toolkit bounds each host call itself, wherever it runs and
-# whether or not it runs as a job, at the limit a worker gives a call by default.
-_HOST_CALL_TIMEOUT_SECONDS = 120.0
+# A page whose script never yields cannot even give its title, so a tab listing waits only this long for each tab.
+_TAB_TITLE_TIMEOUT_SECONDS = 2.0
 _MAX_CONSOLE_ENTRIES = 200
 # A self-contained page an agent wrote, with embedded images; a larger file is not a page to check.
 _MAX_OPEN_FILE_BYTES = 16 * 1024 * 1024
@@ -421,21 +421,37 @@ def _browser_help_payload(action: str) -> dict[str, Any]:
     }
 
 
-@asynccontextmanager
-async def _host_call_deadline(action: str) -> AsyncIterator[None]:
+async def _within_seconds[T](seconds: float, call: Awaitable[T]) -> T:
+    """Await a browser call, stopping it with ``TimeoutError`` once ``seconds`` pass.
+
+    The call runs in its own task, because Playwright drops a request it waits on only when the task that sent it ends
+    cancelled; a limit on the caller's own task turns that cancellation into ``TimeoutError``, which leaves the request
+    to fail later with an error nobody reads.
+    """
+    return await asyncio.wait_for(asyncio.ensure_future(call), seconds)
+
+
+async def _host_call_within_time_limit[T](action: str, call: Awaitable[T]) -> T:
     """Stop a host call at its time limit, since the reply that started it, or started its job, may wait for it."""
-    deadline = asyncio.timeout(_HOST_CALL_TIMEOUT_SECONDS)
+    task = asyncio.ensure_future(call)
     try:
-        async with deadline:
-            yield
+        return await _within_seconds(HOST_CALL_TIMEOUT_SECONDS, task)
     except TimeoutError:
-        if not deadline.expired():
+        if not task.cancelled():
             raise
         msg = (
-            f"Browser action={action} did not finish within {_HOST_CALL_TIMEOUT_SECONDS:g} seconds and was "
+            f"Browser action={action} did not finish within {HOST_CALL_TIMEOUT_SECONDS:g} seconds and was "
             "stopped. If the page stays unresponsive, close its tab with action=close."
         )
         raise TimeoutError(msg) from None
+
+
+async def _tab_title(page: Page) -> str | None:
+    """Return a tab's title, or None when its page cannot answer, such as one a script froze or whose renderer crashed."""
+    try:
+        return await _within_seconds(_TAB_TITLE_TIMEOUT_SECONDS, page.title())
+    except (TimeoutError, PlaywrightError):
+        return None
 
 
 def _desktop_browser_parameters(  # noqa: C901
@@ -767,7 +783,7 @@ class BrowserTools(Toolkit):
             raise ExceptionGroup(msg, errors)
 
     @tool(name="browser_control")
-    async def browser(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def browser(  # noqa: C901, PLR0915
         self,
         action: _BrowserAction,
         target: Literal["host", "desktop"] | None = None,
@@ -920,7 +936,8 @@ class BrowserTools(Toolkit):
             msg = "returnAttachment requires target=desktop."
             raise ValueError(msg)
         profile_name = _clean_str(profile) or _DEFAULT_PROFILE
-        async with _host_call_deadline(action):
+
+        async def host_call() -> str | ToolValue:  # noqa: C901, PLR0911, PLR0912, PLR0915
             if action == "status":
                 return json.dumps(await self._status_payload(profile_name), sort_keys=True)
             if action == "start":
@@ -1059,9 +1076,10 @@ class BrowserTools(Toolkit):
                     ),
                     sort_keys=True,
                 )
+            msg = f"Unhandled action: {action}"
+            raise ValueError(msg)
 
-        msg = f"Unhandled action: {action}"
-        raise ValueError(msg)
+        return await _host_call_within_time_limit(action, host_call())
 
     def _resolve_target(self, *, target: str | None, node: str | None) -> str:
         if node is not None:
@@ -1180,9 +1198,9 @@ class BrowserTools(Toolkit):
         session = self._session
         async with session.lock:
             state = session.profiles.get(profile_name)
-            if state is None or state.cleanup_required:
-                return {"action": "status", "profile": profile_name, "running": False, "status": "ok", "tabs": []}
-            return await self._profile_status(profile_name, state)
+        if state is None or state.cleanup_required:
+            return {"action": "status", "profile": profile_name, "running": False, "status": "ok", "tabs": []}
+        return await self._profile_status(profile_name, state)
 
     async def _profiles_payload(self, selected_profile: str) -> dict[str, Any]:
         session = self._session
@@ -1216,15 +1234,16 @@ class BrowserTools(Toolkit):
             if tab.page.is_closed():
                 stale.append(target_id)
                 continue
-            title = await tab.page.title()
-            payload_tabs.append(
-                {
-                    "active": target_id == state.active_target_id,
-                    "targetId": target_id,
-                    "title": title,
-                    "url": tab.page.url,
-                },
-            )
+            title = await _tab_title(tab.page)
+            entry = {
+                "active": target_id == state.active_target_id,
+                "targetId": target_id,
+                "title": title,
+                "url": tab.page.url,
+            }
+            if title is None:
+                entry["unresponsive"] = True
+            payload_tabs.append(entry)
         for target_id in stale:
             self._remove_tab(state, target_id)
         return payload_tabs
@@ -1249,15 +1268,16 @@ class BrowserTools(Toolkit):
         state = await self._ensure_profile(profile_name)
         page = await state.context.new_page()
         target_id = self._register_tab(state, page)
+        # The new tab is current before it loads, so a later call without targetId reaches it even if loading fails.
+        if self._worker_display is not None:
+            await page.bring_to_front()
+        state.active_target_id = target_id
         if html is not None:
             # Content on about:blank, unlike a file:// page, cannot load or navigate to other local files.
             await page.set_content(html, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
         else:
             assert target_url is not None
             await _goto(page, target_url)
-        if self._worker_display is not None:
-            await page.bring_to_front()
-        state.active_target_id = target_id
         return {
             "action": "open",
             "profile": profile_name,
@@ -1378,17 +1398,19 @@ class BrowserTools(Toolkit):
                     Path(staging.name),
                     _MAX_STAGED_UPLOAD_BYTES - retained_bytes,
                 )
-                await locator.set_input_files(staged_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
             except BaseException:
                 staging.cleanup()
                 raise
-            # Chromium reads selected paths lazily, including during a later form submit.
-            # Keep snapshots until tab/profile teardown even after set_input_files returns.
-            if state.cleanup_required or tab.page.is_closed():
-                staging.cleanup()
-            else:
-                tab.upload_staging.append(staging)
-                tab.upload_staged_bytes += staged_bytes
+            try:
+                await locator.set_input_files(staged_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
+            finally:
+                # Chromium reads selected paths lazily, including during a later form submit, and a selection that
+                # failed or was stopped may already hold them, so keep snapshots until tab/profile teardown.
+                if state.cleanup_required or tab.page.is_closed():
+                    staging.cleanup()
+                else:
+                    tab.upload_staging.append(staging)
+                    tab.upload_staged_bytes += staged_bytes
         return {
             "action": "upload",
             "paths": [source.display_path for source in sources],
