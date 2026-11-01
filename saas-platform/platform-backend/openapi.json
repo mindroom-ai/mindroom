@@ -1480,30 +1480,6 @@
         "title": "StatusResponse",
         "type": "object"
       },
-      "StripePriceResponse": {
-        "description": "Stripe price ID response model.",
-        "properties": {
-          "billing_cycle": {
-            "title": "Billing Cycle",
-            "type": "string"
-          },
-          "plan": {
-            "title": "Plan",
-            "type": "string"
-          },
-          "price_id": {
-            "title": "Price Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "price_id",
-          "plan",
-          "billing_cycle"
-        ],
-        "title": "StripePriceResponse",
-        "type": "object"
-      },
       "SubscriptionCancelResponse": {
         "description": "Subscription cancellation response model.",
         "properties": {
@@ -1563,6 +1539,21 @@
             "title": "Account Id",
             "type": "string"
           },
+          "billing_cycle": {
+            "anyOf": [
+              {
+                "enum": [
+                  "monthly",
+                  "yearly"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Billing Cycle"
+          },
           "can_run_instances": {
             "title": "Can Run Instances",
             "type": "boolean"
@@ -1614,6 +1605,17 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "price_cents": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Cents"
           },
           "status": {
             "enum": [
@@ -3857,55 +3859,6 @@
           }
         },
         "summary": "Get Pricing Config"
-      }
-    },
-    "/pricing/stripe-price/{plan}/{billing_cycle}": {
-      "get": {
-        "description": "Get the Stripe price ID for a specific plan and billing cycle.\n\nArgs:\n    plan: Plan key (e.g., 'byok', 'hobby', 'pro')\n    billing_cycle: Either 'monthly' or 'yearly'\n\nReturns:\n    Dict with price_id or error",
-        "operationId": "get_stripe_price_pricing_stripe_price__plan___billing_cycle__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "plan",
-            "required": true,
-            "schema": {
-              "title": "Plan",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "billing_cycle",
-            "required": true,
-            "schema": {
-              "title": "Billing Cycle",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StripePriceResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Stripe Price"
       }
     },
     "/stripe/checkout": {
