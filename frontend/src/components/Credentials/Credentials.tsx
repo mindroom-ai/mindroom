@@ -142,10 +142,9 @@ export function Credentials() {
         };
       });
       setServices(statuses);
+      // Callers clear the error before loading, so a success here keeps an error another load just reported.
       if (statusResults.some((result) => result.status === "rejected")) {
         setError(PARTIAL_STATUS_ERROR);
-      } else {
-        setError(null);
       }
     } catch (err) {
       const message =
@@ -369,9 +368,9 @@ export function Credentials() {
     setIsDeleting(true);
     setError(null);
     try {
-      // The environment can still supply a deleted service, so the response says what happened and the page reloads:
-      // the service's credentials, unless another service was selected meanwhile, then the list, whose error stays shown.
-      // A service that is gone gives way to the next one, and one that still resolves shows what now applies.
+      // The environment can still supply a deleted service, so the response says what happened and the page reloads
+      // the service's credentials, unless another service was selected meanwhile, then the list. A service that is gone
+      // gives way to the next one, and one that still resolves shows what now applies.
       const response = await fetchJSON<{ message: string }>(
         API_ENDPOINTS.credentials.delete(selectedService),
         {

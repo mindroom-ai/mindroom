@@ -683,6 +683,50 @@ describe("Credentials", () => {
     expect(screen.getByText("Service list unavailable")).toBeInTheDocument();
   });
 
+  it("keeps the credentials error when the reload after a delete cannot read them", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    let deleted = false;
+    (global.fetch as any).mockImplementation(
+      async (input: string, init?: RequestInit) => {
+        const path = String(input);
+        if (init?.method === "DELETE") {
+          deleted = true;
+          return {
+            ok: true,
+            json: async () => ({ status: "success", message: "Deleted" }),
+          };
+        }
+        if (path === "/api/credentials/github_private" && deleted) {
+          throw new Error("Credentials unavailable");
+        }
+        const body =
+          path === "/api/credentials/list"
+            ? ["github_private"]
+            : path.endsWith("/status")
+              ? {
+                  service: "github_private",
+                  has_credentials: true,
+                  key_names: ["token"],
+                }
+              : { service: "github_private", credentials: { token: "t" } };
+        return { ok: true, json: async () => body };
+      },
+    );
+
+    renderOpen();
+
+    await screen.findByText("Active: github_private");
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Delete credentials",
+        description: "Deleted",
+      });
+    });
+    expect(screen.getByText("Credentials unavailable")).toBeInTheDocument();
+  });
+
   it("tests credentials for selected service", async () => {
     serveGithubToken().mockResolvedValueOnce({
       ok: true,
