@@ -2484,7 +2484,6 @@ path = "mindroom.api.schedules"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
-    "mindroom.logging_config",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
@@ -2585,7 +2584,6 @@ path = "mindroom.custom_tools.attachment_helpers"
 depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.projected_thread_membership",
-    "mindroom.matrix.state",
     "mindroom.requester_identity",
 ]
 
