@@ -1669,16 +1669,19 @@ async def test_get_pending_schedule_thread_ids_excludes_new_threads_and_non_pend
 
 
 @pytest.mark.asyncio
-async def test_get_pending_schedule_thread_ids_raises_on_room_state_error(tmp_path: Path) -> None:
-    """The todo scanner must be able to observe and log a failed Matrix state read."""
+async def test_get_scheduled_tasks_for_room_raises_when_room_state_cannot_be_read(tmp_path: Path) -> None:
+    """A room whose state cannot be read must not look like a room without tasks."""
     client = AsyncMock()
-    error_response = nio.RoomGetStateError.from_dict(
-        {"error": "Not authorized"},
-        room_id="!test:server",
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateError.from_dict(
+            {"errcode": "M_FORBIDDEN", "error": "You are not in the room"},
+            room_id="!test:server",
+        ),
     )
-    client.room_get_state = AsyncMock(return_value=error_response)
 
-    with pytest.raises(RuntimeError, match="Failed to get scheduled task state"):
+    with pytest.raises(ScheduledTaskStateReadError, match="M_FORBIDDEN You are not in the room"):
+        await get_scheduled_tasks_for_room(client, "!test:server", schedule_runtime_paths(tmp_path))
+    with pytest.raises(ScheduledTaskStateReadError, match="M_FORBIDDEN You are not in the room"):
         await get_pending_schedule_thread_ids_for_room(client, "!test:server", schedule_runtime_paths(tmp_path))
 
 

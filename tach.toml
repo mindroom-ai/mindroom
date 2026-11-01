@@ -703,6 +703,7 @@ visibility = [
     "mindroom.bot",
     "mindroom.conversation_resolver",
     "mindroom.matrix.conversation_reads",
+    "mindroom.scheduling.tasks",
     "mindroom.thread_export.projected_history",
     "mindroom.model_selection_scope",
 ]
@@ -5585,6 +5586,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.constants",
     "mindroom.entity_resolution",
+    "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
