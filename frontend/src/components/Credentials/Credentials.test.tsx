@@ -840,6 +840,25 @@ describe("Credentials", () => {
     expect(screen.getByText(PARTIAL_WARNING)).toBeInTheDocument();
   });
 
+  it("shows the list's warning above the selected service's own error", async () => {
+    serveServices(["good_service", "zbad_service"], (path) =>
+      path.startsWith("/api/credentials/zbad_service")
+        ? "zbad_service unreadable"
+        : undefined,
+    );
+
+    renderOpen();
+
+    await showsTokenOf("good_service");
+    fireEvent.click(screen.getByRole("button", { name: /^zbad_service/ }));
+
+    const serviceError = await screen.findByText("zbad_service unreadable");
+    expect(
+      screen.getByText(PARTIAL_WARNING).compareDocumentPosition(serviceError) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("drops the partial-status warning once every status loads on Refresh", async () => {
     let statusFails = true;
     serveOneFailingStatus(() => statusFails);

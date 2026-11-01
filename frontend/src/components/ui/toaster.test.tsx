@@ -15,13 +15,14 @@ describe("Toaster", () => {
     vi.useRealTimers();
   });
 
-  it("shows a toast after an earlier one, and both expire", () => {
+  it("shows a toast after an earlier one, and each expires 5 s after it appears", () => {
     render(<Toaster />);
 
     act(() => {
       toast({ title: "Saved" });
     });
     act(() => {
+      vi.advanceTimersByTime(1000);
       toast({ title: "Save Failed", variant: "destructive" });
     });
 
@@ -29,10 +30,16 @@ describe("Toaster", () => {
     expect(screen.getByText("Save Failed")).toBeInTheDocument();
 
     act(() => {
-      vi.advanceTimersByTime(5000);
+      vi.advanceTimersByTime(4000);
     });
 
     expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+    expect(screen.getByText("Save Failed")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+
     expect(screen.queryByText("Save Failed")).not.toBeInTheDocument();
   });
 
