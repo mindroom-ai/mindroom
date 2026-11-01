@@ -228,20 +228,21 @@ export function Credentials() {
     void loadCredentials(selectedService);
   }, [loadCredentials, selectedService]);
 
+  // Selecting, adding, and refreshing ask here before they replace the editor's unsaved draft.
+  const confirmDiscard = useCallback(
+    () =>
+      !hasUnsavedChanges ||
+      window.confirm(`Discard unsaved changes for '${selectedService}'?`),
+    [hasUnsavedChanges, selectedService],
+  );
+
   const handleSelectService = useCallback(
     (service: string) => {
-      if (service === selectedService) {
-        return;
+      if (service !== selectedService && confirmDiscard()) {
+        setSelectedService(service);
       }
-      if (
-        hasUnsavedChanges &&
-        !window.confirm(`Discard unsaved changes for '${selectedService}'?`)
-      ) {
-        return;
-      }
-      setSelectedService(service);
     },
-    [hasUnsavedChanges, selectedService],
+    [confirmDiscard, selectedService],
   );
 
   const handleCreateService = useCallback(() => {
@@ -253,7 +254,10 @@ export function Credentials() {
     }
     if (services.some((service) => service.service === candidate)) {
       setError(`Service '${candidate}' already exists`);
-      setSelectedService(candidate);
+      handleSelectService(candidate);
+      return;
+    }
+    if (!confirmDiscard()) {
       return;
     }
     setError(null);
@@ -269,7 +273,7 @@ export function Credentials() {
     setJsonDraft(EMPTY_JSON);
     setLoadedDraft(EMPTY_JSON);
     setNewServiceName("");
-  }, [newServiceName, services]);
+  }, [confirmDiscard, handleSelectService, newServiceName, services]);
 
   const refreshSelectedStatus = useCallback(async (service: string) => {
     try {
@@ -442,18 +446,12 @@ export function Credentials() {
   }, [selectedService, toast]);
 
   const handleRefresh = useCallback(async () => {
-    if (
-      selectedService &&
-      hasUnsavedChanges &&
-      !window.confirm(
-        `Discard unsaved changes for '${selectedService}' and refresh?`,
-      )
-    ) {
+    if (!confirmDiscard()) {
       return;
     }
     setError(null);
     await reload(selectedService);
-  }, [hasUnsavedChanges, reload, selectedService]);
+  }, [confirmDiscard, reload, selectedService]);
 
   const handleCopy = useCallback(async () => {
     if (!selectedService) {

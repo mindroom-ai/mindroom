@@ -37,13 +37,8 @@ SHARED_CREDENTIALS_GATEWAY_MESSAGE = (
 )
 
 
-def require_connections_same_origin(
-    request: Request,
-    runtime_paths: RuntimePaths,
-    *,
-    detail: str = "Connection changes require a same-origin request",
-) -> None:
-    """Reject mutations from another origin (shared helper for connections and egress routes)."""
+def require_connections_public_origin(request: Request, runtime_paths: RuntimePaths) -> str:
+    """Return this deployment's origin, refusing one that is plain HTTP outside local addresses."""
     expected = deployment_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL"), str(request.base_url))
     if expected is None or not (expected.startswith("https://") or is_local_origin(expected)):
         raise HTTPException(
@@ -51,6 +46,17 @@ def require_connections_same_origin(
             "Connections require an HTTPS public origin, or HTTP on a local address",
             headers=CONNECTIONS_HEADERS,
         )
+    return expected
+
+
+def require_connections_same_origin(
+    request: Request,
+    runtime_paths: RuntimePaths,
+    *,
+    detail: str = "Connection changes require a same-origin request",
+) -> None:
+    """Reject mutations from another origin (shared helper for connections and egress routes)."""
+    expected = require_connections_public_origin(request, runtime_paths)
     require_same_origin(
         request,
         expected,
