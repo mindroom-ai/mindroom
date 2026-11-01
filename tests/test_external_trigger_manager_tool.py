@@ -24,6 +24,7 @@ from tests.conftest import (
     event_serving_client,
     make_conversation_reader_mock,
     make_relation_lookup,
+    make_thread_reply_lookup,
     thread_reply_client,
 )
 from tests.matrix_state_helpers import save_matrix_state
@@ -411,10 +412,7 @@ async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(tmp_pa
 async def test_create_trigger_refuses_a_reply_whose_thread_root_is_blank(tmp_path: Path) -> None:
     """A reply naming a blank thread root is refused like a blank target_thread_id, and the store stays readable."""
     tool = ExternalTriggerManagerTools()
-    context = replace(
-        _context(tmp_path),
-        relations=make_relation_lookup(client=thread_reply_client("$reply:example.org", " ")),
-    )
+    context = replace(_context(tmp_path), relations=make_thread_reply_lookup("$reply:example.org", " "))
     with tool_runtime_context(context):
         payload = _payload(
             await tool.create_trigger("blank-root", public_key=_PUBLIC_KEY, target_thread_id="$reply:example.org"),
