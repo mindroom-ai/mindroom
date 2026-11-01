@@ -98,7 +98,7 @@ from mindroom.providers.google_adc import load_ambient_google_credentials, with_
 from mindroom.providers.identity import model_identity
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
-from mindroom.runtime_env_policy import AWS_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY, is_unset_env_value
+from mindroom.runtime_env_policy import AWS_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
@@ -772,16 +772,6 @@ def _claude_capabilities(
     )
 
 
-def _sdk_reads_unset_export(runtime_paths: RuntimePaths, name: str) -> bool:
-    """Return whether the process env exports ``name`` with a value the shared env rule counts as unset.
-
-    The SDK clients read their endpoint and region variables from the process env whenever they get no value, and
-    take such a blank value as a set one, so MindRoom must pass one instead.
-    """
-    value = runtime_paths.process_env.get(name)
-    return value is not None and is_unset_env_value(name, value)
-
-
 def _anthropic_kwargs(authored: dict[str, Any], api_key: str | None, runtime_paths: RuntimePaths) -> dict[str, Any]:
     """Fill the direct route's key and, unless ``client_params`` sets one, its endpoint from the runtime env."""
     kwargs: dict[str, Any] = {**authored, "api_key": api_key} if api_key else dict(authored)
@@ -790,7 +780,8 @@ def _anthropic_kwargs(authored: dict[str, Any], api_key: str | None, runtime_pat
         return kwargs
     name = ENDPOINT_VARIABLES["anthropic"]
     base_url = get_secret_from_env(name, runtime_paths=runtime_paths)
-    if base_url is None and _sdk_reads_unset_export(runtime_paths, name):
+    # Given no endpoint, the SDK reads the variable itself and would take an exported blank as one.
+    if base_url is None and name in runtime_paths.process_env:
         base_url = ANTHROPIC_BASE_URL_DEFAULT
     if base_url is not None:
         kwargs["client_params"] = {**client_params, "base_url": base_url}
@@ -810,12 +801,9 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
             continue
         if value := get_secret_from_env(env_key, runtime_paths=runtime_paths):
             kwargs[config_key] = value
-        # The SDK reads a blank project as unset, but would build every request URL from a blank region or endpoint.
-        elif (
-            config_key != "project_id"
-            and config_key not in client_params
-            and _sdk_reads_unset_export(runtime_paths, env_key)
-        ):
+        # Given no value, the SDK reads the variable itself: an exported blank project counts as unset there, but a
+        # blank region or endpoint would build every request URL.
+        elif config_key != "project_id" and config_key not in client_params and env_key in runtime_paths.process_env:
             fix = "set a region" if config_key == "region" else "unset it for the region's endpoint, or set one"
             msg = f"{env_key} is exported blank, which the Vertex AI SDK would use as is; {fix}."
             raise ValueError(msg)

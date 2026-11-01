@@ -1675,7 +1675,6 @@ def test_a_blank_exported_anthropic_base_url_keeps_the_direct_route_on_anthropic
 ) -> None:
     """The SDK reads ``ANTHROPIC_BASE_URL`` itself when given none, and would take a blank export as its endpoint."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "data",
@@ -1711,7 +1710,6 @@ def test_a_blank_exported_vertex_endpoint_or_region_fails_the_build_and_names_th
 ) -> None:
     """The Vertex SDK reads these itself when given none, and would build every request URL from a blank export."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     env = {"ANTHROPIC_VERTEX_PROJECT_ID": "p", "CLOUD_ML_REGION": "us-east5", name: ""}
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
     hide_provider_environment(monkeypatch)
@@ -1730,7 +1728,6 @@ def test_a_blank_exported_vertex_endpoint_or_region_fails_the_build_and_names_th
 def test_a_blank_exported_vertex_project_still_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The Vertex SDK reads a blank project as unset and takes the credentials' project, so the build goes on."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     env = {"ANTHROPIC_VERTEX_PROJECT_ID": "", "CLOUD_ML_REGION": "us-east5"}
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
     hide_provider_environment(monkeypatch)

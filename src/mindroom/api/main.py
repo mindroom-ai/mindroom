@@ -204,7 +204,7 @@ class PersonalAgentResponse(BaseModel):
 
 def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> float:
     """Return the configured background idle-worker cleanup interval."""
-    raw = runtime_paths.env_value(_WORKER_CLEANUP_INTERVAL_ENV, default="0").strip()
+    raw = runtime_paths.env_value(_WORKER_CLEANUP_INTERVAL_ENV, default="0")
     try:
         interval = float(raw)
     except ValueError:

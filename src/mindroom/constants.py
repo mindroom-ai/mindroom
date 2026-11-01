@@ -688,15 +688,6 @@ def _trusted_tool_runtime_env_layers(
     return process_env, env_file_values
 
 
-def _isolated_runtime_env_layers(
-    runtime_paths: RuntimePaths,
-) -> tuple[dict[str, str], dict[str, str]]:
-    return (
-        runtime_env_policy.isolated_worker_runtime_env(runtime_paths.process_env),
-        runtime_env_policy.isolated_worker_runtime_env(runtime_paths.env_file_values),
-    )
-
-
 def _shell_extra_env_patterns(extra_env_passthrough: str | None) -> tuple[str, ...]:
     if extra_env_passthrough is None:
         return ()
@@ -750,25 +741,22 @@ def trusted_tool_runtime_env_values(
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def _execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
-    """Return the stricter env visible to sandbox-proxied execution tools."""
-    merged_env = _merged_env_layers(*_isolated_runtime_env_layers(runtime_paths))
-    merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
-    merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
-    return cast("Mapping[str, str]", MappingProxyType(merged_env))
-
-
 def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Return one runtime view filtered for isolated worker execution."""
-    process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
     return RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
         env_path=runtime_paths.env_path,
         storage_root=runtime_paths.storage_root,
         control_state_root=None,
-        process_env=cast("Mapping[str, str]", MappingProxyType(process_env)),
-        env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
+        process_env=cast(
+            "Mapping[str, str]",
+            MappingProxyType(runtime_env_policy.isolated_worker_runtime_env(runtime_paths.process_env)),
+        ),
+        env_file_values=cast(
+            "Mapping[str, str]",
+            MappingProxyType(runtime_env_policy.isolated_worker_runtime_env(runtime_paths.env_file_values)),
+        ),
     )
 
 
@@ -829,7 +817,7 @@ def build_execution_tool_env(
                 process_env=shell_process_env,
             ),
         )
-    return dict(_execution_tool_runtime_env_values(runtime_paths))
+    return dict(runtime_env_values(isolated_runtime_paths(runtime_paths)))
 
 
 def read_secret_file(path: Path) -> str:
@@ -865,7 +853,7 @@ def is_hosted_matrix_homeserver(homeserver: str) -> bool:
 
 def runtime_matrix_homeserver(runtime_paths: RuntimePaths) -> str:
     """Return the effective Matrix homeserver for one runtime context."""
-    homeserver = runtime_paths.env_value("MATRIX_HOMESERVER") or DEFAULT_MATRIX_HOMESERVER
+    homeserver = runtime_paths.env_value("MATRIX_HOMESERVER", default=DEFAULT_MATRIX_HOMESERVER)
     if is_hosted_matrix_homeserver(homeserver):
         return DEFAULT_MATRIX_HOMESERVER
     return homeserver
