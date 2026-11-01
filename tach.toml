@@ -3642,6 +3642,7 @@ visibility = ["mindroom.memory.functions"]
 path = "mindroom.memory.auto_flush"
 depends_on = [
     "mindroom.constants",
+    "mindroom.contacts.turns",
     "mindroom.helper_usage",
     "mindroom.history.conversation_text",
     "mindroom.history.session_runs",
@@ -9685,7 +9686,6 @@ depends_on = [
     "mindroom.contacts.parties",
     "mindroom.contacts.policy",
     "mindroom.contacts.store",
-    "mindroom.delegation.state",
     "mindroom.hooks",
     "mindroom.tool_system.registry",
 ]

@@ -20,6 +20,7 @@ from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
     resolve_runtime_paths,
 )
+from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.history import session_runs
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
@@ -42,14 +43,22 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_worker_key,
 )
-from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, seed_session
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    runtime_paths_for,
+    seed_session,
+    test_runtime_paths,
+)
 from tests.fakes.knowledge import install_recording_refresh_scheduler
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.history_helpers import unreadable_conversations
+from tests.test_generated_agents import CO_OWNER, OWNER, _load, _personal, _with_template
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.contacts.store import ContactStatus
     from mindroom.history.session_runs import DueConversation, RedactedEventIds
     from mindroom.session_storage.store import ConversationStore
 
@@ -752,6 +761,47 @@ async def test_delegated_task_sessions_are_not_flushed(tmp_path: Path, extractor
     await worker._run_cycle(config)
 
     assert extractor.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["active", "removed"])
+async def test_conversations_in_a_contact_room_are_not_flushed(
+    tmp_path: Path,
+    extractor: _Extractor,
+    status: ContactStatus,
+) -> None:
+    """The other side of a contact drove the conversations in its room, even once the contact is removed."""
+    data = _with_template()
+    data["personal_agents"]["mind"]["agent"]["contacts"] = {}
+    data["memory"] = {"backend": "file", "auto_flush": {"enabled": True, "idle_seconds": 1}}
+    config = bind_runtime_paths(
+        _load(tmp_path, data, entries=[_personal(), _personal(CO_OWNER)]),
+        test_runtime_paths(tmp_path),
+    )
+    contact_room = "!contact:example.org"
+    record = ContactRecord(
+        id="c1",
+        status=status,
+        requester=ContactParty(kind="agent", id="mind_alice", owner=OWNER),
+        target=ContactParty(kind="agent", id="mind_bob", owner=CO_OWNER),
+        reason="Plan the dinner",
+        requester_side=ContactSide(),
+        target_side=ContactSide(),
+        origin_room_id=ROOM,
+        origin_thread_id=None,
+        room_id=contact_room,
+        created_at=T0,
+    )
+    update_contacts(runtime_paths_for(config), lambda book: book.contacts.append(record))
+    worker = await _started(config)
+    contact_thread, ordinary = _thread("talk", contact_room), _thread("t1")
+    _seed(config, contact_thread, [_run("thread", contact_thread, T0 + 10)], agent="mind_bob")
+    _seed(config, contact_room, [_run("room", contact_room, T0 + 20)], agent="mind_bob")
+    _seed(config, ordinary, [_run("ordinary", ordinary, T0 + 30)], agent="mind_bob")
+
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("ordinary")]
 
 
 @pytest.mark.asyncio

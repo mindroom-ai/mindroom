@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
 
+from mindroom import agents as agents_module
 from mindroom import ai
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, contacts_path, update_contacts
-from mindroom.contacts.turns import contact_turn, contact_turn_instructions, contact_turn_persona
+from mindroom.contacts.turns import contact_turn, contact_turn_instructions, contact_turn_tools
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_entity_id
@@ -24,10 +26,12 @@ from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_roo
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_lifecycle import answer_suppression
 from mindroom.response_sources import ResponseSources
+from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
@@ -42,6 +46,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 from tests.runtime_fakes import ready_runtime
 from tests.test_generated_agents import BASE, CO_OWNER, OWNER, _load, _personal
 
@@ -73,11 +78,12 @@ def _setup(
     *,
     tools: tuple[str, ...] = ("calculator", "sleep"),
     personal_rooms: bool = False,
+    memory_backend: str = "none",
 ) -> tuple[Config, RuntimePaths]:
-    """Personal agents of Alice, Bob, and Carol with contacts; ``sleep`` always needs approval."""
+    """Personal agents of Alice, Bob, and Carol with contacts and skill learning; ``sleep`` always needs approval."""
     data: dict[str, Any] = {
         **BASE,
-        "memory": {"backend": "none"},
+        "memory": {"backend": memory_backend},
         "tool_approval": {"rules": [{"match": "sleep", "action": "require_approval"}]},
         "personal_agents": {
             "mind": {
@@ -87,6 +93,7 @@ def _setup(
                     "instructions": ["Sign every message with a haiku."],
                     "tools": [*tools, "matrix_message", "scheduler"],
                     "contacts": {"rules": [CONFIG_RULE], "tools": ["calculator", "sleep", "scheduler"]},
+                    "skill_learning": {"enabled": True},
                 },
             },
         },
@@ -158,9 +165,9 @@ def test_only_an_agent_that_can_be_a_party_reads_the_contacts_store(tmp_path: Pa
         contact_turn(config, paths, CONTACT_ROOM, "mind_bob")
 
 
-def _tools(config: Config, side: ContactSide) -> tuple[str, ...] | None:
+def _tools(config: Config, side: ContactSide) -> tuple[str, ...]:
     """Return the tools Bob's agent's contact turns offer when Bob chose ``side``."""
-    return contact_turn_persona(config, _record(target_side=side), "target").tools
+    return contact_turn_tools(config, "mind_bob", side)
 
 
 def test_a_contact_turn_offers_the_chosen_tools_the_agent_still_has_plus_matrix_message(tmp_path: Path) -> None:
@@ -176,16 +183,6 @@ def test_a_contact_turn_offers_the_chosen_tools_the_agent_still_has_plus_matrix_
     assert _tools(lost_config, ContactSide(tools=["calculator"])) == ("matrix_message",)
     regained_config, _ = _setup(tmp_path / "regained")
     assert _tools(regained_config, ContactSide(tools=["calculator"])) == ("calculator", "matrix_message")
-
-
-def test_a_contact_turn_presents_its_agent_as_its_owners_agent_without_skills_or_knowledge(tmp_path: Path) -> None:
-    """The persona keeps the agent's name and owner, and its explicit tool list keeps no skill or knowledge base."""
-    config, _paths = _setup(tmp_path)
-
-    persona = contact_turn_persona(config, _record(), "target")
-
-    assert persona.system_prompt == f"You are Bob's Mind, the personal agent of {CO_OWNER}."
-    assert (persona.kept_skills, persona.kept_knowledge) == ((), ())
 
 
 _ANSWER = "Answer the other side only by calling matrix_message to send into this room"
@@ -430,25 +427,38 @@ def _request(room_id: str) -> ResponseRequest:
     )
 
 
-async def _run(bot: AgentBot, room_id: str) -> tuple[list[FinalDeliveryOutcome], list[ResponseTurnContext]]:
-    """Run one turn in ``room_id`` in a room that streams, and return how its reply ended and the turn it built."""
-    ended: list[FinalDeliveryOutcome] = []
-    turns: list[ResponseTurnContext] = []
+@dataclass
+class _Turn:
+    """How one turn's reply ended, the turn context it built, and how its mid-turn gate acknowledges a deferral."""
+
+    ended: list[FinalDeliveryOutcome] = field(default_factory=list)
+    contexts: list[ResponseTurnContext] = field(default_factory=list)
+    on_defer: list[object] = field(default_factory=list)
+
+
+async def _run(bot: AgentBot, room_id: str) -> _Turn:
+    """Run one turn in ``room_id`` in a room that streams."""
+    turn = _Turn()
 
     async def record_ending(delivery: FinalDeliveryOutcome, *_args: object) -> None:
-        ended.append(delivery)
+        turn.ended.append(delivery)
 
-    def record_turn(ctx: ResponseTurnContext, *args: object, **kwargs: object) -> object:
-        turns.append(ctx)
+    def record_context(ctx: ResponseTurnContext, *args: object, **kwargs: object) -> object:
+        turn.contexts.append(ctx)
         return ai.stream_agent_response(ctx, *args, **kwargs)  # type: ignore[arg-type]
+
+    def record_gate(*args: object, **kwargs: Any) -> object:  # noqa: ANN401
+        turn.on_defer.append(kwargs["on_defer"])
+        return create_mid_turn_gate(*args, **kwargs)  # type: ignore[arg-type]
 
     with patch_response_runner_module(
         should_use_streaming=AsyncMock(return_value=True),
         apply_post_response_effects=AsyncMock(side_effect=record_ending),
-        stream_agent_response=record_turn,
+        stream_agent_response=record_context,
+        create_mid_turn_gate=record_gate,
     ):
         await bot._response_runner.generate_response(_request(room_id))
-    return ended, turns
+    return turn
 
 
 @pytest.mark.asyncio
@@ -456,10 +466,11 @@ async def test_a_contact_turn_shows_nothing_and_offers_only_its_contacts_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No placeholder, typing, stream, Stop button, or answer reaches the room, and the model sees only the contact's tools.
+    """No placeholder, typing, stream, Stop button, reaction, or answer reaches the room, and only the contact's tools do.
 
-    The approval-gated ``sleep`` is dropped though the contact lists it, and the agent's configured instructions,
-    shell, and room tools are left out, while the contact's rules reach the model.
+    The approval-gated ``sleep`` is dropped though the contact lists it, and so are shell, the room tools, and the
+    tools ``matrix_message`` brings along. The agent stays itself: its identity, its configured instructions, and the
+    contact's rules all reach the model.
     """
     config, paths = _setup(tmp_path)
     _contact(paths, _record(target_side=ContactSide(rules=OWNER_RULE)))
@@ -467,25 +478,28 @@ async def test_a_contact_turn_shows_nothing_and_offers_only_its_contacts_tools(
     install_model_providers(monkeypatch, {"default": model})
     bot = _bot(config, paths)
 
-    [delivery], [turn] = await _run(bot, CONTACT_ROOM)
+    turn = await _run(bot, CONTACT_ROOM)
 
+    [delivery], [context] = turn.ended, turn.contexts
     assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
     bot.client.room_send.assert_not_awaited()
     bot.client.room_typing.assert_not_awaited()
-    assert turn.supports_native_tool_approval is False
-    assert turn.persona is not None
-    assert turn.persona.tools == ("calculator", "sleep", "matrix_message")
-    assert turn.allow_no_report_response is True
-    assert turn.compaction_lifecycle is None
+    assert turn.on_defer == [None]
+    assert (context.persona, context.tool_names) == (None, ("calculator", "sleep", "matrix_message"))
+    assert context.supports_native_tool_approval is False
+    assert context.include_interactive_questions is False
+    assert context.allow_no_report_response is True
+    assert context.compaction_lifecycle is None
     [request] = model.requests
     offered = {tool.name for tool in request.tools}
-    assert "matrix_message" in offered
-    assert "add" in offered
-    assert not offered & {"sleep", "run_shell_command", "schedule", "request_contact"}
+    assert {"matrix_message", "add"} <= offered
+    excluded = {"sleep", "run_shell_command", "schedule", "request_contact", "matrix_room", "list_attachments"}
+    assert not offered & excluded
     system_prompt = "\n".join(str(message.content) for message in request.messages if message.role == "system")
+    assert "Bob's Mind" in system_prompt
+    assert "Sign every message with a haiku." in system_prompt
     assert CONFIG_RULE in system_prompt
     assert OWNER_RULE in system_prompt
-    assert "haiku" not in system_prompt
 
 
 @pytest.mark.asyncio
@@ -499,12 +513,69 @@ async def test_the_same_agent_answers_visibly_outside_its_contact_room(
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer("Friday works.")])})
     bot = _bot(config, paths)
 
-    [delivery], [turn] = await _run(bot, OTHER_ROOM)
+    turn = await _run(bot, OTHER_ROOM)
 
+    [delivery], [context] = turn.ended, turn.contexts
     assert delivery.final_visible_body == "Friday works."
     bot.client.room_send.assert_awaited()
-    assert turn.persona is None
-    assert turn.supports_native_tool_approval is True
+    assert [on_defer is not None for on_defer in turn.on_defer] == [True]
+    assert context.tool_names is None
+    assert (context.supports_native_tool_approval, context.include_interactive_questions) == (True, True)
+
+
+@pytest.mark.asyncio
+async def test_a_contact_tool_that_cannot_be_built_is_left_out_like_in_any_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One contact tool failing to build leaves the contact turn running with the others, instead of refusing it."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    model = ScriptedModel([answer("Told Alice's agent Bob is free.")])
+    install_model_providers(monkeypatch, {"default": model})
+    bot = _bot(config, paths)
+    build = agents_module.build_agent_toolkit
+
+    def build_or_fail(tool_name: str, **kwargs: Any) -> object:  # noqa: ANN401
+        if tool_name == "calculator":
+            msg = "calculator is unavailable"
+            raise RuntimeError(msg)
+        return build(tool_name, **kwargs)
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_or_fail):
+        [delivery] = (await _run(bot, CONTACT_ROOM)).ended
+
+    assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
+    [request] = model.requests
+    offered = {tool.name for tool in request.tools}
+    assert "matrix_message" in offered
+    assert "add" not in offered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("room_id", [CONTACT_ROOM, OTHER_ROOM])
+async def test_a_contact_turn_writes_no_memory_and_teaches_no_skill(tmp_path: Path, room_id: str) -> None:
+    """The other side drives a contact turn, so it is never stored as memory nor reviewed for skills, unlike others."""
+    config, paths = _setup(tmp_path, memory_backend="mem0")
+    _contact(paths)
+    bot = _bot(config, paths)
+    store_memory = AsyncMock()
+    count_review = AsyncMock()
+
+    with (
+        patch("mindroom.reply_turn.locked_turn.store_conversation_memory", new=store_memory),
+        patch.object(SkillReviewRunner, "count", new=count_review),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            stream_agent_response=streamed_answer(AsyncMock(return_value="Friday works.")),
+        ),
+    ):
+        await bot._response_runner.generate_response(_request(room_id))
+        assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
+
+    expected = room_id == OTHER_ROOM
+    assert store_memory.called is expected
+    assert count_review.called is expected
 
 
 @pytest.mark.asyncio
@@ -519,7 +590,7 @@ async def test_an_empty_contact_turn_is_neither_retried_nor_shown(
     install_model_providers(monkeypatch, {"default": model})
     bot = _bot(config, paths)
 
-    [delivery], _turns = await _run(bot, CONTACT_ROOM)
+    [delivery] = (await _run(bot, CONTACT_ROOM)).ended
 
     assert len(model.requests) == 1
     assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)

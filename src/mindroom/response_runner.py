@@ -26,7 +26,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     TURN_INTENT_RUN_METADATA_KEY,
 )
-from mindroom.contacts.turns import contact_turn_instructions, contact_turn_persona
+from mindroom.contacts.turns import contact_turn_instructions, contact_turn_tools
 from mindroom.conversation_state_writer import ReplySession
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.error_handling import get_user_friendly_error_message
@@ -249,7 +249,7 @@ def _mid_turn_for_request(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    on_defer: Callable[[str, str], Awaitable[None]],
+    on_defer: Callable[[str, str], Awaitable[None]] | None,
 ) -> MidTurnGate | None:
     """Treat deferred attachment registration as incomplete judgment context too."""
     has_media = _request_has_media(request)
@@ -557,7 +557,10 @@ class ResponseRunner:
                         request,
                         self.deps.runtime.config,
                         self.deps.runtime_paths,
-                        on_defer=acknowledge_deferred,
+                        # A contact turn shows nothing, not even a reaction on the other side's message.
+                        on_defer=None
+                        if self.locked.contact_turn(request.room_id) is not None
+                        else acknowledge_deferred,
                     ),
                     locked_operation=lambda target: self._run_locked_ending_span(
                         request,
@@ -979,9 +982,13 @@ class ResponseRunner:
     ) -> ResponseTurnContext:
         """Build every input of one agent response turn.
 
-        A contact turn offers only its contact's tools, and none that would show an approval card to the other side.
+        A contact turn offers only its contact's tools, none that would show an approval card to the other side, and
+        no interactive questions, since its reply never shows.
         """
-        contact = self.locked.contact_turn(request.room_id)
+        tool_names = None
+        if (contact := self.locked.contact_turn(request.room_id)) is not None:
+            record, side = contact
+            tool_names = contact_turn_tools(self.deps.runtime.config, self.deps.agent_name, record.side(side))
         state_root = resolve_agent_storage(
             self.deps.agent_name,
             self.deps.runtime.config,
@@ -1015,8 +1022,9 @@ class ResponseRunner:
             compaction_lifecycle=compaction_lifecycle,
             refresh_scheduler=self.locked.knowledge_refresh_scheduler(),
             knowledge=knowledge,
-            supports_native_tool_approval=contact is None,
-            persona=None if contact is None else contact_turn_persona(self.deps.runtime.config, *contact),
+            include_interactive_questions=tool_names is None,
+            supports_native_tool_approval=tool_names is None,
+            tool_names=tool_names,
         )
 
     async def _admit_locked_turn(
@@ -2137,22 +2145,27 @@ class ResponseRunner:
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        queue_memory_persistence = self.locked.memory_persistence(
-            agent_name=self.deps.agent_name,
-            session_id=session_id,
-            execution_identity=execution_identity,
-            prompt=memory_prompt,
-            thread_history=memory_thread_history,
-            user_id=request.user_id,
-            hook_source=request.response_envelope.hook_source,
-            origin=request.response_envelope.origin,
-        )
-        queue_skill_review, runtime = self._response_skill_review(
-            request,
-            runtime,
-            session_id=session_id,
-            execution_identity=execution_identity,
-        )
+        if self.locked.contact_turn(resolved_target.room_id) is not None:
+            # The other side drives a contact turn, so it writes no long-term memory and teaches the agent no skill.
+            queue_memory_persistence = None
+            queue_skill_review = None
+        else:
+            queue_memory_persistence = self.locked.memory_persistence(
+                agent_name=self.deps.agent_name,
+                session_id=session_id,
+                execution_identity=execution_identity,
+                prompt=memory_prompt,
+                thread_history=memory_thread_history,
+                user_id=request.user_id,
+                hook_source=request.response_envelope.hook_source,
+                origin=request.response_envelope.origin,
+            )
+            queue_skill_review, runtime = self._response_skill_review(
+                request,
+                runtime,
+                session_id=session_id,
+                execution_identity=execution_identity,
+            )
         persist_response_event_id = self.locked.build_persist_response_event_id_effect(
             session_id=session_id,
             scope=history_scope,
