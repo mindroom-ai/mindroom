@@ -5,6 +5,7 @@ Embedded many-to-one selects such as ``subscription:subscriptions(*)`` or ``acco
 ``<table>_id`` columns.
 RPC calls are recorded in ``rpc_calls``, return ``rpc_results[name]`` (default None), and leave the tables alone.
 Deleting an auth user through ``auth.admin`` records it and removes its ``accounts`` row, like the ON DELETE CASCADE.
+A counted select whose range starts past the matching rows fails, like PostgREST's 416 (PGRST103).
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+from postgrest.exceptions import APIError
 
 _EMBED = re.compile(r"(?:(\w+):)?(\w+)\(([^)]*)\)")
 # Embedded table -> foreign key column on the parent row.
@@ -142,6 +145,8 @@ class FakeQuery:
         for column, desc in reversed(self.order_by):
             matched.sort(key=lambda row, column=column: str(row.get(column) or ""), reverse=desc)
         count = len(matched) if self.count_rows else None
+        if count is not None and self.row_range and self.row_range[0] > count:
+            raise APIError({"code": "PGRST103", "message": "Requested range not satisfiable"})
         if self.row_range:
             matched = matched[self.row_range[0] : self.row_range[1] + 1]
         if self.row_limit is not None:

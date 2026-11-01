@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.utils import paging
-from tests.fake_supabase import FakeSupabase
+from tests.fake_supabase import FakeQuery, FakeResult, FakeSupabase
 
 
 class TestAdminEndpoints:
@@ -434,6 +434,29 @@ class TestAdminEndpoints:
             "instances": "owner@example.com",
         }
 
+    def test_admin_list_survives_a_row_deleted_while_it_pages(self, client: TestClient, mock_verify_admin: Mock):
+        """A row deleted between two pages of a full listing does not fail the listing."""
+        db = FakeSupabase(
+            {"accounts": [{"id": f"acc_{day}", "created_at": f"2026-10-0{day}T00:00:00Z"} for day in (1, 2, 3)]}
+        )
+        serve = FakeQuery.execute
+
+        def serve_then_delete_after_the_last_full_page(query: FakeQuery) -> FakeResult:
+            result = serve(query)
+            if query.row_range == (2, 3):
+                db.tables["accounts"] = db.tables["accounts"][1:]
+            return result
+
+        with (
+            patch("backend.routes.admin.ensure_supabase", return_value=db),
+            patch.object(paging, "_PAGE_SIZE", 2),
+            patch.object(FakeQuery, "execute", serve_then_delete_after_the_last_full_page),
+        ):
+            response = client.get("/admin/accounts")
+
+        assert response.status_code == 200
+        assert [row["id"] for row in response.json()["data"]] == ["acc_3", "acc_2", "acc_1"]
+
     def test_admin_list_range_follows_the_requested_order(self, client: TestClient, mock_verify_admin: Mock):
         """A ranged list holds the requested slice in the requested order, and total counts every row."""
         logs = [{"id": f"log_{day}", "created_at": f"2026-10-0{day}T00:00:00Z"} for day in (4, 1, 5, 3, 2)]
@@ -446,7 +469,7 @@ class TestAdminEndpoints:
         assert response.json()["total"] == 5
 
     def test_admin_list_failure_is_an_error_not_an_empty_list(self, mock_verify_admin: Mock):
-        """A failed listing answers with an error, so the admin never mistakes it for an empty table."""
+        """A failed listing answers 500, not a 200 with no rows."""
         from main import app  # noqa: PLC0415
 
         db = FakeSupabase()

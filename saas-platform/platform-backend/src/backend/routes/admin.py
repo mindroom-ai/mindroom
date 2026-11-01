@@ -460,14 +460,15 @@ async def admin_get_list(
         details={"start": _start, "end": _end},
     )
 
-    def build_query() -> Any:  # noqa: ANN401
-        query = sb.table(resource).select(_LIST_COLUMNS.get(resource, "*"), count="exact")
+    def build_query(count: Literal["exact"] | None = None) -> Any:  # noqa: ANN401
+        query = sb.table(resource).select(_LIST_COLUMNS.get(resource, "*"), count=count)
         return query.order(_sort, desc=_order == "DESC").order("id")
 
     if _end is None:
+        # No count here: with one, PostgREST refuses the final empty page if a row was deleted meanwhile.
         rows = select_all_pages(build_query)
         return {"data": rows[_start:], "total": len(rows)}
-    result = build_query().range(_start, _end - 1).execute()
+    result = build_query("exact").range(_start, _end - 1).execute()
     return {"data": result.data, "total": result.count}
 
 
