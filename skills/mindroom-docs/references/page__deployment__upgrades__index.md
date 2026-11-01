@@ -12,12 +12,6 @@ In runtime chart values, enable the [egress broker](https://github.com/mindroom-
 A `helm upgrade` of a release that ran the chart-managed Agent Vault server deletes that server, its Jobs, and its data claim, so first back up the volume and its bootstrap Secret if you still need the stored secrets.
 Helm leaves behind the CA ConfigMap (`workers.kubernetes.agentVault.workerCaConfigMapName`) and the admin token Secret (default `agent-vault-access-admin`) that the bootstrap Job created, so delete them yourself, and remove the archived `agent-vault-bridge` plugin from `plugins:` if you use it.
 
-## Upgrading to memory clients that read `OPENAI_BASE_URL` from `.env`
-
-With `OPENAI_BASE_URL` in the `.env` beside `config.yaml` or in `OPENAI_BASE_URL_FILE`, an `openai` memory embedder without `config.host` and an `openai` memory LLM without `config.openai_base_url` now use that URL, as models do, where earlier releases used it only when it was exported.
-To keep them on OpenAI's API with the memories and indexes they built, set the other server as each model's `extra_kwargs.base_url` and remove `OPENAI_BASE_URL`; setting the embedder's `config.host` instead switches Mem0 memory, knowledge bases, and knowledge graphs to [new, empty stores](https://docs.mindroom.chat/memory/#embedder).
-When the embedder does move to the other server, reindex its knowledge bases; Mem0 memories and knowledge graphs it built from OpenAI's embeddings no longer match new searches.
-
 ## Upgrading to shared team memory
 
 Earlier releases kept a copy of each team's memory in every member's storage directory; the first start after this upgrade merges those copies into team memory under `team_memory/` before any agent comes online, and removes each copy it merged from its member; the exceptions below stay where they are.
