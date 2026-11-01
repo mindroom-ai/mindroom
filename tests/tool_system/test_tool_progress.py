@@ -45,14 +45,19 @@ def test_a_key_running_into_the_shown_output_stays_masked_when_redaction_fails_a
 
 def test_a_value_below_a_key_above_the_shown_output_stays_hidden() -> None:
     """A secret on the shown output's first line stays hidden when its key is on the line above."""
-    text = _MANIFEST + "x" * 3000 + "\npassword:\n" + "hunter2hunter2\n" + "y" * 1985
+    text = _MANIFEST + "x" * 3000 + "\npassword:\n" + "hunter2hunter2\n" + "y" * 985
 
     assert "hunter2" not in shown_progress(text)
 
 
 def test_a_value_above_the_shown_output_stays_hidden_when_masking_shortens_it() -> None:
     """The line above the shown output only helps masking; a shorter masked text never brings it into view."""
-    shown = "DB_URL=postgres://app:" + "p" * 200 + "@db/app\n" + "z" * 1770
+    shown = "DB_URL=postgres://app:" + "p" * 200 + "@db/app\n" + "z" * 770
     text = "password:\n  value: s3cretvalue\n" + shown
 
     assert "s3cretvalue" not in shown_progress(text)
+
+
+def test_shown_output_is_what_a_live_reply_shows() -> None:
+    """A call's shown output is the latest thousand characters, which a live reply's frame carries whole."""
+    assert shown_progress("w" * 3000 + "x" * 1000) == "x" * 1000

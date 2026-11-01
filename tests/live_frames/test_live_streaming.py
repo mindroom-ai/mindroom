@@ -306,9 +306,9 @@ def _running_shell(*between: float | ToolProgress) -> AsyncIterator[Any]:
 
 @pytest.mark.asyncio
 async def test_a_running_tool_shows_its_latest_output_in_frames_only(tmp_path: Path, frames: _Frames) -> None:
-    """A running call's reported output rides in its frame entry, capped, until it completes; no write keeps it."""
+    """A running call's reported output rides in its frame entry until it completes; no write keeps it."""
     records, edits = _records(), _Edits()
-    stream = _running_shell(ToolProgress("call-1", "step 1"), 0.05, ToolProgress("call-1", "x" * 3000), 0.05)
+    stream = _running_shell(ToolProgress("call-1", "step 1"), 0.05, ToolProgress("call-1", "x" * 1000), 0.05)
     await _run(_config(tmp_path), stream, records, edits)
 
     entries = [state[0] for state in _tool_states(frames.sent) if state]
@@ -316,7 +316,6 @@ async def test_a_running_tool_shows_its_latest_output_in_frames_only(tmp_path: P
     assert "progress" not in entries[0]
     assert "step 1" in shown
     assert "x" * 1000 in shown
-    assert all(len(text) <= 1000 for text in shown if text is not None)
     assert entries[-1]["type"] == "tool_call_completed"
     assert "progress" not in entries[-1]
     written = [write.content for write in records.writes if write.content is not None] + edits.contents

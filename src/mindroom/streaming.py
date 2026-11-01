@@ -152,8 +152,6 @@ StreamInputChunk = (
     | ToolProgress
     | ToolCompleted
 )
-# How much of a running tool call's latest output a live frame shows.
-_LIVE_TOOL_PROGRESS_CHARS = 1000
 # How long queued and in-flight progress edits get to land before stopping the stream cancels them.
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
 
@@ -687,7 +685,7 @@ class StreamingResponse:
         tools = serialize_tool_trace(self.tool_trace) if self.show_tool_calls else ()
         if tools and self.tool_progress:
             tools = tuple(
-                {**entry, "progress": self.tool_progress[trace.tool_call_id][-_LIVE_TOOL_PROGRESS_CHARS:]}
+                {**entry, "progress": self.tool_progress[trace.tool_call_id]}
                 if trace.tool_call_id in self.tool_progress
                 else entry
                 for trace, entry in zip(self.tool_trace, tools, strict=True)

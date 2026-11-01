@@ -1,8 +1,9 @@
 """Live progress text that a running tool call reports to whatever owns the call.
 
-A background job stores the latest report for the agent; a sandbox runner forwards it to the primary. Reports
-reach tool code through the call's context, which tool offloading copies into its threads; a thread a tool
-starts itself must capture ``report_tool_progress`` from that context.
+A dispatched call masks its tool's latest report and shows it in live reply frames; a background job stores it for
+the agent; a sandbox runner forwards it to the primary. Reports reach tool code through the call's context, which
+tool offloading copies into its threads; a thread a tool starts itself must capture ``report_tool_progress`` from
+that context.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
 
 # Enough for the last screenful of output, small enough to show in every job summary.
 _MAX_PROGRESS_CHARS = 2000
+# A live reply shows this much of a running call's output.
+_SHOWN_PROGRESS_CHARS = 1000
 # A listener that shows a report masks credentials before cutting it, so a long credential keeps the label that
 # identifies it; redaction gives up on very long text, so a report carries at most this much.
 _REPORT_WINDOW_CHARS = 16 * _MAX_PROGRESS_CHARS
@@ -26,12 +29,12 @@ _REPORTER: ContextVar[Callable[[str], None] | None] = ContextVar("tool_progress_
 
 
 def cap_progress(text: str) -> str:
-    """Keep only the latest characters of one report that are shown."""
+    """Keep only the latest characters of one report."""
     return text[-_MAX_PROGRESS_CHARS:]
 
 
 def shown_progress(text: str) -> str:
-    """Mask credentials in a report and keep the latest characters that are shown.
+    """Mask credentials in a report and keep the latest characters a live reply shows.
 
     Masking sees the whole report, so a long credential keeps the label that identifies it. Redaction fails closed on a
     line it cannot delimit, such as ``password:`` with its value on the next line; then only the shown part is masked,
@@ -40,14 +43,14 @@ def shown_progress(text: str) -> str:
     """
     masked = redact_sensitive_text(text)
     if masked == REDACTION_FAILED:
-        shown_line = text.rfind("\n", 0, max(0, len(text) - _MAX_PROGRESS_CHARS))
+        shown_line = text.rfind("\n", 0, max(0, len(text) - _SHOWN_PROGRESS_CHARS))
         line_above = text.rfind("\n", 0, max(0, shown_line)) + 1
         masked = redact_sensitive_text(text[private_key_start(text, line_above) :])
         if masked != REDACTION_FAILED:
             # The line above only tells redaction what the shown part's first line holds; masked text can be shorter,
             # so drop it before the cut could bring it into view.
             masked = masked.partition("\n")[2]
-    return cap_progress(masked)
+    return masked[-_SHOWN_PROGRESS_CHARS:]
 
 
 def cap_report(text: str) -> str:
