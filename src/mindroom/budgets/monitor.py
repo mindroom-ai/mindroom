@@ -1,7 +1,8 @@
 """Month-to-date spend per requester and the fallback model decision it drives.
 
-A full scan of retained usage runs in a worker thread at start, when the UTC month changes, and on a slow
-reconciliation interval, which also picks up usage no reply reports, such as helper calls, voice calls, and summaries.
+A full scan of retained usage runs in a worker thread at start, after a config reload that changes what it counts, when
+the UTC month changes, and on a slow reconciliation interval, which also picks up usage no reply reports, such as
+helper calls, voice calls, and summaries.
 Between scans each completed reply adds the cost it priced to its requester's running total, so it costs no scan.
 A reply whose cost is unknown, such as a stopped or failed run or one resumed after an approval, requests a scan.
 Spend is checked when a reply starts, so the reply that crosses a cap still finishes on its model, and the requester's
@@ -12,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -21,6 +24,7 @@ from mindroom.background_tasks import SupervisedLoop
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.pricing import model_prices
 from mindroom.budgets.spend import SpendSnapshot, collect_monthly_spend, month_bounds
+from mindroom.constants import resolve_session_state_root
 from mindroom.logging_config import get_logger
 from mindroom.providers.identity import model_identity
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
@@ -64,6 +68,30 @@ def _is_priced(config: Config, model_name: str) -> bool:
         return False
     identity = model_identity(model_config)
     return (identity.provider, identity.id) in model_prices(config)
+
+
+def _scan_fingerprint(config: Config, runtime_paths: RuntimePaths) -> str:
+    """Return a digest of whether budgets are on and of the settings that change what a scan counts.
+
+    Those are prices, the session stores a scan reads, and the agents, teams, bot accounts, internal user, and aliases
+    that decide whose spend a run is. Caps and the fallback model apply when spend is read, so they are left out.
+    """
+    prices = [
+        [provider, model_id, priced.pricing.model_dump(mode="json"), priced.input_includes_cache]
+        for (provider, model_id), priced in sorted(model_prices(config).items())
+    ]
+    payload = [
+        # Replies add nothing while budgets are off, so turning them back on must recount.
+        config.budgets is not None,
+        prices,
+        str(resolve_session_state_root(runtime_paths.storage_root, runtime_paths).expanduser().resolve()),
+        sorted((name, agent.private is not None) for name, agent in config.agents.items()),
+        sorted(config.teams),
+        sorted(config.bot_accounts),
+        config.mindroom_user.username if config.mindroom_user is not None else None,
+        {canonical: sorted(aliases) for canonical, aliases in config.authorization.aliases.items()},
+    ]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def budget_model(
@@ -186,6 +214,8 @@ class BudgetMonitor:
     tick_seconds: float = _TICK_SECONDS
     caps: BudgetCaps = field(init=False)
     _snapshot: SpendSnapshot | None = field(default=None, init=False)
+    # The scan fingerprint of the config the latest sync applied.
+    _synced_fingerprint: str | None = field(default=None, init=False)
     # Costs of finished replies per canonical requester that the snapshot does not cover: those recorded before the
     # running or latest scan started, which that scan covers once it completes, and those recorded since.
     _costs_before_scan: dict[str, float] = field(default_factory=dict, init=False)
@@ -198,10 +228,13 @@ class BudgetMonitor:
         self.caps = BudgetCaps(budget_caps_path(self.runtime_paths))
         self._loop = SupervisedLoop("budget_monitor", self._run)
 
-    async def sync(self, config: Config) -> None:  # noqa: ARG002 - each scan reads the active config
-        """Start the refresh loop once and rescan for the active config."""
+    async def sync(self, config: Config) -> None:
+        """Start the refresh loop once; rescan on the first sync and when ``config`` changes what a scan counts."""
+        fingerprint = _scan_fingerprint(config, self.runtime_paths)
+        previous, self._synced_fingerprint = self._synced_fingerprint, fingerprint
         self._loop.start()
-        self._request_scan()
+        if fingerprint != previous:
+            self._request_scan()
 
     def response_finished(self, requester_id: str | None, cost_usd: float | None, started_at: datetime | None) -> None:
         """Add a finished reply's cost to its requester's spend until a scan covers the reply, or request a scan.
