@@ -1,14 +1,8 @@
-"""Historical OAuth publication fields and lossless requester bindings.
+"""Legacy OAuth requester bindings without the lossless prefix.
 
-Only the SQLite store invokes this boundary when validating or normalizing stored state.
+Only the SQLite store invokes this boundary when validating a stored scope binding.
 This module never owns a transaction or imports the live store or lifecycle.
 """
-
-# LEGACY_COMPAT: Embedded OAuth publication metadata in credential mappings.
-# Legacy format: embedded `_mindroom_oauth_publication` metadata inside credential mappings.
-# Last legacy release: unreleased pre-SQLite writer; v2026.8.80 already stripped the marker.
-# Handling: reads normalize a copy; only the owning write transaction persists marker removal.
-# Coverage: tests/test_oauth_credential_store.py::test_legacy_publication_marker_normalizes_without_changing_credentials_or_generations.
 
 # LEGACY_COMPAT: OAuth requester bindings without the lossless prefix.
 # Legacy format: OAuth scope bindings used requester keys without the lossless `~` prefix.
@@ -20,7 +14,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.credentials.manager import scoped_credentials_path
 from mindroom.credentials.policy import is_oauth_token_service
@@ -28,12 +22,8 @@ from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Mapping
 
     from mindroom.oauth.credential_store_types import OAuthCredentialStoreContext
-
-
-_LEGACY_PUBLICATION_KEY = "_mindroom_oauth_publication"
 
 
 def compatible_legacy_worker_key(
@@ -87,10 +77,3 @@ def compatible_legacy_worker_key(
         f":{target.worker_scope}:{requester}",
         1,
     )
-
-
-def without_legacy_publication(credentials: Mapping[str, Any]) -> dict[str, Any]:
-    """Remove the retired publication marker from a credential mapping."""
-    result = dict(credentials)
-    result.pop(_LEGACY_PUBLICATION_KEY, None)
-    return result

@@ -19,12 +19,6 @@ if TYPE_CHECKING:
 router = APIRouter(tags=["dynamic-workflows"])
 
 
-@router.get("/reports/private/{run_id}", include_in_schema=False)
-async def legacy_private_dynamic_workflow_report(run_id: str) -> FileResponse:
-    """Reject legacy unscoped Dynamic Workflow report URLs."""
-    raise HTTPException(status_code=404, detail=f"Private report for run '{run_id}' was not found.")
-
-
 @router.get("/reports/private/{scope}/{owner_key}/{workflow_id}/{run_id}", include_in_schema=False)
 async def private_dynamic_workflow_report(
     request: Request,
