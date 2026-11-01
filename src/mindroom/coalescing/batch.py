@@ -135,9 +135,8 @@ class PreparedTurn:
     # The queued notices of follow-ups still waiting behind this batch when it flushed, which dispatch
     # releases with its own. Only a batch of an active response's follow-ups has any.
     queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...]
-    # Whether this turn's queue still holds a run other than the given requester's own messages for this
-    # agent. A live read, not a snapshot: dispatch asks after awaiting its context, and a message admitted
-    # meanwhile counts.
+    # Whether this turn's queue still holds a run other than the given requester's own messages. A live
+    # read, not a snapshot: dispatch asks after awaiting its context, and a message admitted meanwhile counts.
     queues_other_run: Callable[[str], bool]
 
 
