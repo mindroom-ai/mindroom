@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from main import app
 from tests.fake_supabase import FakeQuery, FakeResult, FakeSupabase
 
 
@@ -474,8 +475,6 @@ class TestAdminEndpoints:
 
     def test_admin_list_failure_is_an_error_not_an_empty_list(self, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """A failed listing answers 500, not a 200 with no rows."""
-        from main import app  # noqa: PLC0415
-
         mock_supabase.table.side_effect = RuntimeError("database unavailable")
         response = TestClient(app, raise_server_exceptions=False).get("/admin/accounts")
 
