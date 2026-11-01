@@ -275,8 +275,6 @@ class _CommittedDeliveryState:
     visible_body_state: Literal["placeholder_only", "visible_body"]
     interactive_metadata: interactive.InteractiveMetadata | None
     stream_status: str
-    # The stream's pending-character count when this state was captured.
-    chars_since_last_update: int
     # The text before the final transform reshaped it, when it did.
     untransformed_text: str | None = None
 
@@ -345,6 +343,8 @@ class _PreparedStreamingDelivery:
     display_text: str
     committed_state: _CommittedDeliveryState
     had_warmup_suffix: bool
+    # The stream's pending-character count when this delivery was prepared.
+    chars_since_last_update: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,10 +474,10 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
             ),
             interactive_metadata=interactive_metadata,
             stream_status=snapshot.stream_status,
-            chars_since_last_update=snapshot.chars_since_last_update,
             untransformed_text=snapshot.untransformed_text,
         ),
         had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
+        chars_since_last_update=snapshot.chars_since_last_update,
     )
 
 
@@ -756,7 +756,7 @@ class StreamingResponse:
 
     def _mark_nonterminal_delivery(
         self,
-        committed_state: _CommittedDeliveryState,
+        prepared_delivery: _PreparedStreamingDelivery,
         *,
         boundary_refresh: bool = False,
     ) -> None:
@@ -765,7 +765,7 @@ class StreamingResponse:
         if self.stream_started_at is None:
             self.stream_started_at = now
         self.last_update = now
-        if self._live_state_matches(committed_state):
+        if self._live_state_matches(prepared_delivery.committed_state):
             self.last_delta_at = now
             self.last_boundary_refresh_at = now if boundary_refresh else None
             self.chars_since_last_update = 0
@@ -779,7 +779,7 @@ class StreamingResponse:
         # A tool-trace or presentation change alone adds nothing here, just as
         # it adds nothing when it arrives between edits.
         self.last_boundary_refresh_at = None
-        self.chars_since_last_update -= committed_state.chars_since_last_update
+        self.chars_since_last_update -= prepared_delivery.chars_since_last_update
 
     def _live_state_matches(self, captured: _CommittedDeliveryState) -> bool:
         """Return whether the live text, tool trace, and presentation still equal one captured state."""
@@ -1040,10 +1040,7 @@ class StreamingResponse:
                 had_warmup_suffix=prepared_delivery.had_warmup_suffix,
             )
             self._mark_delivery_committed(prepared_delivery.committed_state)
-            self._mark_nonterminal_delivery(
-                prepared_delivery.committed_state,
-                boundary_refresh=boundary_refresh,
-            )
+            self._mark_nonterminal_delivery(prepared_delivery, boundary_refresh=boundary_refresh)
         else:
             self.placeholder_progress_sent = False
         return True
