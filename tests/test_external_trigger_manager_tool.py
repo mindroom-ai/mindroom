@@ -24,6 +24,7 @@ from tests.conftest import (
     event_serving_client,
     make_conversation_reader_mock,
     make_relation_lookup,
+    thread_reply_client,
 )
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_generated_agents import OWNER, _created, _load, _personal, _with_template
@@ -387,14 +388,7 @@ async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(tmp_pa
     state = MatrixState.load(_runtime_paths(tmp_path))
     state.add_room("lobby", "!lobby:example.org", "#lobby:example.org", "Lobby")
     save_matrix_state(state, _runtime_paths(tmp_path))
-    homeserver = event_serving_client(
-        "$reply:example.org",
-        content={
-            "msgtype": "m.text",
-            "body": "reply",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$root:example.org"},
-        },
-    )
+    homeserver = thread_reply_client("$reply:example.org", "$root:example.org")
     context = replace(_context(tmp_path), relations=make_relation_lookup(client=homeserver))
     with tool_runtime_context(context):
         payload = _payload(
