@@ -60,11 +60,11 @@ def _task(
     )
 
 
-def _record_test_room(room_id: str = "!test_room:localhost") -> None:
-    """Record the configured ``test_room`` as created, so listing reads its tasks under ``room_id``."""
+def _record_test_room() -> None:
+    """Record the configured ``test_room`` as created, so listing reads its tasks under ``!test_room:localhost``."""
     update_matrix_state(
         main._app_runtime_paths(main.app),
-        lambda state: state.add_room("test_room", room_id, "#test_room:localhost", "Test Room"),
+        lambda state: state.add_room("test_room", "!test_room:localhost", "#test_room:localhost", "Test Room"),
     )
 
 

@@ -978,24 +978,18 @@ class Config(BaseModel):
         runtime_paths = _context_runtime_paths(info)
         if runtime_paths is None:
             return self
-        references = [
-            *(("rooms", room) for room in self.rooms),
-            *((f"agents.{name}.rooms", room) for name, agent in self.agents.items() for room in agent.rooms),
-            *((f"teams.{name}.rooms", room) for name, team in self.teams.items() for room in team.rooms),
-            *(
-                (f"agents.{name}.room_thread_modes", room)
-                for name, agent in self.agents.items()
-                for room in agent.room_thread_modes
-            ),
-            *(
+        references: list[tuple[str, str | None]] = [("rooms", room) for room in self.rooms]
+        for name, agent in self.agents.items():
+            references += [(f"agents.{name}.rooms", room) for room in agent.rooms]
+            references += [(f"agents.{name}.room_thread_modes", room) for room in agent.room_thread_modes]
+            references += [
                 (f"agents.{name}.automations.{automation.name}.room", automation.room)
-                for name, agent in self.agents.items()
                 for automation in agent.automations or ()
-            ),
-            *(
-                (f"defaults.automations.{automation.name}.room", automation.room)
-                for automation in self.defaults.automations
-            ),
+            ]
+        references += [(f"teams.{name}.rooms", room) for name, team in self.teams.items() for room in team.rooms]
+        references += [
+            (f"defaults.automations.{automation.name}.room", automation.room)
+            for automation in self.defaults.automations
         ]
         unknown_rooms = sorted(
             f"{location} -> {room}"
