@@ -142,10 +142,6 @@ function retryAfterMs(response: Response): number {
   );
 }
 
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
-}
-
 export async function fetchUsage(
   signal?: AbortSignal,
 ): Promise<UsagePollResult> {
@@ -157,7 +153,9 @@ export async function fetchUsage(
       signal,
     });
   } catch (error) {
-    if (isAbortError(error)) throw error;
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw error;
+    }
     throw new Error("Could not reach the server. Try again.");
   }
 

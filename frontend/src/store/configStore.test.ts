@@ -36,9 +36,25 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+// The load response for a config whose first plugin entry fails validation.
+function pluginValidationFailure() {
+  return Response.json(
+    {
+      detail: [
+        {
+          loc: ["plugins", 0],
+          msg: "Plugin tools_module must be a string",
+          type: "value_error",
+        },
+      ],
+    },
+    { status: 422 },
+  );
+}
+
 // Saves the draft and returns the payload of that save.
 async function savedPayload() {
-  (global.fetch as any).mockResolvedValueOnce(Response.json({ success: true }));
+  vi.mocked(fetch).mockResolvedValueOnce(Response.json({ success: true }));
   await useConfigStore.getState().saveConfig();
   const saveCalls = (global.fetch as any).mock.calls.filter(
     ([url]: [string]) => url === "/api/config/save",
@@ -51,8 +67,8 @@ async function loadFixture(
   config: object,
   agentPolicies: AgentPoliciesByAgent = {},
 ) {
-  (global.fetch as any).mockResolvedValueOnce(Response.json(config));
-  (global.fetch as any).mockResolvedValueOnce(
+  vi.mocked(fetch).mockResolvedValueOnce(Response.json(config));
+  vi.mocked(fetch).mockResolvedValueOnce(
     Response.json({ agent_policies: agentPolicies }),
   );
   await useConfigStore.getState().loadConfig();
@@ -329,8 +345,8 @@ describe("configStore", () => {
       };
       await loadFixture(config);
       const reload = deferred<Response>();
-      (global.fetch as any).mockReturnValueOnce(reload.promise);
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockReturnValueOnce(reload.promise);
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({ agent_policies: {} }),
       );
       const loadPromise = useConfigStore.getState().loadConfig();
@@ -373,15 +389,7 @@ describe("configStore", () => {
         },
       };
 
-      (global.fetch as any).mockResolvedValueOnce(Response.json(mockConfig));
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json({
-          agent_policies: { test: makeAgentPolicy("test") },
-        }),
-      );
-
-      const { loadConfig } = useConfigStore.getState();
-      await loadConfig();
+      await loadFixture(mockConfig, { test: makeAgentPolicy("test") });
 
       const state = useConfigStore.getState();
       expect(state.config).toEqual({
@@ -403,12 +411,12 @@ describe("configStore", () => {
         models: { default: { provider: "ollama", id: "test-model" } },
       };
 
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json(mockConfig, {
           headers: { "x-mindroom-config-uses-includes": "true" },
         }),
       );
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({ agent_policies: {} }),
       );
 
@@ -426,12 +434,12 @@ describe("configStore", () => {
         models: { default: { provider: "ollama", id: "test-model" } },
       };
 
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json(mockConfig, {
           headers: { "x-mindroom-config-pending-restart": "true" },
         }),
       );
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({ agent_policies: {} }),
       );
 
@@ -456,14 +464,7 @@ describe("configStore", () => {
         },
       };
 
-      (global.fetch as any).mockResolvedValueOnce(Response.json(mockConfig));
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json({
-          agent_policies: {},
-        }),
-      );
-
-      await useConfigStore.getState().loadConfig();
+      await loadFixture(mockConfig);
 
       const state = useConfigStore.getState();
       expect(state.rooms).toEqual([
@@ -498,14 +499,7 @@ describe("configStore", () => {
         },
       };
 
-      (global.fetch as any).mockResolvedValueOnce(Response.json(mockConfig));
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json({
-          agent_policies: {},
-        }),
-      );
-
-      await useConfigStore.getState().loadConfig();
+      await loadFixture(mockConfig);
 
       expect(useConfigStore.getState().rooms).toEqual([
         {
@@ -735,26 +729,18 @@ describe("configStore", () => {
         },
       };
 
-      (global.fetch as any).mockResolvedValueOnce(Response.json(mockConfig));
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json({
-          agent_policies: {
-            mind: makeAgentPolicy("mind", {
-              is_private: true,
-              effective_execution_scope: "user",
-              scope_label: "private.per=user",
-              scope_source: "private.per",
-              dashboard_credentials_supported: false,
-              team_eligibility_reason:
-                "Private agents cannot be configured as team members.",
-              private_workspace_enabled: true,
-            }),
-          },
+      await loadFixture(mockConfig, {
+        mind: makeAgentPolicy("mind", {
+          is_private: true,
+          effective_execution_scope: "user",
+          scope_label: "private.per=user",
+          scope_source: "private.per",
+          dashboard_credentials_supported: false,
+          team_eligibility_reason:
+            "Private agents cannot be configured as team members.",
+          private_workspace_enabled: true,
         }),
-      );
-
-      const { loadConfig } = useConfigStore.getState();
-      await loadConfig();
+      });
 
       const state = useConfigStore.getState();
       expect(state.agents[0].private).toEqual({
@@ -858,8 +844,8 @@ describe("configStore", () => {
     });
 
     it("stores backend validation issues and loads raw recovery source when load returns 422", async () => {
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json({
+      await loadFixture(
+        {
           agents: {
             assistant: {
               display_name: "Assistant",
@@ -876,30 +862,12 @@ describe("configStore", () => {
               id: "test-model",
             },
           },
-        }),
+        },
+        { assistant: makeAgentPolicy("assistant") },
       );
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json({
-          agent_policies: { assistant: makeAgentPolicy("assistant") },
-        }),
-      );
-      await useConfigStore.getState().loadConfig();
 
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json(
-          {
-            detail: [
-              {
-                loc: ["plugins", 0],
-                msg: "Plugin tools_module must be a string",
-                type: "value_error",
-              },
-            ],
-          },
-          { status: 422 },
-        ),
-      );
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(pluginValidationFailure());
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({
           source: "agents:\n  assistant:\n    role: broken\n",
         }),
@@ -937,21 +905,8 @@ describe("configStore", () => {
     });
 
     it("surfaces raw recovery fetch failures instead of masking them as validation blockers", async () => {
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json(
-          {
-            detail: [
-              {
-                loc: ["plugins", 0],
-                msg: "Plugin tools_module must be a string",
-                type: "value_error",
-              },
-            ],
-          },
-          { status: 422 },
-        ),
-      );
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(pluginValidationFailure());
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json(
           {
             detail:
@@ -981,22 +936,9 @@ describe("configStore", () => {
     it("ignores stale successful load results after a newer 422 failure", async () => {
       const pendingConfigResponse = deferred<Response>();
 
-      (global.fetch as any)
+      vi.mocked(fetch)
         .mockReturnValueOnce(pendingConfigResponse.promise)
-        .mockResolvedValueOnce(
-          Response.json(
-            {
-              detail: [
-                {
-                  loc: ["plugins", 0],
-                  msg: "Plugin tools_module must be a string",
-                  type: "value_error",
-                },
-              ],
-            },
-            { status: 422 },
-          ),
-        )
+        .mockResolvedValueOnce(pluginValidationFailure())
         .mockResolvedValueOnce(
           Response.json({
             source: "plugins:\n  - bad\n",
@@ -1090,7 +1032,7 @@ describe("configStore", () => {
         },
       });
 
-      (global.fetch as any).mockReturnValueOnce(pendingPolicyResponse.promise);
+      vi.mocked(fetch).mockReturnValueOnce(pendingPolicyResponse.promise);
       const refreshPromise = useConfigStore.getState().refreshAgentPolicies([
         {
           id: "assistant",
@@ -1105,21 +1047,8 @@ describe("configStore", () => {
 
       expect(useConfigStore.getState().agentPoliciesRequestId).toBe(1);
 
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json(
-          {
-            detail: [
-              {
-                loc: ["plugins", 0],
-                msg: "Plugin tools_module must be a string",
-                type: "value_error",
-              },
-            ],
-          },
-          { status: 422 },
-        ),
-      );
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(pluginValidationFailure());
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({
           source: "plugins:\n  - bad\n",
         }),
@@ -1215,21 +1144,8 @@ describe("configStore", () => {
         ],
       });
 
-      (global.fetch as any)
-        .mockResolvedValueOnce(
-          Response.json(
-            {
-              detail: [
-                {
-                  loc: ["plugins", 0],
-                  msg: "Plugin tools_module must be a string",
-                  type: "value_error",
-                },
-              ],
-            },
-            { status: 422 },
-          ),
-        )
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(pluginValidationFailure())
         .mockReturnValueOnce(pendingRawSourceResponse.promise);
 
       const loadPromise = useConfigStore.getState().loadConfig();
@@ -1287,21 +1203,8 @@ describe("configStore", () => {
         recoveryConfigSourceOriginal: "plugins:\n  - bad\n",
       });
 
-      (global.fetch as any)
-        .mockResolvedValueOnce(
-          Response.json(
-            {
-              detail: [
-                {
-                  loc: ["plugins", 0],
-                  msg: "Plugin tools_module must be a string",
-                  type: "value_error",
-                },
-              ],
-            },
-            { status: 422 },
-          ),
-        )
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(pluginValidationFailure())
         .mockReturnValueOnce(pendingRawSourceResponse.promise);
 
       const loadPromise = useConfigStore.getState().loadConfig();
@@ -1359,34 +1262,27 @@ describe("configStore", () => {
         draftVersion: 1,
       });
 
-      (global.fetch as any)
-        .mockResolvedValueOnce(
-          Response.json({
-            agents: {
-              helper: {
-                display_name: "Helper",
-                role: "Fixed on disk",
-                tools: [],
-                skills: [],
-                instructions: [],
-                rooms: [],
-              },
+      await loadFixture(
+        {
+          agents: {
+            helper: {
+              display_name: "Helper",
+              role: "Fixed on disk",
+              tools: [],
+              skills: [],
+              instructions: [],
+              rooms: [],
             },
-            models: {
-              default: {
-                provider: "ollama",
-                id: "test-model",
-              },
+          },
+          models: {
+            default: {
+              provider: "ollama",
+              id: "test-model",
             },
-          }),
-        )
-        .mockResolvedValueOnce(
-          Response.json({
-            agent_policies: { helper: makeAgentPolicy("helper") },
-          }),
-        );
-
-      await useConfigStore.getState().loadConfig();
+          },
+        },
+        { helper: makeAgentPolicy("helper") },
+      );
 
       expect(useConfigStore.getState()).toMatchObject({
         recoveryConfigSource: null,
@@ -1415,7 +1311,7 @@ describe("configStore", () => {
         isDirty: true,
       });
 
-      (global.fetch as any)
+      vi.mocked(fetch)
         .mockResolvedValueOnce(Response.json({ success: true }))
         .mockResolvedValueOnce(
           Response.json({
@@ -1475,7 +1371,7 @@ describe("configStore", () => {
         isDirty: true,
       });
 
-      (global.fetch as any)
+      vi.mocked(fetch)
         .mockResolvedValueOnce(
           Response.json(
             { success: true },
@@ -1534,7 +1430,7 @@ describe("configStore", () => {
         isDirty: true,
       });
 
-      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
+      vi.mocked(fetch).mockReturnValueOnce(pendingSaveResponse.promise);
 
       const savePromise = useConfigStore.getState().saveRecoveryConfigSource();
       useConfigStore
@@ -1629,10 +1525,8 @@ describe("configStore", () => {
         },
       };
 
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json(replacementConfig),
-      );
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(Response.json(replacementConfig));
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({ detail: "boom" }, { status: 500 }),
       );
 
@@ -1671,7 +1565,7 @@ describe("configStore", () => {
 
   describe("refreshAgentPolicies", () => {
     it("stores backend-derived agent policies", async () => {
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({
           agent_policies: {
             helper: makeAgentPolicy("helper"),
@@ -1747,7 +1641,7 @@ describe("configStore", () => {
     it("invalidates the current preview while a refresh is in flight", async () => {
       const pendingResponse = deferred<Response>();
 
-      (global.fetch as any).mockReturnValueOnce(pendingResponse.promise);
+      vi.mocked(fetch).mockReturnValueOnce(pendingResponse.promise);
 
       useConfigStore.setState({
         config: {
@@ -1802,7 +1696,7 @@ describe("configStore", () => {
     });
 
     it("clears policies and records a non-blocking diagnostic when refresh fails", async () => {
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({ detail: "boom" }, { status: 500 }),
       );
 
@@ -1911,7 +1805,7 @@ describe("configStore", () => {
         isDirty: true,
         syncStatus: "synced",
       });
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json(
           {
             detail: {
@@ -1983,9 +1877,7 @@ describe("configStore", () => {
         isDirty: true,
         syncStatus: "synced",
       });
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json({ success: true }),
-      );
+      vi.mocked(fetch).mockResolvedValueOnce(Response.json({ success: true }));
 
       const { saveConfig } = useConfigStore.getState();
       await saveConfig();
@@ -2053,7 +1945,7 @@ describe("configStore", () => {
         isDirty: true,
       });
 
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json(
           {
             detail: [
@@ -2141,7 +2033,7 @@ describe("configStore", () => {
         isDirty: true,
       });
 
-      (global.fetch as any)
+      vi.mocked(fetch)
         .mockReturnValueOnce(pendingSaveResponse.promise)
         .mockResolvedValueOnce(
           Response.json(
@@ -2258,7 +2150,7 @@ describe("configStore", () => {
         },
       });
 
-      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
+      vi.mocked(fetch).mockReturnValueOnce(pendingSaveResponse.promise);
 
       const savePromise = useConfigStore.getState().saveConfig();
       useConfigStore
@@ -2363,7 +2255,7 @@ describe("configStore", () => {
         isDirty: true,
       });
 
-      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
+      vi.mocked(fetch).mockReturnValueOnce(pendingSaveResponse.promise);
 
       const savePromise = useConfigStore.getState().saveConfig();
       useConfigStore.getState().updateAgent("helper", { role: "Now valid" });
@@ -2427,7 +2319,7 @@ describe("configStore", () => {
         isDirty: true,
       });
 
-      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
+      vi.mocked(fetch).mockReturnValueOnce(pendingSaveResponse.promise);
 
       const savePromise = useConfigStore.getState().saveConfig();
       useConfigStore.getState().updateConfigValue(["voice"], {
@@ -2519,13 +2411,9 @@ describe("configStore", () => {
         dirtyRoots: ["models"],
       });
 
-      (global.fetch as any)
+      vi.mocked(fetch)
         .mockReturnValueOnce(pendingSaveResponse.promise)
-        .mockResolvedValueOnce(
-          Response.json({
-            ...loadedConfig,
-          }),
-        )
+        .mockResolvedValueOnce(Response.json(loadedConfig))
         .mockResolvedValueOnce(
           Response.json({
             agent_policies: { helper: makeAgentPolicy("helper") },
@@ -2779,7 +2667,7 @@ describe("configStore", () => {
         diagnostics: [],
         isDirty: true,
       });
-      (global.fetch as any)
+      vi.mocked(fetch)
         .mockResolvedValueOnce(Response.json({ success: true }))
         .mockResolvedValueOnce(
           Response.json({
@@ -2993,7 +2881,7 @@ describe("configStore", () => {
       });
 
       useConfigStore.getState().setAgentPrivateEnabled("mind", true);
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({ detail: "save failed" }, { status: 500 }),
       );
 
@@ -3054,9 +2942,7 @@ describe("configStore", () => {
       });
 
       useConfigStore.getState().setAgentPrivateEnabled("mind", true);
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json({ success: true }),
-      );
+      vi.mocked(fetch).mockResolvedValueOnce(Response.json({ success: true }));
 
       await useConfigStore.getState().saveConfig();
       useConfigStore.getState().setAgentPrivateEnabled("mind", false);
@@ -3117,7 +3003,7 @@ describe("configStore", () => {
         },
       });
 
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({
           agent_policies: {
             leader: makeAgentPolicy("leader", {
@@ -3317,7 +3203,7 @@ describe("configStore", () => {
         },
       });
 
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({
           agent_policies: {
             leader: makeAgentPolicy("leader", {
@@ -3371,7 +3257,7 @@ describe("configStore", () => {
     it("drops stale policy immediately when a policy-affecting edit triggers refresh", async () => {
       const pendingResponse = deferred<Response>();
 
-      (global.fetch as any).mockReturnValueOnce(pendingResponse.promise);
+      vi.mocked(fetch).mockReturnValueOnce(pendingResponse.promise);
 
       useConfigStore.setState({
         config: {
@@ -3556,7 +3442,7 @@ describe("configStore", () => {
         },
       });
 
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({
           agent_policies: {
             new_agent: makeAgentPolicy("new_agent"),
@@ -3600,7 +3486,7 @@ describe("configStore", () => {
         },
       });
 
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({
           agent_policies: {
             new_agent: makeAgentPolicy("new_agent", {
@@ -3755,13 +3641,10 @@ describe("configStore", () => {
         ],
       });
 
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({
           agent_policies: { agent2: makeAgentPolicy("agent2") },
         }),
-      );
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json({}, { headers: { "x-mindroom-config-generation": "1" } }),
       );
 
       useConfigStore.getState().deleteAgent("agent1");
@@ -3770,11 +3653,8 @@ describe("configStore", () => {
           agent2: makeAgentPolicy("agent2"),
         });
       });
-      await useConfigStore.getState().saveConfig();
 
-      const saveCall = (global.fetch as any).mock.calls[1];
-      expect(saveCall[0]).toBe("/api/config/save");
-      expect(JSON.parse(saveCall[1].body)).toMatchObject({
+      expect(await savedPayload()).toMatchObject({
         agents: {
           agent2: mockConfig.agents.agent2,
         },
@@ -3825,7 +3705,7 @@ describe("configStore", () => {
         ],
       });
 
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({
           agent_policies: {
             agent2: makeAgentPolicy("agent2"),
@@ -3898,7 +3778,7 @@ describe("configStore", () => {
         },
       });
 
-      (global.fetch as any).mockResolvedValueOnce(
+      vi.mocked(fetch).mockResolvedValueOnce(
         Response.json({
           agent_policies: {
             leader: makeAgentPolicy("leader"),
@@ -4379,7 +4259,7 @@ describe("configStore", () => {
         dirtyRoots: ["rooms"],
       });
 
-      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
+      vi.mocked(fetch).mockReturnValueOnce(pendingSaveResponse.promise);
 
       const savePromise = useConfigStore.getState().saveConfig();
       useConfigStore.getState().updateRoom("lobby", {
@@ -5578,7 +5458,7 @@ describe("configStore", () => {
         ],
       });
 
-      (global.fetch as any).mockResolvedValueOnce(Response.json({}));
+      vi.mocked(fetch).mockResolvedValueOnce(Response.json({}));
 
       const { saveConfig } = useConfigStore.getState();
       await saveConfig();
@@ -6167,14 +6047,7 @@ describe("configStore", () => {
         },
       };
 
-      (global.fetch as any).mockResolvedValueOnce(Response.json(mockConfig));
-      (global.fetch as any).mockResolvedValueOnce(
-        Response.json({
-          agent_policies: { openclaw: makeAgentPolicy("openclaw") },
-        }),
-      );
-
-      await useConfigStore.getState().loadConfig();
+      await loadFixture(mockConfig, { openclaw: makeAgentPolicy("openclaw") });
       useConfigStore.getState().updateRoom("lobby", { model: "claude" });
 
       expect(

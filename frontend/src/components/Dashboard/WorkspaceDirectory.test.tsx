@@ -139,7 +139,7 @@ describe("WorkspaceDirectory", () => {
       teams: {},
     };
 
-    (global.fetch as ReturnType<typeof vi.fn>)
+    vi.mocked(fetch)
       .mockResolvedValueOnce(Response.json(rawConfig))
       .mockResolvedValueOnce(Response.json({ agent_policies: {} }));
 
@@ -236,7 +236,7 @@ describe("WorkspaceDirectory", () => {
       },
       teams: {},
     };
-    (global.fetch as ReturnType<typeof vi.fn>)
+    vi.mocked(fetch)
       .mockResolvedValueOnce(Response.json(rawConfig))
       .mockResolvedValueOnce(Response.json({ agent_policies: {} }));
 
@@ -424,7 +424,7 @@ describe("WorkspaceDirectory", () => {
 
   it("shows the default mode for a team that omits it", async () => {
     const { mode: _mode, ...teamWithoutMode } = config.teams!.builders;
-    (global.fetch as ReturnType<typeof vi.fn>)
+    vi.mocked(fetch)
       .mockResolvedValueOnce(
         Response.json({ ...config, teams: { builders: teamWithoutMode } }),
       )
