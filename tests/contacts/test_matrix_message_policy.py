@@ -9,10 +9,12 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
+from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_api import MatrixApiTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
+from mindroom.custom_tools.matrix_message_idempotency import claim_matrix_message_send
 from mindroom.entity_resolution import current_entity_id
 from mindroom.hooks import EVENT_CONTACT_BEFORE_SEND, ContactBeforeSendContext, HookBindings, HookRegistry, hook
 from mindroom.matrix.message_extras import MatrixMessageExtra
@@ -48,6 +50,7 @@ THREAD_ID = "$thread:localhost"
 EVENT_ID = "$event:localhost"
 DESTINATION_ERROR = "Error: in a contact conversation you can only write to this room or to your owner's personal room"
 OWNER_ROOM_ERROR = "Error: in a contact conversation you can only send a plain message to your owner's personal room"
+OWNER_ROOM_KEY_ERROR = "Error: in a contact conversation you cannot use idempotency_key in your owner's personal room"
 TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
 NOT_AUTHORIZED = "Not authorized to access the target room."
 MENU = MatrixMessageExtra(title="Menu", content="Soup")
@@ -360,6 +363,35 @@ async def test_contact_turn_only_sends_plain_messages_to_the_owners_personal_roo
     assert payload["message"] == OWNER_ROOM_ERROR
     assert _sent(context) == []
     context.client.room_messages.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_contact_turn_cannot_replay_the_owners_keyed_send_in_their_personal_room(tmp_path: Path) -> None:
+    """A contact turn shares its owner's keyed sends there, so a key could deliver the owner's pending agent request."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    alice_agent = _agent(paths, "mind_alice")
+    owner_turn = _context(config, paths, room_id=PERSONAL_ROOM)
+    async with claim_matrix_message_send(owner_turn, PERSONAL_ROOM, "report-1") as claim:
+        await claim.prepare(
+            {"msgtype": "m.text", "body": f"{alice_agent} Book the table.", ORIGINAL_SENDER_KEY: OWNER},
+            recipient="mind_alice",
+            recipient_user_id=alice_agent,
+            thread_id=None,
+            starts_thread=True,
+        )
+    contact = _context(config, paths)
+    personal_room = nio.MatrixRoom(PERSONAL_ROOM, alice_agent)
+    personal_room.add_member(alice_agent, "Alice's Mind", None)
+    personal_room.add_member(OWNER, "Alice", None)
+    personal_room.members_synced = True
+    contact.client.rooms[PERSONAL_ROOM] = personal_room
+
+    payload = await _call(contact, message="Bob asked about Friday.", room_id=PERSONAL_ROOM, idempotency_key="report-1")
+
+    assert payload["status"] == "error"
+    assert payload["message"] == OWNER_ROOM_KEY_ERROR
+    assert _sent(contact) == []
 
 
 @pytest.mark.asyncio

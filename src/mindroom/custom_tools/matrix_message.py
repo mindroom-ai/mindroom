@@ -41,6 +41,9 @@ _CONTACT_DESTINATION_ERROR = (
 _CONTACT_OWNER_ROOM_ERROR = (
     "Error: in a contact conversation you can only send a plain message to your owner's personal room"
 )
+_CONTACT_OWNER_ROOM_KEY_ERROR = (
+    "Error: in a contact conversation you cannot use idempotency_key in your owner's personal room"
+)
 
 
 def _contact_turn_target_error(
@@ -49,11 +52,14 @@ def _contact_turn_target_error(
     *,
     action: str,
     recipient: str | None,
+    idempotency_key: str | None,
 ) -> str | None:
     """Return why this turn may not act in ``room_id`` this way, or None when it may.
 
     A contact turn acts only in its own room, apart from a plain message to its owner in their personal room with it.
     Anything more there, such as naming a recipient, would start a normal turn with the owner's full authority.
+    A keyed send there shares the owner's own keyed sends, so a matching key would deliver what the owner's turn
+    prepared, such as a pending request to an agent, instead of the contact turn's message.
     """
     config = context.current_config
     contact = contact_turn(config, context.runtime_paths, context.room_id, context.agent_name)
@@ -62,7 +68,9 @@ def _contact_turn_target_error(
     record, side = contact
     if personal_room_of(config, context.runtime_paths, record.party(side).owner) != (context.agent_name, room_id):
         return _CONTACT_DESTINATION_ERROR
-    return _CONTACT_OWNER_ROOM_ERROR if action != "send" or recipient is not None else None
+    if action != "send" or recipient is not None:
+        return _CONTACT_OWNER_ROOM_ERROR
+    return _CONTACT_OWNER_ROOM_KEY_ERROR if idempotency_key is not None else None
 
 
 def _optional_string(value: str | None, name: str) -> str | None:
@@ -192,7 +200,13 @@ class MatrixMessageTools(Toolkit):
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
-        target_error = _contact_turn_target_error(context, resolved_room_id, action=action, recipient=recipient)
+        target_error = _contact_turn_target_error(
+            context,
+            resolved_room_id,
+            action=action,
+            recipient=recipient,
+            idempotency_key=idempotency_key,
+        )
         if target_error is not None:
             return self._payload("error", room_id=resolved_room_id, message=target_error)
         if not await room_access_allowed(context, resolved_room_id, contact_room_ok=True):
