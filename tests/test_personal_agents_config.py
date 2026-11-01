@@ -79,6 +79,13 @@ def test_generated_agent_renders_placeholders_and_forces_owner_access() -> None:
     assert agent["credential_managers"] == ["@Alice.Smith:example.org"]
 
 
+def test_first_name_placeholder_is_the_display_names_first_word() -> None:
+    """`{user_first_name}` is the display name's first word, or the localpart for a blank display name."""
+    template = {"agent": {"display_name": "{user_first_name}'s Mind"}}
+    assert personal_agent_data(template, _entry(user_display_name="Bas Nijholt"))["display_name"] == "Bas's Mind"
+    assert personal_agent_data(template, _entry(user_display_name=" \u00a0"))["display_name"] == "Alice.Smith's Mind"
+
+
 def test_placeholder_values_are_not_rendered_again() -> None:
     """A placeholder inside a substituted value stays literal."""
     template = {"agent": {"display_name": "{user_display_name} {username}"}}
