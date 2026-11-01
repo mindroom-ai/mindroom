@@ -97,6 +97,35 @@ nginx then serves that well-known path even without MatrixRTC; route it from the
 Without administrators the item is called **Download bug report** and saves the report as a file.
 See [Bug Reports](../../../docs/bug-reports.md) for what a report contains and where it goes.
 
+## Server Custom Emoji
+
+The client can offer the custom emoji of one shared room to everyone on the homeserver.
+Create that room once with an operator's access token, from the root of this repository:
+
+```bash
+MATRIX_ACCESS_TOKEN=... uv run python -m scripts.utilities.create_server_emoji_room \
+  --homeserver https://matrix.example.com --name "Example"
+```
+
+The script prints the room ID and the `io.mindroom.emoji` key that names the room's alias.
+Give that alias, or the room ID, to the chart to publish it in `/.well-known/matrix/client`:
+
+```yaml
+matrix:
+  homeserverUrl: https://matrix.example.com
+
+serverEmoji:
+  room: "#emoji:example.com"
+```
+
+Quote the value.
+Unquoted, `#` starts a YAML comment and `!` a YAML tag, so the chart would publish nothing and raise no error.
+
+nginx then serves that well-known path even without MatrixRTC; route it from the Matrix server-name origin to this Service as described above.
+Without a room, custom emoji stay personal to each user.
+The chart rejects a room that is not an alias or a room ID, an alias whose server is not a host name or IP literal with an optional port, or a value that contains whitespace, quotes, backslashes, `$`, `<`, `>` or `&`.
+See [Custom Emoji](../../../docs/custom-emoji.md) for who may add emoji and how the client uses the room.
+
 ## Operator Notices
 
 The web client shows banners from `basePath/notices.json`, which nginx serves without caching; the [MindRoom Chat README](https://github.com/mindroom-ai/mindroom-chat#notices) documents the file format.

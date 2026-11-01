@@ -30,6 +30,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/components/ui/use-toast";
+import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import { EgressBroker } from "./EgressBroker";
 
 interface CredentialStatusResponse {
@@ -229,12 +230,7 @@ export function Credentials() {
   }, [loadCredentials, selectedService]);
 
   // Selecting, adding, and refreshing ask here before they replace the editor's unsaved draft.
-  const confirmDiscard = useCallback(
-    () =>
-      !hasUnsavedChanges ||
-      window.confirm(`Discard unsaved changes for '${selectedService}'?`),
-    [hasUnsavedChanges, selectedService],
-  );
+  const confirmDiscard = useUnsavedDraft(hasUnsavedChanges);
 
   const handleSelectService = useCallback(
     (service: string) => {
