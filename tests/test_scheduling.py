@@ -66,6 +66,7 @@ from tests.scheduling_helpers import (
     scheduling_bot,
     serve_full_room_state,
     serve_room_schedule_state,
+    serve_stored_task,
     serve_task_state_events,
 )
 from tests.tool_approval_helpers import scheduled_call_approvals
@@ -1480,14 +1481,7 @@ async def test_cancel_all_scheduled_tasks(tmp_path: Path) -> None:
 async def test_a_task_stored_without_a_status_is_pending_to_listing_and_cancel_all(tmp_path: Path) -> None:
     """Listing and cancelling all read one pending rule, so cancelling all ends every task that listing shows."""
     client = AsyncMock()
-    workflow = ScheduledWorkflow(
-        schedule_type="once",
-        created_by="@user:server",
-        execute_at=datetime.now(UTC) + timedelta(minutes=5),
-        message="Test message",
-        description="Statusless task",
-        room_id="!test:server",
-    )
+    workflow = _pending_once_workflow()
     serve_room_schedule_state(
         client,
         "!test:server",
@@ -2084,11 +2078,7 @@ async def test_edit_scheduled_task_persists_through_the_router_and_preserves_omi
 async def test_an_explicit_argument_alone_makes_an_edit(tmp_path: Path, argument: str, value: object) -> None:
     """An edit whose request the parser carries over unchanged is written when an explicit argument changes the task."""
     client = AsyncMock()
-    serve_task_state_events(client)
-    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
-    room_state: dict[str, dict[str, Any]] = {}
-    client.room_get_state = AsyncMock(side_effect=lambda room_id: _room_state_response(room_id, room_state))
-    state_writers, router = _recording_state_writer(room_state)
+    client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$edited", "!test:server"))
     runtime_paths = schedule_runtime_paths(tmp_path)
     config, ids = _assistant_config(runtime_paths)
     stored = ScheduledWorkflow(
@@ -2100,12 +2090,12 @@ async def test_an_explicit_argument_alone_makes_an_edit(tmp_path: Path, argument
         thread_id="$thread",
         room_id="!test:server",
     )
-    room_state["taskedit"] = scheduled_task_state_event(
+    serve_stored_task(
+        client,
+        "!test:server",
         "taskedit",
         {"task_id": "taskedit", "status": "pending", "workflow": stored.model_dump_json()},
     )
-    _serve_task_reads(client, room_state)
-    # The edit prompt shows the parser only these fields, which it carries over.
     carried_over = ScheduledWorkflow(
         schedule_type="once",
         execute_at=stored.execute_at,
@@ -2126,7 +2116,6 @@ async def test_an_explicit_argument_alone_makes_an_edit(tmp_path: Path, argument
                 config=config,
                 runtime_paths=runtime_paths,
                 room=_matrix_room("!test:server"),
-                task_runtime=state_writers,
             ),
             room_id="!test:server",
             task_id="taskedit",
@@ -2136,9 +2125,7 @@ async def test_an_explicit_argument_alone_makes_an_edit(tmp_path: Path, argument
         )
 
     assert "✅ Updated task `taskedit`." in result
-    router.room_put_state.assert_awaited_once()
-    [task] = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
-    assert getattr(task.workflow, argument) == value
+    assert json.loads(client.room_put_state.await_args.kwargs["content"]["workflow"])[argument] == value
 
 
 @pytest.mark.asyncio

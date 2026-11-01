@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
+from mindroom.browser.call_limit import browser_request_budget_seconds
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
@@ -807,7 +808,10 @@ def _call_proxy_sync(
             config=_worker_proxy_client_config(
                 proxy_config,
                 runtime_paths,
-                request_budget_seconds=shell_request_budget_seconds(tool_name, function_name, wire_kwargs),
+                request_budget_seconds=max(
+                    shell_request_budget_seconds(tool_name, function_name, wire_kwargs),
+                    browser_request_budget_seconds(tool_name, function_name),
+                ),
             ),
             request=request,
             credentials_manager=credentials_manager,
