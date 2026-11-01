@@ -409,7 +409,7 @@ class TestAdminEndpoints:
     def test_admin_list_holds_every_row_newest_first(
         self, client: TestClient, fake_db: FakeSupabase, mock_verify_admin: Mock
     ):
-        """A list without ``_end`` holds every row past PostgREST's row limit, newest first, ties in id order."""
+        """A list without ``limit`` holds every row past PostgREST's row limit, newest first, ties in id order."""
         accounts = [{"id": f"acc_{day:02d}", "created_at": f"2026-10-{day:02d}T00:00:00Z"} for day in range(1, 13)]
         accounts.append({"id": "acc_00", "created_at": "2026-10-12T00:00:00Z"})
         fake_db.tables["accounts"] = accounts[1::2] + accounts[::2]
@@ -443,14 +443,14 @@ class TestAdminEndpoints:
         assert response.status_code == 200
         assert [row["id"] for row in response.json()["data"]] == ["acc_3", "acc_2", "acc_1"]
 
-    def test_admin_list_end_holds_the_newest_rows_and_counts_every_row(
+    def test_admin_list_limit_holds_the_newest_rows_and_counts_every_row(
         self, client: TestClient, fake_db: FakeSupabase, mock_verify_admin: Mock
     ):
-        """A list with ``_end`` holds that many of the newest rows, and total counts every row."""
+        """A list with ``limit`` holds that many of the newest rows, and total counts every row."""
         fake_db.tables["audit_logs"] = [
             {"id": f"log_{day}", "created_at": f"2026-10-0{day}T00:00:00Z"} for day in (4, 1, 5, 3, 2)
         ]
-        response = client.get("/admin/audit_logs?_end=2")
+        response = client.get("/admin/audit_logs?limit=2")
 
         assert response.status_code == 200
         assert [row["id"] for row in response.json()["data"]] == ["log_5", "log_4"]

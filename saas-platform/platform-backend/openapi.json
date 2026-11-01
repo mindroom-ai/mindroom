@@ -2522,7 +2522,7 @@
     },
     "/admin/{resource}": {
       "get": {
-        "description": "List a resource's rows, newest first, with ties in ``id`` order so pages never skip or repeat a row.\n\nWithout ``_end``, every row; with it, the ``_end`` newest rows. ``total`` counts every row.",
+        "description": "List a resource's rows, newest first.\n\nWithout ``limit``, every row; with it, the ``limit`` newest rows. ``total`` counts every row.",
         "operationId": "admin_get_list_admin__resource__get",
         "parameters": [
           {
@@ -2536,7 +2536,7 @@
           },
           {
             "in": "query",
-            "name": "_end",
+            "name": "limit",
             "required": false,
             "schema": {
               "anyOf": [
@@ -2547,7 +2547,7 @@
                   "type": "null"
                 }
               ],
-              "title": " End"
+              "title": "Limit"
             }
           },
           {

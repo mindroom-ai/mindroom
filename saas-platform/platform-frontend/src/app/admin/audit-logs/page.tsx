@@ -27,7 +27,7 @@ export default function AuditLogsPage() {
     const fetchAuditLogs = async () => {
       try {
         // The 100 newest audit logs.
-        const response = await apiCall('/admin/audit_logs?_end=100')
+        const response = await apiCall('/admin/audit_logs?limit=100')
 
         if (response.ok) {
           const data = await response.json()

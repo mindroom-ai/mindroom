@@ -273,9 +273,9 @@ export interface paths {
         };
         /**
          * Admin Get List
-         * @description List a resource's rows, newest first, with ties in ``id`` order so pages never skip or repeat a row.
+         * @description List a resource's rows, newest first.
          *
-         *     Without ``_end``, every row; with it, the ``_end`` newest rows. ``total`` counts every row.
+         *     Without ``limit``, every row; with it, the ``limit`` newest rows. ``total`` counts every row.
          */
         get: operations["admin_get_list_admin__resource__get"];
         put?: never;
@@ -2129,7 +2129,7 @@ export interface operations {
     admin_get_list_admin__resource__get: {
         parameters: {
             query?: {
-                _end?: number | null;
+                limit?: number | null;
             };
             header?: {
                 authorization?: string;

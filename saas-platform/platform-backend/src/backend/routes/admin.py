@@ -438,27 +438,28 @@ async def admin_get_list(
     request: Request,  # noqa: ARG001
     resource: str,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
-    _end: int | None = None,
+    limit: int | None = None,
 ) -> dict[str, Any]:
-    """List a resource's rows, newest first, with ties in ``id`` order so pages never skip or repeat a row.
+    """List a resource's rows, newest first.
 
-    Without ``_end``, every row; with it, the ``_end`` newest rows. ``total`` counts every row.
+    Without ``limit``, every row; with it, the ``limit`` newest rows. ``total`` counts every row.
     """
     if resource not in ALLOWED_RESOURCES:
         raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
-    audit_log_entry(account_id=admin["user_id"], action="list", resource_type=resource, details={"end": _end})
+    audit_log_entry(account_id=admin["user_id"], action="list", resource_type=resource, details={"limit": limit})
 
     def build_query(count: Literal["exact"] | None = None) -> Any:  # noqa: ANN401
         query = sb.table(resource).select(_LIST_COLUMNS.get(resource, "*"), count=count)
+        # Ordering ties by id keeps the pages of a full listing from skipping or repeating a row.
         return query.order("created_at", desc=True).order("id")
 
-    if _end is None:
+    if limit is None:
         # No count here: with one, PostgREST refuses the final empty page if a row was deleted meanwhile.
         rows = select_all_pages(build_query)
         return {"data": rows, "total": len(rows)}
-    result = build_query("exact").limit(_end).execute()
+    result = build_query("exact").limit(limit).execute()
     return {"data": result.data, "total": result.count}
 
 
