@@ -455,8 +455,11 @@ async def test_a_storage_root_without_mem0_copies_never_asks_the_embedder(tmp_pa
     [
         ("openai", {"model": "text-embedding-3-small", "dimensions": 256}, {}, 256),
         ("openai", {"model": "text-embedding-3-large"}, {}, 3072),
+        ("openai", {"model": "text-embedding-3-small", "host": "https://api.openai.com/v1"}, {}, 1536),
         ("openai", {"model": "text-embedding-3-small", "host": "http://embedder.test/v1"}, {}, None),
         ("openai", {"model": "text-embedding-3-small"}, {"OPENAI_BASE_URL": "http://embedder.test/v1"}, None),
+        ("openai", {"model": "text-embedding-3-small"}, {"OPENAI_BASE_URL_FILE": "endpoint"}, None),
+        ("openai", {"model": "text-embedding-3-small"}, {"OPENAI_BASE_URL": ""}, 1536),
         ("openai", {"model": "text-embedding-3-small", "host": "http://embedder.test/v1", "dimensions": 256}, {}, None),
         ("sentence_transformers", {"model": "sentence-transformers/all-MiniLM-L6-v2"}, {}, None),
         ("huggingface", {"model": "sentence-transformers/all-MiniLM-L6-v2", "dimensions": 256}, {}, None),
@@ -464,8 +467,11 @@ async def test_a_storage_root_without_mem0_copies_never_asks_the_embedder(tmp_pa
     ids=[
         "configured dimensions",
         "known OpenAI model",
+        "OpenAI's own API set as host",
         "other OpenAI-compatible host",
-        "other host the OpenAI SDK reads from its environment",
+        "other host from OPENAI_BASE_URL",
+        "other host from OPENAI_BASE_URL_FILE",
+        "blank OPENAI_BASE_URL",
         "dimensions another host may ignore",
         "local model",
         "dimensions no Mem0-only embedder receives",
@@ -480,6 +486,7 @@ def test_only_settings_that_fix_the_embedding_size_spare_the_embedder_call(
 ) -> None:
     """Only OpenAI's own API is sure to apply `dimensions` and to serve an OpenAI model's size; any other embedder is asked."""
     memory = MemoryConfig(embedder=_MemoryEmbedderConfig(provider=provider, config=EmbedderConfig(**settings)))
+    (tmp_path / "endpoint").write_text("http://embedder.test/v1\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.environment import EMBEDDER_CREDENTIAL_SERVICE, get_secret_from_env
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, OPENAI_BASE_URL_DEFAULT
 from mindroom.providers.names import provider_route
 
 if TYPE_CHECKING:
@@ -152,6 +152,14 @@ def get_ollama_host(runtime_paths: RuntimePaths, *, configured_host: str | None,
         return configured_host
     saved_host = (get_runtime_shared_credentials_manager(runtime_paths).load_credentials("ollama") or {}).get("host")
     return saved_host or configured_host or OLLAMA_HOST_DEFAULT
+
+
+def get_openai_base_url(runtime_paths: RuntimePaths) -> str:
+    """Return the endpoint an OpenAI client without one of its own reaches: ``OPENAI_BASE_URL``, else OpenAI's API.
+
+    Passing it explicitly keeps the SDK from reading the variable itself, which it does only from the process env.
+    """
+    return get_secret_from_env("OPENAI_BASE_URL", runtime_paths=runtime_paths) or OPENAI_BASE_URL_DEFAULT
 
 
 def get_ollama_api_key(runtime_paths: RuntimePaths) -> str | None:

@@ -32,7 +32,7 @@ from mindroom.config.main import Config, config_validation_issues
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig, ModelConfig, RouterConfig
 from mindroom.config.resolution import memory_search
-from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
@@ -51,6 +51,7 @@ from mindroom.memory.config import (
 from mindroom.model_defaults import (
     MEMORY_OLLAMA_LLM,
     OLLAMA_HOST_DEFAULT,
+    OPENAI_BASE_URL_DEFAULT,
     OPENAI_GPT_LUNA,
     OPENAI_GPT_SOL,
     OPENROUTER_BASE_URL_DEFAULT,
@@ -796,7 +797,70 @@ class TestMemoryConfig:
         embedder = create_configured_embedder(config, runtime_paths)
         assert str(embedder._sdk_client().base_url) == "https://api.openai.com/v1/"
         mem0_embedder_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)["embedder"]["config"]
-        assert "openai_base_url" not in mem0_embedder_config
+        assert mem0_embedder_config["openai_base_url"] == OPENAI_BASE_URL_DEFAULT
+
+    @pytest.mark.parametrize(
+        ("exported", "env_file", "expected_url"),
+        [
+            pytest.param({}, "OPENAI_BASE_URL=http://dotenv.local/v1\n", "http://dotenv.local/v1", id="env-file"),
+            pytest.param(
+                {"OPENAI_BASE_URL": ""},
+                "OPENAI_BASE_URL=http://dotenv.local/v1\n",
+                "http://dotenv.local/v1",
+                id="env-file-under-blank-export",
+            ),
+            pytest.param({"OPENAI_BASE_URL_FILE": "endpoint"}, "", "http://file.local/v1", id="file-variable"),
+            pytest.param({"OPENAI_BASE_URL": ""}, "", OPENAI_BASE_URL_DEFAULT, id="blank-export"),
+        ],
+    )
+    def test_openai_memory_clients_without_an_endpoint_reach_openai_base_url(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        exported: dict[str, str],
+        env_file: str,
+        expected_url: str,
+    ) -> None:
+        """The embedder and the memory LLM read `OPENAI_BASE_URL` as chat models do, wherever it is set."""
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL_FILE", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        for name, value in exported.items():
+            monkeypatch.setenv(name, value)
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+        (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+        (tmp_path / "endpoint").write_text("http://file.local/v1\n", encoding="utf-8")
+        runtime_paths = resolve_runtime_paths(config_path=config_path, process_env=exported)
+        config = Config(
+            memory={
+                "embedder": {"provider": "openai", "config": {"model": "text-embedding-3-small", "api_key": "key"}},
+                "llm": {"provider": "openai", "config": {"model": OPENAI_GPT_LUNA, "api_key": "key"}},
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        embedder = create_configured_embedder(config, runtime_paths)
+        assert str(embedder._sdk_client().base_url) == f"{expected_url}/"
+        mem0_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)
+        assert mem0_config["embedder"]["config"]["openai_base_url"] == expected_url
+        assert mem0_config["llm"]["config"]["openai_base_url"] == expected_url
+        assert str(OpenAILLM(mem0_config["llm"]["config"]).client.base_url) == f"{expected_url}/"
+
+    def test_an_openai_memory_llm_keeps_its_configured_endpoint(self, tmp_path: Path) -> None:
+        """A memory LLM's own `openai_base_url` wins over `OPENAI_BASE_URL`."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+        runtime_paths = resolve_runtime_paths(
+            config_path=config_path,
+            process_env={"OPENAI_BASE_URL": "http://runtime.local/v1"},
+        )
+        llm = {"model": OPENAI_GPT_LUNA, "api_key": "key", "openai_base_url": "http://memory-llm.local/v1"}
+        config = Config(memory={"llm": {"provider": "openai", "config": llm}}, router=RouterConfig(model="default"))
+
+        llm_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)["llm"]["config"]
+
+        assert llm_config["openai_base_url"] == "http://memory-llm.local/v1"
 
     def test_openrouter_only_memory_uses_openrouter_for_llm_and_embedder(
         self,

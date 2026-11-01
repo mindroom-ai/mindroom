@@ -1649,7 +1649,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_BASE_URL` | Base URL for `provider: openai` models, such as a local inference server; a model's `extra_kwargs.base_url` overrides it, and `extra_kwargs.client_params.base_url` overrides both |
+| `OPENAI_BASE_URL` | Base URL for `provider: openai` models and the `openai` memory embedder and memory LLM, such as a local inference server; a model's `extra_kwargs.base_url` overrides it, and `extra_kwargs.client_params.base_url` overrides both |
 
 ### Dashboard and API
 
@@ -3282,7 +3282,7 @@ Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_tra
 |---|---|---|
 | `provider` | `openai` | Embedding provider |
 | `config.model` | `text-embedding-3-small` | Embedding model name |
-| `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `ollama`, a configured `OLLAMA_HOST` takes precedence over `host`, and without either the host is `http://localhost:11434` |
+| `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `openai`, without it the embedder uses [`OPENAI_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else OpenAI's API; for `ollama`, a configured `OLLAMA_HOST` takes precedence over `host`, and without either the host is `http://localhost:11434` |
 | `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers |
 | `config.api_key` | `null` | Explicit API key for the `openai` provider |
 | `config.credentials_service` | `null` | Credential service that supplies the `openai` provider's key |
