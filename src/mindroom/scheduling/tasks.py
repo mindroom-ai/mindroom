@@ -1002,10 +1002,12 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
         timezone_str: Timezone string (e.g., 'America/New_York')
 
     Returns:
-        Formatted string like "2024-01-15 15:30 EST (in 2 hours)"
+        Formatted string like "2024-01-15 15:30 EST (2 hours from now)"
 
     """
-    relative_str = humanize.naturaltime(dt, when=datetime.now(UTC))
+    # A timedelta of aware instants, because humanize compares datetimes as naive host-local times,
+    # which repeat during a daylight-saving fall-back hour.
+    relative_str = humanize.naturaltime(datetime.now(UTC) - dt)
     return f"{_format_local_time(dt, timezone_str)} ({relative_str})"
 
 
