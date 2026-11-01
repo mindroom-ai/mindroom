@@ -410,10 +410,7 @@ class OutlookCalendarTools(Toolkit):
         prepare: _Prepare | None = None,
         owner: str | None = None,
     ) -> str:
-        """Refuse malformed arguments before any request, then send the request and render its answer.
-
-        Every result of a call that names a calendar owner, errors included, repeats that owner.
-        """
+        """Refuse malformed arguments before any request, then send the request and render its answer."""
 
         def run() -> Mapping[str, object]:
             request = build()

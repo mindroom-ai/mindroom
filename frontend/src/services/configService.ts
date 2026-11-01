@@ -93,17 +93,11 @@ function saveError(
   );
 }
 
-function responseHeader(response: Response, name: string): string | null {
-  return typeof response.headers?.get === "function"
-    ? response.headers.get(name)
-    : null;
-}
-
 function responseGeneration(
   response: Response,
   fallbackGeneration: number,
 ): number {
-  const headerValue = responseHeader(response, CONFIG_GENERATION_HEADER);
+  const headerValue = response.headers.get(CONFIG_GENERATION_HEADER);
   const parsed =
     headerValue == null || headerValue.trim() === ""
       ? Number.NaN
@@ -147,13 +141,12 @@ export async function loadConfig(): Promise<{
   return {
     config: (await response.json()) as Config,
     generation: responseGeneration(response, 0),
-    usesIncludes:
-      responseHeader(response, CONFIG_USES_INCLUDES_HEADER) === "true",
+    usesIncludes: response.headers.get(CONFIG_USES_INCLUDES_HEADER) === "true",
     // The saved event_journal is read once, when the store is opened, so an edit
     // to it is accepted and then does nothing until a restart. The editor shows
     // the saved value either way; this is what stops that from being a lie.
     pendingRestart:
-      responseHeader(response, CONFIG_PENDING_RESTART_HEADER) === "true",
+      response.headers.get(CONFIG_PENDING_RESTART_HEADER) === "true",
   };
 }
 

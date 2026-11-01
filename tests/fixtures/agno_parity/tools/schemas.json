@@ -22417,7 +22417,7 @@
       },
       {
         "name": "uv_pip_install_package",
-        "description": "Backward-compatible alias for the shared installer path.",
+        "description": "Install a package into the current interpreter environment, as pip_install_package does.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -23162,22 +23162,25 @@
     "functions": [
       {
         "name": "publish_report",
-        "description": "Publish an authorized report source through a revocable public link. Supports source_type dynamic_workflow_run and static_site.",
+        "description": "Publish an authorized report source through a revocable public link.",
         "parameters": {
           "type": "object",
           "properties": {
             "source_type": {
-              "type": "string"
+              "type": "string",
+              "description": "Either dynamic_workflow_run or static_site."
             },
             "source": {
               "type": "object",
               "propertyNames": {
                 "type": "string"
               },
-              "additionalProperties": {}
+              "additionalProperties": {},
+              "description": "For dynamic_workflow_run, workflow_id and run_id of a completed run; for static_site, path\n(workspace-relative, to a directory with index.html or to one HTML file) and title."
             },
             "confirm_public": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Must be true; anyone with the link can open the report until it is revoked."
             },
             "mindroom_output_path": {
               "anyOf": [

@@ -118,6 +118,11 @@ class ConfigField:
     # `RuntimePaths.first_env_value` reads them: the process environment, the `.env`, then each `<NAME>_FILE`.
     env: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        """Keep a password field out of tool entries: only saved settings or the environment may set a secret."""
+        if self.type == "password":
+            self.authored_override = False
+
 
 @dataclass(frozen=True)
 class ToolValidationInfo:

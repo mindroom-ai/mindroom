@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import hmac
 import json
 from dataclasses import dataclass, field, replace
@@ -18,6 +17,7 @@ from mindroom.approval.tool_approval import (
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.failure_text import failure_text
 from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.script_runs.launch_contract import digest_arguments
 from mindroom.script_runs.models import (
     ScriptCallClaim,
     ScriptCallRecord,
@@ -64,7 +64,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable
 
     from mindroom.config.main import Config
     from mindroom.tool_system.agno_toolkits import AnyToolkit
@@ -78,7 +78,6 @@ __all__ = [
     "ScriptRuntimeWorkerAuthority",
     "ScriptToolBroker",
     "ScriptToolCallRequest",
-    "digest_arguments",
     "drain_script_tool_cleanup",
 ]
 
@@ -208,19 +207,6 @@ class ScriptToolCallRequest:
     def arguments_digest(self) -> str:
         """Return the canonical immutable digest claimed before execution."""
         return digest_arguments(self.arguments)
-
-
-def digest_arguments(arguments: Mapping[str, object]) -> str:
-    """Hash one canonical JSON-wire argument object."""
-    normalized = to_json_compatible(arguments)
-    encoded = json.dumps(
-        normalized,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _background_origin(run: ScriptRunRecord, call: ScriptCallRecord) -> BackgroundScriptToolOrigin:

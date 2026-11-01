@@ -30,28 +30,20 @@ interface ToolConfigPanelProps {
   toolDisplayName?: string;
   /** Dedicated per-agent override fields (curated, e.g. shell). */
   overrideFields?: ToolFieldSchema[] | null;
-  /** Global config_fields from the tool metadata (fallback schema). */
+  /** The tool's config_fields: the fallback schema, and the secrets the panel points to the Tools page. */
   configFields?: ToolFieldSchema[] | null;
 }
 
-/** Resolve which schema to use: prefer dedicated overrideFields, fall back to configFields. */
+/**
+ * The fields a tool entry may set: the dedicated overrideFields, else the
+ * configFields, without those the backend refuses in a tool entry.
+ */
 function resolveFields(
   overrideFields?: ToolFieldSchema[] | null,
   configFields?: ToolFieldSchema[] | null,
-): ToolFieldSchema[] | null {
-  if (overrideFields && overrideFields.length > 0) return overrideFields;
-  if (configFields && configFields.length > 0) return configFields;
-  return null;
-}
-
-function coerceDisplayValue(field: ToolFieldSchema, value: unknown): string {
-  if (value == null) return "";
-  if (field.type === "boolean") return value ? "true" : "false";
-  if (field.type === "string[]") {
-    if (Array.isArray(value)) return value.join(", ");
-    return String(value);
-  }
-  return String(value);
+): ToolFieldSchema[] {
+  const fields = overrideFields?.length ? overrideFields : (configFields ?? []);
+  return fields.filter((field) => field.authored_override !== false);
 }
 
 function coerceEditValue(
@@ -74,6 +66,9 @@ function coerceEditValue(
     if (typeof value === "number") return String(value);
     return "";
   }
+  // A text field whose list form the backend also accepts reads it as the
+  // comma-separated text.
+  if (Array.isArray(value)) return value.join(", ");
   return typeof value === "string" ? value : "";
 }
 
@@ -123,7 +118,10 @@ export function ToolConfigPanel({
   } = useConfigStore();
   const lazyLoading = target.kind === "agent" && target.lazyLoading;
   const fields = resolveFields(overrideFields, configFields);
-  const hasFields = fields != null && fields.length > 0;
+  const hasFields = fields.length > 0;
+  const secretLabels = (configFields ?? [])
+    .filter((field) => field.type === "password")
+    .map((field) => field.label);
   const currentOverrides =
     target.kind === "agent"
       ? getAgentToolOverrides(target.agentId, toolName)
@@ -163,7 +161,7 @@ export function ToolConfigPanel({
   };
 
   const isCustomized =
-    deferEnabled || (fields ?? []).some((field) => fieldValue(field) !== null);
+    deferEnabled || fields.some((field) => fieldValue(field) !== null);
 
   // Send a merge patch: null removes a key, and keys the patch does not name
   // stay as authored.
@@ -336,20 +334,16 @@ export function ToolConfigPanel({
       );
     }
 
-    // text, password, number, url
+    // text, number, url
     return (
       <div>
         {isEnabled ? (
           <Input
             id={fieldId}
             type={
-              field.type === "password"
-                ? "password"
-                : field.type === "number"
-                  ? "number"
-                  : field.type === "url"
-                    ? "url"
-                    : "text"
+              field.type === "number" || field.type === "url"
+                ? field.type
+                : "text"
             }
             value={text}
             placeholder={field.placeholder ?? field.label}
@@ -370,11 +364,7 @@ export function ToolConfigPanel({
         ) : (
           <div className="text-xs text-muted-foreground italic">
             {defaultValue != null
-              ? `Default: ${
-                  field.type === "password"
-                    ? "••••••••"
-                    : coerceDisplayValue(field, defaultValue)
-                }`
+              ? `Default: ${String(defaultValue)}`
               : "No default"}
           </div>
         )}
@@ -453,7 +443,7 @@ export function ToolConfigPanel({
       )}
 
       <div className="space-y-4">
-        {(fields ?? []).map((field) => {
+        {fields.map((field) => {
           const value = fieldValue(field);
           const isEnabled = value !== null;
 
@@ -501,6 +491,12 @@ export function ToolConfigPanel({
           );
         })}
       </div>
+
+      {secretLabels.length > 0 && (
+        <p className="mt-4 text-xs text-muted-foreground">
+          Secrets are set on the Tools page: {secretLabels.join(", ")}.
+        </p>
+      )}
     </div>
   );
 }

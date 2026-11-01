@@ -1656,7 +1656,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_API_KEY` | API key for dashboard/API requests; `mindroom config init` and first-run `mindroom run` add a generated key to `.env` when it has none; unset or empty means open access | _(none)_ |
-| `MINDROOM_PORT` | Port in the default OAuth callback URL when `MINDROOM_PUBLIC_URL` and `MINDROOM_BASE_URL` are unset, and in the default [Connections token audience](https://docs.mindroom.chat/connections-portal/#token-binding) and the address MindRoom Chat finds when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; it does not set the API server's bind port, which is `mindroom run --api-port`, and when unset it follows that port | the `--api-port` port, `8765` by default |
+| `MINDROOM_PORT` | Port in the default OAuth callback URL, the default [Connections token audience](https://docs.mindroom.chat/connections-portal/#token-binding), and the address MindRoom Chat finds when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; it does not set the API server's bind port, which is `mindroom run --api-port`, and when unset it follows that port | the `--api-port` port, `8765` by default |
 | `MINDROOM_DASHBOARD_URL` | Origin, HTTPS or HTTP on a local address, where administrators open the dashboard when another app owns `/` on `MINDROOM_PUBLIC_URL`; prerequisites and effects are in [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host) | _(unset: the dashboard is at `/` on the public origin)_ |
 | `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra host names that unauthenticated dashboard or `/v1` requests may address (see [Authorization](https://docs.mindroom.chat/authorization/#unauthenticated-dashboard-host-names)) | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin, or `MINDROOM_DASHBOARD_URL` on that host | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173`, or the hosted public origins when `MINDROOM_PUBLIC_URL` is set |
@@ -9293,6 +9293,7 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
 
 - **Rotate the local device**: Run `mindroom desktop login --replace`, revoke the old device in your Matrix account settings, then run `!desktop rotate` in the agent chat and follow its pairing command.
   `--replace` does not revoke the old device by itself.
+  If a `browser` tool uses the desktop target, update its `device_id` and `device_ed25519` settings to the new device, or its calls fail.
 - **Change the cloud controller**: Once the bridge has a command history, saving a different controller identity is rejected.
   Use `--storage-path` with a new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`; the new setup does not carry over pending commands or outcomes, and the macOS app has no migration action.
 - **Identity mismatch**: A device ID or Ed25519 mismatch is a hard failure; treat it as a rotation or possible substitution and do not bypass it.
@@ -10885,7 +10886,7 @@ browser_control(action="screenshot")
 
 Host-target profiles are named, with `mindroom` as the default; names starting with a dot are rejected.
 In the primary process a profile lives at `browser-profiles/<profile>` under the agent's state root, so every requester of a shared agent shares its signed-in sessions, while different agents never share them.
-This holds even with `worker_scope: user` or `user_agent` unless `browser` is in `worker_tools`, which gives each worker scope its own profiles.
+This holds even with `worker_scope: user` or `user_agent` unless `browser` is in `worker_tools`, which gives each dedicated Docker or Kubernetes worker its own profiles; for the `static_runner` backend see [Browsers in workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#browsers-in-workers).
 In the primary process a started profile keeps running, with its tabs, across replies until `action="stop"` or a MindRoom restart, and replies using it at the same time share it.
 Use a private agent when requesters need separate browser sessions.
 Chromium is taken from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable`.
@@ -12786,7 +12787,7 @@ An administrator creates one Atlassian OAuth 2.0 (3LO) app for the MindRoom inst
 5. Under **Settings**, copy the client ID and secret.
 
 For a local installation, the callback URL is `http://localhost:8765/api/oauth/atlassian/callback`.
-A hosted installation must set `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, from which MindRoom derives the callback URL, and the URL registered on the app must match exactly.
+A hosted installation must set `MINDROOM_PUBLIC_URL`, from which MindRoom derives the callback URL, and the URL registered on the app must match exactly.
 MindRoom always uses this callback and ignores any `redirect_uri` stored with the app credentials.
 
 Store the client ID and secret in the `atlassian_oauth_client` credential service through the dashboard credentials page.
@@ -13392,7 +13393,7 @@ An administrator registers one app in Microsoft Entra for the MindRoom installat
 `User.Read.All`, which `microsoft_people` requests, likewise always needs administrator consent before anyone can connect the people directory.
 
 For a local installation, the redirect URIs are `http://localhost:8765/api/oauth/<provider ID>/callback`, such as `http://localhost:8765/api/oauth/microsoft_files/callback`.
-A hosted installation must set `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, from which MindRoom derives each redirect URI, and the URIs registered on the app must match exactly.
+A hosted installation must set `MINDROOM_PUBLIC_URL`, from which MindRoom derives each redirect URI, and the URIs registered on the app must match exactly.
 Do not add application permissions; the tools only use delegated permissions, which act as the signed-in user.
 
 Store the client ID and secret in the `microsoft_oauth_client` credential service through the dashboard credentials page.
@@ -14924,7 +14925,7 @@ agents:
 `composio` exposes the Composio actions listed in `actions` as agent tools.
 Callable names are the lowercase action IDs; for example, `GITHUB_GET_THE_AUTHENTICATED_USER` becomes `github_get_the_authenticated_user`.
 Before loading the tool, configure the API key and connect the apps' accounts for the chosen `entity_id` in Composio, because the agent cannot create connections itself.
-A missing or empty `actions` list fails with `Composio requires a nonempty actions list.`
+An empty `actions` list in a tool entry fails config validation, and when no setting provides `actions`, the tool fails to load with `Composio requires a nonempty actions list.`
 `composio` does not accept `include_tools` or `exclude_tools`; choose its functions with `actions`.
 It is not confined by `file_access` and cannot run in a worker, so enable it only for agents trusted with the primary runtime (see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access)).
 
@@ -15159,6 +15160,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 Connect Home Assistant in the dashboard's **Tools** tab, using either method:
 
 - **OAuth**: enter the Home Assistant URL; Home Assistant needs no application registration, and after sign-in it returns you to `MINDROOM_DASHBOARD_URL` when you connect from that host, else to `MINDROOM_PUBLIC_URL`, or to the address MindRoom received the request on when that is unset, so set `MINDROOM_PUBLIC_URL` when a proxy in front of MindRoom terminates HTTPS.
+  Home Assistant refuses that address with `Invalid client id` when it is an IP address other than a loopback, private, or link-local one, such as a public or Tailscale `100.x` address, so set `MINDROOM_PUBLIC_URL`, or `MINDROOM_DASHBOARD_URL` when you connect from that host, to a URL with a DNS name, such as `https://mindroom.example.org`, or use the access-token method.
 - **Access token**: in your Home Assistant profile, create a long-lived access token under **Long-Lived Access Tokens**, then enter the Home Assistant URL and the token.
 
 Expired OAuth access tokens renew automatically.
@@ -15170,6 +15172,7 @@ A Home Assistant URL on a private, local, or loopback network, such as `http://h
 | `Invalid authentication token. Please reconnect Home Assistant.` | The token was revoked or OAuth renewal failed; reconnect. |
 | `Private Home Assistant URLs require explicit opt-in. ...` | Enable **Allow private or local URL** and reconnect. |
 | `Connection timeout - check if Home Assistant is accessible` | Make sure the MindRoom server can reach the Home Assistant URL. |
+| `Invalid client id` on Home Assistant's sign-in page | Give MindRoom's address a DNS name, as the **OAuth** method above describes, or connect with an access token. |
 
 ## Related Docs
 
@@ -15348,7 +15351,7 @@ Browser changes made with a dashboard sign-in or trusted upstream identity must 
 
 ### Unauthenticated dashboard host names
 
-Without a credential, the dashboard and the `/v1` API answer only requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, or `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
+Without a credential, the dashboard and the `/v1` API answer only requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_URL`, or `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
 This blocks DNS-rebinding attacks from other web pages.
 Any other name, such as `myserver.local`, fails with `Host '<host>' is not allowed without a credential; add it to MINDROOM_DASHBOARD_ALLOWED_HOSTS or configure authentication`.
 Browser pages may call it only when served from the same host, from a `localhost` name or loopback address, or from a host set through the URL settings above or `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
@@ -15572,11 +15575,11 @@ The API routes are:
 Add `agent_name` to target a connection for one agent's credential scope.
 The dashboard connects to the agent's saved scope, so save a `worker_scope` change before connecting.
 
-The provider callback URL is `<MINDROOM_PUBLIC_URL or MINDROOM_BASE_URL>/api/oauth/<provider>/callback`, or `http://localhost:<MINDROOM_PORT>/api/oauth/<provider>/callback` (port `8765` by default) when neither is set.
+The provider callback URL is `<MINDROOM_PUBLIC_URL>/api/oauth/<provider>/callback`, or `http://localhost:<MINDROOM_PORT>/api/oauth/<provider>/callback` (port `8765` by default) when it is unset.
 Register that URL on the provider's OAuth app, or store an explicit `redirect_uri` in the provider-specific client config service.
 
 Conversation connect links for a scoped connection are valid for 10 minutes, work once, and are tied to the requester, provider, and agent scope that produced them.
-For a personal (`user` or `user_agent`) connection, the browser must be signed in to MindRoom as that same requester; for a shared connection, the link itself is enough and no dashboard login is needed.
+For a personal (`user` or `user_agent`) connection, the browser must be signed in to MindRoom as that same requester, through the dashboard, trusted upstream auth, or a [Connections portal](https://docs.mindroom.chat/connections-portal/) session, which MindRoom Chat starts when the link is clicked; for a shared connection, the link itself is enough and no dashboard login is needed.
 MindRoom rechecks the requester's authority when the link is used and rejects the link if the connection changed after it was issued.
 An expired, reused, unauthorized, or outdated link saves no credentials; rerun the original request for a fresh link.
 For an unscoped connection, or a tool call without a concrete requester, the link is reusable and requires dashboard login instead.
@@ -15624,8 +15627,8 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Spotify | [Spotify](https://docs.mindroom.chat/tools/media-and-content/#connect-spotify) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
-A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
-Otherwise the client works only when MindRoom is opened on `localhost`, and other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access.`
+A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
+Otherwise the client works only when MindRoom is opened on `localhost`, and other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL and configure a custom OAuth client for remote access.`
 
 ### Provider And Credential Service Rules
 
@@ -15736,6 +15739,10 @@ Sign-in works as follows:
    It ignores any session the browser still holds, so the account signed in to Chat replaces another account's session in the same browser.
 2. MindRoom accepts only users of its configured homeserver, and only from the Chat origins it allows (see `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` below).
 
+An agent's connect and reset links, which it posts when a tool needs an account, open the same way: MindRoom Chat opens `/connections/?next=<link>` for a link to its Computers backend, and after its sign-in attempt the portal opens the link, which accepts the session of the requester it was made for; if sign-in failed, the link behaves as if opened directly.
+The portal opens only `/api/oauth/<provider>/authorize` and `/api/oauth/<provider>/reset` links on its own origin.
+Opened outside Chat, a link works in a browser that still holds that requester's session, and otherwise asks for the dashboard login.
+
 When the portal is opened directly rather than from Chat, or reloaded after the Chat tab that opened it closed, it uses the existing session or a [trusted upstream](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) identity, or asks the user to open Connections from Chat.
 If two Connections tabs, on the Agents or Agent Keys page, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
 
@@ -15744,7 +15751,7 @@ If two Connections tabs, on the Agents or Agent Keys page, are signed in as diff
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | unset | JSON list of the exact MindRoom Chat origins that may sign users in, such as `'["https://chat.example.org"]'`; unset or blank allows `https://chat.mindroom.chat`, plus any Chat on a local address while MindRoom itself is on a local address, and only while the homeserver binds tokens; `[]` turns sign-in from Chat off |
-| `MINDROOM_PUBLIC_URL` | unset | The origin users open the portal on, which must be HTTPS or plain HTTP on a local address; unset, the portal accepts the request's own origin, the token audience is `http://localhost:<MINDROOM_PORT>`, and OAuth callbacks use `MINDROOM_BASE_URL`, or that same localhost origin without it |
+| `MINDROOM_PUBLIC_URL` | unset | The origin users open the portal on, which must be HTTPS or plain HTTP on a local address; unset, the portal accepts the request's own origin, the token audience is `http://localhost:<MINDROOM_PORT>`, and OAuth callbacks use that same localhost origin |
 | `MINDROOM_CONNECTIONS_AGENT` | unset | Optional private agent (`private.per: user` or `user_agent`) that the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) selects for each user at first; under trusted upstream auth it also limits the dashboard to `administrators` (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)) |
 
 A configured allowlist replaces both defaults.
@@ -15903,7 +15910,7 @@ See the [Privacy Policy](https://docs.mindroom.chat/privacy/#google-api-services
 This page covers the Google OAuth providers behind the Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud tools: which scopes each requests and why, how to set up your own Google Cloud OAuth client, and how to restrict which Google accounts may connect.
 Paired local installations need no Google Cloud setup and use MindRoom's provisioned client; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
 Use a custom client when MindRoom is opened on any address other than a local loopback address such as `localhost` or `127.0.0.1`, when the installation is not paired, or when you need organization-specific Google policies or your own consent-screen branding.
-The provisioned client works only on a loopback address; other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access.`
+The provisioned client works only on a loopback address; other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL and configure a custom OAuth client for remote access.`
 How connections are made, stored per credential scope, disconnected, and reset is covered in the [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
 ## Providers
@@ -16341,7 +16348,8 @@ Do not report or "fix" these; they are deliberate.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
 - The Connections portal signs users in either through trusted upstream auth or through a Matrix OpenID token that MindRoom Chat hands to the portal window, from the origins `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists or, unset, from MindRoom's hosted Chat and, for a portal on a local address, any Chat on a local address.
   Under the default list, MindRoom accepts that sign-in only while the homeserver binds tokens, because otherwise any backend a user opens from Chat could replay their token to it, and request headers cannot show that a portal is out of such a backend's reach; an explicit list is the operator's choice.
-  The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page.
+  The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates the portal and its APIs, its user's own conversation connect and reset links for requester-owned connections, the OAuth callback for flows it started, and the OAuth success page.
+  The portal opens a connect or reset link given as `?next=` after its sign-in attempt, which grants nothing beyond opening that link directly: the link still checks that the signed-in user is its requester, and the user still approves at the provider or on the reset confirmation page.
   Outside hosted platform mode, it also opens the dashboard, but only for a user in `administrators` whose token the homeserver bound to this deployment at sign-in; everyone else, and every session on a homeserver that does not bind tokens, needs the API key for the dashboard.
   Binding is proven by the homeserver's `/_matrix/client/versions` and a second verification of the token after reading it, so turning binding on or off once during a sign-in cannot promote an unbound token; turning it on and off again within that one sign-in is not covered.
   An allowlisted origin can sign a browser in as any Matrix user whose OpenID token it holds, so list only Chat origins you operate or trust; with the default list, a page served from any local address can do so for a portal on a local address.
@@ -19987,7 +19995,8 @@ A runner or worker restart stops running commands; see the [shell tool](https://
 Dedicated Docker and Kubernetes workers with `worker_scope: shared`, `user`, or `user_agent` keep a headless browser session across calls, including open tabs and the browser profile, when Worker Computer is disabled.
 Include `browser` in the agent's `worker_tools` to use it.
 A change to the browser configuration or the prepared process environment closes the session before the next call.
-The `static_runner` backend and unscoped workers start a fresh browser for each call.
+On the `static_runner` backend every agent routed there shares one set of browser profiles, including signed-in sessions; with the default `inprocess` runner execution mode, calls without a `worker_scope` also share one running browser and its tabs, while other calls start a fresh browser.
+Unscoped dedicated workers start a fresh browser for each call.
 An explicit `target: host` uses the worker even when `default_target: desktop` is set.
 
 [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) adds a visible headed browser and Chat viewer to dedicated Docker and Kubernetes workers; the `static_runner` backend does not support it.
@@ -22142,6 +22151,7 @@ Smaller changes that need operator action:
 - **Credentials from the environment**: the first start, or `mindroom doctor`, deletes the credential files earlier releases copied from provider-key variables, `OLLAMA_HOST`, `GITHUB_TOKEN`, `EMBEDDER_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, and credential seeds; MindRoom now reads those values from the environment at each start (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
   Before upgrading, set again any such variable you removed after MindRoom imported it, or save that credential in the dashboard, or the key stops working; startup logs each removed service whose variable is no longer set.
 - **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
+- **Public address setting**: `MINDROOM_BASE_URL` is removed and `mindroom run` refuses to start while it is set, so before upgrading, move its value to `MINDROOM_PUBLIC_URL` unless that is already set, and delete it.
 
 ### Compaction History
 

@@ -1,21 +1,11 @@
-import { isPlainObject } from "@/lib/configSchema";
-
 export type ToolOverrides = Record<string, unknown>;
 
-type NamedToolEntry = {
-  name: string;
-  overrides?: ToolOverrides | null;
-  defer?: boolean;
-  initial?: boolean;
-};
-
 /**
- * One authored `tools` entry: a bare name, the compact `{name: overrides}`
- * mapping the backend serializes, or the explicit named form. Entries are
- * immutable values; edits return new entries.
+ * One authored `tools` entry as the backend serializes it: a bare name or the
+ * compact `{name: overrides}` mapping. Entries are immutable values; edits
+ * return new entries.
  */
-export type ToolEntry =
-  string | NamedToolEntry | Record<string, ToolOverrides | null>;
+export type ToolEntry = string | Record<string, ToolOverrides>;
 
 function parseToolEntry(entry: ToolEntry): {
   name: string;
@@ -25,29 +15,11 @@ function parseToolEntry(entry: ToolEntry): {
     return { name: entry, overrides: null };
   }
 
-  if ("name" in entry && typeof entry.name === "string") {
-    const named = entry as NamedToolEntry;
-    // The explicit form keeps lazy-loading flags beside its overrides; the
-    // compact form this module writes stores them inside the mapping.
-    const overrides = {
-      ...(isPlainObject(named.overrides) ? named.overrides : {}),
-      ...(named.defer === true ? { defer: true } : {}),
-      ...(named.initial === true ? { initial: true } : {}),
-    };
-    return {
-      name: named.name,
-      overrides: Object.keys(overrides).length > 0 ? overrides : null,
-    };
-  }
-
   const [name, overrides] = Object.entries(entry)[0] ?? [];
   if (typeof name !== "string") {
     throw new Error("Structured tool entries must include a tool name");
   }
-  return {
-    name,
-    overrides: isPlainObject(overrides) ? overrides : null,
-  };
+  return { name, overrides: overrides ?? null };
 }
 
 export function toolEntryName(entry: ToolEntry): string {

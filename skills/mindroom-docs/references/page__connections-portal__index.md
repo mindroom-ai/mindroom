@@ -20,6 +20,10 @@ Sign-in works as follows:
    It ignores any session the browser still holds, so the account signed in to Chat replaces another account's session in the same browser.
 2. MindRoom accepts only users of its configured homeserver, and only from the Chat origins it allows (see `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` below).
 
+An agent's connect and reset links, which it posts when a tool needs an account, open the same way: MindRoom Chat opens `/connections/?next=<link>` for a link to its Computers backend, and after its sign-in attempt the portal opens the link, which accepts the session of the requester it was made for; if sign-in failed, the link behaves as if opened directly.
+The portal opens only `/api/oauth/<provider>/authorize` and `/api/oauth/<provider>/reset` links on its own origin.
+Opened outside Chat, a link works in a browser that still holds that requester's session, and otherwise asks for the dashboard login.
+
 When the portal is opened directly rather than from Chat, or reloaded after the Chat tab that opened it closed, it uses the existing session or a [trusted upstream](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) identity, or asks the user to open Connections from Chat.
 If two Connections tabs, on the Agents or Agent Keys page, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
 
@@ -28,7 +32,7 @@ If two Connections tabs, on the Agents or Agent Keys page, are signed in as diff
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | unset | JSON list of the exact MindRoom Chat origins that may sign users in, such as `'["https://chat.example.org"]'`; unset or blank allows `https://chat.mindroom.chat`, plus any Chat on a local address while MindRoom itself is on a local address, and only while the homeserver binds tokens; `[]` turns sign-in from Chat off |
-| `MINDROOM_PUBLIC_URL` | unset | The origin users open the portal on, which must be HTTPS or plain HTTP on a local address; unset, the portal accepts the request's own origin, the token audience is `http://localhost:<MINDROOM_PORT>`, and OAuth callbacks use `MINDROOM_BASE_URL`, or that same localhost origin without it |
+| `MINDROOM_PUBLIC_URL` | unset | The origin users open the portal on, which must be HTTPS or plain HTTP on a local address; unset, the portal accepts the request's own origin, the token audience is `http://localhost:<MINDROOM_PORT>`, and OAuth callbacks use that same localhost origin |
 | `MINDROOM_CONNECTIONS_AGENT` | unset | Optional private agent (`private.per: user` or `user_agent`) that the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) selects for each user at first; under trusted upstream auth it also limits the dashboard to `administrators` (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)) |
 
 A configured allowlist replaces both defaults.

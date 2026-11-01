@@ -70,6 +70,11 @@ def local_api_origin(paths: RuntimePaths) -> str:
     return f"http://localhost:{paths.env_value('MINDROOM_PORT', default='8765') or '8765'}"
 
 
+def configured_public_url(paths: RuntimePaths) -> str | None:
+    """Return `MINDROOM_PUBLIC_URL` without its trailing slash, or None when it is unset."""
+    return (paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/") or None
+
+
 def with_api_port(paths: RuntimePaths, api_port: int) -> RuntimePaths:
     """Return paths whose `MINDROOM_PORT` is the port the API serves on, unless the operator set one."""
     if (paths.env_value("MINDROOM_PORT") or "").strip():
