@@ -54,6 +54,20 @@ def test_openai_ids_count_exactly_only_on_openai_routes() -> None:
     assert alias.key == "llama_cpp:http://127.0.0.1:8080/v1:gpt-4o"
 
 
+def test_older_openai_models_count_with_their_own_encoding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """gpt-4 and gpt-3.5-turbo use cl100k_base, which counts most text higher than o200k_base."""
+
+    class _OneTokenPerCharacter:
+        def encode(self, text: str, *, disallowed_special: tuple[str, ...]) -> list[str]:  # noqa: ARG002
+            return list(text)
+
+    monkeypatch.setitem(families._encoders, "cl100k_base", families._Encoder(value=_OneTokenPerCharacter()))
+    counter = counter_for_model(ModelIdentity(id="gpt-4", provider="openai"), local_encoder=True)
+
+    assert counter.key == "tiktoken:cl100k_base"
+    assert count(counter, "hello world") == TokenCount(11, "exact")
+
+
 def test_unmapped_ids_estimate_with_their_family_margin() -> None:
     load_o200k()
     text = "Ein Satz mit Zahlen 2026-10-31 und `code()`.\n" * 20
@@ -77,7 +91,7 @@ def test_estimates_wait_for_the_encoder_without_blocking(monkeypatch: pytest.Mon
         release.wait()
         return real_get_encoding(name)
 
-    monkeypatch.setattr(families, "_o200k_encoder", families._Encoder())
+    monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
     monkeypatch.setattr(tiktoken, "get_encoding", slow_get_encoding)
     endpoint = _Endpoint()
     counter = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"), count=endpoint)
@@ -371,7 +385,7 @@ def test_a_frozen_counter_keeps_the_encoder_it_started_with(monkeypatch: pytest.
         release.wait()
         return real_get_encoding(name)
 
-    monkeypatch.setattr(families, "_o200k_encoder", families._Encoder())
+    monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
     monkeypatch.setattr(tiktoken, "get_encoding", slow_get_encoding)
     counter = counter_for_model(ModelIdentity(id="qwen3.8:27b", provider="ollama"))
     frozen = counts.frozen(counter)

@@ -1,6 +1,6 @@
 """The local counter of each model: its own tokenizer where one runs locally, otherwise a scaled o200k_base estimate.
 
-o200k_base loads in a background thread on first use, because tiktoken downloads its vocabulary then, without a
+Each encoding loads in a background thread on first use, because tiktoken downloads its vocabulary then, without a
 timeout, and no reply may wait for that. Until it has loaded, or when it cannot load, estimates are None and counts
 use a stand-in (``token_counting.counts``).
 """
@@ -44,50 +44,60 @@ _PIECE_CHARS = 8_192
 
 @dataclass
 class _Encoder:
-    """The o200k_base encoder once loaded, and whether its background load started."""
+    """One tiktoken encoder once loaded, and whether its background load started."""
 
     value: tiktoken.Encoding | None = None
     started: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-_o200k_encoder = _Encoder()
+# The encoders by tiktoken encoding name: o200k_base for every estimate, and the own encoding of an OpenAI model.
+_encoders: dict[str, _Encoder] = {}
+
+
+def _encoder(name: str) -> _Encoder:
+    return _encoders.setdefault(name, _Encoder())
+
+
+def _load(name: str) -> tiktoken.Encoding:
+    """Return the encoder ``name``, loading it first; this blocks, and the first load may download its vocabulary."""
+    encoder = _encoder(name)
+    if encoder.value is None:
+        with encoder.lock:
+            if encoder.value is None:
+                encoder.value = tiktoken.get_encoding(name)
+    return encoder.value
 
 
 def load_o200k() -> tiktoken.Encoding:
     """Return the o200k_base encoder, loading it first; this blocks, and the first load may download its vocabulary."""
-    encoder = _o200k_encoder
-    if encoder.value is None:
-        with encoder.lock:
-            if encoder.value is None:
-                encoder.value = tiktoken.get_encoding(_O200K)
-    return encoder.value
+    return _load(_O200K)
 
 
-def _load_in_background() -> None:
+def _load_in_background(name: str) -> None:
     try:
-        load_o200k()
+        _load(name)
     except Exception:
         logger.warning(
-            "o200k_base did not load; token estimates use a quarter token per character, and compaction input its bytes",
+            f"{name} did not load; token estimates use a quarter token per character, and compaction input its bytes",
             exc_info=True,
         )
 
 
-def _loaded_o200k() -> tiktoken.Encoding | None:
+def _loaded(name: str) -> tiktoken.Encoding | None:
     """Return the encoder once loaded; the first call starts its load in a background thread and returns None."""
-    encoder = _o200k_encoder
+    encoder = _encoder(name)
     if encoder.value is None and not encoder.started:
         encoder.started = True
-        threading.Thread(target=_load_in_background, name="o200k-loader", daemon=True).start()
+        threading.Thread(target=_load_in_background, args=(name,), name=f"{name}-loader", daemon=True).start()
     return encoder.value
 
 
 def _piece_end(text: str, start: int, end: int) -> int:
     """Return where a piece starting at ``start`` ends, at most at ``end``: just before a word, after a newline or a space.
 
-    o200k_base starts a new token there, so pieces cut there count as one encode does; a stretch without such a
-    place is cut at ``end``, which can add a token.
+    tiktoken's encodings start a new token there, so pieces cut there count as one encode does; a stretch without
+    such a place is cut at ``end``, which can add a token.
     """
     newline = text.rfind("\n", start, end - 1)
     while newline >= start and text[newline + 1].isspace():
@@ -112,21 +122,23 @@ def _encoded_length(encoder: tiktoken.Encoding, text: str) -> int:
     return total
 
 
-def _o200k_tokens(text: str) -> int | None:
-    encoder = _loaded_o200k()
+def _encoding_tokens(name: str, text: str) -> int | None:
+    encoder = _loaded(name)
     return None if encoder is None else _encoded_length(encoder, text)
 
 
 def _scaled_o200k_tokens(margin: float, text: str) -> int | None:
-    tokens = _o200k_tokens(text)
+    tokens = _encoding_tokens(_O200K, text)
     return None if tokens is None else math.ceil(tokens * margin)
 
 
-def _maps_to_o200k(name: str) -> bool:
+def _own_encoding(name: str) -> str | None:
+    """Return the encoding tiktoken maps an OpenAI model id to, or None for an id it does not know."""
     try:
-        return tiktoken.model.encoding_name_for_model(name) in _O200K_ENCODINGS
+        encoding = tiktoken.model.encoding_name_for_model(name)
     except KeyError:
-        return False
+        return None
+    return _O200K if encoding in _O200K_ENCODINGS else encoding
 
 
 def _margin(name: str) -> float:
@@ -155,8 +167,13 @@ def counter_for_model(
     pauses only its own counts.
     """
     name = identity.id.lower().rsplit("/", 1)[-1]
-    if local_encoder and _maps_to_o200k(name):
-        return TokenCounter(key=f"tiktoken:{_O200K}", estimate=_o200k_tokens, exact_locally=True, replay=replay)
+    if local_encoder and (encoding := _own_encoding(name)) is not None:
+        return TokenCounter(
+            key=f"tiktoken:{encoding}",
+            estimate=partial(_encoding_tokens, encoding),
+            exact_locally=True,
+            replay=replay,
+        )
     return TokenCounter(
         key=f"{identity.provider}:{endpoint or identity.endpoint or ''}:{identity.id}",
         estimate=partial(_scaled_o200k_tokens, _margin(name)),

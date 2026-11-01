@@ -34,7 +34,7 @@ Provider tokens per o200k_base token on those samples:
 
 - The counting endpoints are free and rate-limited apart from generation: Anthropic `count_tokens` (also Vertex AI `count-tokens:rawPredict` and Bedrock), Gemini `countTokens`, OpenAI's input-token count, and llama.cpp `/tokenize`.
 - Each endpoint except llama.cpp counts a whole message, so a count includes the message framing; a one-character message counts that framing plus one token, because every such route's tokenizer encodes `"a"` as one token.
-- tiktoken's mapping of a model id to `o200k_base` or `o200k_harmony` is that model's tokenizer only on a route that serves OpenAI's own models (OpenAI's endpoint, Azure, Codex, OpenRouter `openai/` ids); a llama.cpp or other OpenAI-compatible server can serve any model under an OpenAI name.
+- tiktoken's mapping of a model id to its encoding (`o200k_base`, `o200k_harmony`, or `cl100k_base` for older models such as GPT-4) is that model's tokenizer only on a route that serves OpenAI's own models (OpenAI's endpoint, Azure, Codex, OpenRouter `openai/` ids); a llama.cpp or other OpenAI-compatible server can serve any model under an OpenAI name.
 - tiktoken downloads its vocabulary on first use with no timeout.
 
 ## Decisions
