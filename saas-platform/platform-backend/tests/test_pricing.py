@@ -124,7 +124,8 @@ class TestPricingConfig:
         assert listed
         for tier, plan in listed.items():
             assert plan.price_monthly > 0, tier
-            assert plan.price_yearly * 100 == plan.price_monthly * 12 * (100 - model.discounts.annual_percentage), tier
+            discounted = plan.price_monthly * 12 * (100 - model.discounts.annual_percentage) / 100
+            assert plan.price_yearly == round(discounted), tier  # To the cent, which a price like $9.99 needs.
 
     def test_stripe_price_ids(self) -> None:
         """Test that Stripe price IDs are present."""
