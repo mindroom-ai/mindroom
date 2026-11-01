@@ -75,12 +75,7 @@ def _create_no_op_limiter():  # noqa: C901, ANN202
 
                 # Check if this endpoint has a limit defined
                 # First check _route_limits (from decorator), then _limits, then default
-                # Special handling for admin endpoints - check request path
-                if hasattr(request, "url") and request.url.path == "/admin/stats":
-                    # Force the correct limit for admin/stats endpoint
-                    limit_str = "30/minute"
-                else:
-                    limit_str = self._route_limits.get(endpoint_name) or self._limits.get(endpoint_name, "5/minute")
+                limit_str = self._route_limits.get(endpoint_name) or self._limits.get(endpoint_name, "5/minute")
 
                 # Parse the limit (simple parsing for "N/minute" format)
                 if "/" in limit_str:

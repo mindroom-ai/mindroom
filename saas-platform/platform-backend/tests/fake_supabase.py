@@ -6,6 +6,7 @@ Embedded many-to-one selects such as ``subscription:subscriptions(*)`` or ``acco
 RPC calls are recorded in ``rpc_calls``, return ``rpc_results[name]`` (default None), and leave the tables alone.
 Deleting an auth user through ``auth.admin`` records it and removes its ``accounts`` row, like the ON DELETE CASCADE.
 A counted select whose range starts past the matching rows fails, like PostgREST's 416 (PGRST103).
+A ``head`` select returns only the count, like PostgREST's HEAD request.
 ``max_rows`` caps the rows one select returns, like PostgREST's ``db-max-rows``.
 """
 
@@ -43,14 +44,15 @@ class FakeQuery:
     filters: list[tuple[str, str, Any]] = field(default_factory=list)
     order_by: list[tuple[str, bool]] = field(default_factory=list)
     count_rows: bool = False
+    head: bool = False
     row_range: tuple[int, int] | None = None
     row_limit: int | None = None
     single_row: bool = False
     conflict_column: str | None = None
     negate_next: bool = False
 
-    def select(self, columns: str = "*", *, count: str | None = None) -> FakeQuery:
-        self.columns, self.count_rows = columns, count == "exact"
+    def select(self, columns: str = "*", *, count: str | None = None, head: bool = False) -> FakeQuery:
+        self.columns, self.count_rows, self.head = columns, count == "exact", head
         return self
 
     def update(self, payload: dict[str, Any]) -> FakeQuery:
@@ -77,6 +79,9 @@ class FakeQuery:
 
     def eq(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
         return self._filter("eq", column, value)
+
+    def neq(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
+        return self.not_.eq(column, value)
 
     def gt(self, column: str, value: Any) -> FakeQuery:  # noqa: ANN401
         return self._filter("gt", column, value)
@@ -146,6 +151,8 @@ class FakeQuery:
         for column, desc in reversed(self.order_by):
             matched.sort(key=lambda row, column=column: str(row.get(column) or ""), reverse=desc)
         count = len(matched) if self.count_rows else None
+        if self.head:
+            return FakeResult([], count)
         if count is not None and self.row_range and self.row_range[0] > count:
             raise APIError({"code": "PGRST103", "message": "Requested range not satisfiable"})
         if self.row_range:

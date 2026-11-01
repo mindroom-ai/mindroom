@@ -123,14 +123,6 @@ class SyncResult(BaseModel):
     updates: list[SyncUpdateOut]
 
 
-class AdminStatsOut(BaseModel):
-    """Admin statistics output model."""
-
-    accounts: int
-    active_subscriptions: int
-    running_instances: int
-
-
 class UpdateAccountStatusResponse(BaseModel):
     """Update account status response model."""
 

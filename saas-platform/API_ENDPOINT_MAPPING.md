@@ -41,7 +41,6 @@ An operation without a platform frontend caller can still serve an external inte
 
 | Method | Path | Backend module | Frontend caller or purpose |
 | --- | --- | --- | --- |
-| GET | `/admin/stats` | `admin.py` | `src/app/admin/page.tsx`: platform statistics |
 | GET | `/admin/metrics/dashboard` | `admin.py` | `src/app/admin/page.tsx`: dashboard metrics |
 | GET | `/admin/instance-lifecycle` | `admin.py` | `src/app/admin/lifecycle/page.tsx`: instance lifecycle overview |
 | POST | `/admin/instances/{instance_id}/start` | `admin.py` | `src/components/admin/InstanceActions.tsx`: start |
