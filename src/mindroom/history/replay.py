@@ -81,7 +81,7 @@ def prompt_visible_history_texts(
 ) -> tuple[str, ...]:
     """Return the texts the canonical estimate of the scope's prompt-visible history counts, for a provider to count.
 
-    History a native checkpoint stands in for has none: no provider counts the checkpoint's ciphertext as text.
+    History that holds a native checkpoint has none: no provider counts the checkpoint's ciphertext as text.
     """
     messages = _prompt_visible_messages(session, history_settings)
     if any(checkpoint_items(message, native_route) for message in messages):

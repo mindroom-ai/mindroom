@@ -337,7 +337,7 @@ async def _reported_or_measured_history(
     """Return the history size the provider reported for the scope's latest request, if it still describes the history.
 
     Without one, the provider counts the scope's prompt-visible history instead, and the reply waits for that count, so
-    its estimate of the history reads exact counts.
+    its estimate of the history reads exact counts; history that holds a native checkpoint keeps the estimate.
     """
     reported = (
         await asyncio.to_thread(

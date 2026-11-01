@@ -47,7 +47,7 @@ OpenAI models with a known tokenizer, such as GPT-4o, also count exactly on Chat
 Other models, such as those on Ollama or other OpenAI-compatible servers, use an estimate.
 Estimates need the `o200k_base` vocabulary, and older OpenAI models such as GPT-4 on OpenAI's own routes need `cl100k_base`; each downloads on first use, so without network access set `TIKTOKEN_CACHE_DIR` to a directory that already holds them, or the log shows `o200k_base did not load` and estimates fall back to a quarter token per character.
 A reply waits for the provider to count text it has not counted before, such as a changed system prompt or a `MEMORY.md` over its token cap, up to five seconds per count; later replies reuse that count.
-Conversation history is sized from the request size the provider reported for the previous reply, so it costs no wait; without one, such as under a history limit or after another model answered, the reply waits for a count of the history, or uses the estimate where native compaction has condensed it.
+Conversation history is sized from the request size the provider reported for the previous reply, so it costs no wait; without one, such as under a history limit or after another model answered, the reply waits for a count of the history, or uses the estimate once native compaction has condensed part of it.
 Other text, such as the current message, compaction input, and the files `prompt_curation` compares with its `trigger_tokens`, uses the model's estimate, which may count high.
 Counting sends that text to the provider that also receives the agent's requests.
 A count that fails uses the estimate and logs a `Token count failed` warning, once until that route's counting works again.
