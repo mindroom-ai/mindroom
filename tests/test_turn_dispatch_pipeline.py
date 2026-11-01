@@ -45,6 +45,7 @@ from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliver
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import ConversationReader
+from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -1257,6 +1258,33 @@ class TestAgentBot(AgentBotTestBase):
         assert validator.classify(fallback_relay).discovery_event_id is None
         assert validator.classify(replyless_relay).discovery_event_id is None
         assert validator.classify(non_router_relay).discovery_event_id is None
+
+    def test_room_level_router_relay_names_its_original_event(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A room-mode handoff, which clients do not show as a reply, still aliases the human event it relays."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        content = build_message_content(
+            "@mindroom_calculator:localhost could you help with this?",
+            reply_to_event_id="$user_msg:localhost",
+            extra_content={
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            },
+        )
+        relay = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$relay:localhost",
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": content,
+            },
+        )
+
+        assert bot._ingress_validator.classify(relay).discovery_event_id == "$user_msg:localhost"
 
     @pytest.mark.asyncio
     async def test_external_trigger_to_private_agent_uses_trigger_owner_as_requester(
