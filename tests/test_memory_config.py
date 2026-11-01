@@ -74,6 +74,8 @@ def _fake_mem0_llm() -> SimpleNamespace:
 
 
 _SAVED_OLLAMA = "http://saved-ollama:11434"
+_DOTENV_URL = "http://dotenv.local/v1"
+_DOTENV_BASE_URL = f"OPENAI_BASE_URL={_DOTENV_URL}\n"
 _CONFIGURED_OLLAMA = "http://config-ollama:11434"
 
 
@@ -800,17 +802,41 @@ class TestMemoryConfig:
         assert mem0_embedder_config["openai_base_url"] == OPENAI_BASE_URL_DEFAULT
 
     @pytest.mark.parametrize(
-        ("exported", "env_file", "expected_url"),
+        ("exported", "env_file", "embedder_host", "embedder_url", "llm_url"),
         [
-            pytest.param({}, "OPENAI_BASE_URL=http://dotenv.local/v1\n", "http://dotenv.local/v1", id="env-file"),
+            pytest.param({}, _DOTENV_BASE_URL, None, _DOTENV_URL, _DOTENV_URL, id="env-file"),
             pytest.param(
                 {"OPENAI_BASE_URL": ""},
-                "OPENAI_BASE_URL=http://dotenv.local/v1\n",
-                "http://dotenv.local/v1",
+                _DOTENV_BASE_URL,
+                None,
+                _DOTENV_URL,
+                _DOTENV_URL,
                 id="env-file-under-blank-export",
             ),
-            pytest.param({"OPENAI_BASE_URL_FILE": "endpoint"}, "", "http://file.local/v1", id="file-variable"),
-            pytest.param({"OPENAI_BASE_URL": ""}, "", OPENAI_BASE_URL_DEFAULT, id="blank-export"),
+            pytest.param(
+                {"OPENAI_BASE_URL_FILE": "endpoint"},
+                "",
+                None,
+                "http://file.local/v1",
+                "http://file.local/v1",
+                id="file-variable",
+            ),
+            pytest.param(
+                {"OPENAI_BASE_URL": ""},
+                "",
+                None,
+                OPENAI_BASE_URL_DEFAULT,
+                OPENAI_BASE_URL_DEFAULT,
+                id="blank-export",
+            ),
+            pytest.param(
+                {},
+                _DOTENV_BASE_URL,
+                "http://embedder.local/v1",
+                "http://embedder.local/v1",
+                _DOTENV_URL,
+                id="embedder-host-wins",
+            ),
         ],
     )
     def test_openai_memory_clients_without_an_endpoint_reach_openai_base_url(
@@ -819,9 +845,11 @@ class TestMemoryConfig:
         monkeypatch: pytest.MonkeyPatch,
         exported: dict[str, str],
         env_file: str,
-        expected_url: str,
+        embedder_host: str | None,
+        embedder_url: str,
+        llm_url: str,
     ) -> None:
-        """The embedder and the memory LLM read `OPENAI_BASE_URL` as chat models do, wherever it is set."""
+        """The embedder and the memory LLM read `OPENAI_BASE_URL` as chat models do, unless the embedder sets `host`."""
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
         monkeypatch.delenv("OPENAI_BASE_URL_FILE", raising=False)
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -832,20 +860,21 @@ class TestMemoryConfig:
         (tmp_path / ".env").write_text(env_file, encoding="utf-8")
         (tmp_path / "endpoint").write_text("http://file.local/v1\n", encoding="utf-8")
         runtime_paths = resolve_runtime_paths(config_path=config_path, process_env=exported)
+        embedder = {"model": "text-embedding-3-small", "api_key": "key", "host": embedder_host}
         config = Config(
             memory={
-                "embedder": {"provider": "openai", "config": {"model": "text-embedding-3-small", "api_key": "key"}},
+                "embedder": {"provider": "openai", "config": embedder},
                 "llm": {"provider": "openai", "config": {"model": OPENAI_GPT_LUNA, "api_key": "key"}},
             },
             router=RouterConfig(model="default"),
         )
 
-        embedder = create_configured_embedder(config, runtime_paths)
-        assert str(embedder._sdk_client().base_url) == f"{expected_url}/"
+        client = create_configured_embedder(config, runtime_paths)
+        assert str(client._sdk_client().base_url) == f"{embedder_url}/"
         mem0_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)
-        assert mem0_config["embedder"]["config"]["openai_base_url"] == expected_url
-        assert mem0_config["llm"]["config"]["openai_base_url"] == expected_url
-        assert str(OpenAILLM(mem0_config["llm"]["config"]).client.base_url) == f"{expected_url}/"
+        assert mem0_config["embedder"]["config"]["openai_base_url"] == embedder_url
+        assert mem0_config["llm"]["config"]["openai_base_url"] == llm_url
+        assert str(OpenAILLM(mem0_config["llm"]["config"]).client.base_url) == f"{llm_url}/"
 
     @pytest.mark.parametrize(
         ("configured_url", "expected_url"),
