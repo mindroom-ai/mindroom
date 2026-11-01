@@ -520,7 +520,7 @@ def kubernetes_backend_config_signature(
     client_identity = _kubernetes_client_identity(runtime_paths)
     signature = (
         "kubernetes",
-        runtime_paths.env_value(WORKER_COMPUTER_ENABLED_ENV, default="") or "",
+        runtime_paths.env_value(WORKER_COMPUTER_ENABLED_ENV, default=""),
         stable_signature_json(config.seccomp_profile),
         config.namespace,
         config.image,

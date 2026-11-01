@@ -1228,13 +1228,7 @@ def _reload_reason_for(
 
 
 def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:
-    raw = (
-        runtime_paths.env_value(
-            _SCRIPT_RETENTION_SECONDS_ENV,
-            default=str(_DEFAULT_SCRIPT_RETENTION_SECONDS),
-        )
-        or ""
-    ).strip()
+    raw = runtime_paths.env_value(_SCRIPT_RETENTION_SECONDS_ENV, default=str(_DEFAULT_SCRIPT_RETENTION_SECONDS))
     try:
         value = float(raw)
     except ValueError:

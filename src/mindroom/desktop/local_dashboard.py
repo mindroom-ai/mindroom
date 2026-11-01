@@ -71,9 +71,8 @@ def local_dashboard_configuration(runtime_paths: RuntimePaths) -> dict[str, obje
             config_path=runtime_paths.config_path,
             process_env=dict(runtime_paths.process_env),
         )
-        raw_url = current.env_value("MINDROOM_URL", default=DEFAULT_MINDROOM_URL)
-        url = _canonical_loopback_url(raw_url or "")
-        api_key = current.env_value("MINDROOM_API_KEY") or None
+        url = _canonical_loopback_url(current.env_value("MINDROOM_URL", default=DEFAULT_MINDROOM_URL))
+        api_key = current.env_value("MINDROOM_API_KEY")
     except Exception as exc:
         # Neither parser errors nor URLs may carry a credential into status or wire errors.
         raise NativeProtocolError(

@@ -207,10 +207,7 @@ def dashboard_requires_credential(runtime_paths: RuntimePaths) -> bool:
 
 def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
     value = runtime_paths.env_value(name)
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
+    return None if value is None else value.strip()
 
 
 def _build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> _TrustedUpstreamAuthSettings:

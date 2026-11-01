@@ -191,6 +191,7 @@ Changing a prompt that agents build in when they start, such as `HIDDEN_TOOL_CAL
 ## Environment Variables
 
 Set variables in the process environment or in the `.env` file next to `config.yaml`; the process environment wins.
+A blank value, or an unedited placeholder from the starter `.env`, counts as unset in either place unless a variable's description gives an empty value its own meaning, and an exported one never hides the `.env` value, so a container passthrough of a variable the host leaves unset keeps the `.env` setting.
 `MINDROOM_CONFIG_PATH`, `LOG_LEVEL`, `MINDROOM_LOGGER_LEVELS`, `MINDROOM_LOG_FORMAT`, `NO_COLOR`, and [`MINDROOM_TIMING`](https://docs.mindroom.chat/deployment/operational-log-events/#debug-logging) are read only from the process environment, so the `.env` file does not set them.
 Container `env_file`/`--env-file` injection sets process variables and therefore works.
 
