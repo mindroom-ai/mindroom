@@ -969,53 +969,21 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
 
 def test_status_and_connect_name_a_callback_the_authorization_server_refused(tmp_path: Path) -> None:
     """When the server refuses MindRoom's new callback, the dashboard shows that refusal instead of a generic error."""
-    public_url = "https://acme.mindroom.chat"
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org", "MINDROOM_PUBLIC_URL": public_url},
-    )
+    runtime_paths = _runtime_paths(tmp_path, {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"})
     api_app = _make_test_app(runtime_paths, _config_payload())
-    local_callback = "http://localhost:8765/api/oauth/public_mail/callback"
-    get_runtime_credentials_manager(runtime_paths).save_credentials(
-        "public_mail_oauth_client",
-        {
-            "client_id": "registered-client-id",
-            "redirect_uri": local_callback,
-            OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: local_callback,
-            "_source": "oauth_dynamic_client_registration",
-            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
-        },
-    )
-    refusal = "The Public Mail authorization server refused to register MindRoom's new callback https://acme.mindroom.chat/api/oauth/public_mail/callback."
-
-    async def refuse_moved_callback() -> None:
-        raise OAuthCallbackRefusedError(refusal)
-
-    async def bootstrap(provider: OAuthProvider, _runtime_paths: constants.RuntimePaths) -> OAuthRuntimeEndpoints:
-        return OAuthRuntimeEndpoints(
-            authorization_url=provider.authorization_url,
-            token_url=provider.token_url,
-            register_moved_callback=refuse_moved_callback,
-        )
-
-    provider = OAuthProvider(
-        id="public_mail",
-        display_name="Public Mail",
-        authorization_url="https://auth.example.test/authorize",
-        token_url="https://auth.example.test/token",
-        scopes=("mail.read",),
-        credential_service="public_mail_oauth",
-        client_config_services=("public_mail_oauth_client",),
-        token_endpoint_auth_method="none",
-        pkce_code_challenge_method="S256",
-        runtime_bootstrapper=bootstrap,
+    provider = _fake_provider()
+    refusal = (
+        "The Test Drive authorization server refused to register MindRoom's new callback https://acme.mindroom.chat/cb."
     )
 
-    with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
-        with TestClient(api_app, base_url=public_url) as client:
-            login_with_api_key(client)
-            status_response = client.get("/api/oauth/public_mail/status?agent_name=general")
-            connect_response = client.post("/api/oauth/public_mail/connect?agent_name=general")
+    with (
+        patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}),
+        patch.object(OAuthProvider, "client_config_resolution_async", side_effect=OAuthCallbackRefusedError(refusal)),
+        TestClient(api_app, base_url="http://localhost:8765") as client,
+    ):
+        login_with_api_key(client)
+        status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+        connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
 
     assert (status_response.status_code, status_response.json()["detail"]) == (503, refusal)
     assert (connect_response.status_code, connect_response.json()["detail"]) == (503, refusal)

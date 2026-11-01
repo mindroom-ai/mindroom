@@ -238,8 +238,7 @@ class _MovableAuthorizationServerDiscoveryClient(_FakeDiscoveryClient):
 
     authorization_server: ClassVar[str] = "https://auth.example.test"
     supports_registration: ClassVar[bool] = False
-    refuses_registration: ClassVar[bool] = False
-    refusal_status: ClassVar[int] = 400
+    refusal_status: ClassVar[int | None] = None
 
     async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> _FakeDiscoveryResponse:
         del headers
@@ -268,7 +267,7 @@ class _MovableAuthorizationServerDiscoveryClient(_FakeDiscoveryClient):
         del headers
         self.posts.append((url, json))
         assert url == f"{self.authorization_server}/register"
-        if self.refuses_registration:
+        if self.refusal_status is not None:
             return _FakeDiscoveryResponse({"error": "invalid_redirect_uri"}, status_code=self.refusal_status)
         return _FakeDiscoveryResponse(
             {"client_id": f"client-of-{urlparse(url).netloc}", "redirect_uris": json["redirect_uris"]},
@@ -628,11 +627,12 @@ async def test_oauth_provider_still_requires_confidential_client_secret(tmp_path
         await provider.require_client_config_async(runtime_paths)
 
 
+_LOCAL_CALLBACK = "http://localhost:8765/api/oauth/mcp_demo/callback"
 # A dynamic registration stored before MindRoom recorded the token endpoint it belongs to.
 _LEGACY_REGISTRATION = {
     "client_id": "legacy-client-id",
-    "redirect_uri": "http://localhost:8765/api/oauth/mcp_demo/callback",
-    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "http://localhost:8765/api/oauth/mcp_demo/callback",
+    "redirect_uri": _LOCAL_CALLBACK,
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: _LOCAL_CALLBACK,
     "_source": "oauth_dynamic_client_registration",
     "_oauth_provider": "mcp_demo",
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
@@ -683,8 +683,8 @@ async def test_mcp_oauth_reregisters_dynamic_client_when_token_endpoint_moves(
             "provider_id": "mcp_demo",
             "previous_token_endpoint_origin": "https://auth.example.test",
             "current_token_endpoint_origin": "https://moved.example.test",
-            "previous_redirect_uri": "http://localhost:8765/api/oauth/mcp_demo/callback",
-            "current_redirect_uri": "http://localhost:8765/api/oauth/mcp_demo/callback",
+            "previous_redirect_uri": _LOCAL_CALLBACK,
+            "current_redirect_uri": _LOCAL_CALLBACK,
         },
     ]
     assert [url for url, _payload in _MovableAuthorizationServerDiscoveryClient.posts] == [
@@ -715,7 +715,7 @@ async def test_mcp_oauth_reregisters_dynamic_client_when_the_callback_changes(
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     local_resolution = await provider.client_config_resolution_async(_runtime_paths(tmp_path))
     assert local_resolution is not None
-    assert local_resolution.config.redirect_uri == "http://localhost:8765/api/oauth/mcp_demo/callback"
+    assert local_resolution.config.redirect_uri == _LOCAL_CALLBACK
     moved_paths = _runtime_paths(tmp_path, **env)
     redirect_uri = f"{callback}/api/oauth/mcp_demo/callback"
 
@@ -734,7 +734,7 @@ async def test_mcp_oauth_reregisters_dynamic_client_when_the_callback_changes(
     assert resolution.config.redirect_uri == redirect_uri
     assert resolution.registered_redirect_uri == redirect_uri
     assert [payload["redirect_uris"] for _url, payload in _MovableAuthorizationServerDiscoveryClient.posts] == [
-        ["http://localhost:8765/api/oauth/mcp_demo/callback"],
+        [_LOCAL_CALLBACK],
         [redirect_uri],
     ]
     assert [entry for entry in logs if entry["event"] == "oauth_dynamic_client_reregistered"] == [
@@ -744,7 +744,7 @@ async def test_mcp_oauth_reregisters_dynamic_client_when_the_callback_changes(
             "provider_id": "mcp_demo",
             "previous_token_endpoint_origin": "https://auth.example.test",
             "current_token_endpoint_origin": "https://auth.example.test",
-            "previous_redirect_uri": "http://localhost:8765/api/oauth/mcp_demo/callback",
+            "previous_redirect_uri": _LOCAL_CALLBACK,
             "current_redirect_uri": redirect_uri,
         },
     ]
@@ -770,9 +770,6 @@ async def test_mcp_oauth_keeps_an_operator_client_whose_callback_differs(
     assert await _authorized_client_id(provider, runtime_paths) == "operator-client-id"
     assert _MovableAuthorizationServerDiscoveryClient.posts == []
     assert _stored_mcp_client(runtime_paths) == operator_client
-
-
-_LOCAL_CALLBACK = "http://localhost:8765/api/oauth/mcp_demo/callback"
 
 
 def _serve_refresh(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -812,17 +809,14 @@ def _expired_token(client_id: str) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("refuses_registration", [False, True], ids=["server-accepts", "server-refuses"])
 async def test_mcp_oauth_refresh_never_registers_for_a_moved_callback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    refuses_registration: bool,
 ) -> None:
     """A token refresh needs no callback, so after the public URL moves it keeps the stored client and registers none."""
     _serve_movable_discovery(monkeypatch)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     await provider.client_config_resolution_async(_runtime_paths(tmp_path))
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "refuses_registration", refuses_registration)
     moved_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
     grants = _serve_refresh(monkeypatch)
 
@@ -871,7 +865,7 @@ async def test_mcp_oauth_keeps_the_client_when_the_server_refuses_a_moved_callba
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     await provider.client_config_resolution_async(_runtime_paths(tmp_path))
     registered = _stored_mcp_client(_runtime_paths(tmp_path))
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "refuses_registration", True)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "refusal_status", 400)
     moved_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
 
     with capture_logs() as logs, pytest.raises(OAuthCallbackRefusedError) as refused:
@@ -894,6 +888,22 @@ async def test_mcp_oauth_keeps_the_client_when_the_server_refuses_a_moved_callba
 
 
 @pytest.mark.asyncio
+async def test_mcp_oauth_reports_a_refused_first_registration_without_naming_a_moved_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no client yet there are no connections to keep, so a 400 stays the generic registration failure."""
+    _serve_movable_discovery(monkeypatch)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "refusal_status", 400)
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+
+    with pytest.raises(OAuthProviderError, match="dynamic client registration failed") as failed:
+        await provider.client_config_resolution_async(_runtime_paths(tmp_path))
+
+    assert not isinstance(failed.value, OAuthCallbackRefusedError)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status_code", [429, 503], ids=["rate-limited", "unavailable"])
 async def test_mcp_oauth_reports_a_failed_moved_callback_registration_as_no_refusal(
     tmp_path: Path,
@@ -905,7 +915,6 @@ async def test_mcp_oauth_reports_a_failed_moved_callback_registration_as_no_refu
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     await provider.client_config_resolution_async(_runtime_paths(tmp_path))
     registered = _stored_mcp_client(_runtime_paths(tmp_path))
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "refuses_registration", True)
     monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "refusal_status", status_code)
     moved_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
 
@@ -999,7 +1008,7 @@ async def test_mcp_oauth_replaces_legacy_dynamic_registration_whose_callback_mov
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A registration stored before endpoint recording is replaced at once, not bound, when its callback moved."""
+    """A registration stored before endpoint recording whose callback moved is replaced on the first status or connect."""
     runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://acme.mindroom.chat")
     _serve_movable_discovery(monkeypatch)
     get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", _LEGACY_REGISTRATION)

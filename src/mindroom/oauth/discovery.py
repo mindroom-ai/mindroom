@@ -404,16 +404,15 @@ def _registration_needed(
     return resolution.dynamically_registered and resolution.registered_token_url != metadata.token_url
 
 
-class _RegistrationRefusedError(OAuthProviderError):
-    """The registration endpoint refused the client metadata (RFC 7591's 400), such as a callback it does not accept."""
-
-
 async def _post_registration(
     provider: OAuthProvider,
     config: OAuthDiscoveryConfig,
     registration_url: str,
     runtime_paths: RuntimePaths,
+    *,
+    callback_moved: bool,
 ) -> dict[str, Any]:
+    """Register a client; the server refusing a moved callback raises `OAuthCallbackRefusedError` naming it."""
     await _validate_url(registration_url, config, runtime_paths)
     refused = False
     try:
@@ -423,12 +422,22 @@ async def _post_registration(
                 json=_registration_payload(provider, runtime_paths),
                 headers={"Accept": _JSON_CONTENT_TYPE, "Content-Type": _JSON_CONTENT_TYPE},
             )
-            refused = response.status_code == 400
+            # RFC 7591 answers 400 to client metadata the server refuses, such as a callback it does not accept.
+            refused = callback_moved and response.status_code == 400
             response.raise_for_status()
             registration = response.json()
     except Exception as exc:
-        msg = f"{config.error_label} dynamic client registration failed"
-        raise (_RegistrationRefusedError if refused else OAuthProviderError)(msg) from exc
+        if not refused:
+            msg = f"{config.error_label} dynamic client registration failed"
+            raise OAuthProviderError(msg) from exc
+        redirect_uri = provider.default_redirect_uri(runtime_paths)
+        logger.warning("oauth_dynamic_client_callback_refused", provider_id=provider.id, redirect_uri=redirect_uri)
+        msg = (
+            f"The {provider.display_name} authorization server refused to register MindRoom's new callback "
+            f"{redirect_uri}. Existing connections keep working; to connect, set MINDROOM_PUBLIC_URL to an address "
+            f"it accepts or save an OAuth client for {provider.display_name}."
+        )
+        raise OAuthCallbackRefusedError(msg) from exc
     if not isinstance(registration, dict):
         msg = f"{config.error_label} dynamic client registration response is not a JSON object"
         raise OAuthProviderError(msg)
@@ -485,19 +494,13 @@ async def _register_client(
         if not config.dynamic_client_registration or metadata.registration_url is None:
             msg = f"{config.error_label} dynamic client registration belongs to a different token endpoint or callback"
             raise OAuthProviderError(msg)
-        try:
-            registration = await _post_registration(provider, config, metadata.registration_url, runtime_paths)
-        except _RegistrationRefusedError as exc:
-            if not callback_moved:
-                raise
-            redirect_uri = provider.default_redirect_uri(runtime_paths)
-            logger.warning("oauth_dynamic_client_callback_refused", provider_id=provider.id, redirect_uri=redirect_uri)
-            msg = (
-                f"The {provider.display_name} authorization server refused to register MindRoom's new callback "
-                f"{redirect_uri}. Existing connections keep working; to connect, set MINDROOM_PUBLIC_URL to an address "
-                f"it accepts or save an OAuth client for {provider.display_name}."
-            )
-            raise OAuthCallbackRefusedError(msg) from exc
+        registration = await _post_registration(
+            provider,
+            config,
+            metadata.registration_url,
+            runtime_paths,
+            callback_moved=callback_moved,
+        )
         await run_blocking_until_complete(
             credentials_manager.save_credentials,
             provider.client_config_services[0],
