@@ -1898,7 +1898,7 @@ async def test_a_response_stores_only_the_reasoning_summary_it_returns_as_reason
 
 
 def test_a_reasoning_summary_carries_when_the_model_began_reasoning() -> None:
-    """A summary streams only after the model finished reasoning, so its deltas carry when the reasoning item began."""
+    """A summary streams seconds after the model began reasoning, so its deltas carry when the reasoning item began."""
     stream = ResponsesStream(
         provider="openai",
         store=None,
@@ -1920,6 +1920,36 @@ def test_a_reasoning_summary_carries_when_the_model_began_reasoning() -> None:
     assert delta.text == "Think. "
     assert delta.started_at is not None
     assert delta.started_at < summary_arrives
+
+
+def test_each_reasoning_summary_part_starts_a_paragraph() -> None:
+    """Summary parts each open with a bold title; without a break, two titles run together as one garbled line."""
+    stream = ResponsesStream(
+        provider="codex",
+        store=False,
+        portable_replay=True,
+        native_compaction=None,
+        conversation_digest="",
+    )
+    parts = [("rs_1", 0, "**Comparing options**"), ("rs_1", 1, "**Refining the plan**"), ("rs_1", 1, " Trains win.")]
+
+    deltas = [
+        delta.text
+        for index, (item_id, summary_index, text) in enumerate(parts)
+        for delta in stream.add(
+            ResponseReasoningSummaryTextDeltaEvent.model_validate(
+                {
+                    **_PACK_SUMMARY_DELTA,
+                    "sequence_number": index,
+                    "item_id": item_id,
+                    "summary_index": summary_index,
+                    "delta": text,
+                },
+            ),
+        )
+    ]
+
+    assert deltas == ["**Comparing options**", "\n\n**Refining the plan**", " Trains win."]
 
 
 @pytest.mark.asyncio

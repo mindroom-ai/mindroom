@@ -133,7 +133,7 @@ A template gives every person the same agent.
 A person cannot narrow its tools or reword its role, and cannot get a second agent with a narrower job unless an administrator edits `config.yaml` for them.
 The [`agent_manager`](https://docs.mindroom.chat/tools/agent-orchestration/#agent_manager) tool covers both, and MindRoom adds it by itself:
 
-- Every generated agent, personal or created, can show and change its own `display_name`, `role`, `instructions`, and `tools` for its owners.
+- Every generated agent, personal or created, can show and change its own `display_name`, `role`, `instructions`, and `tools`, and set its avatar, for its owners.
 - An agent with `created_agents_per_owner` above 0 can create new agents for the people who ask it.
 
 Every call that creates, changes, or deletes an agent waits for the person asking to approve it on a card; see [Approval Cards](#approval-cards).
@@ -149,6 +149,10 @@ It calls `agent_settings` to read its current values and the tool names it may c
   A chosen tool keeps the settings it has there, and so does each tool it brings along, such as `attachments` with `matrix_message`; any other tool that was not chosen is left out, even one from `defaults.tools`.
 - A change that the next config load would reject is refused with `The agent would not load with this change, so nothing was stored: <reason>`, and so is a new agent from `create_agent`.
 - A field with no edit follows its template or creator, so a later change to either reaches it.
+
+To change the agent's picture, attach a PNG, JPEG, GIF, or WebP image in a conversation with the agent and ask it to use the image as its avatar.
+It calls `set_avatar`, which crops the image to its center square, and the new picture applies without a reload.
+An animated image keeps only its first frame.
 
 Only the agent's owners may ask, and anyone else is refused with `Only <owners> may change <agent>`.
 A personal agent has one owner, the person it was made for, and cannot be deleted.
@@ -204,12 +208,12 @@ The person whose request creates an agent is its owner, resolved through any [br
 Only a person can own an agent, so a MindRoom account is refused, and so is a Matrix ID with `[`, `]`, a space, `*`, or `?`.
 
 An owner can share a created agent by passing `co_owners` to `update_agent`, and passing `null` clears them.
-Co-owners may use the agent, invite it, and change its `display_name`, `role`, `instructions`, and `tools`.
+Co-owners may use the agent, invite it, change its `display_name`, `role`, `instructions`, and `tools`, and set its avatar.
 Only the owner may change `co_owners` or delete the agent with `delete_agent`.
 
 ### Approval Cards
 
-`create_agent`, `update_agent`, and `delete_agent` each show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, whatever `tool_approval` says, because the agent asking may have read text its owner did not write.
+`create_agent`, `update_agent`, `set_avatar`, and `delete_agent` each show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, whatever `tool_approval` says, because the agent asking may have read text its owner did not write.
 The card shows the exact arguments, and only that person can approve it.
 The 5, 10, and 30 minute options on a card are never offered for these calls, but the person asking can skip their cards in a thread with [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything).
 `agent_settings` only reads and asks for no approval of its own, so it shows a card only when a `tool_approval` default or rule requires one.

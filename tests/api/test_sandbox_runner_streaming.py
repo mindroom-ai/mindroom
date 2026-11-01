@@ -95,6 +95,24 @@ def test_a_call_streams_its_progress_and_keepalives_before_its_result(
     assert frames[-1] == _result("done")
 
 
+def test_progress_reaches_the_primary_unmasked_and_uncut(
+    runner: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The primary masks a long credential before it cuts what it shows, so the runner keeps the credential's label."""
+    report = "export API_KEY=" + "".join(f"{index:04x}" for index in range(800))
+
+    async def entrypoint() -> str:
+        report_tool_progress(report)
+        await asyncio.sleep(0.1)
+        return "done"
+
+    _fake_tool(monkeypatch, entrypoint)
+    frames = _stream(runner)
+
+    assert frames[0] == {"progress": report}
+
+
 def test_a_synchronous_call_runs_off_the_event_loop_so_keepalives_keep_flowing(
     runner: TestClient,
     monkeypatch: pytest.MonkeyPatch,

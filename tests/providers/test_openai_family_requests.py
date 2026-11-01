@@ -977,14 +977,14 @@ def _stored(tmp_path: Path, run: RunRecord) -> RunRecord:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_after_an_approved_run_finished_replays_instead_of_continuing_the_chain_it_left(
+async def test_a_turn_after_an_approved_run_finished_continues_the_chain_it_left(
     tmp_path: Path,
 ) -> None:
-    """A stored chain continues only while it holds the conversation the request replays before it.
+    """A stored chain continues while it holds the conversation the request replays before it.
 
     The resumed run sends its paused request again, memory results included, so it continues the chain with the
-    result and the receipt. Once the run finishes, history keeps neither, so the next turn's replay no longer matches
-    what the chain holds: it sends its history explicitly, and the memory results and the receipt never reach it.
+    result and the receipt. The finished run stores both where they were sent, so the next turn's replay matches what
+    the chain holds and continues it with only the new prompt.
     """
     adapter, sent = _stored_reply_route(tmp_path, [_CALL])
 
@@ -1061,17 +1061,8 @@ async def test_a_turn_after_an_approved_run_finished_replays_instead_of_continui
         # The receipt names the call by the ``call_id`` its result references.
         {"role": "user", "content": build_approval_receipt((replace(approval, tool_call_id="call_lookup"),))},
     ]
-    assert "previous_response_id" not in later
-    assert [item.get("role", item.get("type")) for item in later["input"]] == [
-        "developer",
-        "user",
-        "function_call",
-        "function_call_output",
-        "assistant",
-        "user",
-    ]
-    assert "Alice prefers short answers." not in json.dumps(later)
-    assert "TOOL APPROVAL RECEIPT" not in json.dumps(later)
+    assert later["previous_response_id"] == "resp_2"
+    assert later["input"] == [{"role": "user", "content": "And the next one?"}]
 
 
 @pytest.mark.asyncio
@@ -1329,6 +1320,32 @@ def test_codex_sends_the_stable_prompt_without_an_explicit_breakpoint(tmp_path: 
     first = _request(adapter, _messages("Monday"))["input"][0]
 
     assert first == {"role": "developer", "content": "Shared agent instructions."}
+
+
+@pytest.mark.parametrize(
+    ("extra_kwargs", "reasoning"),
+    [
+        pytest.param({}, {"summary": "auto"}, id="default"),
+        pytest.param(
+            {"reasoning_effort": "high", "reasoning_summary": "detailed"},
+            {"effort": "high", "summary": "detailed"},
+            id="configured-summary",
+        ),
+        pytest.param({"reasoning": {"summary": "concise"}}, {"summary": "concise"}, id="configured-reasoning"),
+    ],
+)
+def test_codex_asks_for_a_reasoning_summary_unless_the_model_sets_one(
+    tmp_path: Path,
+    extra_kwargs: dict[str, Any],
+    reasoning: dict[str, str],
+) -> None:
+    """Like the Codex CLI, a Codex request asks for the reasoning summary that a reply shows while the model thinks."""
+    assert _request(_codex(tmp_path, **extra_kwargs), _messages("Monday"))["reasoning"] == reasoning
+
+
+def test_the_openai_route_asks_for_no_reasoning_summary_by_default(tmp_path: Path) -> None:
+    """Some API organizations may not request reasoning summaries, so the OpenAI route sends one only when configured."""
+    assert "summary" not in _request(responses_adapter(tmp_path), _messages("Monday")).get("reasoning", {})
 
 
 def test_a_disabled_cache_sends_each_system_message_without_a_breakpoint() -> None:

@@ -275,10 +275,11 @@ def test_approval_receipt_rejects_unsettled_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_reader_keeps_the_receipt_after_its_input_in_every_request_and_no_finished_run_stores_it() -> None:
+async def test_a_reader_keeps_the_receipt_after_its_input_in_every_request_and_stores_it_there() -> None:
     """The run the receipt names gets it before its first request and keeps it for its later ones; no other run does.
 
-    It follows the run's input, as a user message of its own, so the system messages stay the ones every request sends.
+    It follows the run's input, as a user message of its own, so the system messages stay the ones every request sends,
+    and the run stores it there, so a later turn replays the run's last request whole.
     """
     model = ScriptedModel([calls(tool_call("echo", "call-1", text="x")), answer("first"), answer("second")])
 
@@ -310,7 +311,8 @@ async def test_a_reader_keeps_the_receipt_after_its_input_in_every_request_and_n
         [("system", "You are Code."), ("user", "Again")],
     ]
     assert model.requests[1].messages[:3] == model.requests[0].messages
-    assert all(RECEIPT_TEXT not in str(message.content) for message in [*first.messages, *second.messages])
+    assert [message.content for message in first.messages if message.role == "user"] == ["Go", RECEIPT_TEXT]
+    assert all(RECEIPT_TEXT not in str(message.content) for message in second.messages)
 
 
 def _chat_echo_call_reply(server_id: str | None) -> dict[str, Any]:

@@ -319,6 +319,29 @@ def test_message_limit_applies_after_the_run_limit_and_drops_orphaned_tool_resul
     assert _replay(runs, num_history_messages=0) == []
 
 
+def test_turn_context_replays_where_it_was_sent_but_takes_no_slot_in_a_message_window() -> None:
+    """A message window counts conversation, so a stored turn context neither shrinks it nor opens it orphaned."""
+    runs: list[AnyRunRecord] = [
+        _agent_run(
+            run_id,
+            messages=[
+                Message(role="user", content=f"{run_id} question"),
+                Message(role="user", content=f"{run_id} memories", add_to_agent_memory=False),
+                Message(role="assistant", content=f"{run_id} answer"),
+            ],
+        )
+        for run_id in ("one", "two", "three")
+    ]
+
+    assert _contents(_replay(runs, num_history_runs=1)) == ["three question", "three memories", "three answer"]
+    assert _contents(_replay(runs, num_history_messages=4)) == [
+        "two question",
+        "two answer",
+        "three question",
+        "three answer",
+    ]
+
+
 def test_replayed_history_is_a_marked_copy_that_never_changes_stored_runs() -> None:
     blocks = [{"type": "text", "text": "block"}]
     stored = [Message(role="user", content="question"), Message(role="assistant", content=blocks)]
@@ -503,18 +526,15 @@ def test_each_attempt_request_carries_its_media_on_a_copy_of_the_prompt() -> Non
     assert not {id(message) for message in with_media} & {id(message) for message in [*history, turn.prompt]}
 
 
-def test_next_request_repeats_the_previous_one_up_to_its_transient_context() -> None:
-    """Unstored turn context follows the prompt, so the next turn's request shares the whole stored prefix."""
+def test_next_request_repeats_the_previous_one_whole() -> None:
+    """Turn context is stored where it was sent, so the next turn's request extends the previous one whole."""
     first_turn = TurnMessages(
         context=(Message(role="user", content="thread message"),),
         prompt=Message(role="user", content="question one"),
         transient=(Message(role="user", content="context one", add_to_agent_memory=False),),
     )
     first = _request(summary=None, history=[], turn=first_turn)
-    stored = [
-        *(message for message in first[1:] if message.add_to_agent_memory),
-        Message(role="assistant", content="answer one"),
-    ]
+    stored = [*first[1:], Message(role="assistant", content="answer one")]
     second_turn = TurnMessages(
         prompt=Message(role="user", content="question two"),
         transient=(Message(role="user", content="context two", add_to_agent_memory=False),),
@@ -527,14 +547,7 @@ def test_next_request_repeats_the_previous_one_up_to_its_transient_context() -> 
     )
 
     assert _contents(first) == ["Be precise.", "thread message", "question one", "context one"]
-    assert _contents(second) == [
-        "Be precise.",
-        "thread message",
-        "question one",
-        "answer one",
-        "question two",
-        "context two",
-    ]
+    assert _contents(second) == [*_contents(first), "answer one", "question two", "context two"]
 
 
 @pytest.mark.parametrize("summary", [None, ScopeSummary(text=" \n ", updated_at=_SUMMARY.updated_at)])
@@ -680,8 +693,8 @@ def test_a_paused_row_whose_answers_name_no_model_ends_its_input_at_the_first_ca
     assert [message.id for message in stored_turn_input(stored).context] == [context.id]
 
 
-def test_a_stopped_run_s_turn_input_ends_at_its_model_s_first_answer() -> None:
-    """A stopped run stores no transient context, so its model's first answer, even one without a call, ends the input."""
+def test_a_row_without_turn_context_ends_its_input_at_its_model_s_first_answer() -> None:
+    """A row without turn context ends its input at its model's first answer, even one without a call."""
     context = Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>')
     answer = Message(role="assistant", content="Partial", provider_data=model_provenance("m", "Synthetic"))
     stored = _paused_row([context, Message(role="user", content="multiply"), answer]).messages

@@ -664,9 +664,13 @@ async def test_restart_unbinds_external_trigger_runtime_before_stop_and_leaves_i
 
 @pytest.mark.asyncio
 async def test_reconcile_post_update_rooms_does_not_bind_trigger_runtime(tmp_path: Path) -> None:
-    """Room reconciliation should not bind trigger runtime before support services settle."""
+    """Room reconciliation sets up a changed bot's rooms without binding trigger delivery before support services."""
     config = _config_with_code_agent(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), config=config)
+    orchestrator.running = True
+    code_bot = MagicMock(spec=AgentBot)
+    code_bot.running = True
+    install_bots(orchestrator, {"code": code_bot})
     plan = ConfigUpdatePlan(
         new_config=config,
         restart={"code"},
@@ -679,11 +683,12 @@ async def test_reconcile_post_update_rooms_does_not_bind_trigger_runtime(tmp_pat
     )
 
     with (
-        patch.object(orchestrator._rooms, "setup", new=AsyncMock()),
+        patch.object(orchestrator._rooms, "setup", new=AsyncMock()) as setup_rooms,
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
     ):
-        await orchestrator._reconcile_post_update_rooms(plan, changed_entities=set())
+        await orchestrator._reconcile_post_update_rooms(plan, changed_entities={"code"})
 
+    setup_rooms.assert_awaited_once_with([code_bot])
     mock_bind_runtime.assert_not_called()
 
 

@@ -43,7 +43,7 @@ plugins:
       dawarich_url: http://dawarich.local
 ```
 
-Whenever an agent is about to answer a message, this hook adds the user's location to that turn's context, and `persist=False` keeps it out of session history.
+Whenever an agent is about to answer a message, this hook adds the user's location to that turn's context, and `persist=False` puts it in a separate context message instead of the user's message text.
 
 MindRoom finds `@hook` functions in the manifest's `hooks_module`, or in `tools_module` when `hooks_module` is omitted; see [Manifest format](plugins.md#manifest-format).
 
@@ -270,8 +270,10 @@ Persisted items are appended to the user message and kept in session history, so
 </mindroom_message_context>
 ```
 
-Items with `persist=False` go into a separate context message for the current turn only.
-Use `persist=False` for live data such as location or weather, so session history and provider prompt caches stay reusable.
+Items with `persist=False` go into a separate context message after the turn's prompt instead of into the message text.
+Later turns still see that message where it was sent, and unlike persisted items it stays out of text compaction summaries; see [History Settings](configuration/history.md#history-settings).
+In a conversation several people use, those later turns include replies to someone else, so the agent can repeat one person's `persist=False` item, such as their location, to another; a [private agent](configuration/agents.md#private-instances) keeps each requester's conversations apart.
+Use `persist=False` for live data such as location or weather.
 Use stable keys and deterministic text for persisted items.
 
 ## System prompt enrichment (`system:enrich`)
@@ -302,7 +304,7 @@ The key `matrix_message_target` is reserved; MindRoom replaces hook items that u
 
 ## Enrichment in minimal mode
 
-In [minimal mode](tools/agent-cli.md), system enrichment and non-persisted message enrichment are available to the agent through the CLI's enrichment context document instead of the prompt.
+In [minimal mode](tools/agent-cli.md), system enrichment and `persist=False` message enrichment are available to the agent through the CLI's enrichment context document instead of the prompt.
 Return an `EnrichmentItem` with `minimal_required=True` when the item must stay in the prompt without a tool call; `ctx.add_metadata()` and `ctx.add_instruction()` cannot set this flag.
 Persisted message enrichment and standard mode are unaffected.
 
