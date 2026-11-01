@@ -177,6 +177,8 @@ class _Agent:
     max_tool_calls_per_turn: int | None = None
     before_request: tuple[BeforeRequestHook, ...] = ()
     records: list[RunRecord] = field(default_factory=list)
+    # The size the reply's preparation gave its first request.
+    prepared_context_tokens: int | None = None
 
     def spec(self) -> AgentSpec:
         return AgentSpec(
@@ -248,6 +250,7 @@ async def _run(
         prompt_id=turn.prompt.id,
         lifecycle=agent.lifecycle,
         turn_recorder=agent.turn_recorder,
+        prepared_context_tokens=agent.prepared_context_tokens,
     )
     store_persist = persist_to(store, session) if store is not None else None
 
@@ -707,6 +710,29 @@ async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_
 
     assert summary_calls.inputs
     assert summary_calls.inputs[0].count(TOOL_RESULT[:200]) >= 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prepared", [None, 1_000], ids=["estimated", "prepared-from-a-reported-size"])
+async def test_the_first_request_is_sized_as_the_reply_prepared_it(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+    prepared: int | None,
+) -> None:
+    """Until a response arrives, the hook sizes the request as the reply's preparation did.
+
+    That preparation sized the history from the provider's reported size where one applied, which a padded estimate
+    of the same history would exceed, folding a conversation that fits.
+    """
+    config, paths = _config(tmp_path)
+    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
+    old = [Message(role="user", content="h" * 8_000), Message(role="assistant", content="a" * 8_000)]
+    seed_session(storage, _session("session-1", runs=[_completed_run("old", messages=old)]))
+    model = ToolLoopModel(tool_rounds=0)
+
+    await _run(_scoped_agent(model, config, paths, storage, prepared_context_tokens=prepared), "Do the task")
+
+    assert bool(summary_calls.inputs) is (prepared is None)
 
 
 @pytest.mark.asyncio

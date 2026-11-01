@@ -232,6 +232,7 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         compaction_decision=CompactionDecision(mode="none", reason="auto_disabled"),
         native_history=None,
         counter=fake_token_counter(),
+        non_prompt_tokens=0,
     )
 
 
@@ -556,20 +557,23 @@ def test_scheduled_limit_caps_larger_plans_only() -> None:
 
 
 @pytest.mark.parametrize("limit", [0, 2])
-def test_a_scheduled_limit_publishes_a_cut_plan_for_the_next_reply(limit: int) -> None:
+def test_a_scheduled_limit_leaves_nothing_to_size_the_next_reply_by(limit: int) -> None:
     """A scheduled run replays at most its limit, so the size its provider reports cannot size the whole history."""
     prepared = PreparedHistoryState(
         replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=500, add_history_to_context=True),
         replays_persisted_history=True,
         prepared_context_tokens=1_500,
+        non_prompt_tokens=1_000,
         native_history=None,
     )
+    published = build_prepared_history_metadata_content(prepared)[AI_RUN_METADATA_KEY]["prepared_context"]
+    assert published["non_prompt_tokens"] == 1_000
 
     capped = _prepared_history_with_scheduled_limit(prepared, limit)
 
-    # The next reply sizes history from a reported size only after a request that published a configured plan.
-    published = build_prepared_history_metadata_content(capped)[AI_RUN_METADATA_KEY]["compaction"]["replay_plan"]
-    assert published["mode"] != "configured"
+    # The run records no system prompt and tools, so the next reply sizes its history by estimate.
+    published = build_prepared_history_metadata_content(capped)[AI_RUN_METADATA_KEY]["prepared_context"]
+    assert "non_prompt_tokens" not in published
 
 
 def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:

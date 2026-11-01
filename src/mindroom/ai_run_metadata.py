@@ -113,7 +113,16 @@ def _prepared_history_payload(prepared_history: PreparedHistoryState) -> dict[st
     """Return the prepared-context and compaction diagnostics a reply's run metadata publishes."""
     payload: dict[str, Any] = {}
     if prepared_history.prepared_context_tokens is not None:
-        payload["prepared_context"] = {"tokens": prepared_history.prepared_context_tokens}
+        prepared_context: dict[str, int] = {"tokens": prepared_history.prepared_context_tokens}
+        replay_plan = prepared_history.replay_plan
+        # A request whose plan cut the history, however it was cut, reports the size of that part alone.
+        if (
+            prepared_history.non_prompt_tokens is not None
+            and replay_plan is not None
+            and replay_plan.mode == "configured"
+        ):
+            prepared_context["non_prompt_tokens"] = prepared_history.non_prompt_tokens
+        payload["prepared_context"] = prepared_context
     decision = prepared_history.compaction_decision
     compaction: dict[str, Any] = {
         "decision": decision.mode,

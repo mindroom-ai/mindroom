@@ -349,6 +349,7 @@ async def _prepare_after_native_answer(
         PreparedHistoryState(
             replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=0, add_history_to_context=True),
             prepared_context_tokens=1_000,
+            non_prompt_tokens=100,
             native_history=None,
         ),
     )

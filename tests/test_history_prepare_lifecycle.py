@@ -1879,11 +1879,13 @@ def _reported_run(
     reasoning_tokens: int | None = None,
     plan_mode: Literal["configured", "limited"] = "configured",
     native_checkpoint: bool = False,
+    non_prompt_tokens: int | None = 400,
 ) -> RunRecord:
     """Return a completed run whose answer carries the request size its provider reported and the model's stamp.
 
-    The run publishes the replay plan ``plan_mode`` its request was sent with, and with ``native_checkpoint`` the answer
-    holds a native compaction checkpoint.
+    The run publishes the replay plan ``plan_mode`` its request was sent with and, when not None, the
+    ``non_prompt_tokens`` of system prompt and tools it was sized with, which a run records only when its request
+    replayed the whole history; with ``native_checkpoint`` the answer holds a native compaction checkpoint.
     By default the answer's request starts the second after any summary a test writes. With ``reasoning_tokens``
     the answer also stores one encrypted reasoning item, as a Responses route records it, and reports that much
     reasoning.
@@ -1918,6 +1920,7 @@ def _reported_run(
         PreparedHistoryState(
             replay_plan=ResolvedReplayPlan(mode=plan_mode, estimated_tokens=600, add_history_to_context=True),
             prepared_context_tokens=1_000,
+            non_prompt_tokens=non_prompt_tokens,
             native_history=None,
         ),
     )
@@ -1936,8 +1939,9 @@ async def _prepare_with_reported_usage(
     """Prepare a reply after three runs; return it, the chars / 4 history estimate, and the compaction notices.
 
     ``latest`` configures the newest run, and a summary folding ``folded_run_ids`` is stored as written at
-    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, ``non_prompt_tokens`` are the system prompt and
-    tools. The answering model counts with ``counter``, a quarter token per character when it is None.
+    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, ``non_prompt_tokens`` are today's system prompt
+    and tools, while each run records the 400 its request was sized with. The answering model counts with
+    ``counter``, a quarter token per character when it is None.
     """
     counter = counter or fake_token_counter()
     runs = [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", **latest)]
@@ -2161,6 +2165,58 @@ async def test_the_replay_plan_trims_by_the_reported_size_over_the_final_budget(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("today", "taken_off"),
+    [
+        # Minus today's 7,000, history would show 1,500 tokens, under the 4,000-token trigger, as does the estimate.
+        pytest.param(7_000, 400, id="grown"),
+        pytest.param(100, 100, id="shrunk"),
+    ],
+)
+async def test_the_reported_request_size_takes_off_the_smaller_system_prompt(
+    tmp_path: Path,
+    today: int,
+    taken_off: int,
+) -> None:
+    """The reported request carried the 400-token system prompt and tools its run recorded, not today's.
+
+    A prompt grown since, such as after more tools or longer context files, counts in today's static estimate, not as
+    history that shrank. A prompt that shrank stays counted as history until the next run records it, because taking
+    off an estimate's margin with it could undercount the history.
+    """
+    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 8_000},
+        non_prompt_tokens=today,
+    )
+
+    assert estimate < 4_000
+    assert prepared.compaction_decision.current_history_tokens == 8_000 + 500 - taken_off
+    assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
+
+
+@pytest.mark.asyncio
+async def test_trimming_never_widens_the_budget_by_an_estimate_that_overcounts(tmp_path: Path) -> None:
+    """An estimate's ratio to the reported size fits the whole history, not the newest runs trimming keeps.
+
+    Widening the budget by it could keep newer runs that overcount less, past the real budget.
+    """
+    # Each run's 4,000 characters estimate at 2,000 tokens; the answer the request did not hold at 1,000.
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 2_000},
+        counter=TokenCounter(estimate=lambda text: len(text) // 2),
+    )
+    assert prepared.compaction_decision.current_history_tokens == 2_000 + 1_000 - 400
+
+    state = _finalize_with_history_budget(tmp_path, prepared, 2_500)
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode == "limited"
+    assert state.replay_plan.estimated_tokens <= 2_500
+
+
+@pytest.mark.asyncio
 async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays(tmp_path: Path) -> None:
     """A model that renders earlier turns' reasoning holds the answer's reasoning, which its own request did not."""
     sized = {}
@@ -2185,6 +2241,8 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
         pytest.param({}, {}, id="no-reported-usage"),
         # A request whose replay plan cut the history reported the size of the part it sent.
         pytest.param({"input_tokens": 8_000, "plan_mode": "limited"}, {}, id="partial-replay"),
+        # A request under an authored replay limit, since removed, records nothing to take off its size.
+        pytest.param({"input_tokens": 8_000, "non_prompt_tokens": None}, {}, id="authored-limit-since-removed"),
         # A native checkpoint replays differently on each route, and its response was billed for the transcript it replaced.
         pytest.param({"input_tokens": 8_000, "native_checkpoint": True}, {}, id="native-checkpoint"),
         pytest.param({"input_tokens": 8_000, "model": "other-model"}, {}, id="another-model-answered"),

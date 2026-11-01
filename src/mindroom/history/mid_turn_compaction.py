@@ -101,6 +101,8 @@ class _MidTurnCompaction:
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None
     turn_recorder: TurnRecorder | None
+    # The size the reply's preparation gave the run's first request, from the provider's reported size where one applied.
+    prepared_context_tokens: int | None
     # Set when compaction failed or cannot bring the request under the limit; this run is not compacted again. An
     # approval resume builds a new hook, so it may try once more.
     stopped: bool = False
@@ -145,12 +147,13 @@ def mid_turn_compaction_hook(
     prompt_id: str | None,
     lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
+    prepared_context_tokens: int | None = None,
 ) -> BeforeRequestHook:
     """Return the pre-request hook that compacts one run's long turn before a request that would exceed its window.
 
     A fold lands in the scope of ``storage`` when the run's requests replay its stored history under ``replay_plan``;
     ``lifecycle`` shows the fold through the reply's notices and ``turn_recorder`` records the folded calls for an
-    interrupted record.
+    interrupted record. ``prepared_context_tokens`` sizes the first request, which no response has sized yet.
     """
     compaction = _MidTurnCompaction(
         config=config,
@@ -164,6 +167,7 @@ def mid_turn_compaction_hook(
         prompt_id=prompt_id,
         lifecycle=lifecycle,
         turn_recorder=turn_recorder,
+        prepared_context_tokens=prepared_context_tokens,
     )
 
     async def hook(state: LoopState) -> RequestDecision:
@@ -427,10 +431,11 @@ def _request_tokens(
     tools: Sequence[ToolSpec],
     loaded_ids: frozenset[str],
 ) -> int:
-    """Size the next request from the latest response this loop received, else by estimate.
+    """Size the next request from the latest response this loop received, else as the reply's preparation sized it.
 
-    A native response that created a checkpoint is billed for the transcript it replaced, so after one a native route
-    estimates its projected request.
+    That preparation sized history from the provider's reported size where one applied, which a padded estimate of the
+    same history would exceed. A run without it estimates; a native response that created a checkpoint is billed for
+    the transcript it replaced, so after one a native route estimates its projected request.
     """
     anchor = next(
         (
@@ -440,6 +445,8 @@ def _request_tokens(
         ),
         None,
     )
+    if anchor is None and compaction.prepared_context_tokens is not None:
+        return compaction.prepared_context_tokens
     if anchor is not None and not checkpoint_items(messages[anchor], policy.native_route):
         reported = reported_context_tokens(
             messages[anchor],
