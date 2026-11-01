@@ -3556,6 +3556,7 @@ visibility = [
 path = "mindroom.memory.legacy_team_memory"
 depends_on = [
     "mindroom.constants",
+    "mindroom.embeddings.factory",
     "mindroom.memory._file_backend",
     "mindroom.memory._policy",
     "mindroom.memory._shared",

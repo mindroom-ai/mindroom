@@ -1362,7 +1362,7 @@ def test_memory_embedder_check_warns_when_endpoint_unreachable(
             "OPENAI_API_KEY",
             "memory.llm.config.openai_base_url",
         ),
-        # Mem0's OpenAI client reads OPENAI_BASE_URL itself, for the shared key and a configured one alike.
+        # The memory LLM reaches OPENAI_BASE_URL, for the shared key and a configured one alike.
         (
             "openai",
             {"model": "m"},

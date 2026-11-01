@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.credentials.sync import get_embedder_api_key, get_ollama_api_key, get_ollama_host
+from mindroom.credentials.sync import get_embedder_api_key, get_ollama_api_key, get_ollama_host, get_openai_base_url
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
 
@@ -57,7 +57,7 @@ def resolve_embedder_settings(config: Config, runtime_paths: RuntimePaths) -> _R
         return _ResolvedEmbedderSettings(
             provider=provider,
             model=embedder_config.model,
-            host=embedder_config.host,
+            host=embedder_config.host or get_openai_base_url(runtime_paths),
             dimensions=embedder_config.dimensions,
             query_prefix=embedder_config.query_prefix,
             document_prefix=embedder_config.document_prefix,
@@ -117,7 +117,7 @@ def create_configured_embedder(
     if settings.provider == "ollama":
         from mindroom.embeddings.ollama_embedder import OllamaEmbedder  # noqa: PLC0415
 
-        # The resolver always resolves an Ollama host; only the other providers leave it unset.
+        # The resolver always resolves an Ollama host, as it does an OpenAI endpoint.
         assert settings.host is not None
         return OllamaEmbedder(model=settings.model, host=settings.host, api_key=settings.api_key)
 
