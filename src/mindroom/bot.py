@@ -735,6 +735,7 @@ class AgentBot:
                 logger=self.logger,
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
+                matrix_id=runtime_matrix_id,
                 pending_turns=principal,
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
