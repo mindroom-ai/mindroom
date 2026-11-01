@@ -2965,6 +2965,8 @@ class TestEncryptedRelations:
         with pytest.raises(RuntimeError, match="unreadable events remain"):
             await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        if recover_room:
+            assert await bodies(alice) == ["root"]
         client.room_keys = self._thread_of_encrypted_replies(readable=True).room_keys
         await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
         assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
