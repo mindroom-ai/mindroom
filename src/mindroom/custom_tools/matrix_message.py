@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 
 from mindroom.custom_tools import matrix_conversation_operations
 from mindroom.custom_tools.attachment_helpers import (
+    explicit_thread_root,
     resolve_context_thread_id,
     resolve_requested_room_id,
     room_access_allowed,
-    thread_root_for_send,
 )
 from mindroom.custom_tools.matrix_agent_discovery import available_room_agents
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
@@ -247,7 +247,7 @@ class MatrixMessageTools(Toolkit):
                 thread_id = "room"
         # A replayed keyed send delivers its stored target, so only a new request resolves its thread.
         if stored_intent is None and thread_id is not None and thread_id != "room":
-            thread_id = await thread_root_for_send(context, room_id=room_id, thread_id=thread_id)
+            thread_id = await explicit_thread_root(context, room_id=room_id, thread_id=thread_id)
         effective_thread_id = resolve_context_thread_id(
             context,
             room_id=room_id,

@@ -50,6 +50,7 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
+    FakeRelationStore,
     bind_runtime_paths,
     delivered_matrix_event,
     delivered_matrix_side_effect,
@@ -2074,6 +2075,47 @@ async def test_matrix_message_send_to_a_thread_reply_posts_in_its_thread() -> No
     relates_to = mock_send.await_args.args[2]["m.relates_to"]
     assert relates_to["rel_type"] == "m.thread"
     assert relates_to["event_id"] == "$root:localhost"
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_send_keeps_a_thread_id_whose_lookup_fails() -> None:
+    """A thread_id whose thread cannot be looked up is sent as given instead of failing the tool."""
+    tool = MatrixMessageTools()
+    client = MagicMock()
+    client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "event_id": "$rich-reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "reply",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$parent:localhost"}},
+                },
+            },
+        ),
+    )
+    relations = make_relation_lookup(client=client)
+    cast("FakeRelationStore", relations.store).failure = RuntimeError("journal unavailable")
+    ctx = replace(_make_context(thread_id=None), relations=relations)
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$send_evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(action="send", message="hello", thread_id="$rich-reply:localhost"),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] == "$rich-reply:localhost"
+    assert mock_send.await_args.args[2]["m.relates_to"]["event_id"] == "$rich-reply:localhost"
 
 
 @pytest.mark.asyncio
