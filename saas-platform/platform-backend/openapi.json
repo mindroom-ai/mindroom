@@ -265,42 +265,20 @@
             "title": "Recent Instances",
             "type": "array"
           },
-          "recent_signups": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "title": "Recent Signups",
-            "type": "array"
-          },
           "subscription_revenue": {
             "title": "Subscription Revenue",
             "type": "number"
           },
-          "subscriptions_by_tier": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "title": "Subscriptions By Tier",
-            "type": "object"
-          },
           "total_accounts": {
             "title": "Total Accounts",
-            "type": "integer"
-          },
-          "total_instances": {
-            "title": "Total Instances",
             "type": "integer"
           }
         },
         "required": [
           "total_accounts",
           "active_subscriptions",
-          "total_instances",
           "instances_by_status",
           "subscription_revenue",
-          "subscriptions_by_tier",
-          "recent_signups",
           "recent_instances"
         ],
         "title": "AdminDashboardMetricsResponse",

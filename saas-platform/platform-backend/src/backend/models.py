@@ -316,11 +316,8 @@ class AdminDashboardMetricsResponse(BaseModel):
 
     total_accounts: int
     active_subscriptions: int
-    total_instances: int
     instances_by_status: dict[str, int]
     subscription_revenue: float
-    subscriptions_by_tier: dict[str, int]
-    recent_signups: list[dict[str, Any]]
     recent_instances: list[dict[str, Any]]
 
 

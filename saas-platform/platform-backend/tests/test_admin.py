@@ -519,9 +519,7 @@ class TestAdminEndpoints:
         data = response.json()
         assert data["total_accounts"] == 5
         assert data["active_subscriptions"] == 4
-        assert data["subscriptions_by_tier"] == {"byok": 2, "hobby": 1, "pro": 1}
         assert data["subscription_revenue"] == 35.0  # 10 + 8 + 16.66 (199.90 / 12), rounded to whole dollars
-        assert data["total_instances"] == 4
         assert data["instances_by_status"] == {"running": 3, "stopped": 1}
 
     def test_admin_dashboard_metrics_fail_instead_of_reporting_zeros(

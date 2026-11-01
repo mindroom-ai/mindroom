@@ -26,18 +26,6 @@ interface AdminMetrics {
   recent_instances: RecentActivity[]
 }
 
-function normalizeAdminMetrics(data: Partial<AdminMetrics> | null | undefined): AdminMetrics {
-  const metrics = data ?? {}
-
-  return {
-    total_accounts: metrics.total_accounts ?? 0,
-    active_subscriptions: metrics.active_subscriptions ?? 0,
-    instances_by_status: metrics.instances_by_status ?? {},
-    subscription_revenue: metrics.subscription_revenue ?? 0,
-    recent_instances: metrics.recent_instances ?? [],
-  }
-}
-
 // Shown in place of a figure the metrics request did not return.
 const UNAVAILABLE = '—'
 
@@ -61,8 +49,7 @@ export default function AdminDashboard() {
           setHealth({ status: 'degraded', supabase: false, stripe: false })
         }
         if (metricsRes.ok) {
-          const data = await metricsRes.json() as Partial<AdminMetrics> | null
-          setMetrics(normalizeAdminMetrics(data))
+          setMetrics(await metricsRes.json() as AdminMetrics)
         }
       } catch (error) {
         logger.error('Error fetching admin data:', error)
@@ -112,6 +99,7 @@ export default function AdminDashboard() {
     },
   ]
   const recentInstances = metrics?.recent_instances ?? []
+  const noActivity = metrics ? 'No recent activity' : 'Recent activity unavailable'
 
   return (
     <div>
@@ -161,7 +149,7 @@ export default function AdminDashboard() {
                 </div>
               ))
             ) : (
-              <p className="text-sm text-gray-500 dark:text-gray-400">No recent activity</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400">{noActivity}</p>
             )}
           </div>
         </CardContent>

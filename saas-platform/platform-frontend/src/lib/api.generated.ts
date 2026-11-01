@@ -1056,20 +1056,10 @@ export interface components {
             recent_instances: {
                 [key: string]: unknown;
             }[];
-            /** Recent Signups */
-            recent_signups: {
-                [key: string]: unknown;
-            }[];
             /** Subscription Revenue */
             subscription_revenue: number;
-            /** Subscriptions By Tier */
-            subscriptions_by_tier: {
-                [key: string]: number;
-            };
             /** Total Accounts */
             total_accounts: number;
-            /** Total Instances */
-            total_instances: number;
         };
         /**
          * AdminDeleteResponse

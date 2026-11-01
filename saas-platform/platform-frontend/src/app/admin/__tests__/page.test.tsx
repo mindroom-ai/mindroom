@@ -36,12 +36,13 @@ describe('AdminDashboard', () => {
     jest.clearAllMocks()
   })
 
-  it('shows each count from the dashboard metrics, without growth figures', async () => {
+  it('shows each figure from the dashboard metrics, without growth figures', async () => {
     mockResponses({
       total_accounts: 1500,
       active_subscriptions: 1200,
       instances_by_status: { running: 1100, stopped: 2 },
       subscription_revenue: 199,
+      recent_instances: [],
     })
 
     render(<AdminDashboard />)
@@ -57,6 +58,7 @@ describe('AdminDashboard', () => {
     expect(card('System Health').getByText('Supabase: ✓ Healthy | Stripe: ✓ Healthy')).toHaveClass('text-green-600')
     expect(screen.getAllByText('1500')).toHaveLength(1)
     expect(screen.queryByText(/%/)).not.toBeInTheDocument()
+    expect(screen.getByText('No recent activity')).toBeInTheDocument()
   })
 
   it('shows a dash instead of zero for figures the metrics request did not return', async () => {
@@ -79,6 +81,7 @@ describe('AdminDashboard', () => {
     }
     expect(screen.queryByText('0')).not.toBeInTheDocument()
     expect(screen.queryByText('$0')).not.toBeInTheDocument()
+    expect(screen.getByText('Recent activity unavailable')).toBeInTheDocument()
   })
 
   it('marks the system degraded when the health check fails', async () => {
@@ -91,22 +94,6 @@ describe('AdminDashboard', () => {
     })
 
     expect(card('System Health').getByText('Supabase: ✗ Error | Stripe: ✗ Error')).toHaveClass('text-red-600')
-  })
-
-  it('renders partial metrics responses without crashing', async () => {
-    mockResponses({
-      total_accounts: 3,
-      active_subscriptions: 2,
-      subscription_revenue: 199,
-    })
-
-    render(<AdminDashboard />)
-
-    await waitFor(() => {
-      expect(screen.getByText('No recent activity')).toBeInTheDocument()
-    })
-
-    expect(screen.getByText('$199')).toBeInTheDocument()
   })
 
   it('renders recent activity when the metrics response includes it', async () => {

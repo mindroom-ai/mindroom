@@ -320,13 +320,13 @@ async def get_dashboard_metrics(
         active_subs = select_all_pages(
             lambda: (
                 sb.table("subscriptions")
-                .select("tier,billing_cycle,price_cents")
+                .select("billing_cycle,price_cents")
                 .eq("status", "active")
                 .neq("tier", "free")
                 .order("id")
             )
         )
-        all_instances = instances_data.list_instances(sb, columns="status")
+        instances = instances_data.list_instances(sb, columns="status")
         audit_logs = (
             sb.table("audit_logs")
             .select("created_at, action, account_id")
@@ -341,11 +341,8 @@ async def get_dashboard_metrics(
     return {
         "total_accounts": accounts.count or 0,
         "active_subscriptions": len(active_subs),
-        "total_instances": len(all_instances),
-        "instances_by_status": Counter(inst["status"] for inst in all_instances),
+        "instances_by_status": Counter(inst["status"] for inst in instances),
         "subscription_revenue": float(round(sum(_monthly_revenue_usd(sub) for sub in active_subs))),
-        "subscriptions_by_tier": Counter(sub["tier"] for sub in active_subs),
-        "recent_signups": [],  # Not implemented yet
         "recent_instances": audit_logs.data or [],
     }
 
