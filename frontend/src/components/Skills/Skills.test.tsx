@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Skills } from "./Skills";
 import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
-import { createSkill, getSkill, listSkills } from "@/services/skillsService";
+import {
+  createSkill,
+  getSkill,
+  listSkills,
+  updateSkill,
+} from "@/services/skillsService";
 
 vi.mock("@/services/skillsService", () => ({
   createSkill: vi.fn(),
@@ -151,7 +156,7 @@ describe("Skills unsaved edits", () => {
     expect(getSkill).not.toHaveBeenCalledWith("beta");
   });
 
-  it("drops a discarded draft at once, even when the next skill fails to load", async () => {
+  it("drops a discarded draft at once, and shows a failed load instead of an editor", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     let failBeta: (error: Error) => void = () => {};
     vi.mocked(getSkill).mockImplementation((name) =>
@@ -171,9 +176,21 @@ describe("Skills unsaved edits", () => {
     expect(confirmSpy).toHaveBeenCalledTimes(1);
 
     failBeta(new Error("unreadable"));
-    const editor = await screen.findByLabelText("Skill content");
-    expect(editor).toHaveValue("");
-    expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
+    expect(
+      await screen.findByText("Could not load beta: unreadable"),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Skill content")).not.toBeInTheDocument();
+    const save = screen.getByRole("button", { name: /save/i });
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    expect(updateSkill).not.toHaveBeenCalled();
+
+    // Loading another skill clears the failure.
+    fireEvent.click(screen.getByText("alpha"));
+    expect(
+      await screen.findByDisplayValue("alpha content"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Could not load/)).not.toBeInTheDocument();
   });
 
   it("does not ask when the selected skill is selected again", async () => {

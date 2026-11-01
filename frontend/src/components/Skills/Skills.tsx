@@ -42,6 +42,8 @@ export function Skills() {
   const [originalContent, setOriginalContent] = useState("");
   const [loadingList, setLoadingList] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  // Why the selected skill failed to load; its editor stays hidden, so nothing can save over it.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const selectedSkill = selectedName
@@ -89,6 +91,7 @@ export function Skills() {
     // The previous skill's draft goes at once, so it never shows or saves under another skill.
     setDraftContent("");
     setOriginalContent("");
+    setLoadError(null);
     if (!selectedName) return;
 
     setLoadingDetail(true);
@@ -100,9 +103,12 @@ export function Skills() {
       })
       .catch((error) => {
         if (!isActive) return;
+        const message =
+          error instanceof Error ? error.message : "Unknown error";
+        setLoadError(message);
         toast({
           title: "Failed to load skill",
-          description: error instanceof Error ? error.message : "Unknown error",
+          description: message,
           variant: "destructive",
         });
       })
@@ -321,6 +327,10 @@ export function Skills() {
               {loadingDetail ? (
                 <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
                   Loading skill contents...
+                </div>
+              ) : loadError !== null ? (
+                <div className="h-full flex items-center justify-center text-sm text-destructive">
+                  Could not load {selectedSkill.name}: {loadError}
                 </div>
               ) : (
                 <Editor
