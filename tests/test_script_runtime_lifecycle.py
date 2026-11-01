@@ -47,6 +47,7 @@ from mindroom.orchestration.script_runtime import (
     _ScriptRuntimeLifecycleError,
     _ScriptRuntimeUnavailableError,
     build_script_runtime,
+    optional_script_gateway_url,
 )
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToolBroker
 from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
@@ -681,6 +682,24 @@ async def test_worker_gateway_rejects_explicit_loopback_urls(
 
     with pytest.raises(ValueError, match="non-loopback"):
         await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("public_url", [None, "http://localhost:8765/"], ids=["unset", "unreachable"])
+async def test_optional_worker_gateway_turns_off_for_a_missing_or_unreachable_public_url(
+    tmp_path: Path,
+    public_url: str | None,
+) -> None:
+    """Without an explicit gateway, background scripts turn off instead of failing startup, and an unusable public URL says so."""
+    process_env = {} if public_url is None else {"MINDROOM_PUBLIC_URL": public_url}
+    runtime_paths = _runtime_paths(tmp_path, **_STATIC_RUNNER_ENV, **process_env)
+
+    with capture_logs() as logs:
+        gateway_url = await optional_script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+    assert gateway_url == ""
+    warned = [entry for entry in logs if entry["event"] == "background_script_gateway_disabled_invalid_public_url"]
+    assert len(warned) == (public_url is not None)
 
 
 @pytest.mark.asyncio

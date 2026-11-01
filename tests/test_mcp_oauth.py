@@ -732,6 +732,34 @@ async def test_mcp_oauth_reregisters_dynamic_client_when_the_callback_changes(
 
 
 @pytest.mark.asyncio
+async def test_mcp_oauth_keeps_an_operator_client_whose_callback_differs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client the operator saved keeps its own callback and is never replaced by a registration."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.org"},
+    )
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+    operator_client = {"client_id": "operator-client-id", "redirect_uri": "https://proxy.example.org/mcp/callback"}
+    get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", operator_client)
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+
+    resolution = await provider.client_config_resolution_async(runtime_paths)
+
+    assert resolution is not None
+    assert resolution.custom is True
+    assert resolution.config.redirect_uri == "https://proxy.example.org/mcp/callback"
+    assert await _authorized_client_id(provider, runtime_paths) == "operator-client-id"
+    assert _MovableAuthorizationServerDiscoveryClient.posts == []
+    assert _stored_mcp_client(runtime_paths) == operator_client
+
+
+@pytest.mark.asyncio
 async def test_mcp_oauth_rejects_dynamic_registration_after_move_to_server_without_registration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
