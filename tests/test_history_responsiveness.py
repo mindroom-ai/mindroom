@@ -111,10 +111,10 @@ async def test_history_sizing_allows_loop_progress(
         await entered.wait()
         released.set()
 
-    def controlled_text_estimate(counter: TokenCounter, value: str) -> TokenCount:
+    def controlled_text_estimate(counter: TokenCounter, value: str, *, calibrated: bool = True) -> TokenCount:
         loop.call_soon_threadsafe(entered.set)
         loop_progress.append(released.wait(timeout=1))
-        return count(counter, value)
+        return count(counter, value, calibrated=calibrated)
 
     if stage == "summary":
         monkeypatch.setattr("mindroom.history.compaction.count", controlled_text_estimate)
@@ -441,11 +441,11 @@ async def test_summary_retry_sizing_allows_loop_progress(
     loop = asyncio.get_running_loop()
     loop_progress: list[bool] = []
 
-    def controlled_estimate(counter: TokenCounter, value: str) -> TokenCount:
+    def controlled_estimate(counter: TokenCounter, value: str, *, calibrated: bool = True) -> TokenCount:
         released = threading.Event()
         loop.call_soon_threadsafe(released.set)
         loop_progress.append(released.wait(timeout=1))
-        return count(counter, value)
+        return count(counter, value, calibrated=calibrated)
 
     monkeypatch.setattr("mindroom.history.compaction.count", controlled_estimate)
     summary = "Greeting received."
