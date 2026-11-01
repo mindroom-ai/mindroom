@@ -50,7 +50,6 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
-    FakeRelationStore,
     bind_runtime_paths,
     delivered_matrix_event,
     delivered_matrix_side_effect,
@@ -2087,8 +2086,10 @@ async def test_matrix_message_send_keeps_a_thread_id_whose_lookup_fails() -> Non
         "body": "reply",
         "m.relates_to": {"m.in_reply_to": {"event_id": "$parent:localhost"}},
     }
-    relations = make_relation_lookup(client=event_serving_client("$rich-reply:localhost", content=rich_reply))
-    cast("FakeRelationStore", relations.store).failure = RuntimeError("journal unavailable")
+    relations = make_relation_lookup(
+        client=event_serving_client("$rich-reply:localhost", content=rich_reply),
+        failure=RuntimeError("journal unavailable"),
+    )
     ctx = replace(_make_context(thread_id=None), relations=relations)
 
     with (

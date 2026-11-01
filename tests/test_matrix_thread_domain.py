@@ -241,15 +241,14 @@ async def test_event_thread_membership_unknown_through_non_message_ancestors(
 
 def _failing_relations(failure: str) -> RelationLookup:
     """Return a relation lookup whose homeserver or journal raises ``boom``."""
-    relations_client = MagicMock()
-    relations_client.room_get_event = AsyncMock(side_effect=RuntimeError("boom"))
     if failure == "homeserver":
+        relations_client = MagicMock()
+        relations_client.room_get_event = AsyncMock(side_effect=RuntimeError("boom"))
         return make_relation_lookup(client=relations_client)
-    relations = make_relation_lookup(
+    return make_relation_lookup(
         client=event_serving_client("$thread-reply:localhost", content=_THREAD_REPLY_CONTENT),
+        failure=RuntimeError("boom"),
     )
-    cast("FakeRelationStore", relations.store).failure = RuntimeError("boom")
-    return relations
 
 
 @pytest.mark.parametrize("failure", ["homeserver", "journal"])

@@ -681,23 +681,6 @@ class MatrixApiTools(Toolkit):
         return None
 
     @staticmethod
-    async def _redaction_thread_resolution_error(
-        context: ToolRuntimeContext,
-        *,
-        room_id: str,
-        event_id: str,
-    ) -> str | None:
-        """Return a fail-closed error when the redaction target's thread membership is unknown."""
-        if not await redaction_thread_membership_known(
-            context.conversation_reader,
-            context.relations,
-            room_id,
-            event_id=event_id,
-        ):
-            return "Failed to resolve redaction target thread mapping."
-        return None
-
-    @staticmethod
     def _with_acting_requester(
         context: ToolRuntimeContext,
         event_type: str,
@@ -1077,11 +1060,14 @@ class MatrixApiTools(Toolkit):
 
         assert normalized_event_id is not None
 
-        error_message = await self._redaction_thread_resolution_error(
-            context,
-            room_id=room_id,
+        # A redaction whose thread membership is unknown fails closed.
+        thread_known = await redaction_thread_membership_known(
+            context.conversation_reader,
+            context.relations,
+            room_id,
             event_id=normalized_event_id,
         )
+        error_message = None if thread_known else "Failed to resolve redaction target thread mapping."
         dangerous = False
         if error_message is None:
             state_policy_error, dangerous = await self._redaction_state_policy_error(

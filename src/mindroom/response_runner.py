@@ -1695,7 +1695,7 @@ class ResponseRunner:
                     and delivery.ending == DECLINED.ending
                 ):
                     await self.deps.delivery_gateway.send_judgment_reaction(
-                        turn_id=lifecycle.identity.response_envelope.source_event_id,
+                        turn_id=request.response_envelope.source_event_id,
                         room_id=request.room_id,
                         event_id=request.sources.logical_source_event_ids[-1],
                         key=request.participation.decline_reaction,

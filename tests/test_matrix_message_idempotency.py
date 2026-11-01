@@ -103,20 +103,16 @@ async def test_a_replayed_threaded_send_does_not_resolve_its_thread_again(
     context = replace(context, relations=make_thread_reply_lookup("$reply-in-thread:localhost", "$root:localhost"))
     lookups = cast("AsyncMock", context.relations.runtime.client.room_get_event)
     with tool_runtime_context(context):
-        first = json.loads(
-            await MatrixMessageTools().matrix_message(
-                message="into the thread",
-                thread_id="$reply-in-thread:localhost",
-                idempotency_key="threaded",
-            ),
-        )
-        second = json.loads(
-            await MatrixMessageTools().matrix_message(
-                message="into the thread",
-                thread_id="$reply-in-thread:localhost",
-                idempotency_key="threaded",
-            ),
-        )
+        first, second = [
+            json.loads(
+                await MatrixMessageTools().matrix_message(
+                    message="into the thread",
+                    thread_id="$reply-in-thread:localhost",
+                    idempotency_key="threaded",
+                ),
+            )
+            for _ in range(2)
+        ]
     assert first["status"] == "ok"
     assert first["thread_id"] == "$root:localhost"
     assert second == first

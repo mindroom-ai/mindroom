@@ -2219,6 +2219,7 @@ def make_relation_lookup(
     *,
     threads: dict[str, str | None] | None = None,
     client: object | None = None,
+    failure: Exception | None = None,
 ) -> RelationLookup:
     """Return a real relation lookup over an in-memory set of admitted events.
 
@@ -2230,7 +2231,7 @@ def make_relation_lookup(
     """
     resolved_client = SimpleNamespace(client=client) if client is not None else _serving_client()
     return RelationLookup(
-        store=cast("RelationView", FakeRelationStore(threads=dict(threads or {}))),
+        store=cast("RelationView", FakeRelationStore(threads=dict(threads or {}), failure=failure)),
         runtime=resolved_client,  # type: ignore[arg-type]
     )
 
