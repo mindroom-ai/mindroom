@@ -72,6 +72,8 @@ class _Counts:
     # A counter key's decayed sums of provider counts and of its estimates for the same texts.
     ratios: dict[str, tuple[float, float]] = field(default_factory=dict)
     cooling_until: dict[str, float] = field(default_factory=dict)
+    # Counter keys whose latest provider count failed, so a streak of failures warns once.
+    failing: set[str] = field(default_factory=set)
     pending: dict[_TextKey, asyncio.Task[TokenCount]] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -160,12 +162,16 @@ async def count_exact(counter: TokenCounter, text: str) -> TokenCount:
     except Exception as error:
         with _state.lock:
             _state.cooling_until[counter.key] = time.monotonic() + _COOLDOWN_SECONDS
-        logger.warning("Token count failed", key=counter.key, fallback_kind=local.kind, error=str(error))
+            streak = counter.key in _state.failing
+            _state.failing.add(counter.key)
+        log = logger.debug if streak else logger.warning
+        log("Token count failed", key=counter.key, fallback_kind=local.kind, error=str(error))
         return local
     estimate = await asyncio.to_thread(counter.estimate, text)
     key = _text_key(counter, text)
     state = _state
     with state.lock:
+        state.failing.discard(counter.key)
         state.exact[key] = tokens
         if len(state.exact) > _MAX_CACHED:
             del state.exact[next(iter(state.exact))]

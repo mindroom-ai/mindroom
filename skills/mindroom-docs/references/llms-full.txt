@@ -3109,7 +3109,7 @@ OpenAI models with a known tokenizer, such as GPT-4o, also count exactly on Chat
 Other models, such as those on Ollama or other OpenAI-compatible servers, use an estimate.
 Text that rarely changes, such as the system prompt, the tools, and `MEMORY.md`, is counted in the background, so a reply never waits for a count and later replies use the exact number; other text uses an estimate corrected by the provider's earlier counts.
 Counting sends that text to the provider that also receives the agent's requests.
-A count that fails logs `Token count failed` and uses the estimate.
+A count that fails uses the estimate and logs a `Token count failed` warning, once until that route's counting works again.
 
 ## Agent Compaction Settings
 

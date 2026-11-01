@@ -181,6 +181,33 @@ def test_failed_count_falls_back_logs_kind_and_cools_down_only_its_key() -> None
     assert asyncio.run(count_exact(healthy, "y" * 8)) == TokenCount(8, "exact")
 
 
+def test_a_route_whose_counting_keeps_failing_warns_once_until_it_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A proxy without a counting endpoint fails after every pause; only the first failure of a streak warns."""
+    monkeypatch.setattr(counts, "_COOLDOWN_SECONDS", 0.0)
+    down = [True]
+
+    async def endpoint(text: str) -> int:
+        if down[0]:
+            msg = "no count_tokens on this proxy"
+            raise RuntimeError(msg)
+        return len(text)
+
+    counter = fake_token_counter(key="proxy", count=endpoint)
+    with capture_logs() as logs:
+        asyncio.run(count_exact(counter, "a" * 8))
+        asyncio.run(count_exact(counter, "b" * 8))
+        down[0] = False
+        asyncio.run(count_exact(counter, "c" * 8))
+        down[0] = True
+        asyncio.run(count_exact(counter, "d" * 8))
+
+    assert [(log["event"], log["log_level"]) for log in logs] == [
+        ("Token count failed", "warning"),
+        ("Token count failed", "debug"),
+        ("Token count failed", "warning"),
+    ]
+
+
 def test_slow_count_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     async def hanging(text: str) -> int:
         await asyncio.Event().wait()
