@@ -122,14 +122,14 @@ repos:
         name: TypeScript type checking
         entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bun run type-check'
         language: system
-        files: ^frontend/.*\.(ts|tsx)$
+        files: ^frontend/(.*\.(ts|tsx)|tsconfig.*\.json|package\.json|bun\.lock)$
         pass_filenames: false
 
       - id: eslint
         name: ESLint
         entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bun run lint'
         language: system
-        files: ^frontend/(.*\.(ts|tsx)|eslint\.config\.js)$
+        files: ^frontend/(.*\.(ts|tsx)|eslint\.config\.js|package\.json|bun\.lock)$
         pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
