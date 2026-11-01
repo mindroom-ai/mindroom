@@ -1391,7 +1391,7 @@ async def test_claude_send_answers_its_own_prompt_after_claude_code_starts_a_tur
     ]
 
 
-_UNAVAILABLE = replace(_claude_result(0), result="/status isn't available in this environment.")
+_BLOCKED = replace(_claude_result(0), result="UserPromptSubmit operation blocked by hook: deploys need approval")
 
 
 @pytest.mark.asyncio
@@ -1399,41 +1399,53 @@ async def test_claude_send_returns_the_result_of_a_prompt_that_runs_no_turn(
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A command headless Claude Code does not offer, or a prompt a hook blocked, gets a result but no echo."""
+    """A prompt a hook blocked gets a result but no echo, and its result follows what Claude reported on its own."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
-    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[_UNAVAILABLE]])
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[_BACKGROUND_NOTE, _self_started_result(30), _BLOCKED]])
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    reply = await asyncio.wait_for(_in_call(run_context, tools.claude_send("/status")), timeout=10)
+    reply = await asyncio.wait_for(_in_call(run_context, tools.claude_send("Deploy it")), timeout=10)
 
-    assert reply.startswith("/status isn't available in this environment.\n\n")
+    assert reply.startswith(
+        "The background tests passed.\nUserPromptSubmit operation blocked by hook: deploys need approval\n\n",
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("turns", "second_prompt", "second_reply"),
+    ("turns", "stop_while_writing", "second_reply"),
     [
         pytest.param(
             [
-                [_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000, text="Working on the first task.")],
+                [_ECHO],
                 [
+                    _claude_response("claude-sonnet-5-5", "msg-1", 1000, text="First."),
                     _claude_result(200),
                     _ECHO,
                     _claude_response("claude-sonnet-5-5", "msg-2", 500, text="Second."),
                     _claude_result(60),
                 ],
             ],
-            "second",
-            "Second.",
+            False,
+            "First.\nSecond.",
             id="answer-unread",
         ),
         pytest.param(
             # Claude Code was running a turn of its own, which the stopped prompt joined after the stop.
-            [[], [_FIRST_ECHO, _self_started_result(30), _UNAVAILABLE]],
-            "/status",
-            "/status isn't available in this environment.",
+            [[], [_FIRST_ECHO, _self_started_result(30), _BLOCKED]],
+            False,
+            _BLOCKED.result,
             id="prompt-joined-a-self-started-turn",
+        ),
+        pytest.param(
+            [
+                [_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000, text="First."), _claude_result(200)],
+                [_BLOCKED],
+            ],
+            True,
+            f"First.\n{_BLOCKED.result}",
+            id="stopped-while-writing",
         ),
     ],
 )
@@ -1441,29 +1453,35 @@ async def test_claude_send_after_a_stopped_call_returns_its_own_reply(
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
     turns: list[list[Message]],
-    second_prompt: str,
+    stop_while_writing: bool,
     second_reply: str,
 ) -> None:
     """A call stopped before Claude answered leaves that answer unread, and the next call reads past it to its own."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
-    prompted = asyncio.Event()
+    writing, written, write_released = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    if not stop_while_writing:
+        write_released.set()
     send_script = _ScriptedClaudeSDKClient.query
 
-    async def send_and_signal(self: _ScriptedClaudeSDKClient, prompt: AsyncIterable[dict[str, Any]]) -> None:
+    async def send_when_released(self: _ScriptedClaudeSDKClient, prompt: AsyncIterable[dict[str, Any]]) -> None:
+        writing.set()
+        await write_released.wait()
         await send_script(self, prompt)
-        prompted.set()
+        written.set()
 
-    monkeypatch.setattr(_ScriptedClaudeSDKClient, "query", send_and_signal)
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "query", send_when_released)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
     first = asyncio.create_task(_in_call(run_context, tools.claude_send("first")))
-    await prompted.wait()
+    await writing.wait()
     first.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first
-    second = await asyncio.wait_for(_in_call(run_context, tools.claude_send(second_prompt)), timeout=10)
+    write_released.set()
+    await asyncio.wait_for(written.wait(), timeout=10)
+    second = await asyncio.wait_for(_in_call(run_context, tools.claude_send("second")), timeout=10)
 
     assert second.startswith(f"{second_reply}\n\n")
 

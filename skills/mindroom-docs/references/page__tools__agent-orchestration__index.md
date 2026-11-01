@@ -680,7 +680,7 @@ Through the OpenAI-compatible API, keep the same `X-Session-Id` across requests 
 | `disallowed_tools` | text | `null` | Comma-separated Claude Code tool names to deny. |
 | `max_turns` | number | `null` | Maximum Claude turns per query; minimum 1. |
 | `system_prompt` | text | `null` | Extra system prompt passed to Claude. |
-| `cli_path` | text | `null` | Path to the Claude CLI executable, Claude Code 2.1.19 or later. |
+| `cli_path` | text | `null` | Path to the Claude CLI executable, Claude Code 2.1.124 or later. |
 | `session_ttl_minutes` | number | `60` | Idle sessions close after this many minutes; minimum 1. |
 | `max_sessions` | number | `200` | Maximum live sessions per agent; at the limit, the least recently used idle session closes. Minimum 1. |
 

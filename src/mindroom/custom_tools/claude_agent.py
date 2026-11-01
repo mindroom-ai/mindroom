@@ -45,6 +45,7 @@ _START_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 logger = get_logger(__name__)
 _SYNTHETIC_MODEL = "<synthetic>"
+_NO_TEXT = "Claude session completed without text output."
 
 
 def _parse_csv_list(raw_value: str | None) -> list[str]:
@@ -98,8 +99,9 @@ class _ClaudeSessionState:
 
 @dataclass
 class _ClaudeTurn:
-    """One Claude Code turn: the responses of its main conversation by message id, and its result."""
+    """One Claude Code turn: its text, the responses of its main conversation by message id, and its result."""
 
+    text_parts: list[str] = field(default_factory=list)
     responses: dict[str, AssistantMessage] = field(default_factory=dict)
     result: ResultMessage | None = None
 
@@ -351,17 +353,15 @@ def _settle_prompts(session: _ClaudeSessionState, result: ResultMessage) -> list
     return answered
 
 
-def _response_text(text_parts: list[str], result: ResultMessage | None) -> str:
-    """Return Claude's reply text, falling back to the result summary and marking reported errors."""
-    response_text = "\n".join(part for part in text_parts if part).strip()
-    if not response_text:
-        if result is not None and result.result:
-            response_text = str(result.result).strip()
-        else:
-            response_text = "Claude session completed without text output."
+def _turn_text(turn: _ClaudeTurn) -> str:
+    """Return one turn's text, falling back to its result summary and marking an error the turn reported."""
+    text = "\n".join(part for part in turn.text_parts if part).strip()
+    result = turn.result
+    if not text and result is not None and result.result:
+        text = str(result.result).strip()
     if result is not None and result.is_error:
-        return f"Claude reported an error: {response_text}"
-    return response_text
+        return f"Claude reported an error: {text or _NO_TEXT}"
+    return text
 
 
 class ClaudeAgentTools(Toolkit):
@@ -623,7 +623,8 @@ class ClaudeAgentTools(Toolkit):
                     session.model = resolved_model
                 prompt_id = str(uuid4())
                 session.unanswered[prompt_id] = False
-                await session.client.query(_prompt_message(trimmed_prompt, prompt_id))
+                # A stopped call still sends its prompt, so every prompt waiting for a result reached Claude Code.
+                await asyncio.shield(session.client.query(_prompt_message(trimmed_prompt, prompt_id)))
                 response_text, tool_names, turns = await self._collect_response(session, prompt_id)
                 session.last_used_at = monotonic()
             except ClaudeSDKError as exc:
@@ -659,7 +660,6 @@ class ClaudeAgentTools(Toolkit):
         such a turn runs joins it; a call stopped before reading its result leaves that result unread. Turns read
         before this prompt's answer stay in its reply and usage, so the agent still sees what Claude reported.
         """
-        text_parts: list[str] = []
         tool_names: list[str] = []
         turns = [_ClaudeTurn()]
 
@@ -674,7 +674,7 @@ class ClaudeAgentTools(Toolkit):
                     turn.responses.setdefault(message.message_id, message)
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text:
-                        text_parts.append(block.text)
+                        turn.text_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
                         tool_names.append(block.name)
             elif isinstance(message, ResultMessage):
@@ -684,7 +684,7 @@ class ClaudeAgentTools(Toolkit):
                     break
                 turns.append(_ClaudeTurn())
 
-        return _response_text(text_parts, turns[-1].result), tool_names, turns
+        return "\n".join(text for turn in turns if (text := _turn_text(turn))) or _NO_TEXT, tool_names, turns
 
     def _format_response_output(
         self,
