@@ -45,6 +45,7 @@ from tests.history_helpers import (
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -61,6 +62,17 @@ def _agent_inputs(config: Config) -> HistoryPreparationInputs:
         active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
     )
+
+
+def _noting_loop_progress(operation: Callable[..., Any], loop_progress: list[bool]) -> Callable[..., Any]:
+    """Wrap ``operation`` to note, before each call, whether the event loop runs while the call blocks."""
+    loop = asyncio.get_running_loop()
+
+    def controlled(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        loop_progress.append(loop_runs_while_blocked(loop))
+        return operation(*args, **kwargs)
+
+    return controlled
 
 
 @pytest.mark.asyncio
@@ -95,31 +107,18 @@ async def test_history_sizing_allows_loop_progress(
         )
 
     prepared = await prepare()
-    loop = asyncio.get_running_loop()
     loop_progress: list[bool] = []
-    estimate = ResponsesAdapter.estimate_portable_replay_tokens
-
-    def controlled_estimate(self: ResponsesAdapter, messages: list[Message]) -> int:
-        loop_progress.append(loop_runs_while_blocked(loop))
-        return estimate(self, messages)
-
-    def controlled_text_estimate(
-        value: str,
-        *,
-        model_id: str | None = None,
-        conservative_fallback: bool = False,
-    ) -> int:
-        loop_progress.append(loop_runs_while_blocked(loop))
-        return estimate_compaction_input_tokens(
-            value,
-            model_id=model_id,
-            conservative_fallback=conservative_fallback,
-        )
-
     if stage == "summary":
-        monkeypatch.setattr("mindroom.history.compaction.estimate_compaction_input_tokens", controlled_text_estimate)
+        monkeypatch.setattr(
+            "mindroom.history.compaction.estimate_compaction_input_tokens",
+            _noting_loop_progress(estimate_compaction_input_tokens, loop_progress),
+        )
     else:
-        monkeypatch.setattr(ResponsesAdapter, "estimate_portable_replay_tokens", controlled_estimate)
+        monkeypatch.setattr(
+            ResponsesAdapter,
+            "estimate_portable_replay_tokens",
+            _noting_loop_progress(ResponsesAdapter.estimate_portable_replay_tokens, loop_progress),
+        )
     if stage == "prepare":
         await prepare()
     elif stage == "finalize":
@@ -165,19 +164,13 @@ async def test_history_storage_work_allows_loop_progress(
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
     storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
-    loop = asyncio.get_running_loop()
     loop_progress: list[bool] = []
     target, operation = (
         ("mindroom.history.compaction.read_chunk_basis", read_chunk_basis)
         if stage == "basis"
         else ("mindroom.history.compaction.append_compaction_chunk", append_compaction_chunk)
     )
-
-    def controlled(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        loop_progress.append(loop_runs_while_blocked(loop))
-        return operation(*args, **kwargs)
-
-    monkeypatch.setattr(target, controlled)
+    monkeypatch.setattr(target, _noting_loop_progress(operation, loop_progress))
     monkeypatch.setattr(
         "mindroom.history.compaction.generate_compaction_summary",
         AsyncMock(return_value="Greeting received."),
@@ -419,18 +412,11 @@ async def test_summary_retry_sizing_allows_loop_progress(
     retry: str,
 ) -> None:
     """Every estimate lets queued loop work run, including after a model refusal."""
-    loop = asyncio.get_running_loop()
     loop_progress: list[bool] = []
-
-    def controlled_estimate(value: str, *, model_id: str | None = None, conservative_fallback: bool = False) -> int:
-        loop_progress.append(loop_runs_while_blocked(loop))
-        return estimate_compaction_input_tokens(
-            value,
-            model_id=model_id,
-            conservative_fallback=conservative_fallback,
-        )
-
-    monkeypatch.setattr("mindroom.history.compaction.estimate_compaction_input_tokens", controlled_estimate)
+    monkeypatch.setattr(
+        "mindroom.history.compaction.estimate_compaction_input_tokens",
+        _noting_loop_progress(estimate_compaction_input_tokens, loop_progress),
+    )
     summary = "Greeting received."
     responses: list[object] = [summary]
     if retry == "fallback":

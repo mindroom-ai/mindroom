@@ -101,7 +101,7 @@ def file_work_waiting_for_the_loop(methods: dict[object, tuple[str, ...]]) -> It
     """Make each named method wait, before its file work, until the event loop has run other work.
 
     The loop runs other work only while the method runs off it, so a method called on the loop thread records itself
-    as blocked; the methods after it skip the check, since a loop that stays held would make each wait out its timeout.
+    as blocked; the methods after it skip the check, so a loop that stays blocked costs at most one wait.
     """
     loop = asyncio.get_running_loop()
     freedom = LoopFreedom()
