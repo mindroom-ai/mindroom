@@ -48,8 +48,5 @@
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
     "whatwg-fetch": "^3.6.20"
-  },
-  "overrides": {
-    "postcss": "^8.5.32"
   }
 }
