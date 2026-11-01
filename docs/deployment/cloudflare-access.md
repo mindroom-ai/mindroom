@@ -19,7 +19,7 @@ Examples use `chat.example.com` for that host, `admin.example.com` for the dashb
 | 4 | Everything else, including `/.well-known/matrix/client`, `/livekit/jwt/`, and `/livekit/sfu/` | MindRoom Chat |
 
 The first rule keeps a request from passing Access as one path and reaching a service as another, because Access, the tunnel, and the origin can resolve such paths differently.
-The client chart serves `/.well-known/matrix/client` only with MatrixRTC or bug reports enabled; otherwise send it to Tuwunel as well.
+The client chart serves `/.well-known/matrix/client` only with MatrixRTC, bug reports, or a [server emoji room](../custom-emoji.md) enabled; otherwise send it to Tuwunel as well.
 Runtime features with public paths include the [OpenAI-compatible API](../openai-api.md), the [Connections portal](../connections-portal.md#trusted-upstream-sign-in), the [MCP gateway](mcp-gateway.md#route-browser-and-machine-traffic), the [worker computer](../tools/worker-computer.md#reverse-proxy-and-host-routing), [external triggers](../external-triggers.md), [Slack events](../tools/slack.md#set-up-the-slack-app), the [usage export](../usage.md#usage-export-service) and [budget](../budgets.md#budget-service) services, and [published](../tools/agent-orchestration.md#report_publishing) and [private](../tools/agent-orchestration.md#dynamic_workflow) reports.
 `admin.example.com` sends every path to the runtime, as described in [Dashboard On Its Own Host](trusted-upstream-auth.md#dashboard-on-its-own-host), behind the same first rule.
 

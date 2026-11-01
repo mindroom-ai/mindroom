@@ -10,6 +10,7 @@ This directory contains utility scripts for MindRoom self-hosting.
 
 ### 🔧 Utilities
 - **`utilities/repair_nested_sidecars.py`** - Repair an explicitly selected legacy nested-attachment edit through Matrix
+- **`utilities/create_server_emoji_room.py`** - Create the room that shares custom emoji with everyone on a homeserver
 - **`utilities/cleanup_agent_edits.sh`** - Clean up agent-edited files in Matrix database
 - **`utilities/cleanup_agent_edits_docker.sh`** - Clean up agent edits in Docker environment
 - **`utilities/cleanup_agent_edits.py`** - Python version of cleanup script with more options
