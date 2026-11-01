@@ -3,6 +3,7 @@
 from unittest.mock import Mock, patch
 
 import pytest
+from backend.pricing import get_stripe_price_id
 from backend.routes import admin, webhooks
 from backend.deps import verify_admin
 from fastapi.testclient import TestClient
@@ -105,13 +106,18 @@ async def test_subscription_projection_uses_the_live_tier(seam):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("seam", ["updated", "refresh"])
 @pytest.mark.parametrize(("billing_cycle", "unit_amount"), [("monthly", 1000), ("yearly", 9600)])
-async def test_subscription_records_the_price_it_pays(seam, billing_cycle, unit_amount):
+@pytest.mark.parametrize("listed", [True, False], ids=["listed", "unlisted"])
+async def test_subscription_records_the_price_it_pays(seam, billing_cycle, unit_amount, listed):
     db = database()
     remote = subscription("active", "byok")
-    remote["items"]["data"][0]["price"] |= {
-        "unit_amount": unit_amount,
-        "metadata": {"tier": "byok", "billing_cycle": billing_cycle},
-    }
+    price = remote["items"]["data"][0]["price"]
+    price["unit_amount"] = unit_amount
+    if listed:
+        # A price in pricing-config.yaml takes its billing cycle from there, whatever its metadata says.
+        price["id"] = get_stripe_price_id("byok", billing_cycle)
+        price["metadata"] = {"tier": "byok", "billing_cycle": "yearly" if billing_cycle == "monthly" else "monthly"}
+    else:
+        price["metadata"] = {"tier": "byok", "billing_cycle": billing_cycle}
     with (
         patch.object(webhooks, "ensure_supabase", return_value=db),
         patch.object(

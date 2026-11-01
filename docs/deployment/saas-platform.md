@@ -253,7 +253,7 @@ Admins see the last run, instances pending teardown, and stuck states on the adm
 
 A failed step is stored in `instances.lifecycle_error` and retried on the next run.
 For Stripe-billed subscriptions the lifecycle rechecks the subscription with Stripe, so a lost or out-of-order webhook converges by the next night; if Stripe cannot be reached, nothing is stopped except the instances of an account pending deletion.
-When a price cannot be mapped to a tier, the lifecycle logs a warning and still refreshes status and trial end so inactive subscriptions are held.
+When a price cannot be mapped to a tier and billing cycle, the lifecycle logs a warning and still refreshes status and trial end so inactive subscriptions are held.
 Changing a plan's `included_ai_budget_usd` redeploys every running instance of that tier, one after another, on its next reconcile.
 Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
 If an instance's OpenRouter key was deleted in OpenRouter or is missing from its instance Secret, re-provisioning replaces it.
