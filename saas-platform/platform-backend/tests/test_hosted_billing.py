@@ -50,20 +50,8 @@ def database():
     )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("seam", ["created", "updated", "refresh", "payment_failed"])
-@pytest.mark.parametrize(
-    "amount,paid_subscription,expected",
-    [
-        (0, "sub_1", "unpaid"),
-        (15, "other", "unpaid"),
-        (15, "sub_1", "past_due"),
-    ],
-)
-async def test_past_due_requires_a_paid_payment(seam, amount, paid_subscription, expected):
-    db = database()
-    db.tables["payments"] = [{"subscription_id": paid_subscription, "amount": amount, "status": "succeeded"}]
-    remote = subscription("past_due")
+async def apply_stripe_subscription(seam, db, remote, event=None):
+    """Store `remote`, as Stripe now reports it, through the nightly refresh or a webhook handler that receives `event`."""
     with (
         patch.object(webhooks, "ensure_supabase", return_value=db),
         patch.object(
@@ -78,7 +66,23 @@ async def test_past_due_requires_a_paid_payment(seam, amount, paid_subscription,
                 {"id": "in_1", "parent": {"subscription_details": {"subscription": "sub_1"}}}
             )
         else:
-            getattr(webhooks, f"handle_subscription_{seam}")(remote)
+            getattr(webhooks, f"handle_subscription_{seam}")(event or remote)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seam", ["created", "updated", "refresh", "payment_failed"])
+@pytest.mark.parametrize(
+    "amount,paid_subscription,expected",
+    [
+        (0, "sub_1", "unpaid"),
+        (15, "other", "unpaid"),
+        (15, "sub_1", "past_due"),
+    ],
+)
+async def test_past_due_requires_a_paid_payment(seam, amount, paid_subscription, expected):
+    db = database()
+    db.tables["payments"] = [{"subscription_id": paid_subscription, "amount": amount, "status": "succeeded"}]
+    await apply_stripe_subscription(seam, db, subscription("past_due"))
     assert db.row("subscriptions", id="local_1")["status"] == expected
 
 
@@ -86,18 +90,7 @@ async def test_past_due_requires_a_paid_payment(seam, amount, paid_subscription,
 @pytest.mark.parametrize("seam", ["updated", "refresh"])
 async def test_subscription_projection_uses_the_live_tier(seam):
     db = database()
-    remote = subscription("active", "hobby")
-    with (
-        patch.object(webhooks, "ensure_supabase", return_value=db),
-        patch.object(
-            instance_lifecycle, "stripe", Mock(api_key="test", Subscription=Mock(retrieve=Mock(return_value=remote)))
-        ),
-        patch.object(webhooks.stripe.Subscription, "retrieve", return_value=remote),
-    ):
-        if seam == "refresh":
-            await instance_lifecycle._refresh_status_from_stripe(db, "local_1")
-        else:
-            webhooks.handle_subscription_updated(subscription("active", "pro"))
+    await apply_stripe_subscription(seam, db, subscription("active", "hobby"), event=subscription("active", "pro"))
     row = db.row("subscriptions", id="local_1")
     assert row["tier"] == "hobby"
     assert row["stripe_price_id"] == "price_hobby"
@@ -118,17 +111,7 @@ async def test_subscription_records_the_price_it_pays(seam, billing_cycle, unit_
         price["metadata"] = {"tier": "byok", "billing_cycle": "yearly" if billing_cycle == "monthly" else "monthly"}
     else:
         price["metadata"] = {"tier": "byok", "billing_cycle": billing_cycle}
-    with (
-        patch.object(webhooks, "ensure_supabase", return_value=db),
-        patch.object(
-            instance_lifecycle, "stripe", Mock(api_key="test", Subscription=Mock(retrieve=Mock(return_value=remote)))
-        ),
-        patch.object(webhooks.stripe.Subscription, "retrieve", return_value=remote),
-    ):
-        if seam == "refresh":
-            await instance_lifecycle._refresh_status_from_stripe(db, "local_1")
-        else:
-            webhooks.handle_subscription_updated(remote)
+    await apply_stripe_subscription(seam, db, remote)
     row = db.row("subscriptions", id="local_1")
     assert (row["billing_cycle"], row["price_cents"]) == (billing_cycle, unit_amount)
 
