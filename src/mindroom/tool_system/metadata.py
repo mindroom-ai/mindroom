@@ -62,7 +62,7 @@ _MEDIA_MODEL_DEFAULT_FIELDS = {
 }
 
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
-_TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "string[]", "text", "url"})
+_TEXT_CONFIG_FIELD_TYPES = frozenset({"select", "string[]", "text", "url"})
 _TOOLKIT_FILTER_CONFIG_FIELDS = (
     ConfigField(
         name="include_tools",
@@ -203,14 +203,8 @@ def _validate_authored_override_value(
     metadata: ToolMetadata | ToolValidationInfo,
 ) -> object:
     """Validate one authored override value against its declared config field type."""
-    if value == _AUTHORED_OVERRIDE_INHERIT:
+    if value is None or value == _AUTHORED_OVERRIDE_INHERIT:
         return value
-
-    if value is None:
-        if field.required:
-            msg = f"{full_path}: null is not allowed for required fields."
-            raise ToolConfigOverrideError(msg)
-        return None
 
     if field.type in _TEXT_CONFIG_FIELD_TYPES:
         return _validate_text_authored_override_value(
@@ -303,7 +297,7 @@ def validate_authored_tool_entry_overrides(
     unexpected_fields = sorted(set(overrides) - set(fields_by_name))
     if unexpected_fields:
         unexpected = ", ".join(unexpected_fields)
-        allowed = ", ".join(sorted(fields_by_name)) or "none"
+        allowed = ", ".join(sorted(name for name, field in fields_by_name.items() if field.authored_override)) or "none"
         path = _override_path(tool_name, unexpected_fields[0], config_path_prefix=config_path_prefix)
         msg = f"{path}: unknown authored override field(s): {unexpected}; remove or correct them. Allowed fields: {allowed}."
         raise ToolConfigOverrideError(msg)
@@ -312,18 +306,24 @@ def validate_authored_tool_entry_overrides(
     for field_name, value in overrides.items():
         field = fields_by_name[field_name]
         full_path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)
-        if field.type == "password":
-            msg = f"{full_path}: authored overrides are not allowed for password fields."
-            raise ToolConfigOverrideError(msg)
         if not field.authored_override:
-            msg = f"{full_path}: authored overrides are not allowed for this field."
+            reason = (
+                "authored overrides are not allowed for password fields; save the secret on the dashboard's Tools page."
+                if field.type == "password"
+                else "authored overrides are not allowed for this field."
+            )
+            msg = f"{full_path}: {reason}"
             raise ToolConfigOverrideError(msg)
-        validated[field_name] = _validate_authored_override_value(
+        validated_value = _validate_authored_override_value(
             field,
             value,
             full_path=full_path,
             metadata=metadata,
         )
+        if field.required and validated_value in (None, []):
+            msg = f"{full_path}: this field is required and cannot be empty."
+            raise ToolConfigOverrideError(msg)
+        validated[field_name] = validated_value
     try:
         _run_authored_override_validator(tool_name, validated, validator=metadata.authored_override_validator)
     except ValueError as exc:
