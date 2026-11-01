@@ -28,26 +28,28 @@ const shellFields: ToolFieldSchema[] = [
   },
 ];
 
-/** Back the panel with the real store, holding one agent and defaults.tools. */
+/** Back the panel with the real store, holding agents with the same tools and defaults.tools. */
 function seedStore({
+  agentIds = ["openclaw"],
   agentTools = ["shell"],
   defaultTools = [],
-}: { agentTools?: ToolEntry[]; defaultTools?: ToolEntry[] } = {}) {
+}: {
+  agentIds?: string[];
+  agentTools?: ToolEntry[];
+  defaultTools?: ToolEntry[];
+} = {}) {
   const config = {
-    agents: { openclaw: { display_name: "OpenClaw", tools: agentTools } },
+    agents: Object.fromEntries(
+      agentIds.map((id) => [id, { display_name: id, tools: agentTools }]),
+    ),
     defaults: { tools: defaultTools },
   } as unknown as Config;
   useConfigStore.setState({
     config,
     loadedConfig: config,
-    agents: [
-      {
-        id: "openclaw",
-        display_name: "OpenClaw",
-        tools: agentTools,
-        rooms: [],
-      } as unknown as Agent,
-    ],
+    agents: Object.entries(config.agents).map(
+      ([id, agent]) => ({ id, rooms: [], ...agent }) as unknown as Agent,
+    ),
   });
 }
 
@@ -151,17 +153,14 @@ describe("ToolConfigPanel", () => {
       extra_env_passthrough: [],
       shell_path_prepend: ["/run/wrappers/bin"],
     });
-    expect(
-      screen.getByRole("checkbox", { name: "Override Env Passthrough" }),
-    ).toBeChecked();
+    const envToggle = screen.getByRole("checkbox", {
+      name: "Override Env Passthrough",
+    });
+    expect(envToggle).toBeChecked();
     expect(screen.getByText("No values.")).toBeInTheDocument();
 
-    fireEvent.click(
-      screen.getByRole("checkbox", { name: "Override Env Passthrough" }),
-    );
-    expect(
-      screen.getByRole("checkbox", { name: "Override Env Passthrough" }),
-    ).not.toBeChecked();
+    fireEvent.click(envToggle);
+    expect(envToggle).not.toBeChecked();
 
     // Ticking a field starts from the tool default.
     fireEvent.click(screen.getByRole("checkbox", { name: "Override Timeout" }));
@@ -512,19 +511,9 @@ describe("ToolConfigPanel", () => {
   });
 
   it("keeps a draft to the agent it was typed for", () => {
-    const tools = [{ shell: { extra_env_passthrough: ["HOME"] } }];
-    const config = {
-      agents: {
-        a: { display_name: "A", tools },
-        b: { display_name: "B", tools },
-      },
-    } as unknown as Config;
-    useConfigStore.setState({
-      config,
-      loadedConfig: config,
-      agents: Object.entries(config.agents).map(
-        ([id, agent]) => ({ id, rooms: [], ...agent }) as unknown as Agent,
-      ),
+    seedStore({
+      agentIds: ["a", "b"],
+      agentTools: [{ shell: { extra_env_passthrough: ["HOME"] } }],
     });
     const panel = (agentId: string) => (
       <ToolConfigPanel

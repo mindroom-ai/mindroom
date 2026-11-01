@@ -3,8 +3,9 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { HomeAssistantIntegration } from "./HomeAssistantIntegration";
 
+const { mockToast } = vi.hoisted(() => ({ mockToast: vi.fn() }));
 vi.mock("@/components/ui/use-toast", () => ({
-  useToast: () => ({ toast: vi.fn() }),
+  useToast: () => ({ toast: mockToast }),
 }));
 
 describe("HomeAssistantIntegration", () => {
@@ -66,6 +67,55 @@ describe("HomeAssistantIntegration", () => {
       );
     });
   });
+
+  it.each([
+    { method: "OAuth", message: "Failed to start OAuth flow" },
+    { method: "Token", message: "Failed to connect" },
+  ])(
+    "reports a $method connect failure without a JSON body by its fallback message",
+    async ({ method, message }) => {
+      global.fetch = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ connected: false }),
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+          json: async () => {
+            throw new SyntaxError("Unexpected token '<'");
+          },
+        }) as any;
+
+      render(<HomeAssistantIntegration />);
+
+      if (method === "Token") {
+        fireEvent.mouseDown(
+          await screen.findByRole("tab", { name: "Access Token" }),
+          { button: 0 },
+        );
+        fireEvent.change(
+          screen.getByLabelText("Access Token", { selector: "input" }),
+          { target: { value: "token-value" } },
+        );
+      }
+      fireEvent.change(await screen.findByLabelText("Home Assistant URL"), {
+        target: { value: "http://homeassistant.example" },
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: `Connect with ${method}` }),
+      );
+
+      await waitFor(() => {
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({
+            description: message,
+            variant: "destructive",
+          }),
+        );
+      });
+    },
+  );
 
   it("connects with a token and notifies the parent", async () => {
     const onSuccess = vi.fn();

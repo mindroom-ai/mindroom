@@ -119,6 +119,12 @@ spec:
               mountPath: /app/config.json
               subPath: {{ .Values.config.key }}
               readOnly: true
+            {{- if $nginxManaged }}
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            {{- end }}
             - name: nginx-config
               mountPath: /etc/nginx/conf.d/default.conf
               subPath: {{ .Values.nginx.key }}

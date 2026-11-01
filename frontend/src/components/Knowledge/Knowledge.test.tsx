@@ -1166,7 +1166,37 @@ describe("Knowledge", () => {
     expect(uploadCalls).toHaveLength(0);
   });
 
-  it("surfaces structured reindex failure details", async () => {
+  it.each([
+    {
+      body: "structured details",
+      response: jsonResponse(
+        {
+          detail: {
+            success: false,
+            base_id: "git_docs",
+            indexed_count: 0,
+            availability: "refresh_failed",
+            last_error: "Indexed 0 of 1 managed knowledge files",
+          },
+        },
+        409,
+      ),
+      message: "Indexed 0 of 1 managed knowledge files",
+    },
+    {
+      body: "no JSON",
+      response: new Response("<html>Bad gateway</html>", { status: 502 }),
+      message: "Request failed (502)",
+    },
+    {
+      body: "no JSON and a status text",
+      response: new Response("<html>Bad gateway</html>", {
+        status: 502,
+        statusText: "Bad Gateway",
+      }),
+      message: "Bad Gateway",
+    },
+  ])("surfaces a reindex failure with $body", async ({ response, message }) => {
     mockStore({
       git_docs: {
         path: "./knowledge_docs/git_docs",
@@ -1194,22 +1224,7 @@ describe("Knowledge", () => {
           },
         }),
       },
-      {
-        reindexResponses: {
-          git_docs: jsonResponse(
-            {
-              detail: {
-                success: false,
-                base_id: "git_docs",
-                indexed_count: 0,
-                availability: "refresh_failed",
-                last_error: "Indexed 0 of 1 managed knowledge files",
-              },
-            },
-            409,
-          ),
-        },
-      },
+      { reindexResponses: { git_docs: response } },
     );
 
     render(<Knowledge />);
@@ -1217,13 +1232,11 @@ describe("Knowledge", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Reindex" }));
 
-    expect(
-      await screen.findByText("Indexed 0 of 1 managed knowledge files"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(message)).toBeInTheDocument();
     expect(mockToast).toHaveBeenCalledWith(
       expect.objectContaining({
         title: "Reindex failed",
-        description: "Indexed 0 of 1 managed knowledge files",
+        description: message,
         variant: "destructive",
       }),
     );

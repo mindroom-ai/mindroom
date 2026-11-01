@@ -683,6 +683,33 @@ async def test_current_room_refresh_reuses_ready_room_snapshots(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_failed_membership_queries_log_why_they_failed(tmp_path: Path) -> None:
+    """A failed joined-rooms or joined-members query logs its error message, not only the exception type."""
+    config, runtime_paths = _current_room_runtime_config(tmp_path)
+    room_id = "!current:example.com"
+    client = AsyncMock()
+    client.joined_rooms.side_effect = [
+        nio.LocalProtocolError("durable sync session is closed"),
+        nio.JoinedRoomsResponse(rooms=[room_id]),
+    ]
+    client.joined_members.side_effect = nio.LocalProtocolError("room membership changed during lookup")
+    index = AgentReplyMembershipIndex()
+
+    with capture_logs() as logs:
+        await index.refresh(config, runtime_paths, client)
+        await index.refresh(config, runtime_paths, client)
+
+    assert [
+        (log["event"], log["error"])
+        for log in logs
+        if log["event"] in {"agent_reply_control_client_joined_rooms_failed", "agent_reply_grant_room_snapshot_failed"}
+    ] == [
+        ("agent_reply_control_client_joined_rooms_failed", "LocalProtocolError: durable sync session is closed"),
+        ("agent_reply_grant_room_snapshot_failed", "LocalProtocolError: room membership changed during lookup"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_control_departure_marks_current_room_snapshot_unready(tmp_path: Path) -> None:
     """Current-room entries without managed keys must fail closed on control departure."""
     config, runtime_paths = _current_room_runtime_config(tmp_path)

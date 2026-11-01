@@ -182,8 +182,8 @@ async def _wait_for_finished(socket_path: str, handle: str) -> str:
     raise AssertionError(message)
 
 
-async def _assert_pid_dead(pid: int) -> None:
-    for _ in range(40):
+async def _assert_pid_dead(pid: int, *, timeout_seconds: float = 2.0) -> None:
+    for _ in range(round(timeout_seconds / 0.05)):
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -1116,11 +1116,9 @@ async def test_orphaned_supervisor_exits_and_kills_children() -> None:
     supervisor_pid = int(supervisor_pid_file.read_text(encoding="utf-8").strip())
 
     try:
-        await _assert_pid_dead(supervisor_pid)
-        for _ in range(40):
-            if not runtime_dir.exists():
-                break
-            await asyncio.sleep(0.1)
+        # The supervisor notices the orphaning at its next parent poll and then tears down, which a loaded host slows.
+        await _assert_pid_dead(supervisor_pid, timeout_seconds=10 * shell_supervisor._PARENT_POLL_INTERVAL_SECONDS)
+        # It removes the runtime dir before it exits.
         assert not runtime_dir.exists()
     finally:
         with contextlib.suppress(ProcessLookupError, PermissionError):

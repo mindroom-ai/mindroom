@@ -225,7 +225,7 @@ Matrix sync callback
 | `script_runs/broker.py` | Authenticates a script's tool calls by capability and runs each claimed call under the run's current authority |
 | `script_runs/recovery.py` | The recovery signature that lets a restarted primary adopt a still-running worker script |
 | `script_runs/supervised.py` | Launch, status, and signal of one script process through a shell supervisor, shared by unsafe-local runs and worker routes |
-| `script_runs/launch_contract.py` | Script environment names, size limits, and snapshot layout shared by launchers, the shim, and the SDK |
+| `script_runs/launch_contract.py` | Script environment names, size limits, and snapshot layout for launchers, the shim, and the SDK, plus the tool-call argument digest the SDK and the broker share |
 | `script_runs/shim.py` | Import-light entry point that verifies a run's snapshot inside the script process and runs its source |
 | `script_runs/wire.py` | The primary-worker script protocol: its version, request and response models, normalized receipts, and error |
 | `script_runs/worker_client.py` | The primary's HTTP client for a worker's script routes |
@@ -316,6 +316,7 @@ Matrix sync callback
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `scheduling/tasks.py` | Cron and natural-language task scheduling |
 | `scheduling/runtime.py` | The one owner of scheduled-task runners and of when each runner may use its task's owner bot |
+| `scheduling/recurring_schedule.py` | Durable checkpoints for recurring task timers and their pending Matrix trigger |
 | `scheduling/ownership.py` | Which bot runs a scheduled task, decided once at save time from the room's full state |
 | `scheduling/errors.py` | `SchedulingError`, the one failure a scheduling operation reports, with subtypes for a missing task and failed task storage, which chat, the scheduler tool, and the schedules API each render |
 | `scheduling/scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |
