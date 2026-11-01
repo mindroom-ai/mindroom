@@ -5909,3 +5909,31 @@ def test_manager_joins_calls_in_its_own_personal_room(tmp_path: Path) -> None:
         ),
     )
     assert manager._is_configured_call_room(_room())
+
+
+def test_manager_ignores_personal_rooms_of_call_agents_outside_the_room(tmp_path: Path) -> None:
+    """Only agents in a room can answer there, so a damaged record of an absent call agent keeps configured rooms working."""
+    config = Config(
+        models={},
+        agents={
+            "helper": AgentConfig(display_name="Helper", rooms=[ROOM_ID]),
+            "other": AgentConfig(display_name="Other"),
+        },
+        calls=CallsConfig(
+            enabled=True,
+            profiles={
+                "voice": RealtimeCallProfile(
+                    backend="realtime",
+                    model="gpt-realtime",
+                    credentials_service="openai",
+                    voice="marin",
+                ),
+            },
+            agents={"helper": "voice", "other": "voice"},
+        ),
+    )
+    record = personal_room_record_path(test_runtime_paths(tmp_path), "other", "@bob:example.org")
+    record.parent.mkdir(parents=True)
+    record.write_text('{"user_id": "@bob:example.org", "field_from_a_newer_release": true}')
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
+    assert manager._is_configured_call_room(_room())

@@ -335,7 +335,10 @@ def _call_templates(config: Mapping[str, Any], templates: Mapping[str, dict[str,
     calls = config.get("calls")
     if not isinstance(calls, dict) or not isinstance(calls.get("agents"), dict):
         return {}
-    assigned = {key: profile for key, profile in calls["agents"].items() if key in templates}
+    # A key without a string profile stays in calls.agents, where CallsConfig reports it like any other.
+    assigned = {
+        key: profile for key, profile in calls["agents"].items() if key in templates and isinstance(profile, str)
+    }
     # Expansion removes the template keys, so CallsConfig would see a template's profile only once a user is onboarded.
     profiles = calls.get("profiles")
     if unknown := sorted({p for p in assigned.values() if not isinstance(profiles, dict) or p not in profiles}):
@@ -349,7 +352,7 @@ def _call_templates(config: Mapping[str, Any], templates: Mapping[str, dict[str,
         if any(agent.get("rooms") for agent in (templates[key]["agent"], *overrides)):
             msg = (
                 f"calls.agents names personal_agents.{key}, whose agent lists rooms in the template or a user's "
-                "override; a room takes only one calls-enabled agent, and every user's agent would join them"
+                "override; a room takes only one calls-enabled agent"
             )
             raise ValueError(msg)
     return assigned

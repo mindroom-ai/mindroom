@@ -465,3 +465,10 @@ def test_onboarding_under_a_calls_template_keeps_other_agents_cli_catalogs(tmp_p
     after = _runtime_config(tmp_path / "after", deepcopy(data), roster=(_entry(), _entry("@bob:example.org")))
     assert after.calls.agents != before.calls.agents
     assert _catalog_authority(after, "mind_alice_smith") == _catalog_authority(before, "mind_alice_smith")
+
+
+def test_blank_template_call_profile_is_a_validation_error(tmp_path: Path) -> None:
+    """A template key without a profile is refused like any other non-string profile, not with a TypeError."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS) | {"agents": {"mind": None}}}
+    with pytest.raises(ValueError, match=r"calls\.agents\.mind"):
+        _runtime_config(tmp_path, data)
