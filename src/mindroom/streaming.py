@@ -337,7 +337,7 @@ def interactive_response_for_visible_body(
 
 @dataclass(frozen=True, slots=True)
 class _PreparedStreamingDelivery:
-    """One frozen non-terminal delivery attempt."""
+    """One frozen delivery attempt, non-terminal or terminal."""
 
     content: dict[str, Any]
     display_text: str

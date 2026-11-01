@@ -1774,7 +1774,6 @@ class TestStreamingBehavior:
     async def test_trace_only_change_during_an_edit_leaves_nothing_pending(self) -> None:
         """A tool-trace change with no new text, made while an edit is in flight, leaves no characters pending."""
         mock_client = _make_matrix_client_mock()
-        first_send_landed = asyncio.Event()
         streaming = StreamingResponse(
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
@@ -1785,7 +1784,6 @@ class TestStreamingBehavior:
             min_char_update_interval=0.35,
             max_idle=10.0,
             show_tool_calls=False,
-            visible_progress_callback=lambda _body, _trace: first_send_landed.set(),
             **reply_hooks(),
         )
         streaming.last_update = float("-inf")
@@ -1806,7 +1804,6 @@ class TestStreamingBehavior:
         with patch("mindroom.streaming.time.time", return_value=100.0):
             streaming._update("Checking")
             _queue_delivery_request(delivery_queue)
-            await first_send_landed.wait()
             await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.await_count == 1
