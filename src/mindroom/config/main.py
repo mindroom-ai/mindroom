@@ -114,7 +114,7 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
 )
 from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN
-from mindroom.entity_resolution import call_room_ownership_key
+from mindroom.entity_resolution import call_room_ownership_key, resolve_agent_thread_mode, router_agents_for_room
 from mindroom.file_locks import advisory_file_lock
 from mindroom.git_urls import credential_free_repo_url
 
@@ -1523,8 +1523,6 @@ class Config(BaseModel):
         Router inherits a mode only when all relevant configured agents share it.
         In ambiguous cases, default to "thread".
         """
-        from mindroom.entity_resolution import resolve_agent_thread_mode, router_agents_for_room  # noqa: PLC0415
-
         runtime_room_override = resolve_room_thread_mode_override(runtime_paths, room_id)
         if runtime_room_override is not None:
             return runtime_room_override

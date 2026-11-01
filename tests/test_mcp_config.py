@@ -96,6 +96,11 @@ def test_mcp_server_config_normalizes_display_metadata(raw: str, expected: str |
     assert values == (expected,) * 5
 
 
+def test_mcp_server_config_accepts_blank_description_without_auth() -> None:
+    """A blank description counts as unset, so it does not require OAuth auth."""
+    assert MCPServerConfig(transport="stdio", command="npx", description="   ").description is None
+
+
 def test_mcp_server_config_rejects_description_without_auth() -> None:
     """A description only surfaces in OAuth bridge tool descriptions, so it requires auth."""
     with pytest.raises(ValueError, match="MCP description requires OAuth auth"):
