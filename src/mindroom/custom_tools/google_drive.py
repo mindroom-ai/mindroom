@@ -336,14 +336,14 @@ class GoogleDriveTools(
             return f"Unsupported Workspace file type for download: {mime_type}"
         return None
 
-    def _download_advice(self, metadata: dict[str, Any]) -> str:
-        """After a refused read, name the download function while offered, or say why it would refuse the file too."""
-        if "google_drive_download_file" not in toolkit_function_names(self):
-            return ""
-        refusal = self._download_refusal(metadata)
-        if refusal:
-            return f" google_drive_download_file would refuse it too: {refusal}"
-        return " Use google_drive_download_file instead."
+    def _read_refusal(self, error: str, metadata: dict[str, Any]) -> str:
+        """Refuse a read; name the download function while offered, or quote why it would refuse the file too."""
+        if "google_drive_download_file" in toolkit_function_names(self):
+            if download_refusal := self._download_refusal(metadata):
+                error += f" google_drive_download_file would refuse it too: {download_refusal}"
+            else:
+                error += " Use google_drive_download_file instead."
+        return json.dumps({"error": error, "file": metadata})
 
     @authenticate
     def _upload_file(
@@ -493,11 +493,6 @@ class GoogleDriveTools(
             log_error(f"Could not trash Google Drive file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    def _text_read_refusal(self, mime_type: str, metadata: dict[str, Any]) -> str:
-        return json.dumps(
-            {"error": f"Cannot read {mime_type} as text.{self._download_advice(metadata)}", "file": metadata},
-        )
-
     # AGNO_COMPAT: Drive `read_file` refuses text by MIME type and names a download function that may not exist.
     # Reason: Agno 3.0.9 refuses every `application/octet-stream` file, including text MindRoom's own uploads
     # store that way, and ends errors with "Use download_file instead." although MindRoom exposes
@@ -526,7 +521,7 @@ class GoogleDriveTools(
             if mime_type in self.TEXT_EXPORT_TYPES:
                 export_mime = self.TEXT_EXPORT_TYPES[mime_type]
             elif mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
-                return self._text_read_refusal(mime_type, metadata)
+                return self._read_refusal(f"Cannot read {mime_type} as text.", metadata)
             else:
                 export_mime = None
 
@@ -536,13 +531,8 @@ class GoogleDriveTools(
             else:
                 file_size = int(metadata.get("size", 0))
                 if file_size > self.max_read_size:
-                    return json.dumps(
-                        {
-                            "error": f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size})."
-                            f"{self._download_advice(metadata)}",
-                            "file": metadata,
-                        },
-                    )
+                    error = f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size})."
+                    return self._read_refusal(error, metadata)
                 request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
                 content_bytes = self._download_bytes(request)
 
@@ -551,7 +541,7 @@ class GoogleDriveTools(
             # none. A PDF can be NUL-free when its streams are uncompressed, so its signature counts too.
             # UTF-16 text is refused as well.
             if content_bytes.startswith(b"%PDF-") or b"\x00" in content_bytes:
-                return self._text_read_refusal(mime_type, metadata)
+                return self._read_refusal(f"Cannot read {mime_type} as text.", metadata)
             content = content_bytes.decode("utf-8", errors="replace")
             return json.dumps(
                 {
