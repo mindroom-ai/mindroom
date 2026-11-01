@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     ClaudeSDKError,
     ProcessError,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolResultBlock,
     UserMessage,
@@ -1391,7 +1392,13 @@ async def test_claude_send_answers_its_own_prompt_after_claude_code_starts_a_tur
     ]
 
 
-_BLOCKED = replace(_claude_result(0), result="UserPromptSubmit operation blocked by hook: deploys need approval")
+# A command headless Claude Code does not offer, such as /status, gets a result but no echo and runs no turn.
+_NO_TURN = replace(_claude_result(0), result="/status isn't available in this environment.")
+_BLOCK_REASON = "UserPromptSubmit operation blocked by hook:\ndeploys need approval\n\nOriginal prompt: Deploy it"
+_HOOK_BLOCK = SystemMessage(
+    subtype="informational",
+    data={"type": "system", "subtype": "informational", "content": _BLOCK_REASON, "prevent_continuation": True},
+)
 
 
 @pytest.mark.asyncio
@@ -1399,17 +1406,52 @@ async def test_claude_send_returns_the_result_of_a_prompt_that_runs_no_turn(
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A prompt a hook blocked gets a result but no echo, and its result follows what Claude reported on its own."""
+    """A prompt that runs no turn gets a result but no echo, and its result follows what Claude reported on its own."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
-    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[_BACKGROUND_NOTE, _self_started_result(30), _BLOCKED]])
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[_BACKGROUND_NOTE, _self_started_result(30), _NO_TURN]])
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    reply = await asyncio.wait_for(_in_call(run_context, tools.claude_send("Deploy it")), timeout=10)
+    reply = await asyncio.wait_for(_in_call(run_context, tools.claude_send("/status")), timeout=10)
 
-    assert reply.startswith(
-        "The background tests passed.\nUserPromptSubmit operation blocked by hook: deploys need approval\n\n",
-    )
+    assert reply.startswith("The background tests passed.\n/status isn't available in this environment.\n\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("blocked_read", "blocked_reply"),
+    [
+        pytest.param(
+            [_HOOK_BLOCK, replace(_claude_result(0), result=_BLOCK_REASON)],
+            _BLOCK_REASON,
+            id="while-idle",
+        ),
+        pytest.param(
+            # Claude Code drops a prompt a hook blocks while its own turn runs, and that turn goes on.
+            [_TASK_OUTPUT, _HOOK_BLOCK, _BACKGROUND_NOTE, _self_started_result(30)],
+            f"{_BLOCK_REASON}\nThe background tests passed.",
+            id="while-claude-code-runs-its-own-turn",
+        ),
+    ],
+)
+async def test_claude_send_returns_why_a_hook_blocked_its_prompt(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_read: list[Message],
+    blocked_reply: str,
+) -> None:
+    """A prompt a hook blocks gets no echo; the block reason answers it, and the next prompt gets its own reply."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    next_read = [_ECHO, _claude_response("claude-sonnet-5-5", "msg-3", 500, text="Next."), _claude_result(60)]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [blocked_read, next_read])
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+
+    blocked = await asyncio.wait_for(_in_call(run_context, tools.claude_send("Deploy it")), timeout=10)
+    following = await asyncio.wait_for(_in_call(run_context, tools.claude_send("Next step")), timeout=10)
+
+    assert blocked.startswith(f"{blocked_reply}\n\n")
+    assert following.startswith("Next.\n\n")
 
 
 @pytest.mark.asyncio
@@ -1433,18 +1475,18 @@ async def test_claude_send_returns_the_result_of_a_prompt_that_runs_no_turn(
         ),
         pytest.param(
             # Claude Code was running a turn of its own, which the stopped prompt joined after the stop.
-            [[], [_FIRST_ECHO, _self_started_result(30), _BLOCKED]],
+            [[], [_FIRST_ECHO, _self_started_result(30), _NO_TURN]],
             False,
-            _BLOCKED.result,
+            _NO_TURN.result,
             id="prompt-joined-a-self-started-turn",
         ),
         pytest.param(
             [
                 [_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000, text="First."), _claude_result(200)],
-                [_BLOCKED],
+                [_NO_TURN],
             ],
             True,
-            f"First.\n{_BLOCKED.result}",
+            f"First.\n{_NO_TURN.result}",
             id="stopped-while-writing",
         ),
     ],

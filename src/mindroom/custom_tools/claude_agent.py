@@ -18,6 +18,7 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     ClaudeSDKError,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolUseBlock,
     UserMessage,
@@ -93,7 +94,7 @@ class _ClaudeSessionState:
     stderr_lines: collections.deque[str] = field(
         default_factory=lambda: collections.deque(maxlen=_MAX_STDERR_LINES),
     )
-    # Prompts whose result is still unread, oldest first, each marked once Claude Code has echoed it.
+    # Prompts whose result is still unread, oldest first, each marked once a turn has taken it up: echoed or dropped.
     unanswered: dict[str, bool] = field(default_factory=dict)
 
 
@@ -340,10 +341,10 @@ async def _prompt_message(prompt: str, prompt_id: str) -> AsyncIterator[dict[str
 def _settle_prompts(session: _ClaudeSessionState, result: ResultMessage) -> list[str]:
     """Stop waiting for the prompts ``result`` answers, and return them.
 
-    A result answers the prompts echoed in its turn, which may be a turn Claude Code started on its own. Without an
-    echo, a result of a turn Claude Code did not start itself answers the oldest prompt, one that ran no turn, such as
-    a command headless Claude Code does not offer or a prompt a hook blocked. Results are read only while the reading
-    call's own prompt waits, so an oldest prompt always exists.
+    A result answers the prompts its turn took up, which may be a turn Claude Code started on its own. Otherwise, a
+    result of a turn Claude Code did not start itself answers the oldest prompt, one that ran no turn, such as a
+    command headless Claude Code does not offer. Results are read only while the reading call's own prompt waits, so
+    an oldest prompt always exists.
     """
     answered = [prompt for prompt, echoed in session.unanswered.items() if echoed]
     if not answered and (result.origin is None or result.origin["kind"] == "human"):
@@ -351,6 +352,28 @@ def _settle_prompts(session: _ClaudeSessionState, result: ResultMessage) -> list
     for prompt in answered:
         del session.unanswered[prompt]
     return answered
+
+
+def _note_prompt_taken_up(
+    session: _ClaudeSessionState,
+    turn: _ClaudeTurn,
+    message: UserMessage | SystemMessage,
+) -> None:
+    """Mark the waiting prompt the turn being read took up, if ``message`` shows one.
+
+    A prompt's echo marks that prompt. Claude Code's notice that it dropped a prompt without running it, such as one
+    a hook blocked, marks the oldest prompt not yet echoed and gives the turn its reason.
+    """
+    if isinstance(message, UserMessage):
+        if message.uuid in session.unanswered:
+            session.unanswered[message.uuid] = True
+        return
+    if not message.data.get("prevent_continuation"):
+        return
+    dropped = next((prompt for prompt, echoed in session.unanswered.items() if not echoed), None)
+    if dropped is not None:
+        session.unanswered[dropped] = True
+        turn.text_parts.append(message.data["content"])
 
 
 def _turn_text(turn: _ClaudeTurn) -> str:
@@ -665,8 +688,8 @@ class ClaudeAgentTools(Toolkit):
 
         async for message in session.client.receive_messages():
             turn = turns[-1]
-            if isinstance(message, UserMessage) and message.uuid in session.unanswered:
-                session.unanswered[message.uuid] = True
+            if isinstance(message, UserMessage | SystemMessage):
+                _note_prompt_taken_up(session, turn, message)
             elif isinstance(message, AssistantMessage):
                 # Placeholder messages, such as a request that failed every retry, name no real model.
                 if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL and message.message_id:
