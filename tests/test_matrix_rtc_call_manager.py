@@ -5911,8 +5911,8 @@ def test_manager_joins_calls_in_its_own_personal_room(tmp_path: Path) -> None:
     assert manager._is_configured_call_room(_room())
 
 
-def test_manager_ignores_personal_rooms_of_call_agents_outside_the_room(tmp_path: Path) -> None:
-    """Only agents in a room can answer there, so a damaged record of an absent call agent keeps configured rooms working."""
+def test_manager_keeps_its_configured_room_when_another_call_agents_record_is_damaged(tmp_path: Path) -> None:
+    """A damaged record of another call agent leaves out only that record's room."""
     config = Config(
         models={},
         agents={
@@ -5970,13 +5970,11 @@ def _write_personal_room(tmp_path: Path, agent_name: str, user_id: str, room_id:
     )
 
 
-def test_invited_call_agent_does_not_answer_in_a_present_agents_personal_room(tmp_path: Path) -> None:
-    """A personal room's own agent and an invited call agent leave the room to neither, as for two invited agents."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_helper", "helper", "pw")
-    state.add_account("agent_other", "other", "pw")
-    save_matrix_state(state, runtime_paths)
+def test_invited_call_agent_does_not_answer_in_another_agents_personal_room(tmp_path: Path) -> None:
+    """A personal room's own agent and an invited call agent leave the room to neither, as for two invited agents.
+
+    The room's members are not consulted: lazy-loaded membership may not list the personal room's agent yet.
+    """
     _write_personal_room(tmp_path, "other", "@alice:example.org", ROOM_ID)
     manager = _manager(
         _client(),
@@ -5985,9 +5983,7 @@ def test_invited_call_agent_does_not_answer_in_a_present_agents_personal_room(tm
         _two_call_agents(accept_invites=True),
         invited_rooms_by_agent={"helper": {ROOM_ID}},
     )
-    room = _room()
-    room.add_member("@other:localhost", "Other", None)
-    assert not manager._is_configured_call_room(room)
+    assert not manager._is_configured_call_room(_room())
 
 
 def test_manager_keeps_its_configured_room_when_one_of_its_records_is_damaged(tmp_path: Path) -> None:

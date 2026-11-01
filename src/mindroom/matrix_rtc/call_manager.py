@@ -29,7 +29,7 @@ from nio import AuthenticatedToDeviceEvent
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
-from mindroom.entity_resolution import configured_call_agent_name_for_room, prepared_entity_names_by_user_id
+from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
@@ -804,16 +804,6 @@ class CallManager:
             self._replay_pending_keys(room_call, session)
             room_call.clear_reconcile_retry()
 
-    def _present_call_agents_personal_rooms(self, room: nio.MatrixRoom) -> dict[str, frozenset[str]]:
-        """Return the personal rooms of this agent and of the call agents joined in ``room``, the only ones that can answer there."""
-        names_by_user_id = prepared_entity_names_by_user_id(self._config, self._runtime_paths)
-        present = {self._agent_name, *(names_by_user_id.get(user_id) for user_id in cached_joined_member_ids(room))}
-        return {
-            agent_name: personal_room_ids(self._runtime_paths, agent_name)
-            for agent_name in self._config.calls.agents
-            if agent_name in present
-        }
-
     def _is_configured_call_room(self, room: nio.MatrixRoom, *, call_event: nio.UnknownEvent | None = None) -> bool:
         """Return whether this agent is configured to join calls in ``room``."""
         room_alias = room.canonical_alias
@@ -825,7 +815,10 @@ class CallManager:
                 self._runtime_paths,
                 room_aliases=room_aliases,
                 invited_rooms_by_agent=self._get_invited_rooms_by_agent(),
-                personal_rooms_by_agent=self._present_call_agents_personal_rooms(room),
+                personal_rooms_by_agent={
+                    agent_name: personal_room_ids(self._runtime_paths, agent_name)
+                    for agent_name in self._config.calls.agents
+                },
             )
         except ValueError as error:
             log = logger.warning if self._has_live_remote_call_signal(room, call_event) else logger.debug
