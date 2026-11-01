@@ -114,7 +114,12 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
 )
 from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN
-from mindroom.entity_resolution import call_room_ownership_key, resolve_agent_thread_mode, router_agents_for_room
+from mindroom.entity_resolution import (
+    call_room_ownership_key,
+    names_recorded_room,
+    resolve_agent_thread_mode,
+    router_agents_for_room,
+)
 from mindroom.file_locks import advisory_file_lock
 from mindroom.git_urls import credential_free_repo_url
 
@@ -122,7 +127,6 @@ from mindroom.git_urls import credential_free_repo_url
 from mindroom.integrations import validate_integrations
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import managed_account_key
-from mindroom.matrix.state import resolve_room_id
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     is_managed_room_key,
@@ -1004,7 +1008,7 @@ class Config(BaseModel):
         unknown_rooms = sorted(
             f"{location} -> {room}"
             for location, room in references
-            if room is not None and room not in named_rooms and not resolve_room_id(room, runtime_paths).startswith("!")
+            if room is not None and room not in named_rooms and not names_recorded_room(room, runtime_paths)
         )
         if unknown_rooms:
             msg = (

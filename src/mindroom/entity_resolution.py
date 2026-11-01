@@ -40,6 +40,11 @@ def call_room_ownership_key(room_ref: str, runtime_paths: RuntimePaths) -> str:
     return room_alias_identifier_candidates(room_ref, runtime_paths)[-1]
 
 
+def names_recorded_room(room_ref: str, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a reference is a room ID, or a room key or alias MindRoom's record maps to one."""
+    return matrix_state.resolve_room_id(room_ref, runtime_paths).startswith("!")
+
+
 def configured_call_agent_name_for_room(
     config: Config,
     room_id: str,
