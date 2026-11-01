@@ -66,6 +66,13 @@ const serveGithubToken = () =>
       }),
     });
 
+/** How many plain reads (no method) of this exact path the page made. */
+const readsOf = (path: string) =>
+  (global.fetch as any).mock.calls.filter(
+    ([input, init]: [string, RequestInit | undefined]) =>
+      input === path && init?.method === undefined,
+  ).length;
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -565,12 +572,6 @@ describe("Credentials", () => {
         return { ok: true, json: async () => body };
       },
     );
-    const readsOf = (path: string) =>
-      (global.fetch as any).mock.calls.filter(
-        ([input, init]: [string, RequestInit | undefined]) =>
-          input === path && init?.method === undefined,
-      ).length;
-
     renderOpen();
 
     fireEvent.click(await screen.findByRole("button", { name: /^openai/ }));
@@ -812,15 +813,140 @@ describe("Credentials", () => {
 
     renderOpen();
 
+    const editor = screen.getByPlaceholderText(
+      '{"api_key":"..."}',
+    ) as HTMLTextAreaElement;
     await waitFor(() => {
-      expect(screen.getByText("good_service")).toBeInTheDocument();
-      expect(screen.getByText("zbad_service")).toBeInTheDocument();
-      expect(
-        screen.getByText(
-          "Some service statuses could not be loaded. You can still edit credentials.",
-        ),
-      ).toBeInTheDocument();
+      expect(editor.value).toContain('"token": "abc"');
     });
+    expect(
+      screen.getByRole("button", { name: /^good_service/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^zbad_service/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Some service statuses could not be loaded. You can still edit credentials.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the list error when the list fails to reload on Refresh", async () => {
+    let refreshed = false;
+    (global.fetch as any).mockImplementation(async (input: string) => {
+      const path = String(input);
+      if (path === "/api/credentials/list" && refreshed) {
+        throw new Error("Service list unavailable");
+      }
+      const body =
+        path === "/api/credentials/list"
+          ? ["github_private"]
+          : path.endsWith("/status")
+            ? {
+                service: "github_private",
+                has_credentials: true,
+                key_names: ["token"],
+              }
+            : { service: "github_private", credentials: { token: "t" } };
+      return { ok: true, json: async () => body };
+    });
+
+    renderOpen();
+
+    await screen.findByText("Active: github_private");
+    await waitFor(() => {
+      expect(readsOf("/api/credentials/github_private")).toBe(1);
+    });
+    refreshed = true;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(readsOf("/api/credentials/github_private")).toBe(2);
+    });
+    expect(
+      await screen.findByText("Service list unavailable"),
+    ).toBeInTheDocument();
+  });
+
+  it("reloads only the list on Refresh when there is no service", async () => {
+    serveNoServices();
+
+    renderOpen();
+
+    await screen.findByText(
+      "No services found yet. Add one and save JSON credentials.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(readsOf("/api/credentials/list")).toBe(2);
+    });
+    expect((global.fetch as any).mock.calls).toHaveLength(2);
+  });
+
+  it("keeps the already-exists error after selecting that service", async () => {
+    (global.fetch as any).mockImplementation(async (input: string) => {
+      const path = String(input);
+      const [, , , service, suffix] = path.split("/");
+      const body =
+        path === "/api/credentials/list"
+          ? ["service_a", "service_b"]
+          : suffix === "status"
+            ? { service, has_credentials: true, key_names: ["token"] }
+            : { service, credentials: { token: `${service}-value` } };
+      return { ok: true, json: async () => body };
+    });
+
+    renderOpen();
+
+    await screen.findByText("Active: service_a");
+    fireEvent.change(screen.getByPlaceholderText("new_service_name"), {
+      target: { value: "service_b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    await screen.findByText("Active: service_b");
+    await waitFor(() => {
+      expect(readsOf("/api/credentials/service_b")).toBe(1);
+    });
+    expect(
+      screen.getByText("Service 'service_b' already exists"),
+    ).toBeInTheDocument();
+  });
+
+  it("clears the previous service's error when another service is selected", async () => {
+    (global.fetch as any).mockImplementation(async (input: string) => {
+      const path = String(input);
+      const [, , , service, suffix] = path.split("/");
+      if (path === "/api/credentials/service_a") {
+        throw new Error("Credentials unavailable");
+      }
+      const body =
+        path === "/api/credentials/list"
+          ? ["service_a", "service_b"]
+          : suffix === "status"
+            ? { service, has_credentials: true, key_names: ["token"] }
+            : { service, credentials: { token: `${service}-value` } };
+      return { ok: true, json: async () => body };
+    });
+
+    renderOpen();
+
+    expect(
+      await screen.findByText("Credentials unavailable"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^service_b/ }));
+
+    const editor = screen.getByPlaceholderText(
+      '{"api_key":"..."}',
+    ) as HTMLTextAreaElement;
+    await waitFor(() => {
+      expect(editor.value).toContain('"token": "service_b-value"');
+    });
+    expect(
+      screen.queryByText("Credentials unavailable"),
+    ).not.toBeInTheDocument();
   });
 
   it("prompts before switching services with unsaved changes", async () => {

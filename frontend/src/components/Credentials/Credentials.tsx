@@ -161,7 +161,6 @@ export function Credentials() {
     const requestId = latestCredentialsRequestRef.current + 1;
     latestCredentialsRequestRef.current = requestId;
     setIsLoadingCredentials(true);
-    setError(null);
     try {
       const data = await fetchJSON<CredentialGetResponse>(
         API_ENDPOINTS.credentials.get(service),
@@ -236,6 +235,7 @@ export function Credentials() {
       ) {
         return;
       }
+      setError(null);
       setSelectedService(service);
     },
     [hasUnsavedChanges, selectedService],
@@ -283,6 +283,17 @@ export function Credentials() {
       // Keep existing list if status refresh fails.
     }
   }, []);
+
+  // The service's credentials first, unless another service was selected meanwhile, then the list.
+  const reload = useCallback(
+    async (service: string) => {
+      if (service && selectedServiceRef.current === service) {
+        await loadCredentials(service);
+      }
+      await loadServices();
+    },
+    [loadCredentials, loadServices],
+  );
 
   const handleSave = useCallback(async () => {
     if (!selectedService) {
@@ -368,19 +379,15 @@ export function Credentials() {
     setIsDeleting(true);
     setError(null);
     try {
-      // The environment can still supply a deleted service, so the response says what happened and the page reloads
-      // the service's credentials, unless another service was selected meanwhile, then the list. A service that is gone
-      // gives way to the first remaining one, and one that still resolves shows what now applies.
+      // The environment can still supply a deleted service, so the response says what happened and the page reloads.
+      // A service that is gone gives way to the first remaining one, and one that still resolves shows what now applies.
       const response = await fetchJSON<{ message: string }>(
         API_ENDPOINTS.credentials.delete(selectedService),
         {
           method: "DELETE",
         },
       );
-      if (selectedServiceRef.current === selectedService) {
-        await loadCredentials(selectedService);
-      }
-      await loadServices();
+      await reload(selectedService);
       toast({
         title: "Delete credentials",
         description: response.message,
@@ -397,7 +404,7 @@ export function Credentials() {
     } finally {
       setIsDeleting(false);
     }
-  }, [loadCredentials, loadServices, selectedService, toast]);
+  }, [reload, selectedService, toast]);
 
   const handleTest = useCallback(async () => {
     if (!selectedService) {
@@ -442,11 +449,8 @@ export function Credentials() {
       return;
     }
     setError(null);
-    await loadServices();
-    if (selectedService) {
-      await loadCredentials(selectedService);
-    }
-  }, [hasUnsavedChanges, loadCredentials, loadServices, selectedService]);
+    await reload(selectedService);
+  }, [hasUnsavedChanges, reload, selectedService]);
 
   const handleCopy = useCallback(async () => {
     if (!selectedService) {
