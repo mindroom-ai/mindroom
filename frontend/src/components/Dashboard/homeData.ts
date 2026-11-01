@@ -82,7 +82,11 @@ function isCount(value: unknown): boolean {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 export type RuntimeLabel =
-  "Idle" | "Working" | "Starting" | "Paused" | "Unavailable";
+  | "Idle"
+  | "Working"
+  | "Starting"
+  | "Paused"
+  | "Unavailable";
 export async function fetchRuntimeActivity(
   signal?: AbortSignal,
 ): Promise<RuntimeLabel> {

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useEffectEvent } from "react";
 import {
   Home,
   Loader2,
@@ -119,10 +119,6 @@ export function HomeAssistantIntegration({
       executionScope,
     );
 
-  useEffect(() => {
-    checkStatus();
-  }, []);
-
   const checkStatus = async () => {
     setLoading(true);
     try {
@@ -137,6 +133,11 @@ export function HomeAssistantIntegration({
       setLoading(false);
     }
   };
+
+  const checkStatusOnOpen = useEffectEvent(checkStatus);
+  useEffect(() => {
+    checkStatusOnOpen();
+  }, []);
 
   const connectOAuth = async () => {
     setConnecting(true);
