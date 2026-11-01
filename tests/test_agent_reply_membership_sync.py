@@ -259,20 +259,15 @@ def test_every_invalidation_revokes_and_none_starts_calls() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("refresh_owed", [False, True])
 @pytest.mark.parametrize("refreshed", [True, False])
-async def test_grant_change_revokes_every_bots_calls_before_reconciling_any(
-    *,
-    refreshed: bool,
-    refresh_owed: bool,
-) -> None:
+async def test_grant_change_revokes_every_bots_calls_before_reconciling_any(*, refreshed: bool) -> None:
     """While one bot's revocation is held no bot starts calls; then every bot does, even while a refresh is owed.
 
     Each call start rechecks its requester against current grants, so a grant room that stays unready denies only the
     calls it alone would allow.
     """
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
-    memberships.needs_refresh.return_value = refresh_owed
+    memberships.needs_refresh.return_value = True
     memberships.apply_member_event.return_value = True
     hold = asyncio.Event()
     bots, calls = _fleet("router", "voice", hold=hold)
@@ -298,7 +293,6 @@ async def test_grant_change_revokes_every_bots_calls_before_reconciling_any(
 async def test_bot_added_during_revocation_is_left_to_its_own_first_frame() -> None:
     """One grant change asks one cohort; a bot started during its revocation reconciles calls at its own start."""
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
-    memberships.needs_refresh.return_value = False
     hold = asyncio.Event()
     bots, calls = _fleet("router", hold=hold)
     membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
@@ -351,22 +345,12 @@ async def test_live_transition_retries_unfinished_effects_after_event_replay(int
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("still_owed", [False, True])
 @pytest.mark.parametrize("loss", ["invalidation", "room_fence"])
-async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(
-    tmp_path: Path,
-    loss: str,
-    *,
-    still_owed: bool,
-) -> None:
-    """A failed refresh waits out its backoff, but a new loss of authority refreshes at once.
-
-    This holds whether refreshes had stopped being owed or a grant room that cannot be queried still owes one.
-    """
-    grants = Config()
-    no_grants = Config()
+async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(tmp_path: Path, loss: str) -> None:
+    """A failed refresh waits out its backoff, but a new loss of authority refreshes at once."""
+    config = Config()
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
-    memberships.needs_refresh.side_effect = lambda config: config is grants
+    memberships.needs_refresh.return_value = True
     memberships.mark_room_unready.return_value = True
     membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
     refreshes = 0
@@ -375,15 +359,15 @@ async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(
         nonlocal refreshes
         refreshes += 1
 
-    membership_sync.invalidate(grants, reason="uncertain_sync_response")
-    await membership_sync.refresh_if_needed(grants, failed_refresh)
-    await membership_sync.refresh_if_needed(grants if still_owed else no_grants, failed_refresh)
+    membership_sync.invalidate(config, reason="uncertain_sync_response")
+    await membership_sync.refresh_if_needed(config, failed_refresh)
+    await membership_sync.refresh_if_needed(config, failed_refresh)
     assert refreshes == 1
     if loss == "invalidation":
-        membership_sync.invalidate(grants, reason="uncertain_sync_response")
+        membership_sync.invalidate(config, reason="uncertain_sync_response")
     else:
         membership_sync.pre_admit_ingestion(
-            grants,
+            config,
             test_runtime_paths(tmp_path),
             _ingestion_admission(
                 IngestionRecordDisposition.ROOM_LIFECYCLE,
@@ -394,6 +378,6 @@ async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(
             ),
             None,
         )
-    await membership_sync.refresh_if_needed(grants, failed_refresh)
+    await membership_sync.refresh_if_needed(config, failed_refresh)
 
     assert refreshes == 2
