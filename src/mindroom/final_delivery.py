@@ -174,8 +174,8 @@ class FinalDeliveryOutcome:
 
     @property
     def response_cost_usd(self) -> float | None:
-        """Read the reply's USD cost from the authoritative final delivery payload, None when it reports none."""
-        return reply_cost_usd(self.extra_content)
+        """Read the reply's USD cost from the authoritative final delivery payload, None when the cost is unknown."""
+        return reply_cost_usd(self.extra_content, completed=self.completed)
 
     @property
     def final_visible_event_id(self) -> str | None:  # noqa: D102

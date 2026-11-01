@@ -179,8 +179,10 @@ class LockedTurns:
         orchestrator = self.deps.runtime.orchestrator
 
         def notify(cost_usd: float | None) -> None:
-            orchestrator.automations.response_finished(source_event_ids)
-            orchestrator.budgets.response_finished(requester_id, cost_usd)
+            try:
+                orchestrator.automations.response_finished(source_event_ids)
+            finally:
+                orchestrator.budgets.response_finished(requester_id, cost_usd)
 
         return notify
 

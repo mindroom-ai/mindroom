@@ -56,7 +56,7 @@ class PostResponseEffectsDeps:
     add_interactive_buttons: Callable[[str, interactive.InteractiveMetadata], Awaitable[None]] | None = None
     queue_memory_persistence: Callable[[], None] | None = None
     queue_skill_review: Callable[[str], Awaitable[None]] | None = None
-    # Receives the reply's cost, None when it reports none.
+    # Receives the reply's cost: zero when it used no priced model, None when the cost is unknown.
     notify_response_finished: Callable[[float | None], None] | None = None
     persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None

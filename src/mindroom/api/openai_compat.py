@@ -157,7 +157,7 @@ def _release_openai_completion_lock(completion_lock: asyncio.Lock) -> None:
 
 @dataclass
 class _CompletionCost:
-    """The USD cost of one completion's turn, set when the turn ends; None until then or for unpriced models."""
+    """The USD cost of one completion's turn: zero when it used no priced model, None until known."""
 
     usd: float | None = None
 
@@ -305,15 +305,19 @@ def _usage_from_team_output(record: TeamRunRecord) -> _UsageInfo:
 
 
 def _team_cost_usd(record: TeamRunRecord | None, config: Config) -> float | None:
-    """Return what a team completion's runs cost, priced as a team reply's run metadata prices them."""
+    """Return what a team completion's runs cost, priced as a team reply's run metadata prices them.
+
+    The record a team run hands over holds all its usage, so only a run that handed none over has an unknown cost.
+    """
     if record is None:
         return None
-    return run_cost_usd(
+    cost = run_cost_usd(
         team_usage(record),
         model_provider=record.model_provider,
         model_id=record.model,
         prices=model_prices(config),
     )
+    return 0.0 if cost is None else cost
 
 
 class _ChatCompletionResponse(BaseModel):
@@ -829,7 +833,7 @@ async def _non_stream_completion(
     """Handle non-streaming chat completion: the streamed turn, collected into one answer."""
     agent_name, session_id = turn.entity_label, turn.session_id
     result = await ai_response(replace(turn, show_tool_calls=False), runtime_paths, config)
-    cost.usd = reply_cost_usd(result.run_metadata)
+    cost.usd = reply_cost_usd(result.run_metadata, completed=result.completed is not None)
     failed = result.failed
 
     # A failed turn completes no attempt, also when it failed after part of its answer, which its text then holds. One
@@ -952,7 +956,7 @@ async def _stream_completion(
             stream_completed = not stream_failed
         finally:
             await stream.aclose()
-            cost.usd = reply_cost_usd(run_metadata)
+            cost.usd = reply_cost_usd(run_metadata, completed=stream_completed)
 
     response = OpenAIStreamingResponse(
         event_generator(),

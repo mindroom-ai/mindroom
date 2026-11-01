@@ -637,16 +637,19 @@ async def test_a_rescan_replaces_the_costs_recorded_before_it_started_and_keeps_
 async def test_a_reply_counts_for_the_person_a_scan_charges(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An alias counts for its canonical user, and a reply requested by an agent or a bot counts for nobody."""
     config = _config().model_copy(update={"bot_accounts": [BRIDGE_BOT]})
-    monitor, _scans, _current = await _started(tmp_path, monkeypatch, {}, config)
+    monitor, scans, _current = await _started(tmp_path, monkeypatch, {}, config)
     paths = monitor.runtime_paths
     router = fixture_entity_matrix_id(ROUTER_AGENT_NAME, config.get_domain(paths), paths).full_id
     assert budget_user_id(router, config, paths) is None
 
     monitor.response_finished(ALICE_BRIDGE, 2.0)
-    monitor.response_finished(BRIDGE_BOT, 3.0)
-    monitor.response_finished(router, 4.0)
-    monitor.response_finished(None, 5.0)
+    for requester_id in (BRIDGE_BOT, router, None):
+        monitor.response_finished(requester_id, 4.0)
+        # Nobody is charged for such a reply, so not knowing its cost needs no scan.
+        monitor.response_finished(requester_id, None)
+    await _quiet()
 
+    assert scans.calls == 1
     assert monitor._spend_usd(ALICE) == 2.0
     assert monitor._spend_usd(BRIDGE_BOT) == 0.0
     assert monitor._spend_usd(router) == 0.0
@@ -655,12 +658,37 @@ async def test_a_reply_counts_for_the_person_a_scan_charges(tmp_path: Path, monk
 
 
 @pytest.mark.asyncio
-async def test_an_unpriced_reply_adds_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monitor, _scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 3.0})
+async def test_a_completed_unpriced_reply_neither_adds_nor_scans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 3.0})
+
+    monitor.response_finished(ALICE, 0.0)
+    monitor.response_finished(BOB, 0.0)
+    await _quiet()
+
+    assert scans.calls == 1
+    assert [(user.user_id, user.spend_usd) for user in monitor.status().users] == [(ALICE, 3.0)]
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_reply_adds_nothing_and_requests_a_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stopped, failed, or resumed reply reports no exact cost, but its run's usage is stored, so a scan counts it."""
+    monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 5.0})
+    scans.release.clear()
+    scans.spend = {ALICE: 7.0}
 
     monitor.response_finished(ALICE, None)
 
-    assert monitor._spend_usd(ALICE) == 3.0
+    assert monitor._spend_usd(ALICE) == 5.0
+    await _until(lambda: scans.calls == 2)
+    scans.release.set()
+    await _until(lambda: monitor._spend_usd(ALICE) == 7.0)
     await monitor.stop()
 
 

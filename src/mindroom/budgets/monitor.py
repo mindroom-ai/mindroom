@@ -2,7 +2,8 @@
 
 A full scan of retained usage runs in a worker thread at start, when the UTC month changes, and on a slow
 reconciliation interval, which also picks up usage no reply reports, such as helper calls, voice calls, and summaries.
-Between scans each finished reply adds the cost it priced to its requester's running total, so a reply costs no scan.
+Between scans each completed reply adds the cost it priced to its requester's running total, so it costs no scan.
+A reply whose cost is unknown, such as a stopped or failed run or one resumed after an approval, requests a scan.
 Spend is checked when a reply starts, so the reply that crosses a cap still finishes on its model, and the requester's
 next reply uses the fallback model.
 """
@@ -203,21 +204,26 @@ class BudgetMonitor:
         self._request_scan()
 
     def response_finished(self, requester_id: str | None, cost_usd: float | None) -> None:
-        """Add a finished reply's cost to its requester's spend until a scan covers the reply.
+        """Add a finished reply's cost to its requester's spend until a scan covers the reply, or request a scan.
 
         ``requester_id`` is the requester the reply ran for, which its stored run names, so the cost counts for the
         person a scan charges: an alias's canonical user, and nobody for an agent or a bot. A private agent keeps one
         instance per requester, so that requester is also the owner a scan charges for a run that names none, and a
         team reply's cost covers its members' runs, which name the same requester.
-        ``cost_usd`` is the cost the reply's run metadata reports, None when the reply used no priced model.
+        ``cost_usd`` is the exact cost of the reply's stored usage, zero when it used no priced model, or None when it
+        is unknown; then a scan counts the usage instead.
         """
-        if requester_id is None or cost_usd is None:
+        if requester_id is None:
             return
         config = self.config_provider()
         if config is None or config.budgets is None:
             return
         user_id = budget_user_id(requester_id, config, self.runtime_paths)
-        if user_id is not None:
+        if user_id is None:
+            return
+        if cost_usd is None:
+            self._request_scan()
+        elif cost_usd:
             self._costs_since_scan[user_id] = self._costs_since_scan.get(user_id, 0.0) + cost_usd
 
     async def stop(self) -> None:
@@ -230,9 +236,10 @@ class BudgetMonitor:
         return 0.0 if snapshot is None else self._spend_with_replies(snapshot, user_id)
 
     def _spend_with_replies(self, snapshot: SpendSnapshot, user_id: str) -> float:
-        """Return ``user_id``'s spend in ``snapshot`` plus the costs of the finished replies it does not cover.
+        """Return ``user_id``'s spend in ``snapshot`` plus the costs replies reported since the scan behind it started.
 
-        The scan behind ``snapshot`` dropped every cost recorded before it started, so the costs left fall in its month.
+        That scan dropped every cost recorded before it started, so the costs left fall in its month. A reply that
+        finished while it ran may also be in ``snapshot`` until the next scan.
         """
         return (
             snapshot.spend_usd.get(user_id, 0.0)
