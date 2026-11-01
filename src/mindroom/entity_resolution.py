@@ -30,8 +30,8 @@ class DuplicateManagedEntityIdentityError(RuntimeError):
     """Raised when persisted managed Matrix accounts are ambiguous."""
 
 
-def call_room_ownership_key(room_ref: str, runtime_paths: RuntimePaths) -> str:
-    """Normalize a call-room reference before live Matrix state is available."""
+def canonical_room_reference(room_ref: str, runtime_paths: RuntimePaths) -> str:
+    """Return a configured room reference's room ID in MindRoom's record, else the room key its alias names, else itself."""
     resolved = matrix_state.resolve_room_id(room_ref, runtime_paths)
     if resolved != room_ref:
         return resolved
@@ -43,12 +43,8 @@ def names_room(config: Config, room_ref: str, runtime_paths: RuntimePaths) -> bo
 
     A configured room key and the alias MindRoom gives it name a room before the room is created and recorded.
     """
-    room_keys = config.managed_room_keys()
-    return (
-        room_ref in room_keys
-        or managed_room_key_for_alias(room_ref, runtime_matrix_domain(runtime_paths), runtime_paths) in room_keys
-        or matrix_state.resolve_room_id(room_ref, runtime_paths).startswith("!")
-    )
+    room = canonical_room_reference(room_ref, runtime_paths)
+    return room.startswith("!") or room in config.managed_room_keys()
 
 
 def configured_call_agent_name_for_room(

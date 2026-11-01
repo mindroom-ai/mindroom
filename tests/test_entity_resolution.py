@@ -165,7 +165,7 @@ def test_live_canonical_alias_selects_configured_responders_only_when_it_is_the_
         process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": namespace},
     )
     config = bind_runtime_paths(
-        Config(agents={"a": AgentConfig(display_name="A", rooms=["dev"]), "b": AgentConfig(display_name="B")}),
+        Config(agents={"a": AgentConfig(display_name="A", rooms=["dev"])}),
         runtime_paths,
     )
     room = nio.MatrixRoom("!other:localhost", "@user:localhost")

@@ -115,7 +115,7 @@ from mindroom.constants import (
 )
 from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN
 from mindroom.entity_resolution import (
-    call_room_ownership_key,
+    canonical_room_reference,
     names_room,
     resolve_agent_thread_mode,
     router_agents_for_room,
@@ -1132,7 +1132,7 @@ class Config(BaseModel):
         tolerate_plugin_load_errors: bool,
     ) -> Config:
         config = cls.model_validate(data, context={"runtime_paths": runtime_paths})
-        config._reject_call_agents_sharing_a_room(lambda room: call_room_ownership_key(room, runtime_paths))
+        config._reject_call_agents_sharing_a_room(lambda room: canonical_room_reference(room, runtime_paths))
         # A sandbox runner runs tool calls, never a model, and its config snapshot carries no models.
         if not runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]):
             config._validate_model_references()
