@@ -196,6 +196,16 @@ def test_saved_settings_then_the_process_environment_win_over_the_env_file(
     assert tool.api_key == expected
 
 
+def test_a_file_variant_supplies_a_tool_setting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `<NAME>_FILE` variable names a file whose contents set the field, as it does for model provider keys."""
+    secret_file = tmp_path / "tavily-key"
+    secret_file.write_text("file-key\n")
+
+    tool = _tavily(tmp_path, monkeypatch, process_env={"TAVILY_API_KEY_FILE": str(secret_file)})
+
+    assert tool.api_key == "file-key"
+
+
 def test_an_inline_setting_wins_over_saved_settings_and_the_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

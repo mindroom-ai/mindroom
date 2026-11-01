@@ -84,6 +84,9 @@ auth:
   # Users from other homeservers can only join calls that already exist.
   fullAccessHomeservers: []
   port: 8080
+  # LIVEKIT_LOG_LEVEL: debug, info, warn, or error. The service writes every log line to stderr and logs each health
+  # probe at info, so warn keeps probes out of logs that collectors read as errors.
+  logLevel: warn
   resources:
     requests:
       cpu: 50m

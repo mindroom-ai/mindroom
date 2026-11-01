@@ -90,7 +90,7 @@ def load_config_attempt(runtime_paths: RuntimePaths) -> ConfigLoad:
         )
         source_files = frozenset(source_digests)
         source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
-        runtime_config, source_digests = validate_loaded_config_source(
+        runtime_config = validate_loaded_config_source(
             data,
             source_digests,
             source_bytes,
@@ -98,8 +98,8 @@ def load_config_attempt(runtime_paths: RuntimePaths) -> ConfigLoad:
             uses_includes=uses_includes,
             tolerate_plugin_load_errors=True,
         )
-        source_files = frozenset(source_digests)
-        source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
+        source_files = runtime_config.source_files
+        source_fingerprint = runtime_config.source_fingerprint
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         logger.warning(
             "Failed to load config due to validation",
