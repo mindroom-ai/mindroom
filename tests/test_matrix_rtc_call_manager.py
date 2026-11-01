@@ -38,7 +38,12 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.event_journal import IngestionRecordAdmission, IngestionRecordDisposition
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.llm.usage import TokenCounts
-from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
+from mindroom.matrix.personal_room_store import (
+    PersonalRoomRecord,
+    personal_room_ids,
+    personal_room_record_path,
+    write_personal_room,
+)
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_backends import (
@@ -449,6 +454,7 @@ def _manager(
     tool_support: object = object(),
     clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     invited_rooms_by_agent: dict[str, set[str]] | None = None,
+    get_invited_rooms_by_agent: Callable[[], dict[str, set[str]]] | None = None,
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]] | None = None,
@@ -468,7 +474,7 @@ def _manager(
         ssl_verify=True,
         bridge_factory=bridge_factory or (lambda _identity, _e2ee: bridge),
         tool_support=tool_support,  # type: ignore[arg-type]
-        get_invited_rooms_by_agent=lambda: invited_rooms_by_agent or {},
+        get_invited_rooms_by_agent=get_invited_rooms_by_agent or (lambda: invited_rooms_by_agent or {}),
         clock_ms=clock_ms,
         agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
         **_admission(admission_gate, wait_for_admission_or_shutdown or wait_for_admission),
@@ -2410,6 +2416,44 @@ async def test_manager_full_reconciliation_visits_every_configured_room(tmp_path
     await manager.reconcile_joined_rooms()
 
     assert {request.args[0] for request in client.room_get_state.await_args_list} == {ROOM_ID, other_room_id}
+
+
+@pytest.mark.asyncio
+async def test_manager_full_reconciliation_reads_room_ownership_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass over every joined room reads the call agents' invited and personal rooms once, not once per room."""
+    other_room_id = "!other-call:example.org"
+    unrelated_room_id = "!unrelated:example.org"
+    config = _config()
+    config.agents["helper"].rooms.append(other_room_id)
+    client = _client()
+    client.rooms = {
+        ROOM_ID: _room(),
+        other_room_id: _room(room_id=other_room_id),
+        unrelated_room_id: _room(room_id=unrelated_room_id),
+    }
+    client.room_get_state.return_value = nio.RoomGetStateResponse([], ROOM_ID)
+    invited_reads: list[None] = []
+    personal_reads: list[str] = []
+
+    def read_invited_rooms() -> dict[str, set[str]]:
+        invited_reads.append(None)
+        return {}
+
+    def read_personal_rooms(runtime_paths: RuntimePaths, agent_name: str) -> frozenset[str]:
+        personal_reads.append(agent_name)
+        return personal_room_ids(runtime_paths, agent_name)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.personal_room_ids", read_personal_rooms)
+    manager = _manager(client, FakeBridge(), tmp_path, config, get_invited_rooms_by_agent=read_invited_rooms)
+
+    await manager.reconcile_joined_rooms()
+
+    assert {request.args[0] for request in client.room_get_state.await_args_list} == {ROOM_ID, other_room_id}
+    assert len(invited_reads) == 1
+    assert personal_reads == ["helper"]
 
 
 @pytest.mark.asyncio
