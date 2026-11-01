@@ -282,24 +282,28 @@ def test_the_ladder_marks_the_newest_tool_result_a_prior_boundary_and_the_last_t
 
 
 @pytest.mark.asyncio
-async def test_transient_context_takes_no_marker_so_the_next_turn_reuses_the_prompt_breakpoint(tmp_path: Path) -> None:
-    """Per-request context after the prompt stays unmarked, so the next turn replays the same cached prefix."""
+async def test_turn_context_takes_no_marker_and_replays_unchanged_on_the_next_turn(tmp_path: Path) -> None:
+    """Turn context after the prompt stays unmarked, and the next turn replays it unchanged after that prompt."""
     transient = render_transient_context(
         ("<mindroom_message_context>Current location: Amsterdam</mindroom_message_context>",),
     )
     wire = Wire(sse_reply([{"type": "text", "text": "A1"}]))
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"extended_cache_time": False})
     system = Message(role="system", content="Stable system")
-    for history in ([], [Message(role="user", content="Q1"), Message(role="assistant", content="A1")]):
-        prompt = Message(role="user", content="Q2" if history else "Q1")
-        context = Message(role="user", content=transient)
-        await claude_turn(provider, ModelRequest(messages=[system, *history, prompt, context]))
+    first = [Message(role="user", content="Q1"), Message(role="user", content=transient, add_to_agent_memory=False)]
+    second_turn = [
+        Message(role="user", content="Q2"),
+        Message(role="user", content=transient, add_to_agent_memory=False),
+    ]
+    for messages in (first, [*first, Message(role="assistant", content="A1"), *second_turn]):
+        await claude_turn(provider, ModelRequest(messages=[system, *messages]))
 
     current = wire.body(0)["messages"][0]["content"]
     assert current[0]["cache_control"] == _FIVE_MINUTES
     assert "cache_control" not in current[1]
     second = wire.body(1)["messages"]
-    assert second[0]["content"] == current[:1]
+    assert [block["text"] for block in second[0]["content"]] == [block["text"] for block in current]
+    assert "cache_control" not in second[0]["content"][1]
     assert second[-1]["content"][0]["cache_control"] == _FIVE_MINUTES
     assert "cache_control" not in second[-1]["content"][1]
 

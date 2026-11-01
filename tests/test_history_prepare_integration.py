@@ -340,7 +340,7 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
         )
 
     assert prepared_run.prepared_history.replays_persisted_history is False
-    # Unstored turn context follows the prompt, so the next request repeats this one up to it.
+    # Turn context follows the prompt, after the thread context sent before it.
     expected = [
         render_msg_tag(sender="alice", body="Earlier context", event_id="$earlier"),
         render_msg_tag(sender="bob", body="More context", event_id="$more"),
