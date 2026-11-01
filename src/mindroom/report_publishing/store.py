@@ -236,10 +236,10 @@ def _validate_public_report_slug(value: str) -> None:
 
 
 def _public_report_url(base_url: str | None, slug: str, *, artifact_kind: str) -> str | None:
-    if base_url is None or not base_url.strip():
+    if base_url is None:
         return None
     suffix = f"/reports/public/{slug}/" if artifact_kind == ARTIFACT_KIND_STATIC_SITE else f"/reports/public/{slug}"
-    return f"{base_url.rstrip('/')}{suffix}"
+    return f"{base_url}{suffix}"
 
 
 def _relative_artifact_path(artifact_path: Path, storage_root: Path) -> str:
