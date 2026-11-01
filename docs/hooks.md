@@ -272,6 +272,7 @@ Persisted items are appended to the user message and kept in session history, so
 
 Items with `persist=False` go into a separate context message after the turn's prompt instead of into the message text.
 Later turns still see that message where it was sent, and unlike persisted items it stays out of text compaction summaries; see [History Settings](configuration/history.md#history-settings).
+In a thread several people use, those later turns include replies to someone else, so the agent can repeat one person's `persist=False` item, such as their location, to another; a [private agent](configuration/agents.md#private-instances) keeps each requester's conversations apart.
 Use `persist=False` for live data such as location or weather.
 Use stable keys and deterministic text for persisted items.
 

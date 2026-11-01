@@ -33,8 +33,8 @@ class TurnMessages:
     ``transient`` holds turn context (``add_to_agent_memory=False``), such as memory results, that follows the prompt
     and is stored with the run where it was sent, unless the run stopped after a call. Later turns replay it there
     outside a message limit, so each request extends the previous one whole: Codex's prompt cache reuses only a prompt
-    an earlier request sent whole, and dropping a finished turn's context capped every later turn's cache hit at the
-    first message it had followed.
+    an earlier request sent whole, so a turn context left out of later requests would cap their cache hits at the first
+    message it followed.
     """
 
     prompt: Message
