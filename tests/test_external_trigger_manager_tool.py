@@ -26,6 +26,7 @@ from tests.conftest import (
     make_relation_lookup,
 )
 from tests.matrix_state_helpers import save_matrix_state
+from tests.test_generated_agents import OWNER, _created, _load, _personal, _with_template
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -94,9 +95,10 @@ def _context(
     requester_id: str = "@owner:example.org",
     room_id: str = "lobby",
     config: Config | None = None,
+    agent_name: str = "watcher",
 ) -> ToolRuntimeContext:
     return make_test_tool_runtime_context(
-        agent_name="watcher",
+        agent_name=agent_name,
         target=MessageTarget.resolve(
             room_id=room_id,
             thread_id="$thread",
@@ -227,6 +229,49 @@ async def test_private_agent_create_trigger_accepts_current_dynamic_room(tmp_pat
         "room_id": "!private:example.org",
         "thread_id": None,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("data", "roster", "agent_name"),
+    [
+        pytest.param(_with_template(), {"entries": [_personal()]}, "mind_alice", id="personal"),
+        pytest.param(None, {"created": [_created()]}, "creator_research", id="created"),
+    ],
+)
+async def test_generated_agent_create_trigger_accepts_current_dynamic_room(
+    tmp_path: Path,
+    data: dict[str, Any] | None,
+    roster: dict[str, Any],
+    agent_name: str,
+) -> None:
+    """Personal and created agents may bind a trigger to the room they answer in, such as a personal room."""
+    config = _load(tmp_path, data, **roster)
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(
+        _context(tmp_path, requester_id=OWNER, room_id="!personal:localhost", config=config, agent_name=agent_name),
+    ):
+        payload = _payload(await tool.create_trigger("dynamic-campground", public_key=_PUBLIC_KEY))
+
+    assert payload["status"] == "ok", payload
+    assert payload["trigger"]["target"]["agent"] == agent_name
+    assert payload["trigger"]["target"]["room_id"] == "!personal:localhost"
+
+
+@pytest.mark.asyncio
+async def test_generated_agent_create_trigger_rejects_room_configured_for_others(tmp_path: Path) -> None:
+    """A room with configured responders answers only them, so a generated agent may not bind a trigger there."""
+    config = _load(tmp_path, created=[_created()])
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(
+        _context(tmp_path, requester_id=OWNER, room_id="lobby", config=config, agent_name="creator_research"),
+    ):
+        payload = _payload(await tool.create_trigger("lobby-campground", public_key=_PUBLIC_KEY))
+
+    assert payload["status"] == "error"
+    assert "target room must already be configured" in payload["message"]
 
 
 @pytest.mark.asyncio

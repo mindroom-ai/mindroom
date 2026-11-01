@@ -31,6 +31,7 @@ from mindroom.oauth import reset as oauth_reset
 from mindroom.oauth import service as oauth_service
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.api.conftest import (
+    publish_api_payload,
     trusted_upstream_env,
     trusted_upstream_jwks,
     trusted_upstream_jwt,
@@ -39,10 +40,8 @@ from tests.api.conftest import (
 from tests.api.test_oauth_api import (
     _expect_styled_oauth_page,
     _fake_provider,
-    _publish_config,
     _runtime_paths,
     _stored_oauth_credentials,
-    _use_runtime_auth_settings,
 )
 from tests.computer_helpers import ComputerPeer
 from tests.runtime_fakes import bind_test_embedded_runtime
@@ -105,8 +104,7 @@ def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
     }
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    _publish_config(main.app, paths, payload)
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, payload)
     return {
         "client": TestClient(main.app, base_url=PORTAL_ORIGIN),
         "paths": paths,
@@ -144,8 +142,7 @@ def _serve(signin: dict[str, Any], payload: dict[str, Any] | None = None, **env:
     paths = replace(signin["paths"], process_env={**signin["paths"].process_env, **env})
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    _publish_config(main.app, paths, payload or signin["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, payload or signin["payload"])
 
 
 def _connect_state(client: TestClient) -> str:
@@ -678,8 +675,7 @@ def _serve_with_trusted_upstream(
     paths = replace(signin["paths"], process_env=env)
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    _publish_config(main.app, paths, payload)
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, payload)
 
     def upstream(name: str) -> dict[str, str]:
         return {

@@ -90,7 +90,9 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
     a turn's preparation added to its thread context are left out.
     A stopped turn's answer, its last message, is a rendered summary that can quote tool calls with their inputs and
     outputs, so it is left out too; earlier replies its thread context holds stay. ``agent_work`` keeps all of these,
-    plus tool calls and results, for a reviewer of how the agent worked.
+    plus tool calls and results, for a reviewer of how the agent worked. The turn context a run stores
+    (``add_to_agent_memory=False``), such as memory results and the approval receipt, is never kept: it is neither
+    what was said nor work the agent did.
     """
     if not is_model_history_visible_run(run):
         return []
@@ -103,6 +105,8 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
     requester = run_requester(run) or "unknown"
     said: list[Utterance] = []
     for message in run.messages:
+        if not message.add_to_agent_memory:
+            continue
         content = message.content if isinstance(message.content, str) else ""
         mindroom_wrote = (
             runtime_prompt

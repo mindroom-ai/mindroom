@@ -2960,13 +2960,13 @@ class TestEncryptedRelations:
         client = self._thread_of_encrypted_replies(readable=False)
         if recover_room:
             client.history = [client.events["$root"], *client.relations["$root"]]
-            client.repeat_last = True
-            client.pages = [(client.history, None)]
             await record_room_history_recovery(alice, ROOM)
         strict = hydrator(alice, client, **EXPORT_CALLER)
         with pytest.raises(RuntimeError, match="unreadable events remain"):
             await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        if recover_room:
+            assert await bodies(alice) == ["root"]
         client.room_keys = self._thread_of_encrypted_replies(readable=True).room_keys
         await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
         assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]

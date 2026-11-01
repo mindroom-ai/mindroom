@@ -6,6 +6,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.browser.call_limit import HostCallTimeLimitError
 from mindroom.worker_computer.protocol import BrowserSession, ComputerDisplay, ComputerStatus
 
 
@@ -79,6 +80,9 @@ class WorkerComputerRuntime:
             await self._start_locked()
             try:
                 return await action()
+            except HostCallTimeLimitError:
+                # The toolkit already stopped this call and keeps the browser, whose other tabs still work.
+                raise
             except (TimeoutError, asyncio.CancelledError):
                 await self._stop_locked()
                 raise
