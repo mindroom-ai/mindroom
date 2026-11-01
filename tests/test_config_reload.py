@@ -18,7 +18,6 @@ import pytest
 import yaml
 from structlog.testing import capture_logs
 
-import mindroom.matrix.rooms as matrix_rooms
 import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
@@ -32,8 +31,6 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, ConfigReloadedContext, hook
-from mindroom.matrix import client_room_admin
-from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import (
     _AGENT_LIVE_FIELDS,
@@ -153,22 +150,6 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
     """Return a runtime-bound config for reload tests."""
     runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
     return bind_runtime_paths(config, runtime_paths)
-
-
-def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
-    """Helper to setup a test bot with required attributes."""
-
-    async def change_membership(room_id: str, target_membership: str) -> bool:
-        if target_membership == "join":
-            return await client_room_admin.join_room(mock_client, room_id) is RoomJoinOutcome.JOINED
-        assert target_membership == "leave"
-        return await matrix_rooms.leave_room(mock_client, room_id)
-
-    bot.client = mock_client
-    bot._room_lifecycle.deps = replace(
-        bot._room_lifecycle.deps,
-        change_membership=change_membership,
-    )
 
 
 def test_startup_phase_logging_helpers_emit_structured_timing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1684,7 +1665,7 @@ async def test_queued_config_reload_waits_for_in_flight_response(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    setup_test_bot(bot, AsyncMock())
+    bot.client = AsyncMock()
 
     response_started = asyncio.Event()
     release_response = asyncio.Event()
@@ -2760,7 +2741,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    setup_test_bot(bot, AsyncMock())
+    bot.client = AsyncMock()
 
     send_entered = asyncio.Event()
     release_send = asyncio.Event()
@@ -2820,7 +2801,7 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
     bots = {}
     for agent_name in ("agent1", "agent2"):
         bot = make_test_agent_bot(mock_agent_users[agent_name], orchestrator=runtime)
-        setup_test_bot(bot, AsyncMock())
+        bot.client = AsyncMock()
         bots[agent_name] = bot
 
     shared_gate = runtime.response_admission_gate
@@ -2875,7 +2856,7 @@ async def test_closed_admission_defers_response_until_gate_reopens(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    setup_test_bot(bot, AsyncMock())
+    bot.client = AsyncMock()
     runner = unwrap_extracted_collaborator(bot._response_runner)
     admission_gate = bot.orchestrator.response_admission_gate
     response_started = asyncio.Event()
@@ -2926,7 +2907,7 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    setup_test_bot(bot, AsyncMock())
+    bot.client = AsyncMock()
     send_response = AsyncMock(return_value="$thinking")
     install_send_response_mock(bot, send_response)
     admission_gate = bot.orchestrator.response_admission_gate
