@@ -236,7 +236,7 @@ For Gemini on Vertex AI (`provider: google` with `extra_kwargs.vertexai: true`),
 Setting `GOOGLE_GENAI_USE_VERTEXAI=true` moves every `google` and `gemini` model to Vertex AI unless the model chooses its route itself: `extra_kwargs.client_params.enterprise`, then `extra_kwargs.client_params.vertexai`, then `extra_kwargs.vertexai`, set to `true` or `false`, wins over the variable.
 `GOOGLE_GENAI_USE_ENTERPRISE` selects nothing.
 
-`OPENAI_BASE_URL` is described in [Configuration — Model Providers](https://docs.mindroom.chat/configuration/#model-providers).
+`OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` are described in [Configuration — Model Providers](https://docs.mindroom.chat/configuration/#model-providers).
 
 ### File-based Secrets
 
