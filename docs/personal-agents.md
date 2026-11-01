@@ -46,6 +46,8 @@ A key follows the [agent naming rules](configuration/agents.md#naming-rules) and
 | `agent` | object | Required | Any [agent](configuration/agents.md#configuration-options) fields; the defaults for every user's agent. |
 | `users` | object | `{}` | Per-user overrides keyed by concrete Matrix user ID, with no patterns. Each override is an agent field that replaces the template's value whole, so a list or object is not merged. |
 
+In the template's `delegate_to`, the template key names each user's own agent, so `delegate_to: [mind]` lets every user's agent run fresh copies of itself as [subagents](tools/agent-orchestration.md#agent-delegation).
+
 Placeholders are replaced as exact tokens, so other braces in prompts stay literal and a replaced value is never replaced again.
 
 | Placeholder | Value | Where |

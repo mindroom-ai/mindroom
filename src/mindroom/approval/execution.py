@@ -51,7 +51,7 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
-from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.events import CollectedStreamPresentation, with_stored_calls
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
@@ -213,7 +213,8 @@ async def _continue_persisted_agent(
     presentation = CollectedStreamPresentation(
         show_tool_calls=continuation.show_tool_calls,
         response_text=paused_answer.text,
-        tool_trace=list(paused_answer.tool_trace),
+        # The calls before the pause stay whole, so a stop later in the turn replays them as a finished turn would.
+        tool_trace=with_stored_calls(paused_answer.tool_trace, persisted.tools or ()),
         track_hidden_tools=True,
     )
     collected = await _collect_agent_continuation(events, presentation, run_id=continuation.run_id, progress=progress)

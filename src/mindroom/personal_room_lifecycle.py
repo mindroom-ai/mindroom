@@ -20,7 +20,11 @@ from mindroom.matrix.personal_room_store import (
     read_personal_room,
     retained_personal_rooms,
 )
-from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomValidationError
+from mindroom.matrix.personal_rooms import (
+    PersonalRoomRosterMismatchError,
+    PersonalRoomValidationError,
+    is_onboarding_room_member,
+)
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.personal_agents import is_mindroom_account_id, provision_personal_agent
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
@@ -196,8 +200,9 @@ class PersonalRoomLifecycle:
         """Forward a trusted router observation; unavailable owners leave it retryable.
 
         When personal_rooms.agent names a template, the requester's own agent
-        serves the room: a missing one is provisioned, and until it is in the
-        live config, connected, and past its first sync the trigger is pending.
+        serves the room: a missing one is provisioned only while the requester
+        is still in the onboarding room, and until it is in the live config,
+        connected, and past its first sync the trigger is pending.
         An unsynced agent's membership changes wait for its sync to catch up,
         which would stall the pass for every other user.
         """
@@ -216,6 +221,9 @@ class PersonalRoomLifecycle:
             # A new agent's account can join the lobby before the reload that makes it known.
             if is_mindroom_account_id(user_id, self.runtime_paths):
                 logger.debug("MindRoom account gets no personal agent", user_id=user_id, room_id=source_room_id)
+                return
+            assert self.runtime.client is not None
+            if not await is_onboarding_room_member(self.runtime.client, user_id, source_room_id):
                 return
             await self._provision_personal_agent(
                 settings.agent,
