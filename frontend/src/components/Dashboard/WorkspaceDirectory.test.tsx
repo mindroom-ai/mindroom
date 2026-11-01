@@ -140,11 +140,8 @@ describe("WorkspaceDirectory", () => {
     };
 
     (global.fetch as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ ok: true, json: async () => rawConfig })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ agent_policies: {} }),
-      });
+      .mockResolvedValueOnce(Response.json(rawConfig))
+      .mockResolvedValueOnce(Response.json({ agent_policies: {} }));
 
     await useConfigStore.getState().loadConfig();
     renderWorkspaceDirectory();
@@ -240,11 +237,8 @@ describe("WorkspaceDirectory", () => {
       teams: {},
     };
     (global.fetch as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ ok: true, json: async () => rawConfig })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ agent_policies: {} }),
-      });
+      .mockResolvedValueOnce(Response.json(rawConfig))
+      .mockResolvedValueOnce(Response.json({ agent_policies: {} }));
 
     await useConfigStore.getState().loadConfig();
     renderWorkspaceDirectory();
@@ -431,14 +425,10 @@ describe("WorkspaceDirectory", () => {
   it("shows the default mode for a team that omits it", async () => {
     const { mode: _mode, ...teamWithoutMode } = config.teams!.builders;
     (global.fetch as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ ...config, teams: { builders: teamWithoutMode } }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ agent_policies: {} }),
-      });
+      .mockResolvedValueOnce(
+        Response.json({ ...config, teams: { builders: teamWithoutMode } }),
+      )
+      .mockResolvedValueOnce(Response.json({ agent_policies: {} }));
     await useConfigStore.getState().loadConfig();
     renderWorkspaceDirectory();
 
