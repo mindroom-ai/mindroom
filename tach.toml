@@ -12,10 +12,8 @@
 # - Use grouped `paths = [...]` only when every grouped module intentionally
 #   shares the exact same policy.
 # - `depends_on` lists exactly the declared modules a module imports at
-#   runtime. `exact = true` fails the check on every other entry: one naming
-#   a module this file does not declare, one no longer imported, and one
-#   imported only under `if TYPE_CHECKING:`, which Tach ignores here. When
-#   such an import changes, update `depends_on` in the same PR.
+#   runtime, function-level imports included and `if TYPE_CHECKING:` imports
+#   excluded; `exact = true` fails the check on any other entry.
 #
 # Docs:
 # - https://docs.gauge.sh/usage/configuration/
@@ -81,7 +79,6 @@ depends_on = [
 path = "mindroom.embeddings.embedder_health"
 depends_on = [
     "mindroom.embeddings.errors",
-    # Deferred (function-level) imports inside the probe path; still runtime edges.
     "mindroom.embeddings.factory",
     "mindroom.embeddings.openai_embedder",
     "mindroom.config.resolution",
@@ -3695,7 +3692,6 @@ depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.embeddings.factory",
     "mindroom.memory._mem0_usage",
-    # Deferred (function-level) import that loads the Ollama SDK only once Mem0's Ollama embedder fails.
     "mindroom.providers.ollama.errors",
     "mindroom.tool_system.dependencies",
 ]
@@ -4824,7 +4820,6 @@ path = "mindroom.cli.config"
 depends_on = [
     "mindroom.cli.local_model_config",
     "mindroom.atomic_file",
-    # Deferred imports in config validate's automation check.
     "mindroom.automations.registry",
     "mindroom.tool_system.plugins",
     "mindroom.cli.agent_docs",
@@ -4837,7 +4832,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.path_confinement",
     "mindroom.providers.names",
-    # Deferred import in the missing-env check.
     "mindroom.providers.credentials",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backend_kinds",
@@ -4912,9 +4906,7 @@ depends_on = [
     "mindroom.providers.key_checks",
     "mindroom.providers.names",
     "mindroom.providers.ollama.settings",
-    # Deferred import in the Vertex AI Claude connection check, so the anthropic SDK loads only when used.
     "mindroom.providers.anthropic.messages",
-    # Deferred imports in the Ollama server checks, so the Ollama SDK, memory setup, and model registry load only when used.
     "mindroom.memory.config",
     "mindroom.providers.ollama.adapter",
     "mindroom.providers.registry",
@@ -4968,7 +4960,6 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.service"
 depends_on = [
-    # Deferred import in the install-time dashboard warning.
     "mindroom.api.auth",
     "mindroom.cli.config",
     "mindroom.cli.env_file",
