@@ -38,6 +38,9 @@ function normalizeAdminMetrics(data: Partial<AdminMetrics> | null | undefined): 
   }
 }
 
+// Shown in place of a figure the metrics request did not return.
+const UNAVAILABLE = '—'
+
 export default function AdminDashboard() {
   const [health, setHealth] = useState<HealthStatus | null>(null)
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null)
@@ -82,22 +85,22 @@ export default function AdminDashboard() {
   const statCards = [
     {
       title: 'Total Accounts',
-      value: metrics?.total_accounts ?? 0,
+      value: metrics ? metrics.total_accounts : UNAVAILABLE,
       icon: Users,
     },
     {
       title: 'Active Subscriptions',
-      value: metrics?.active_subscriptions ?? 0,
+      value: metrics ? metrics.active_subscriptions : UNAVAILABLE,
       icon: CreditCard,
     },
     {
       title: 'Running Instances',
-      value: metrics?.instances_by_status.running ?? 0,
+      value: metrics ? metrics.instances_by_status.running ?? 0 : UNAVAILABLE,
       icon: Server,
     },
     {
       title: 'MRR (est.)',
-      value: `$${(metrics?.subscription_revenue ?? 0).toLocaleString()}`,
+      value: metrics ? `$${metrics.subscription_revenue.toLocaleString()}` : UNAVAILABLE,
       icon: DollarSign,
     },
     {

@@ -8,8 +8,8 @@ Backend filenames below are relative to `platform-backend/src/backend/routes/`; 
 
 ## Summary
 
-- **OpenAPI operations**: 51, counting each HTTP method and path template once.
-- **OpenAPI operations called by platform frontend code**: 32, including browser requests and server authentication checks.
+- **OpenAPI operations**: 50, counting each HTTP method and path template once.
+- **OpenAPI operations called by platform frontend code**: 31, including browser requests and server authentication checks.
 - **OpenAPI operations without a direct platform frontend caller**: 19, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and six other routes.
 
 Ordinary browser requests go directly to the configured platform API through `src/lib/api.ts`.

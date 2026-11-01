@@ -524,6 +524,17 @@ class TestAdminEndpoints:
         assert data["total_instances"] == 4
         assert data["instances_by_status"] == {"running": 3, "stopped": 1}
 
+    def test_admin_dashboard_metrics_fail_instead_of_reporting_zeros(
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock
+    ):
+        """A database failure is an error response, not a dashboard of zero figures."""
+        mock_supabase.table.side_effect = RuntimeError("database unavailable")
+
+        response = client.get("/admin/metrics/dashboard")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to fetch dashboard metrics"}
+
     def test_admin_resource_not_in_allowlist(self, client: TestClient, mock_verify_admin: Mock):
         """Test admin accessing resource not in allowlist."""
         # Make request to a resource not in ADMIN_RESOURCE_ALLOWLIST

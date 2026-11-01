@@ -1,5 +1,6 @@
 """Admin-only routes for platform management."""
 
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
@@ -325,14 +326,7 @@ async def get_dashboard_metrics(
                 .order("id")
             )
         )
-        mrr = sum(_monthly_revenue_usd(sub) for sub in active_subs)
-
         all_instances = instances_data.list_instances(sb, columns="status")
-        status_counts: dict[str, int] = {}
-        for inst in all_instances:
-            status = inst.get("status", "unknown")
-            status_counts[status] = status_counts.get(status, 0) + 1
-
         audit_logs = (
             sb.table("audit_logs")
             .select("created_at, action, account_id")
@@ -340,39 +334,20 @@ async def get_dashboard_metrics(
             .limit(10)
             .execute()
         )
-        recent_activity = audit_logs.data if audit_logs.data else []
-    except Exception:
-        logger.exception("Error fetching metrics")
-        return {
-            "total_accounts": 0,
-            "active_subscriptions": 0,
-            "total_instances": 0,
-            "instances_by_status": {},
-            "subscription_revenue": 0.0,
-            "subscriptions_by_tier": {},
-            "recent_signups": [],
-            "recent_instances": [],
-        }
-    else:
-        # Build subscriptions by tier
-        subscriptions_by_tier = {}
-        for sub in active_subs:
-            tier = sub.get("tier", "free")
-            subscriptions_by_tier[tier] = subscriptions_by_tier.get(tier, 0) + 1
+    except Exception as e:
+        logger.exception("Error fetching dashboard metrics")
+        raise HTTPException(status_code=500, detail="Failed to fetch dashboard metrics") from e
 
-        # Build instances by status dict
-        instances_by_status = {status: count for status, count in status_counts.items()}
-
-        return {
-            "total_accounts": accounts.count or 0,
-            "active_subscriptions": len(active_subs),
-            "total_instances": len(all_instances),
-            "instances_by_status": instances_by_status,
-            "subscription_revenue": float(round(mrr)),
-            "subscriptions_by_tier": subscriptions_by_tier,
-            "recent_signups": [],  # Not implemented yet
-            "recent_instances": recent_activity if recent_activity else [],
-        }
+    return {
+        "total_accounts": accounts.count or 0,
+        "active_subscriptions": len(active_subs),
+        "total_instances": len(all_instances),
+        "instances_by_status": Counter(inst["status"] for inst in all_instances),
+        "subscription_revenue": float(round(sum(_monthly_revenue_usd(sub) for sub in active_subs))),
+        "subscriptions_by_tier": Counter(sub["tier"] for sub in active_subs),
+        "recent_signups": [],  # Not implemented yet
+        "recent_instances": audit_logs.data or [],
+    }
 
 
 # === Generic admin resources ===

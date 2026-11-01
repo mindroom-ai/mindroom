@@ -59,6 +59,28 @@ describe('AdminDashboard', () => {
     expect(screen.queryByText(/%/)).not.toBeInTheDocument()
   })
 
+  it('shows a dash instead of zero for figures the metrics request did not return', async () => {
+    mockApiCall.mockImplementation((path: string) =>
+      Promise.resolve(
+        path === '/health'
+          ? { ok: true, json: async () => ({ status: 'ok', supabase: true, stripe: true }) }
+          : { ok: false },
+      ),
+    )
+
+    render(<AdminDashboard />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Operational')).toBeInTheDocument()
+    })
+
+    for (const title of ['Total Accounts', 'Active Subscriptions', 'Running Instances', 'MRR (est.)']) {
+      expect(card(title).getByText('—')).toBeInTheDocument()
+    }
+    expect(screen.queryByText('0')).not.toBeInTheDocument()
+    expect(screen.queryByText('$0')).not.toBeInTheDocument()
+  })
+
   it('marks the system degraded when the health check fails', async () => {
     mockApiCall.mockResolvedValue({ ok: false })
 
