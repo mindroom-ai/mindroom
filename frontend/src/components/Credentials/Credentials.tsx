@@ -370,7 +370,7 @@ export function Credentials() {
     try {
       // The environment can still supply a deleted service, so the response says what happened and the page reloads
       // the service's credentials, unless another service was selected meanwhile, then the list. A service that is gone
-      // gives way to the next one, and one that still resolves shows what now applies.
+      // gives way to the first remaining one, and one that still resolves shows what now applies.
       const response = await fetchJSON<{ message: string }>(
         API_ENDPOINTS.credentials.delete(selectedService),
         {

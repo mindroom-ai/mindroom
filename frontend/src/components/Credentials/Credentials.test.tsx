@@ -503,7 +503,11 @@ describe("Credentials", () => {
           message: "Credentials deleted for github_private",
         }),
       })
-      .mockResolvedValue({ ok: true, json: async () => [] });
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ service: "github_private", credentials: {} }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => [] });
 
     renderOpen();
 
