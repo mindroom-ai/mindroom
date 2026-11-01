@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn
@@ -18,6 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.load_attempt import load_config_attempt
 from mindroom.config.main import Config, load_config
 from mindroom.config.reload_status import ConfigReloadStatus
+from mindroom.config.yaml_includes import source_files_fingerprint
 from mindroom.orchestration.config_lifecycle import _ReplacementDrainState
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.response_admission import ResponseAdmissionGate
@@ -1295,6 +1297,25 @@ async def test_failed_reload_load_reports_failure_and_watches_files_it_read(tmp_
     lifecycle.apply_update_plan.assert_not_awaited()
     assert lifecycle.status == ConfigReloadStatus(status="failed")
     assert lifecycle.watched_source_files == frozenset({runtime_paths.config_path.resolve()})
+
+
+def test_load_attempt_reports_the_source_a_legacy_access_migration_rewrote(tmp_path: Path) -> None:
+    """A load that migrates and rewrites the config reports the rewritten file's fingerprint, not the authored one."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config_path = runtime_paths.config_path
+    config_path.write_text(f"access_model: room_membership\n{_AGENT1_YAML}", encoding="utf-8")
+    authored_digest = hashlib.sha256(config_path.read_bytes()).hexdigest()
+
+    attempt = load_config_attempt(runtime_paths)
+
+    rewritten_digest = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    assert rewritten_digest != authored_digest
+    assert attempt.loaded
+    assert attempt.source_files == frozenset({config_path.resolve()})
+    assert attempt.source_fingerprint == source_files_fingerprint(
+        config_path,
+        {config_path.resolve(): rewritten_digest},
+    )
 
 
 def test_load_attempt_keeps_an_unexpected_error_for_the_reload_owner(
