@@ -1150,7 +1150,12 @@ async def test_worker_failure_faults_the_runtime_and_releases_its_session(
 
     status = runtime.status()
     assert status["gui_mode"] == "faulted"
-    assert status["last_error"]["message"] == "transport failed"
+    assert status["last_error"] == {
+        "code": "internal_error",
+        "message": "transport failed",
+        "recovery": "Stop and restart the desktop bridge.",
+        "retryable": True,
+    }
     assert owner.client.to_device_callbacks == []
     with pytest.raises(DesktopFilesystemError, match="closed"):
         cast("DesktopFilesystem", bridge.filesystem).list_folders()
@@ -1586,6 +1591,21 @@ def test_set_allowed_apps_requires_saved_configuration_and_stopped_access(tmp_pa
     assert result["status"]["bridge"]["state"] == "stopped"
     with pytest.raises(NativeProtocolError, match="at least one local capability"):
         asyncio.run(host.handle(_request("start")))
+
+
+def test_start_refuses_a_saved_browser_without_apps_folders_or_shell(tmp_path: Path) -> None:
+    """Browser control needs a saved app, so a browser alone is not a capability the helper starts with."""
+    runtime = FakeRuntime()
+    host = _host(tmp_path, runtime)
+    payload = _config_payload()
+    payload.update(allowed_app_ids=[], browser={**cast("dict[str, object]", payload["browser"]), "enabled": True})
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
+
+    with pytest.raises(NativeProtocolError, match="at least one local capability") as caught:
+        asyncio.run(host.handle(_request("start")))
+
+    assert caught.value.code == "configuration_missing"
+    assert not runtime.running
 
 
 @pytest.mark.parametrize(
@@ -2125,7 +2145,12 @@ def test_host_remains_available_when_config_path_is_a_directory(tmp_path: Path) 
     host = _host(tmp_path)
     status = host.status()
     assert status["config"]["state"] == "invalid"
-    assert status["bridge"]["last_error"]["code"] == "invalid_request"
+    assert status["bridge"]["last_error"] == {
+        "code": "invalid_request",
+        "message": "Native desktop configuration must be a regular file owned by this user.",
+        "recovery": None,
+        "retryable": False,
+    }
 
 
 def test_stop_cancels_pending_start_before_it_can_publish_running(tmp_path: Path) -> None:

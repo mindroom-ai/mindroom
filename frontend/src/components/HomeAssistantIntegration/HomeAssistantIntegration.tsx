@@ -27,7 +27,10 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
-import { withAgentExecutionScope } from "@/lib/api";
+import {
+  apiErrorMessageFromResponse,
+  withAgentExecutionScope,
+} from "@/lib/api";
 import type { WorkerScope } from "@/types/config";
 
 interface HomeAssistantStatus {
@@ -157,8 +160,12 @@ export function HomeAssistantIntegration({
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || "Failed to start OAuth flow");
+        throw new Error(
+          await apiErrorMessageFromResponse(
+            response,
+            "Failed to start OAuth flow",
+          ),
+        );
       }
 
       const data = await response.json();
@@ -242,8 +249,9 @@ export function HomeAssistantIntegration({
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || "Failed to connect");
+        throw new Error(
+          await apiErrorMessageFromResponse(response, "Failed to connect"),
+        );
       }
 
       toast({

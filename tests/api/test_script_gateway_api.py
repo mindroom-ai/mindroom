@@ -22,8 +22,8 @@ from mindroom.script_runs.broker import (
     ScriptRuntimeResolver,
     ScriptRuntimeUnavailableError,
     ScriptToolBroker,
-    digest_arguments,
 )
+from mindroom.script_runs.launch_contract import digest_arguments
 from mindroom.script_runs.models import (
     ScriptCallClaim,
     ScriptCallRecord,

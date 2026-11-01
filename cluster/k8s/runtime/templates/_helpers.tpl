@@ -220,10 +220,12 @@ image digest and the selected image directory. root is the directory the transpo
 
 {{- /*
 Content-bundle init script; takes the bundle's overwrite flag and receives the source and target paths as $1 and $2.
-With overwrite, the target ends up with the same entries, types, contents, modes, symlink targets, and (where cp -a
-can preserve them) owners as after rm -rf and cp -a, but only entries that differ are rewritten, so a restart on
+With overwrite, the target ends up with the same entries, types, contents, modes, symlink targets, and (as root, where
+cp -a can preserve them) owners as after rm -rf and cp -a, but only entries that differ are rewritten, so a restart on
 network storage copies only what changed. Unlike a full copy, unchanged files keep their timestamps, directory
 timestamps and symlink owners are not synced, and hard-link relationships between files are not guaranteed to be preserved.
+Other users copy without cp -a, whose BusyBox build reports every file it cannot give its source owner, so their
+copies get the time of the copy instead of the source timestamps.
 Every start compares both trees in full, but with one stat and one md5sum batch per tree instead of processes per
 file, so the number of processes grows with the changes and symlinks, not with the files.
 An image missing a tool the sync uses, or a name with a newline in either tree (listings are line-based),
@@ -248,6 +250,11 @@ kind() {
 # BusyBox test -w is always true for root, which root-squashed NFS does not honour, so root always tries u+w.
 # Best effort: a parent we may not chmod can still be writable, and the copy or removal reports a real denial.
 writable() { if [ "$uid" = 0 ] || [ ! -w "$1" ]; then chmod u+w "$1" 2>/dev/null || :; fi; }
+# Only root may give a copy its source owner, and BusyBox cp -a run by anyone else reports every file it could not
+# chown. Others copy without -p, under umask 0 so group and other permission bits stay as with cp -a.
+# An image without id gets cp -a.
+uid=$(id -u 2>/dev/null) || uid=0
+if [ "$uid" = 0 ]; then copy() { cp -a "$@"; }; else copy() { (umask 0 && exec cp -RP "$@"); }; fi
 if [ -L "$dst" ] || [ ! -d "$dst" ]; then rm -f "$dst"; fi
 mkdir -p "$dst"
 reason=
@@ -260,10 +267,9 @@ if [ -n "$reason" ]; then
   echo "$0: $reason, so $dst is replaced by a full copy" >&2
   chmod -R u+w "$dst" 2>/dev/null || :
   rm -rf "$dst"
-  mkdir -p "$dst"
-  cp -a "$src/." "$dst/"
+  # Copying onto the missing path gives it the source directory's mode too.
+  copy "$src/." "$dst"
 else
-  uid=$(id -u)
   # cp -a keeps ownership only where chown works, so compare it only then (root without NFS root squashing).
   own=
   if [ "$uid" = 0 ] && chown "$(stat -c %u:%g "$src")" "$dst" 2>/dev/null; then own=' %u %g'; fi
@@ -350,7 +356,7 @@ else
     kind "$dst/$p"
     case $k in -|f) writable "$dst/${p%/*}" ;; *) continue ;; esac
     [ "$k" = - ] || rm -f "$dst/$p"
-    cp -a "$src/$p" "$dst/$p"
+    copy "$src/$p" "$dst/$p"
     [ "$k" != - ] || new=$p
   done
   # Fix directory modes and owners deepest first, including parents that writable changed.

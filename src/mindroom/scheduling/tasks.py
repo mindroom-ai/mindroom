@@ -611,6 +611,7 @@ async def _homeserver_returns_full_state_events(client: nio.AsyncClient, room_id
     A server that ignores ``format=event`` answers both reads with the same content, which cannot hold itself
     under ``content``.
     """
+    failure = f"Failed to read the create event of room `{room_id}`"
     try:
         full, bare = [
             await client._send(
@@ -624,10 +625,10 @@ async def _homeserver_returns_full_state_events(client: nio.AsyncClient, room_id
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        msg = f"Failed to read the create event of room {room_id!r}"
+        msg = f"{failure}: {type(exc).__name__}: {exc}"
         raise ScheduledTaskStateReadError(msg) from exc
     if not isinstance(full, nio.RoomGetStateEventResponse) or not isinstance(bare, nio.RoomGetStateEventResponse):
-        msg = f"Failed to read the create event of room {room_id!r}: {full} {bare}"
+        msg = f"{failure}: {full} {bare}"
         raise ScheduledTaskStateReadError(msg)
     return full.content.get("content") == bare.content
 
@@ -639,6 +640,7 @@ async def _read_scheduled_task_state(
     runtime_paths: RuntimePaths,
 ) -> dict[str, typing.Any] | None:
     """Fetch one scheduled-task state payload, treating state not written by MindRoom as absent."""
+    failure = f"Failed to get scheduled task `{task_id}` from room `{room_id}`"
     try:
         # Nio's state-event read omits the sender; Synapse and Tuwunel return the full event for format=event.
         response = await client._send(
@@ -650,23 +652,23 @@ async def _read_scheduled_task_state(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}"
+        msg = f"{failure}: {type(exc).__name__}: {exc}"
         raise ScheduledTaskStateReadError(msg) from exc
     if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
         return None
     if not isinstance(response, nio.RoomGetStateEventResponse):
-        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"
+        msg = f"{failure}: {response}"
         raise ScheduledTaskStateReadError(msg)
     event = response.content
     if not isinstance(event.get("sender"), str) or not isinstance(event.get("content"), dict):
         transport = response.transport_response
         error = event.get("errcode") or (f"HTTP {transport.status}" if transport is not None else "no HTTP status")
-        msg = f"Scheduled task {task_id!r} in room {room_id!r} was not returned as a full state event ({error})"
+        msg = f"Scheduled task `{task_id}` in room `{room_id}` was not returned as a full state event ({error})"
         raise ScheduledTaskStateReadError(msg)
     # A server that ignores format=event returns the state content itself, whose author can shape it like a
     # bot-written event, so only a server proven to return whole events names the sender.
     if not await _homeserver_returns_full_state_events(client, room_id):
-        msg = f"Scheduled task {task_id!r} in room {room_id!r} was read from a homeserver that ignores format=event"
+        msg = f"Scheduled task `{task_id}` in room `{room_id}` was read from a homeserver that ignores format=event"
         raise ScheduledTaskStateReadError(msg)
     return _runtime_authored_task_content(room_id, event, persisted_bot_user_ids(runtime_paths))
 

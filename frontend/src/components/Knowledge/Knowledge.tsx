@@ -13,7 +13,7 @@ import {
   getCoreRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { apiErrorMessageFromPayload, API_ENDPOINTS } from "@/lib/api";
+import { apiErrorMessageFromResponse, API_ENDPOINTS } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useConfigStore, type SaveConfigResult } from "@/store/configStore";
 import { SchemaSection } from "@/components/SchemaForm";
@@ -264,14 +264,12 @@ function validateBaseName(baseName: string): string | null {
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
   if (!response.ok) {
-    let detail = response.statusText;
-    try {
-      const payload = await response.json();
-      detail = apiErrorMessageFromPayload(payload, detail);
-    } catch {
-      // Keep fallback detail
-    }
-    throw new Error(detail || `Request failed (${response.status})`);
+    throw new Error(
+      await apiErrorMessageFromResponse(
+        response,
+        response.statusText || `Request failed (${response.status})`,
+      ),
+    );
   }
   return response.json() as Promise<T>;
 }
