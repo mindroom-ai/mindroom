@@ -34,6 +34,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { apiErrorMessageFromResponse } from "@/lib/api";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   useTools,
@@ -663,7 +664,9 @@ export function Integrations() {
       );
 
       if (!response.ok) {
-        throw new Error("Failed to disconnect");
+        throw new Error(
+          await apiErrorMessageFromResponse(response, "Failed to disconnect"),
+        );
       }
       // The environment or a granted shared credential can still supply deleted credentials, so the server says what happened.
       const { message } = (await response.json()) as { message: string };

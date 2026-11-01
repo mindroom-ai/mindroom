@@ -1210,7 +1210,7 @@ describe("Integrations", () => {
           display_name: "OpenAI",
           description: "OpenAI models",
           setup_type: "api_key",
-          status: "connected",
+          status: "available",
         }),
       ],
       { refetch },
@@ -1238,6 +1238,38 @@ describe("Integrations", () => {
       method: "DELETE",
     });
     expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the server's reason when deleting a tool's credentials fails", async () => {
+    listTools([
+      tool({
+        name: "openai",
+        display_name: "OpenAI",
+        description: "OpenAI models",
+        setup_type: "api_key",
+        status: "available",
+      }),
+    ]);
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      json: async () => ({ detail: "Stored credentials are unreadable" }),
+    });
+
+    render(<Integrations />);
+
+    fireEvent.click(
+      within(await findCard("OpenAI")).getByRole("button", {
+        name: "Disconnect",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Disconnect Failed",
+        description: "Stored credentials are unreadable",
+        variant: "destructive",
+      });
+    });
   });
 
   it("lists worker-scoped and private agents in the scope selector", async () => {
