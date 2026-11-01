@@ -553,6 +553,29 @@ def test_a_wide_image_is_cropped_to_its_center_square() -> None:
             assert green > 200 > red
 
 
+def test_a_photo_is_turned_upright_before_it_is_cropped() -> None:
+    """A phone photo stored sideways with an EXIF rotation becomes an upright avatar."""
+    stored = Image.new("RGB", (400, 200), "blue")
+    stored.paste("red", (0, 0, 200, 200))
+    exif = Image.Exif()
+    exif[274] = 6  # Shown rotated 90 degrees clockwise, so the stored left half is the top.
+    buffer = io.BytesIO()
+    stored.save(buffer, format="JPEG", exif=exif)
+
+    with Image.open(io.BytesIO(managed_avatars.normalized_avatar_png(buffer.getvalue()))) as avatar:
+        top_right, bottom_left = avatar.getpixel((245, 10)), avatar.getpixel((10, 245))
+    assert top_right[0] > 200 > top_right[2]
+    assert bottom_left[2] > 200 > bottom_left[0]
+
+
+def test_an_image_with_too_many_pixels_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An image that would decode to far more pixels than an avatar needs is refused before it is decoded."""
+    monkeypatch.setattr(managed_avatars, "_MAX_SOURCE_PIXELS", 100)
+
+    with pytest.raises(ValueError, match="Avatar image exceeds the 100-pixel decoded limit"):
+        managed_avatars.normalized_avatar_png(_image_bytes(size=(11, 10)))
+
+
 def test_a_transparent_logo_keeps_its_transparency() -> None:
     """A logo with a transparent background stays transparent instead of turning black."""
     buffer = io.BytesIO()
