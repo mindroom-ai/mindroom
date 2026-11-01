@@ -18,11 +18,16 @@ WORKFLOW_DIR = ROOT / ".github" / "workflows"
 _TEST_PATH = re.compile(r"(?<![\w./-])tests/[\w./-]+\.py\b")
 # Jobs that install or run repository or dependency code chosen by the pushed commit.
 _CODE_RUNNING_JOBS = (
+    ("commit-attribution.yml", "check"),
     ("dashboard-tests.yml", "dashboard"),
     ("docs.yml", "build"),
+    ("logo.yml", "verify"),
     ("macos-tests.yml", "packaging"),
     ("macos-tests.yml", "swift-tests"),
     ("markdown-code-runner.yml", "markdown-code-runner"),
+    ("platform-backend-tests.yml", "backend"),
+    ("platform-backend-tests.yml", "frontend"),
+    ("plugin-ci.yml", "check"),
     ("pytest.yml", "test"),
     ("release.yml", "build"),
     ("release.yml", "build_macos_helper"),
