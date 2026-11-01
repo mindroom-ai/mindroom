@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping  # noqa: TC003 - pydantic resolves SpendSnapshot's fields at runtime
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING
@@ -11,14 +12,12 @@ from mindroom.budgets.pricing import PricedModel, cost_usd
 from mindroom.usage.stats import collect_requester_daily_usage
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 
 @dataclass(frozen=True, slots=True)
-class UnpricedModelUsage:
+class _UnpricedModelUsage:
     """Month-to-date tokens of a model without configured prices."""
 
     provider: str
@@ -34,7 +33,7 @@ class SpendSnapshot:
     period_end: date
     generated_at: datetime
     spend_usd: Mapping[str, float]
-    unpriced_models: tuple[UnpricedModelUsage, ...]
+    unpriced_models: tuple[_UnpricedModelUsage, ...]
     scanned_sources: int
     unavailable_sources: int
 
@@ -76,7 +75,7 @@ def collect_monthly_spend(
         generated_at=now,
         spend_usd=dict(spend),
         unpriced_models=tuple(
-            UnpricedModelUsage(provider=provider, model=model, total_tokens=tokens)
+            _UnpricedModelUsage(provider=provider, model=model, total_tokens=tokens)
             for (provider, model), tokens in sorted(unpriced.items())
         ),
         scanned_sources=coverage.scanned_sources,

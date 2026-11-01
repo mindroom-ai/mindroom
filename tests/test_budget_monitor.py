@@ -4,10 +4,9 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
+import json
 import threading
 import time
-from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -18,14 +17,8 @@ from mindroom.budgets import monitor as monitor_module
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model, budget_user_id
 from mindroom.budgets.pricing import model_prices, run_cost_usd
-from mindroom.budgets.spend import SpendSnapshot, UnpricedModelUsage
-from mindroom.budgets.spend_store import (
-    connect_spend_store,
-    load_spend,
-    spend_fingerprint,
-    spend_store_path,
-    store_scan,
-)
+from mindroom.budgets.spend import SpendSnapshot, _UnpricedModelUsage
+from mindroom.budgets.spend_state import SpendState, spend_fingerprint
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -86,7 +79,7 @@ def _snapshot(
         period_end=end,
         generated_at=generated_at,
         spend_usd=dict(spend),
-        unpriced_models=(UnpricedModelUsage(provider="Ollama", model="qwen3.8:27b", total_tokens=5),),
+        unpriced_models=(_UnpricedModelUsage(provider="Ollama", model="qwen3.8:27b", total_tokens=5),),
         scanned_sources=2,
         unavailable_sources=unavailable,
     )
@@ -818,53 +811,97 @@ async def test_a_rescan_keeps_the_total_a_finished_reply_added(tmp_path: Path) -
     await monitor.stop()
 
 
-async def _restarted(
-    tmp_path: Path,
-    config: Config,
-    clock: _Clock,
-    **timing: float,
-) -> tuple[BudgetMonitor, list[Config]]:
-    """Return a fresh monitor over the storage an earlier, stopped monitor used, synced to ``config``."""
-    monitor, current = _monitor(tmp_path, config, clock, **timing)
+def _state_path(tmp_path: Path) -> Path:
+    return budget_caps_path(_paths(tmp_path)).parent / "spend_state.json"
+
+
+async def _restarted(tmp_path: Path, config: Config, clock: _Clock, **timing: float) -> BudgetMonitor:
+    """Return a fresh monitor over the storage an earlier monitor used, synced to ``config``."""
+    monitor, _current = _monitor(tmp_path, config, clock, **timing)
     await monitor.sync(config)
-    return monitor, current
+    return monitor
 
 
 @pytest.mark.asyncio
-async def test_a_restart_within_the_reconciliation_interval_resumes_the_stored_spend_without_a_scan(
+async def test_a_clean_stop_and_restart_resumes_the_kept_spend_without_a_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = _Clock()
-    scans = _Scans(monkeypatch, {ALICE: 9.0, BOB: 2.0})
+    scans = _Scans(monkeypatch, {ALICE: 8.0, BOB: 2.0})
     scans.unavailable = 1
     before, _current = _monitor(tmp_path, _config(), clock)
     await before.sync(_config())
     await _until(lambda: before.status().snapshot is not None)
-    before.response_finished(ALICE, 1.5, OCTOBER)
+    # A rescan covers the reply before it, and the reply that finishes while it runs stays a kept cost.
+    before.response_finished(ALICE, 2.0, OCTOBER)
+    first_scan = before.status().snapshot
+    scans.release.clear()
+    scans.spend = {ALICE: 9.5, BOB: 2.0}
+    before.response_finished(BOB, None, OCTOBER)
+    await _until(lambda: scans.calls == 2)
+    before.response_finished(ALICE, 1.0, OCTOBER)
+    scans.release.set()
+    await _until(lambda: before.status().snapshot is not first_scan)
     before.response_finished(CAROL, 0.25, OCTOBER)
     status = before.status()
     spend = {user_id: before._spend_usd(user_id) for user_id in (ALICE, BOB, CAROL)}
     await before.stop()
+    assert json.loads(_state_path(tmp_path).read_text())["reply_costs"] == {ALICE: 1.0, CAROL: 0.25}
 
     clock.now = OCTOBER + timedelta(hours=5)
     restarted, _current = _monitor(tmp_path, _config(), clock, tick_seconds=0.01, reconcile_seconds=5 * 3600 + 1)
 
-    # The stored spend applies before the first sync, so caps hold from the first reply after a restart.
+    # The kept spend applies before the first sync, so caps hold from the first reply after a restart.
+    assert not _state_path(tmp_path).exists()
     assert {user_id: restarted._spend_usd(user_id) for user_id in (ALICE, BOB, CAROL)} == spend
     assert _decide(restarted, ALICE, "astra") == "luna"
     assert restarted.status() == status
     await restarted.sync(_config())
     await _quiet()
-    assert scans.calls == 1
-    # The next reconciliation is due an interval after the stored scan started, not after the restart.
-    await _until(lambda: scans.calls == 2)
+    assert scans.calls == 2
+    # The next reconciliation is due an interval after the kept scan started, not after the restart.
+    await _until(lambda: scans.calls == 3)
     await restarted.stop()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["stale", "last_month", "repriced", "agent_added", "requested", "budgets_were_off"])
-async def test_a_restart_scans_when_the_stored_scan_cannot_stand_in(
+@pytest.mark.parametrize("reason", ["crashed", "reply_after_stop", "unknown_reply_after_stop", "second_start"])
+async def test_a_start_without_a_clean_stop_right_before_it_scans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    clock = _Clock()
+    scans = _Scans(monkeypatch, {ALICE: 9.0})
+    before, _current = _monitor(tmp_path, _config(), clock)
+    await before.sync(_config())
+    await _until(lambda: before.status().snapshot is not None)
+    if reason != "crashed":
+        await before.stop()
+        assert _state_path(tmp_path).exists()
+    if reason == "reply_after_stop":
+        before.response_finished(ALICE, 1.0, OCTOBER)
+    elif reason == "unknown_reply_after_stop":
+        before.response_finished(ALICE, None, OCTOBER)
+    elif reason == "second_start":
+        # This start takes the kept spend and then crashes, so the next start finds nothing.
+        _monitor(tmp_path, _config(), clock)
+    assert not _state_path(tmp_path).exists()
+
+    restarted = await _restarted(tmp_path, _config(), clock)
+
+    await _until(lambda: scans.calls == 2)
+    await restarted.stop()
+    await before.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    ["stale", "last_month", "repriced", "agent_added", "requested", "scanning", "budgets_off"],
+)
+async def test_a_restart_scans_when_the_kept_spend_cannot_stand_in(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     reason: str,
@@ -874,33 +911,69 @@ async def test_a_restart_scans_when_the_stored_scan_cannot_stand_in(
     before, current = _monitor(tmp_path, _config(), clock)
     await before.sync(_config())
     await _until(lambda: before.status().snapshot is not None)
+    # A stop that keeps nothing also removes what an earlier stop kept.
+    _state_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    _state_path(tmp_path).write_text("{}")
     config = _config()
+    if reason == "repriced":
+        config.models["astra"].pricing = ModelPricing(input=1, output=6)
+    elif reason == "agent_added":
+        # The kept scan did not read this agent's usage.
+        config.agents["code"] = AgentConfig(display_name="Code")
+    elif reason == "requested":
+        before.response_finished(ALICE, None, OCTOBER)
+    elif reason == "scanning":
+        scans.release.clear()
+        before.response_finished(ALICE, None, OCTOBER)
+        await _until(lambda: scans.calls == 2)
+    elif reason == "budgets_off":
+        current[0] = _config().model_copy(update={"budgets": None})
+        await before.sync(current[0])
+    await before.stop()
+    scans.release.set()
+    await _quiet()
+    assert _state_path(tmp_path).exists() is (reason in {"stale", "last_month", "repriced", "agent_added"})
     if reason == "stale":
         clock.now = OCTOBER + timedelta(hours=7)
     elif reason == "last_month":
         clock.now = datetime(2026, 11, 1, 0, 5, tzinfo=UTC)
-    elif reason == "repriced":
-        config.models["astra"].pricing = ModelPricing(input=1, output=6)
-    elif reason == "agent_added":
-        # The scan before the restart did not read this agent's usage.
-        config.agents["code"] = AgentConfig(display_name="Code")
-    elif reason == "requested":
-        # The scan the request starts fails, so the request is still unserved when the runtime stops.
-        scans.error = RuntimeError("database locked")
-        before.response_finished(ALICE, None, OCTOBER)
-        await _until(lambda: scans.calls == 2)
-        await _quiet()
-        scans.error = None
-    else:
-        current[0] = _config().model_copy(update={"budgets": None})
-        await before.sync(current[0])
     calls = scans.calls
-    await before.stop()
 
-    restarted, _current = await _restarted(tmp_path, config, clock)
+    restarted = await _restarted(tmp_path, config, clock)
 
     await _until(lambda: scans.calls == calls + 1)
     await restarted.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["corrupt", "bad_values", "other_version"])
+async def test_an_unusable_kept_state_falls_back_to_a_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    payload = SpendState(fingerprint="fingerprint", snapshot=_snapshot({ALICE: 1.0}), reply_costs={}).model_dump(
+        mode="json",
+    )
+    if state == "bad_values":
+        payload["snapshot"]["generated_at"] = "yesterday"
+    elif state == "other_version":
+        payload["version"] = 2
+    path = _state_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"not json" if state == "corrupt" else json.dumps(payload).encode())
+    scans = _Scans(monkeypatch, {ALICE: 12.0})
+
+    with capture_logs() as logs:
+        monitor, _current = _monitor(tmp_path, _config())
+
+    assert [entry["event"] for entry in logs] == ["budget_spend_state_unusable"]
+    assert not path.exists()
+    assert monitor.status().snapshot is None
+    await monitor.sync(_config())
+    await _until(lambda: monitor._spend_usd(ALICE) == 12.0)
+    assert scans.calls == 1
+    await monitor.stop()
 
 
 @pytest.mark.asyncio
@@ -944,89 +1017,6 @@ async def test_a_config_reload_rescans_only_when_what_a_scan_counts_changes(
     await monitor.stop()
 
 
-@pytest.mark.asyncio
-async def test_a_completed_scan_drops_the_stored_reply_costs_it_covers_and_keeps_later_ones(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = _Clock()
-    scans = _Scans(monkeypatch, {ALICE: 5.0})
-    before, _current = _monitor(tmp_path, _config(), clock)
-    await before.sync(_config())
-    await _until(lambda: before.status().snapshot is not None)
-    # The store writer is held, so the scan's write queues behind the reply writes before and while it ran.
-    writer_held = threading.Event()
-    add_reply_cost = monitor_module.add_reply_cost
-    monkeypatch.setattr(monitor_module, "add_reply_cost", lambda *args: writer_held.wait(5) and add_reply_cost(*args))
-    clock.now += timedelta(minutes=1)
-    before.response_finished(ALICE, 2.0, OCTOBER)
-    scans.release.clear()
-    scans.spend = {ALICE: 6.5}
-    clock.now += timedelta(minutes=1)
-    before.response_finished(BOB, None, OCTOBER)
-    await _until(lambda: scans.calls == 2)
-    clock.now += timedelta(minutes=1)
-    before.response_finished(ALICE, 1.0, OCTOBER)
-    scans.release.set()
-    await _until(lambda: before._spend_usd(ALICE) == 7.5)
-    writer_held.set()
-    await before.stop()
-
-    stored = load_spend(spend_store_path(_paths(tmp_path)))
-    assert stored.reply_costs == {ALICE: 1.0}
-    assert stored.scan_requested is False
-    restarted, _current = await _restarted(tmp_path, _config(), clock)
-    await _quiet()
-
-    assert restarted._spend_usd(ALICE) == 7.5
-    assert scans.calls == 2
-    await restarted.stop()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("store", ["missing", "corrupt", "other_schema", "unparsable", "locked"])
-async def test_an_unusable_spend_store_falls_back_to_a_scan(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    store: str,
-) -> None:
-    """Only a store that cannot be used again is replaced; one that is only locked is kept."""
-    path = spend_store_path(_paths(tmp_path))
-    path.parent.mkdir(parents=True)
-    lock = None
-    if store == "corrupt":
-        path.write_bytes(b"not a database" * 100)
-    elif store == "other_schema":
-        with closing(sqlite3.connect(path)) as connection:
-            connection.execute("PRAGMA user_version = 7")
-    elif store == "unparsable":
-        with closing(connect_spend_store(path)) as connection:
-            store_scan(connection, _snapshot({ALICE: 1.0}), "fingerprint")
-            with connection:
-                connection.execute("UPDATE scan SET generated_at = 'yesterday'")
-    elif store == "locked":
-        lock = sqlite3.connect(path, isolation_level=None)
-        lock.execute("BEGIN EXCLUSIVE")
-    scans = _Scans(monkeypatch, {ALICE: 12.0})
-
-    with capture_logs() as logs:
-        monitor, _current = _monitor(tmp_path, _config())
-    if lock is not None:
-        lock.close()
-
-    events = {entry["event"] for entry in logs}
-    assert ("budget_spend_store_unavailable" in events) is (store == "locked")
-    assert ("budget_spend_store_unreadable" in events) is (store not in {"missing", "locked"})
-    assert path.exists() is (store == "locked")
-    await monitor.sync(_config())
-    await _until(lambda: monitor._spend_usd(ALICE) == 12.0)
-    await monitor.stop()
-    assert scans.calls == 1
-    stored = load_spend(path)
-    assert stored.snapshot is not None
-    assert stored.snapshot.spend_usd == {ALICE: 12.0}
-
-
 def test_the_fingerprint_follows_what_a_scan_counts_not_how_the_config_is_written(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     config = _config(monthly_limit_usd=10)
@@ -1060,41 +1050,3 @@ def test_the_fingerprint_follows_what_a_scan_counts_not_how_the_config_is_writte
     assert spend_fingerprint(reordered, paths) == fingerprint
     assert all(spend_fingerprint(changed, paths) != fingerprint for changed in changes)
     assert spend_fingerprint(config, moved_sessions) != fingerprint
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("during_scan", [False, True])
-async def test_a_lost_store_write_makes_the_next_start_scan(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    during_scan: bool,
-) -> None:
-    """A restart must not resume spend that misses a reply, though the running total still counts it."""
-    clock = _Clock()
-    scans = _Scans(monkeypatch, {ALICE: 9.0})
-    before, _current = _monitor(tmp_path, _config(), clock)
-    await before.sync(_config())
-    await _until(lambda: before.status().snapshot is not None)
-    first_scan = before.status().snapshot
-    if during_scan:
-        # The scan running when the write is lost does not cover that reply, so it must not make the store resumable.
-        scans.release.clear()
-        before.response_finished(BOB, None, OCTOBER)
-        await _until(lambda: scans.calls == 2)
-    clock.now += timedelta(minutes=1)
-
-    def lose(*_args: object) -> None:
-        msg = "disk I/O error"
-        raise sqlite3.OperationalError(msg)
-
-    monkeypatch.setattr(monitor_module, "add_reply_cost", lose)
-    before.response_finished(ALICE, 2.0, OCTOBER)
-    scans.release.set()
-    await _until(lambda: before.status().snapshot is not first_scan or not during_scan)
-    assert before._spend_usd(ALICE) == 11.0
-    await before.stop()
-
-    restarted, _current = await _restarted(tmp_path, _config(), clock)
-
-    await _until(lambda: scans.calls == 3 if during_scan else scans.calls == 2)
-    await restarted.stop()

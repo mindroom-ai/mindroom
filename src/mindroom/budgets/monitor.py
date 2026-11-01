@@ -1,13 +1,12 @@
 """Month-to-date spend per requester and the fallback model decision it drives.
 
-A full scan of retained usage runs in a worker thread when the UTC month changes, when budgets are turned on or a
-config change alters what a scan counts, and on a slow reconciliation interval, which also picks up usage no reply
+A full scan of retained usage runs in a worker thread at start, when the UTC month changes, when budgets are turned on
+or a config change alters what a scan counts, and on a slow reconciliation interval, which also picks up usage no reply
 reports, such as helper calls, voice calls, and summaries.
 Between scans each completed reply adds the cost it priced to its requester's running total, so it costs no scan.
 A reply whose cost is unknown, such as a stopped or failed run or one resumed after an approval, requests a scan.
-The latest scan, the reply costs since it started, and unserved scan requests are stored beside the caps, so a restart
-enforces the stored spend at once, and scans at start only when the stored scan is missing, of an earlier month, counted
-with other settings, or due for reconciliation, or a scan request is unserved.
+A clean stop keeps the latest scan and the reply costs since it started, and a start within the reconciliation interval
+that finds them, counted with the same settings, resumes them instead of scanning.
 Spend is checked when a reply starts, so the reply that crosses a cap still finishes on its model, and the requester's
 next reply uses the fallback model.
 """
@@ -16,9 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import sqlite3
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
@@ -27,15 +24,11 @@ from mindroom.background_tasks import SupervisedLoop
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.pricing import model_prices
 from mindroom.budgets.spend import SpendSnapshot, collect_monthly_spend, month_bounds
-from mindroom.budgets.spend_store import (
-    add_reply_cost,
-    add_scan_request,
-    connect_spend_store,
-    discard_spend_store,
-    load_spend,
+from mindroom.budgets.spend_state import (
+    SpendState,
+    keep_spend_state,
     spend_fingerprint,
-    spend_store_path,
-    store_scan,
+    take_spend_state,
 )
 from mindroom.logging_config import get_logger
 from mindroom.providers.identity import model_identity
@@ -203,63 +196,43 @@ class BudgetMonitor:
     tick_seconds: float = _TICK_SECONDS
     caps: BudgetCaps = field(init=False)
     _snapshot: SpendSnapshot | None = field(default=None, init=False)
-    # Fingerprints of the settings the stored scan was counted with and of the config the latest sync applied.
-    _stored_fingerprint: str | None = field(default=None, init=False)
+    # Fingerprints of the settings ``_snapshot`` was counted with and of the config the latest sync applied.
+    _snapshot_fingerprint: str | None = field(default=None, init=False)
     _synced_fingerprint: str | None = field(default=None, init=False)
     _last_scan_started: float | None = field(default=None, init=False)
+    _scanning: bool = field(default=False, init=False)
     # Costs of finished replies per canonical requester that the snapshot does not cover: those recorded before the
     # running or latest scan started, which that scan covers once it completes, and those recorded since.
     _costs_before_scan: dict[str, float] = field(default_factory=dict, init=False)
     _costs_since_scan: dict[str, float] = field(default_factory=dict, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _loop: SupervisedLoop = field(init=False)
-    _store_path: Path = field(init=False)
-    # One writer thread applies the store writes in the order they were queued, through a connection only it uses.
-    _writer: ThreadPoolExecutor | None = field(default=None, init=False)
-    _store: sqlite3.Connection | None = field(default=None, init=False)
-    # When the latest write the store lost was recorded; the writer stores no scan that started before it.
-    _lost_at: datetime | None = field(default=None, init=False)
+    _state_path: Path = field(init=False)
+    # Whether ``stop`` kept the spend for the next start, which any later reply makes stale.
+    _state_kept: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
-        """Load the per-user caps and the spend a previous run stored."""
+        """Load the per-user caps a previous run stored, and the spend its clean stop kept."""
         self.caps = BudgetCaps(budget_caps_path(self.runtime_paths))
         self._loop = SupervisedLoop("budget_monitor", self._run)
-        self._store_path = spend_store_path(self.runtime_paths)
-        if not self._store_path.exists():
-            return
-        # Stored spend only spares a scan, so the first sync scans when it cannot be read.
-        try:
-            stored = load_spend(self._store_path)
-        except (sqlite3.OperationalError, OSError):
-            # A lock or an I/O error can pass, so the store is kept for the scan to overwrite.
-            logger.warning("budget_spend_store_unavailable", path=str(self._store_path), exc_info=True)
-            return
-        except (sqlite3.DatabaseError, ValueError, TypeError):
-            logger.warning("budget_spend_store_unreadable", path=str(self._store_path), exc_info=True)
-            with contextlib.suppress(OSError):
-                discard_spend_store(self._store_path)
-            return
-        self._snapshot, self._stored_fingerprint = stored.snapshot, stored.fingerprint
-        self._costs_since_scan = stored.reply_costs
-        if stored.scan_requested:
-            self._wake.set()
+        self._state_path = budget_caps_path(self.runtime_paths).parent / "spend_state.json"
+        # The kept spend applies from the first reply; the first sync decides whether a scan must replace it.
+        state = take_spend_state(self._state_path)
+        if state is not None:
+            self._snapshot, self._snapshot_fingerprint = state.snapshot, state.fingerprint
+            self._costs_since_scan = state.reply_costs
 
     async def sync(self, config: Config) -> None:
         """Start the refresh loop once, and request a scan unless the spend kept fits ``config``.
 
-        The first call keeps a stored scan of this month that was counted with the same settings and started within the
-        reconciliation interval, and schedules the next reconciliation from its start; later calls rescan only when
-        those settings changed.
+        The first call resumes the spend a clean stop kept when it fits; later calls rescan only when the settings change.
         """
         fingerprint = spend_fingerprint(config, self.runtime_paths)
         previous, self._synced_fingerprint = self._synced_fingerprint, fingerprint
         self._loop.start()
-        if fingerprint == previous or (previous is None and self._resume_stored_scan(fingerprint)):
+        if fingerprint == previous or (previous is None and self._resume_kept_scan(fingerprint)):
             return
-        # Replies add nothing while budgets are off, so a stored scan must be recounted before budgets apply again;
-        # without budgets or a store there is nothing to mark.
-        if config.budgets is not None or self._store_path.exists():
-            self._request_scan()
+        self._request_scan()
 
     def response_finished(self, requester_id: str | None, cost_usd: float | None, started_at: datetime | None) -> None:
         """Add a finished reply's cost to its requester's spend until a scan covers the reply, or request a scan.
@@ -281,22 +254,41 @@ class BudgetMonitor:
         user_id = budget_user_id(requester_id, config, self.runtime_paths)
         if user_id is None:
             return
-        now = self.clock()
-        if started_at is None or month_bounds(started_at)[0] != month_bounds(now)[0]:
+        if self._state_kept:
+            # The kept spend no longer covers this reply, so the next start scans.
+            self._state_kept = False
+            with contextlib.suppress(OSError):
+                self._state_path.unlink(missing_ok=True)
+        if started_at is None or month_bounds(started_at)[0] != month_bounds(self.clock())[0]:
             cost_usd = None
         if cost_usd is None:
             self._request_scan()
         elif cost_usd:
             self._costs_since_scan[user_id] = self._costs_since_scan.get(user_id, 0.0) + cost_usd
-            self._persist(now, lambda store: add_reply_cost(store, user_id, cost_usd, now))
 
     async def stop(self) -> None:
-        """Stop the refresh loop, and the store writer once it applied the writes queued so far."""
+        """Stop the refresh loop, and keep the spend for the next start when nothing is left to count."""
+        state = self._state_to_keep()
         await self._loop.stop()
-        writer, self._writer = self._writer, None
-        if writer is not None:
-            writer.submit(self._close_store)
-            await asyncio.to_thread(writer.shutdown)
+        try:
+            await asyncio.to_thread(keep_spend_state, self._state_path, state)
+        except OSError:
+            logger.warning("budget_spend_state_not_kept", path=str(self._state_path), exc_info=True)
+            return
+        self._state_kept = state is not None
+
+    def _state_to_keep(self) -> SpendState | None:
+        """Return the spend a start can resume: none without budgets or a scan of this month, or with a scan due."""
+        snapshot, fingerprint = self._current_snapshot(), self._snapshot_fingerprint
+        # A requested or running scan would count usage that no kept reply cost covers.
+        if snapshot is None or fingerprint is None or self._wake.is_set() or self._scanning:
+            return None
+        config = self.config_provider()
+        if config is None or config.budgets is None:
+            return None
+        before, since = self._costs_before_scan, self._costs_since_scan
+        costs = {user: before.get(user, 0.0) + since.get(user, 0.0) for user in before.keys() | since.keys()}
+        return SpendState(fingerprint=fingerprint, snapshot=snapshot, reply_costs=costs)
 
     def _spend_usd(self, user_id: str) -> float:
         """Return a canonical requester's month-to-date spend, or zero until a scan of this month completed."""
@@ -364,10 +356,10 @@ class BudgetMonitor:
             return None
         return snapshot
 
-    def _resume_stored_scan(self, fingerprint: str) -> bool:
-        """Schedule reconciliation from the stored scan's start when that scan can stand in for a startup scan."""
+    def _resume_kept_scan(self, fingerprint: str) -> bool:
+        """Time reconciliation from the kept scan's start when that scan can stand in for a startup scan."""
         snapshot = self._current_snapshot()
-        if snapshot is None or self._stored_fingerprint != fingerprint:
+        if snapshot is None or self._snapshot_fingerprint != fingerprint:
             return False
         age = (self.clock() - snapshot.generated_at).total_seconds()
         if not 0 <= age < self.reconcile_seconds:
@@ -376,40 +368,7 @@ class BudgetMonitor:
         return True
 
     def _request_scan(self) -> None:
-        """Wake the loop for a scan, and store the request until a scan that starts after it completes."""
         self._wake.set()
-        now = self.clock()
-        self._persist(now, lambda store: add_scan_request(store, now))
-
-    def _persist(self, recorded_at: datetime, write: Callable[[sqlite3.Connection], None]) -> None:
-        """Queue one store write of something recorded at ``recorded_at``; the event loop never waits for the store."""
-        if self._writer is None:
-            self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="budget_spend_store")
-        self._writer.submit(self._apply, recorded_at, write)
-
-    def _apply(self, recorded_at: datetime, write: Callable[[sqlite3.Connection], None]) -> None:
-        """Apply one write on the writer thread, or delete the store, so no restart resumes spend that misses it."""
-        try:
-            if self._store is None:
-                self._store = connect_spend_store(self._store_path)
-            write(self._store)
-        except (sqlite3.Error, OSError):
-            logger.warning("budget_spend_not_stored", path=str(self._store_path), exc_info=True)
-            self._lost_at = recorded_at
-            self._close_store()
-            with contextlib.suppress(OSError):
-                discard_spend_store(self._store_path)
-
-    def _store_scan(self, store: sqlite3.Connection, snapshot: SpendSnapshot, config: Config) -> None:
-        # A scan that started before a lost write does not cover it, so the store stays without a scan until one does.
-        if self._lost_at is None or self._lost_at <= snapshot.generated_at:
-            store_scan(store, snapshot, spend_fingerprint(config, self.runtime_paths))
-            self._lost_at = None
-
-    def _close_store(self) -> None:
-        if self._store is not None:
-            self._store.close()
-            self._store = None
 
     async def _run(self) -> None:
         last_scan_seconds = 0.0
@@ -430,7 +389,9 @@ class BudgetMonitor:
             # Requests made while waiting are covered by this scan; ones made during it earn one trailing scan.
             self._wake.clear()
             self._last_scan_started = time.monotonic()
+            self._scanning = True
             await self._scan()
+            self._scanning = False
             last_scan_seconds = time.monotonic() - self._last_scan_started
 
     def _scan_due(self) -> bool:
@@ -451,16 +412,15 @@ class BudgetMonitor:
         for user_id, cost_usd in self._costs_since_scan.items():
             self._costs_before_scan[user_id] = self._costs_before_scan.get(user_id, 0.0) + cost_usd
         self._costs_since_scan = {}
+        fingerprint = spend_fingerprint(config, self.runtime_paths)
         try:
             snapshot = await asyncio.to_thread(self._collect, config, self.clock())
         except Exception:
             # Usage storage is external state; keep enforcing the last good scan and the replies since it started.
             logger.warning("budget_scan_failed", exc_info=True)
             return
-        self._snapshot = snapshot
+        self._snapshot, self._snapshot_fingerprint = snapshot, fingerprint
         self._costs_before_scan = {}
-        # Queued after every reply this scan covers, so storing it drops exactly those.
-        self._persist(snapshot.generated_at, lambda store: self._store_scan(store, snapshot, config))
 
     def _collect(self, config: Config, now: datetime) -> SpendSnapshot:
         return collect_monthly_spend(config, self.runtime_paths, now, model_prices(config))

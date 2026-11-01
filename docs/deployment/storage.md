@@ -24,7 +24,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `credentials/` - Credentials saved in the dashboard or by tools; keys from the environment are read at each start and not stored (see [Credentials from the Environment](../oauth-framework.md#credentials-from-the-environment))
 - `private_oauth/` - Per-user and per-agent connection credentials, such as OAuth tokens
 - `egress_broker/` - Agent Keys CA, worker token signing key, and request log (see [Resetting broker state](egress-broker.md#resetting-broker-state))
-- `budgets/` - Per-user caps set on the [Budgets](../budgets.md#per-user-caps) page or through the Budget API, and counted month-to-date spend, which MindRoom recounts from recorded usage when it is missing
+- `budgets/` - Per-user caps set on the [Budgets](../budgets.md#per-user-caps) page or through the Budget API, and the month-to-date spend a clean stop keeps for the next start
 - `logs/` - Application logs
 - `matrix_state.yaml` - The Matrix accounts and access tokens of MindRoom's agents, teams, router, and its internal `mindroom_user` account when configured, the rooms MindRoom manages, and the space room ID
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
