@@ -5501,6 +5501,7 @@ depends_on = ["mindroom.agent_cli.shell_contract", "mindroom.constants"]
 path = "mindroom.tool_system.progress"
 depends_on = []
 visibility = [
+    "mindroom.agent_loop",
     "mindroom.delegation.lifecycle",
     "mindroom.tool_jobs.runtime",
     "mindroom.api.sandbox_execute_stream",
@@ -6079,6 +6080,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.invocation",
+    "mindroom.tool_system.progress",
     "mindroom.tool_system.tool_function",
     "mindroom.failure_text",
 ]
