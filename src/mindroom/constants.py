@@ -172,7 +172,7 @@ class RuntimePaths:
             return self.env_file_values[name]
         return default
 
-    def _plain_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
+    def plain_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
         """Return the first usable value of ``names`` in the process env, then the `.env`, and the variable that set it.
 
         A blank or unedited starter-template placeholder value counts as unset, so an exported one does not hide a
@@ -188,10 +188,10 @@ class RuntimePaths:
     def first_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
         """Return the first usable value of ``names`` and the variable that supplied it.
 
-        Tries ``_plain_env_value``, then the stripped contents of the file each name's `<NAME>_FILE` names, so an
+        Tries ``plain_env_value``, then the stripped contents of the file each name's `<NAME>_FILE` names, so an
         earlier value never resolves a file path; a file's blank or placeholder contents count as unset too.
         """
-        if (plain := self._plain_env_value(names)) is not None:
+        if (plain := self.plain_env_value(names)) is not None:
             return plain
         for name in names:
             path = runtime_env_path(self, f"{name}_FILE")
@@ -822,11 +822,11 @@ def read_secret_file(path: Path) -> str:
 
 
 def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
-    """Resolve one runtime env var, read as ``RuntimePaths._plain_env_value`` reads it, as a filesystem path.
+    """Resolve one runtime env var, read as ``RuntimePaths.plain_env_value`` reads it, as a filesystem path.
 
     Relative paths are interpreted relative to the runtime config directory.
     """
-    if (plain := runtime_paths._plain_env_value((name,))) is None:
+    if (plain := runtime_paths.plain_env_value((name,))) is None:
         return None
     return _resolve_runtime_relative_path(plain[0], base_dir=runtime_paths.config_dir)
 

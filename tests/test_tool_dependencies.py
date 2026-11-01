@@ -51,9 +51,16 @@ _BUILTINS = builtin_tool_registry()
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from mindroom.constants import RuntimePaths
+
 REPO_ROOT = Path(__file__).parent.parent
 HOOK_SCRIPT = REPO_ROOT / ".github" / "scripts" / "check_tool_extras_sync.py"
-TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"))
+
+
+@pytest.fixture
+def runtime_paths(tmp_path: Path) -> RuntimePaths:
+    """Return a runtime whose config and storage live under the test's own directory, never the checkout."""
+    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "mindroom_data")
 
 
 def _base_dependency_names() -> set[str]:
@@ -188,7 +195,10 @@ def test_tools_requiring_config_metadata() -> None:
         )
 
 
-def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_tool_by_name_retries_after_auto_install(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
     """Tool loading should retry once after auto-install succeeds."""
     tool_name = "test_auto_install_tool"
     calls = {"count": 0}
@@ -221,14 +231,17 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(
         "mindroom.tool_system.dependencies._auto_install_optional_extra",
-        lambda name, runtime_paths: name == tool_name and runtime_paths == TEST_RUNTIME_PATHS,
+        lambda name, install_paths: name == tool_name and install_paths == runtime_paths,
     )
-    tool = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None, tools=builtin_tool_registry())
+    tool = get_tool_by_name(tool_name, runtime_paths, worker_target=None, tools=builtin_tool_registry())
     assert isinstance(tool, DummyToolkit)
     assert calls["count"] == 2
 
 
-def test_workspace_tool_installs_the_extra_of_the_builtin_it_copies(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_workspace_tool_installs_the_extra_of_the_builtin_it_copies(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
     """A workspace copy of a built-in Google tool installs the built-in's extra, before and after a failed import."""
     workspace = GoogleWorkspaceConfig(
         name="secondary",
@@ -261,13 +274,16 @@ def test_workspace_tool_installs_the_extra_of_the_builtin_it_copies(monkeypatch:
     monkeypatch.setattr(dependencies, "check_deps_installed", lambda _dependencies: False)
     monkeypatch.setattr(dependencies, "_auto_install_optional_extra", install)
 
-    tool = get_tool_by_name("secondary_gmail", TEST_RUNTIME_PATHS, worker_target=None, tools=tools)
+    tool = get_tool_by_name("secondary_gmail", runtime_paths, worker_target=None, tools=tools)
 
     assert "secondary_get_latest_emails" in tool.functions
     assert requested == ["gmail", "gmail"]
 
 
-def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_tool_by_name_raises_when_auto_install_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
     """Tool loading should raise ImportError when auto-install cannot help."""
     tool_name = "test_auto_install_failure_tool"
 
@@ -296,18 +312,19 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
         lambda _name, _runtime_paths: False,
     )
     with pytest.raises(ImportError, match="dependency missing forever"):
-        get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None, tools=builtin_tool_registry())
+        get_tool_by_name(tool_name, runtime_paths, worker_target=None, tools=builtin_tool_registry())
 
 
 def test_auto_install_optional_extra_for_import_retry_invalidates_caches(
     monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Optional import retries should refresh import caches after installing."""
     installed: list[str] = []
     invalidated: list[bool] = []
 
-    def auto_install(extra_name: str, runtime_paths: object) -> bool:
-        assert runtime_paths == TEST_RUNTIME_PATHS
+    def auto_install(extra_name: str, install_paths: object) -> bool:
+        assert install_paths == runtime_paths
         installed.append(extra_name)
         return True
 
@@ -317,7 +334,7 @@ def test_auto_install_optional_extra_for_import_retry_invalidates_caches(
         lambda: invalidated.append(True),
     )
 
-    assert auto_install_optional_extra_for_import_retry("supabase", TEST_RUNTIME_PATHS)
+    assert auto_install_optional_extra_for_import_retry("supabase", runtime_paths)
 
     assert installed == ["supabase"]
     assert invalidated == [True]
@@ -325,6 +342,7 @@ def test_auto_install_optional_extra_for_import_retry_invalidates_caches(
 
 def test_auto_install_optional_extra_for_import_retry_skips_cache_invalidation_when_install_fails(
     monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Failed optional installs should not invalidate import caches before callers raise."""
     invalidated: list[bool] = []
@@ -335,7 +353,7 @@ def test_auto_install_optional_extra_for_import_retry_skips_cache_invalidation_w
         lambda: invalidated.append(True),
     )
 
-    assert not auto_install_optional_extra_for_import_retry("supabase", TEST_RUNTIME_PATHS)
+    assert not auto_install_optional_extra_for_import_retry("supabase", runtime_paths)
     assert invalidated == []
 
 
@@ -585,6 +603,7 @@ def test_install_command_for_current_python_uses_pip_user_outside_virtualenv(
 def test_auto_install_optional_extra_resolves_non_tool_groups_by_normalized_name(
     monkeypatch: pytest.MonkeyPatch,
     available_name: str,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """A non-tool extra installs through the runtime path, also when installed metadata spells it with hyphens."""
     monkeypatch.setattr("mindroom.tool_system.dependencies.auto_install_enabled", lambda _runtime_paths: True)
@@ -597,7 +616,7 @@ def test_auto_install_optional_extra_resolves_non_tool_groups_by_normalized_name
         lambda extras: extras == [available_name],
     )
 
-    assert _auto_install_optional_extra("sentence_transformers", TEST_RUNTIME_PATHS)
+    assert _auto_install_optional_extra("sentence_transformers", runtime_paths)
 
 
 @pytest.fixture
@@ -888,7 +907,10 @@ def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, c
                 process.communicate(timeout=20)
 
 
-def test_unrelated_tool_constructors_run_in_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unrelated_tool_constructors_run_in_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
     """Deferred tool builds remain concurrent while sharing the dependency read lock."""
     tool_name = "test_parallel_optional_tool"
     rendezvous = threading.Barrier(2)
@@ -920,7 +942,7 @@ def test_unrelated_tool_constructors_run_in_parallel(monkeypatch: pytest.MonkeyP
             pool.map(
                 lambda _: get_tool_by_name(
                     tool_name,
-                    TEST_RUNTIME_PATHS,
+                    runtime_paths,
                     worker_target=None,
                     tools=builtin_tool_registry(),
                 ),

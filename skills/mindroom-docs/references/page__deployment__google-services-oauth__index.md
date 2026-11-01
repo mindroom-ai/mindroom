@@ -108,7 +108,7 @@ For non-interactive deployments, seed the shared client at startup with a [crede
 
 ## Service Account
 
-To use a Google Workspace service account instead of per-user OAuth, set `GOOGLE_SERVICE_ACCOUNT_FILE` to the service-account key file path in the environment or the config-adjacent `.env`.
+To use a Google Workspace service account instead of per-user OAuth, set `GOOGLE_SERVICE_ACCOUNT_FILE` to the service-account key file path in the environment or the config-adjacent `.env`; a relative path resolves from the config directory.
 Set `GOOGLE_DELEGATED_USER` to the account to impersonate through domain-wide delegation, and authorize the service account's client ID for the scopes in the [Providers](#providers) table in the Google Workspace Admin console.
 The service account then serves every Google tool on this page instead of stored user connections, and the dashboard shows these services as connected.
 Without `GOOGLE_DELEGATED_USER`, Google Cloud tools run as the service account itself, so grant it the IAM roles the tool needs, such as BigQuery Data Viewer and BigQuery Job User for `google_bigquery`.
