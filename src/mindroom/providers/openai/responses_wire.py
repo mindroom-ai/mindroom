@@ -322,6 +322,8 @@ def _with_encrypted_reasoning(params: dict[str, Any]) -> None:
 def _codex_params(params: dict[str, Any], settings: ResponsesSettings, wire: ResponsesWire) -> None:
     """Add what the Codex endpoint requires and drop what it rejects."""
     params.setdefault("instructions", wire.default_instructions)
+    # Like the Codex CLI, ask for the reasoning summary unless the model sets one; without it a reply shows no reasoning.
+    params["reasoning"] = {"summary": "auto", **(params.get("reasoning") or {})}
     if settings.prompt_cache_key:
         params.setdefault("prompt_cache_key", settings.prompt_cache_key)
     if settings.session_id:
@@ -500,6 +502,7 @@ class ResponsesStream:
     _tool_use: dict[str, Any] = field(default_factory=dict)
     _items: dict[int, dict[str, Any]] = field(default_factory=dict)
     _reasoning_started_at: float | None = None
+    _summary_part: tuple[str, int] | None = None
 
     def _failure(self, event: Any) -> ProviderError:  # noqa: ANN401 - SDK error event
         if event.type == "error":
@@ -523,11 +526,15 @@ class ResponsesStream:
             self._content.append(current.delta)
             events.append(TextDelta(current.delta))
         elif event.type == "response.output_item.added" and current.item.type == "reasoning":
-            # Its summary streams only after the model finished reasoning, so the summary's deltas carry this start.
+            # Its summary streams seconds after the model began reasoning, so the summary's deltas carry this start.
             self._reasoning_started_at = time.monotonic()
         elif event.type == "response.reasoning_summary_text.delta":
-            self._reasoning.append(current.delta)
-            events.append(ReasoningDelta(current.delta, started_at=self._reasoning_started_at))
+            # Each summary part opens with its own bold title, so a new part starts a new paragraph.
+            part = (current.item_id, current.summary_index)
+            text = current.delta if part == self._summary_part or not self._reasoning else f"\n\n{current.delta}"
+            self._summary_part = part
+            self._reasoning.append(text)
+            events.append(ReasoningDelta(text, started_at=self._reasoning_started_at))
         elif event.type == "response.output_item.added" and current.item.type == "function_call":
             self._tool_use = _function_call(current.item)
         elif event.type == "response.function_call_arguments.delta" and self._tool_use:
