@@ -225,8 +225,6 @@ async def test_router_joins_rooms_on_start(
 
 
 @pytest.mark.asyncio
-@pytest.mark.requires_matrix  # Requires real Matrix server for router room management
-@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 @pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 async def test_orchestrator_creates_router_with_all_rooms(
     config_with_rooms: Config,
@@ -256,8 +254,6 @@ async def test_orchestrator_creates_router_with_all_rooms(
 
 
 @pytest.mark.asyncio
-@pytest.mark.requires_matrix  # Requires real Matrix server for router room updates
-@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 @pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 async def test_router_updates_rooms_on_config_change(
     monkeypatch: pytest.MonkeyPatch,
@@ -265,30 +261,36 @@ async def test_router_updates_rooms_on_config_change(
 ) -> None:
     """Test that the router updates its room list when config changes."""
     # Initial config with some rooms
-    initial_config = Config(
-        agents={
-            "agent1": AgentConfig(
-                display_name="Agent 1",
-                role="Test agent",
-                rooms=["room1"],
-            ),
-        },
+    initial_config = _bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    rooms=["room1"],
+                ),
+            },
+        ),
+        tmp_path,
     )
 
-    # Updated config with more rooms
-    updated_config = Config(
-        agents={
-            "agent1": AgentConfig(
-                display_name="Agent 1",
-                role="Test agent",
-                rooms=["room1", "room2"],
-            ),
-            "agent2": AgentConfig(
-                display_name="Agent 2",
-                role="New agent",
-                rooms=["room3"],
-            ),
-        },
+    # Updated config with more rooms and a new agent
+    updated_config = _bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    rooms=["room1", "room2"],
+                ),
+                "agent2": AgentConfig(
+                    display_name="Agent 2",
+                    role="New agent",
+                    rooms=["room3"],
+                ),
+            },
+        ),
+        tmp_path,
     )
 
     setup_rooms = AsyncMock()
@@ -332,6 +334,8 @@ async def test_router_updates_rooms_on_config_change(
             monkeypatch.setattr(bot, "stop", mock_stop)
             monkeypatch.setattr(bot, "start", mock_start)
             monkeypatch.setattr(bot, "sync_forever", mock_sync_forever)
+            # A reload reconciles the rooms of running bots only.
+            bot.running = True
 
         # Update config
         updated = await orchestrator.config_reload._update_config()
