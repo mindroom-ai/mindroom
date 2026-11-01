@@ -75,6 +75,7 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     PrincipalStore,
+    RefreshRequest,
     SemanticConsumer,
     TurnRecordStore,
     VisibleMessage,
@@ -102,6 +103,7 @@ from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
+from mindroom.matrix.journal_ingress import _inbound_event
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
@@ -1059,31 +1061,54 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("history_degraded", [False, True])
 @pytest.mark.parametrize(("newer_mentions", "answered"), [("research", True), ("general", False)])
 async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_turn(
     config: Config,
     tmp_path: Path,
     newer_mentions: str,
     answered: bool,
+    history_degraded: bool,
 ) -> None:
     """A newer requester message for another agent does not supersede the older turn.
 
     This agent ignores that message and records no turn for it, so after a
-    restart nothing would ever answer the older message it supersedes.
+    restart nothing would ever answer the older message it supersedes. The
+    thread history and, when that read may have missed messages, the journal's
+    pending events must agree.
     """
-    newer_history = thread_history_result(
-        [
-            make_visible_message(
-                sender=_SENDER,
-                body="newer message from the same requester",
-                event_id="$newer:localhost",
-                timestamp=2_000_000,
-                content={"m.mentions": {"user_ids": [_entity_user_id(config, newer_mentions)]}},
-            ),
-        ],
-        is_full_history=True,
+    newer = _text_event(
+        "newer message from the same requester",
+        event_id="$newer:localhost",
+        thread_id=_THREAD_ROOT,
+        origin_server_ts=2_000_000,
     )
-    harness = _build_harness(config, tmp_path, thread_history=newer_history)
+    newer.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, newer_mentions)]}
+    visible_newer = make_visible_message(
+        sender=_SENDER,
+        body=newer.body,
+        event_id=newer.event_id,
+        timestamp=newer.server_timestamp,
+        content=newer.source["content"],
+    )
+    harness = _build_harness(
+        config,
+        tmp_path,
+        thread_history=thread_history_result([] if history_degraded else [visible_newer], is_full_history=True),
+    )
+    if history_degraded:
+        # A read that must still refetch a revision cannot prove that no newer message exists.
+        reader = harness.ingress.deps.resolver.deps.conversation_reader
+        reader.read.return_value = reader.read_strict.return_value = ConversationPage(
+            messages=(),
+            refresh_pending=(
+                RefreshRequest(_ROOM_ID, _THREAD_ROOT, "$withheld:localhost", "$withheld:localhost", 1, 1),
+            ),
+            next_cursor=None,
+        )
+        await harness.journal_principal.admit(
+            _inbound_event(_ROOM_ID, newer, EventKind.MESSAGE, EventClass.ACTIONABLE),
+        )
     room = _room_with_members(config, "general", "research")
     event = _text_event("older message for general", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
     event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
