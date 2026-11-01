@@ -556,6 +556,7 @@ class TestAdminEndpoints:
         assert "subscription_revenue" in data
         assert data["total_accounts"] == 100
         active_subs_mock.neq.assert_called_with("tier", "free")
+        subs_data_mock.select.assert_called_with("tier,billing_cycle,price_cents")
         subs_data_mock.neq.assert_called_with("tier", "free")
         assert data["active_subscriptions"] == 70
         assert data["total_instances"] == 2  # We have 2 instances total in the mock

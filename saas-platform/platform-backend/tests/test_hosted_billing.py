@@ -148,6 +148,28 @@ async def test_refresh_logs_the_fields_it_corrected():
     )
 
 
+@pytest.mark.asyncio
+async def test_refresh_of_an_unchanged_subscription_writes_nothing():
+    db = database()
+    db.row("subscriptions", id="local_1").update(
+        stripe_price_id="price_pro",
+        billing_cycle="monthly",
+        price_cents=20000,
+        trial_ends_at="2027-01-15T08:00:00Z",  # The trial end Stripe reports, spelled differently.
+    )
+    remote = subscription("active", "pro") | {"trial_end": 1_800_000_000}
+    remote["items"]["data"][0]["price"]["unit_amount"] = 20000
+    retrieve = Mock(return_value=remote)
+    with (
+        patch.object(instance_lifecycle, "stripe", Mock(api_key="test", Subscription=Mock(retrieve=retrieve))),
+        patch.object(instance_lifecycle, "logger") as logger,
+    ):
+        await instance_lifecycle._refresh_status_from_stripe(db, "local_1")
+
+    assert db.row("subscriptions", id="local_1")["updated_at"] == "before"
+    logger.warning.assert_not_called()
+
+
 def test_subscription_rebound_during_retrieve_is_not_overwritten():
     db = database()
     newer = {"stripe_subscription_id": "sub_new", "tier": "hobby", "status": "trialing"}
