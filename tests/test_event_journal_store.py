@@ -6362,6 +6362,36 @@ class TestApprovalContinuations:
         stored = json.loads(str(row["context_json"]))
         assert {"response_text", "response_tool_trace", "response_presentation_state"}.isdisjoint(stored)
 
+    async def test_continuation_origin_without_the_acts_for_requester_flag_loads_with_it_unset(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An origin keeps whether its sender spoke for the requester; one stored before the flag existed reads as not."""
+        await self.admit_sources(alice)
+        continuation = self.continuation()
+        continuation = replace(continuation, origin=replace(continuation.origin, acts_for_requester=True))
+        await paused_for_approval(alice, continuation)
+        assert await alice.approvals.approval_continuation("approval-1") == continuation
+
+        row = await alice._backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                ("approval-1",),
+            ),
+        )
+        assert row is not None
+        stored = json.loads(str(row["context_json"]))
+        del stored["origin"]["acts_for_requester"]
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
+                (json.dumps(stored), "approval-1"),
+            ),
+        )
+        restored = await alice.approvals.approval_continuation("approval-1")
+        assert restored is not None
+        assert restored.origin == replace(continuation.origin, acts_for_requester=False)
+
     async def test_continuation_loads_the_execution_identity_its_run_paused_under(
         self,
         alice: PrincipalStore,

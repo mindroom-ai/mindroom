@@ -764,7 +764,7 @@ async def answer_suppression(
 ) -> Suppression | None:
     """Return why a whole answer the hooks left must not be shown, and record a silent schedule's result.
 
-    A hook can suppress it, and a silent schedule's no-report answer is never shown.
+    A hook can suppress it, and neither a silent schedule's no-report answer nor a contact turn's answer is ever shown.
     """
     suppression = Suppression.HOOK if draft.suppress else None
     if suppression is None and draft.envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND:
@@ -773,6 +773,8 @@ async def answer_suppression(
             no_report_text = strip_matching_visible_tool_markers(no_report_text, draft.tool_trace)
         if constants.is_silent_schedule_no_report_response(no_report_text):
             suppression = Suppression.SILENT_NO_REPORT
+    if suppression is None and identity.contact_turn:
+        suppression = Suppression.CONTACT_TURN
     await record_silent_schedule_result_if_needed(
         entity_name=entity_name,
         agent_names=identity.participating_agent_names or (entity_name,),

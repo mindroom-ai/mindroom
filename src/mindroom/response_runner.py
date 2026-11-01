@@ -26,6 +26,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     TURN_INTENT_RUN_METADATA_KEY,
 )
+from mindroom.contacts.turns import contact_room, contact_turn_instructions, contact_turn_tools
 from mindroom.conversation_state_writer import ReplySession
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.error_handling import get_user_friendly_error_message
@@ -82,7 +83,6 @@ from mindroom.reply_turn.request import (
     PreparedResponseRuntime,
     ResponseRequest,
     correlation_id_for_request,
-    is_silent_schedule_response,
     merge_response_extra_content,
     response_typing_indicator,
 )
@@ -249,7 +249,7 @@ def _mid_turn_for_request(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    on_defer: Callable[[str, str], Awaitable[None]],
+    on_defer: Callable[[str, str], Awaitable[None]] | None,
 ) -> MidTurnGate | None:
     """Treat deferred attachment registration as incomplete judgment context too."""
     has_media = _request_has_media(request)
@@ -557,14 +557,15 @@ class ResponseRunner:
                         request,
                         self.deps.runtime.config,
                         self.deps.runtime_paths,
-                        on_defer=acknowledge_deferred,
+                        # A contact turn shows nothing, not even a reaction on the other side's message.
+                        on_defer=None if request.contact is not None else acknowledge_deferred,
                     ),
                     locked_operation=lambda target: self._run_locked_ending_span(
                         request,
                         target=target,
                         locked_operation=locked_operation,
                     ),
-                    signal_queued_message=signal_queued_message and not is_silent_schedule_response(request),
+                    signal_queued_message=signal_queued_message and not self.locked.is_quiet(request),
                 )
                 handle = current_span()
                 if handle is not None and not handle.exited:
@@ -594,7 +595,7 @@ class ResponseRunner:
             return await self._run_owned_or_locked_response(request, target=target, locked_operation=locked_operation)
         except BaseException as error:
             handle = current_span()
-            await self._exit_unended_span(handle, error, target=target)
+            await self._exit_unended_span(handle, error, target=target, contact_turn=request.contact is not None)
             if isinstance(error, _PostLockRequestPreparationError) and handle is not None and handle.exited:
                 return Owned()
             raise
@@ -626,6 +627,7 @@ class ResponseRunner:
         error: BaseException,
         *,
         target: MessageTarget,
+        contact_turn: bool,
     ) -> None:
         """End a claimed span the error left running.
 
@@ -633,10 +635,19 @@ class ResponseRunner:
         instance ends it as lost and replays its sources.
         """
         if handle is not None and not handle.exited and not current_task_is_process_shutdown():
-            await run_coroutine_until_complete(self._exit_span_on_error(handle, error, target=target))
+            await run_coroutine_until_complete(
+                self._exit_span_on_error(handle, error, target=target, contact_turn=contact_turn),
+            )
 
-    async def _exit_span_on_error(self, handle: SpanHandle, error: BaseException, *, target: MessageTarget) -> None:
-        """End a span whose locked response raised before ending it."""
+    async def _exit_span_on_error(
+        self,
+        handle: SpanHandle,
+        error: BaseException,
+        *,
+        target: MessageTarget,
+        contact_turn: bool,
+    ) -> None:
+        """End a span whose locked response raised before ending it; a contact turn's failure stays unshown."""
         gateway = self.deps.delivery_gateway
         if isinstance(error, asyncio.CancelledError):
             await gateway.end_interrupted_span(
@@ -644,6 +655,7 @@ class ResponseRunner:
                 target,
                 ending=Cancelled(classify_cancel_source(error)),
                 delivery_started=False,
+                contact_turn=contact_turn,
             )
             return
         if isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError)):
@@ -651,6 +663,11 @@ class ResponseRunner:
             return
         if isinstance(error, _PostLockRequestPreparationError):
             cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
+            if contact_turn:
+                # A contact turn shows nothing in its contact room, not even its failure.
+                self.deps.logger.warning("contact_turn_preparation_failed", error=str(cause), **target.log_context)
+                await gateway.end_reply_span(handle, suppress_decision(handle))
+                return
             confirms = handle.unconfirmed_progress
             now_ns = time.time_ns()
             error_text = get_user_friendly_error_message(
@@ -824,7 +841,7 @@ class ResponseRunner:
         request: ResponseRequest,
     ) -> MatrixCompactionLifecycle | None:
         """Build the ordered foreground compaction notice adapter for one response."""
-        if is_silent_schedule_response(request) or request.participation is not None:
+        if self.locked.is_quiet(request) or request.participation is not None:
             return None
         event_id, shows_placeholder = existing_event(request)
         reply_to_event_id = event_id if shows_placeholder else request.reply_to_event_id
@@ -889,13 +906,22 @@ class ResponseRunner:
             self.locked.bind_mid_turn_context(request)
             if request.pipeline_timing is not None:
                 request.pipeline_timing.mark("thread_refresh_ready")
-            request = replace(
-                request,
-                system_enrichment_items=with_silent_schedule_delivery(
-                    request.system_enrichment_items,
-                    request.response_envelope,
-                ),
+            system_enrichment_items = with_silent_schedule_delivery(
+                request.system_enrichment_items,
+                request.response_envelope,
             )
+            if request.contact is not None:
+                instructions = contact_turn_instructions(
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                    *request.contact,
+                )
+                # The runtime owns these instructions; a hook's item under the same key never stands in for them.
+                system_enrichment_items = (
+                    *(item for item in system_enrichment_items if item.key != instructions.key),
+                    instructions,
+                )
+            request = replace(request, system_enrichment_items=system_enrichment_items)
             if request.payload_preparation is None:
                 return request
             return await self.deps.request_preparer.prepare(request)
@@ -929,7 +955,7 @@ class ResponseRunner:
             thread_id=target.resolved_thread_id,
             requester_id=requester_id,
             matrix_run_metadata=_turn_run_metadata(request),
-            current_sender_id=request.response_envelope.origin.acting_sender_id,
+            current_sender_id=request.response_envelope.origin.speaker_id,
             history_boundary_event_id=request.history_boundary_event_id,
             member_display_names=request.member_display_names,
             transient_enrichment_items=with_matrix_message_target(
@@ -941,7 +967,8 @@ class ResponseRunner:
                 ),
             ),
             system_enrichment_items=tuple(request.system_enrichment_items),
-            allow_no_report_response=is_silent_schedule_response(request),
+            # A quiet turn may end without an answer: an empty run is neither retried nor answered with a notice.
+            allow_no_report_response=self.locked.is_quiet(request),
             scheduled_history_budget=request.scheduled_history_budget,
             redacted_history_events=partial(self.deps.redacted_history_events, target),
             prompt=prompt,
@@ -966,7 +993,15 @@ class ResponseRunner:
         transient_enrichment_items: Sequence[EnrichmentItem],
         compaction_lifecycle: MatrixCompactionLifecycle | None,
     ) -> ResponseTurnContext:
-        """Build every input of one agent response turn."""
+        """Build every input of one agent response turn.
+
+        A contact turn offers only its contact's tools, none that would show an approval card to the other side, and
+        no interactive questions, since its reply never shows.
+        """
+        tool_names = None
+        if request.contact is not None:
+            record, side = request.contact
+            tool_names = contact_turn_tools(self.deps.runtime.config, self.deps.agent_name, record.side(side))
         state_root = resolve_agent_storage(
             self.deps.agent_name,
             self.deps.runtime.config,
@@ -1000,7 +1035,9 @@ class ResponseRunner:
             compaction_lifecycle=compaction_lifecycle,
             refresh_scheduler=self.locked.knowledge_refresh_scheduler(),
             knowledge=knowledge,
-            supports_native_tool_approval=True,
+            include_interactive_questions=tool_names is None,
+            supports_native_tool_approval=tool_names is None,
+            tool_names=tool_names,
         )
 
     async def _admit_locked_turn(
@@ -1213,8 +1250,12 @@ class ResponseRunner:
         response_kind: str,
         history_scope: HistoryScope | None = None,
         reply_entity_names: tuple[str, ...] = (),
+        suppression: Suppression = Suppression.EMPTY_PROMPT,
     ) -> SourceFate:
-        """Finalize one empty prompt through the canonical response lifecycle: its claimed reply ends showing nothing."""
+        """Finalize a turn that runs nothing through the canonical response lifecycle: its claimed reply shows nothing.
+
+        That is an empty prompt, or a turn in a removed contact's room.
+        """
         prepared = await self._begin_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -1225,7 +1266,7 @@ class ResponseRunner:
             return prepared
         await self._end_unanswered(
             prepared,
-            FinalDeliveryOutcome(ending=Suppressed(Suppression.EMPTY_PROMPT)),
+            FinalDeliveryOutcome(ending=Suppressed(suppression)),
             response_kind=response_kind,
             post_response_outcome=ResponseOutcome(),
         )
@@ -1311,6 +1352,7 @@ class ResponseRunner:
         response_kind: str,
     ) -> SourceFate:
         """Finalize an empty prompt through the locked lifecycle before setup side effects."""
+        request = self.locked.with_contact(request)
         return await self._run_locked_response_lifecycle(
             request,
             response_kind=response_kind,
@@ -1354,6 +1396,19 @@ class ResponseRunner:
         await self._generate_and_settle(prepared)
         return Owned()
 
+    def _runs_nothing(self, request: ResponseRequest) -> Suppression | None:
+        """Return why a locked turn ends unanswered without running: an empty prompt, or a contact no longer active.
+
+        A contact turn read its contact before it waited for the conversation, so it reads the store again once it holds
+        it: a removed contact's room takes no more turns, even one admitted or queued before the removal.
+        """
+        if not request.prompt.strip():
+            return Suppression.EMPTY_PROMPT
+        if request.contact is None:
+            return None
+        current = contact_room(self.deps.runtime.config, self.deps.runtime_paths, request.room_id, self.deps.agent_name)
+        return None if current is not None and current[0].status == "active" else Suppression.CONTACT_TURN
+
     async def _prepare_locked_turn(
         self,
         request: ResponseRequest,
@@ -1381,13 +1436,14 @@ class ResponseRunner:
                 requester_user_id=execution_identity.requester_id,
             )
         )
-        if not request.prompt.strip():
+        if (suppression := self._runs_nothing(request)) is not None:
             return await self._finalize_empty_prompt_locked(
                 request,
                 resolved_target=resolved_target,
                 response_kind="ai" if team is None else "team",
                 history_scope=history_scope,
                 reply_entity_names=member_names,
+                suppression=suppression,
             )
         admitted = await self._admit_locked_turn(
             request,
@@ -1436,7 +1492,7 @@ class ResponseRunner:
             execution_identity=execution_identity,
             placeholder_message=(
                 None
-                if is_silent_schedule_response(request) or request.participation is not None
+                if self.locked.is_quiet(request) or request.participation is not None
                 else AGENT_PLACEHOLDER
                 if team is None
                 else TEAM_PLACEHOLDER
@@ -1643,7 +1699,7 @@ class ResponseRunner:
         request = turn.request
         # A resumed reply is a stream, and a whole answer would replace what it already showed.
         use_streaming = _resumed_reply() is not None or (
-            not is_silent_schedule_response(request)
+            not self.locked.is_quiet(request)
             and await should_use_streaming(
                 self.locked.client(),
                 request.room_id,
@@ -1821,6 +1877,7 @@ class ResponseRunner:
                 self.locked.client(),
                 request,
                 response_run_id=turn.run_id,
+                quiet=self.locked.is_quiet(request),
                 participation=participation,
             ):
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
@@ -1914,6 +1971,7 @@ class ResponseRunner:
                 self.locked.client(),
                 request,
                 response_run_id=turn.run_id,
+                quiet=self.locked.is_quiet(request),
                 participation=runtime.participation,
             ):
                 with tool_runtime_context(runtime.tool_context):
@@ -1990,7 +2048,11 @@ class ResponseRunner:
         )
 
     async def generate_response(self, request: ResponseRequest) -> SourceFate:
-        """Generate and send/edit an agent response with lifecycle locking; return what it did with its sources."""
+        """Generate and send/edit an agent response with lifecycle locking; return what it did with its sources.
+
+        Whether it is a contact turn is read here once, and the whole turn follows it.
+        """
+        request = self.locked.with_contact(request)
         return await self._run_locked_response_lifecycle(
             request,
             response_kind="ai",
@@ -2119,22 +2181,27 @@ class ResponseRunner:
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        queue_memory_persistence = self.locked.memory_persistence(
-            agent_name=self.deps.agent_name,
-            session_id=session_id,
-            execution_identity=execution_identity,
-            prompt=memory_prompt,
-            thread_history=memory_thread_history,
-            user_id=request.user_id,
-            hook_source=request.response_envelope.hook_source,
-            origin=request.response_envelope.origin,
-        )
-        queue_skill_review, runtime = self._response_skill_review(
-            request,
-            runtime,
-            session_id=session_id,
-            execution_identity=execution_identity,
-        )
+        if request.contact is not None:
+            # The other side drives a contact turn, so it writes no long-term memory and teaches the agent no skill.
+            queue_memory_persistence = None
+            queue_skill_review = None
+        else:
+            queue_memory_persistence = self.locked.memory_persistence(
+                agent_name=self.deps.agent_name,
+                session_id=session_id,
+                execution_identity=execution_identity,
+                prompt=memory_prompt,
+                thread_history=memory_thread_history,
+                user_id=request.user_id,
+                hook_source=request.response_envelope.hook_source,
+                origin=request.response_envelope.origin,
+            )
+            queue_skill_review, runtime = self._response_skill_review(
+                request,
+                runtime,
+                session_id=session_id,
+                execution_identity=execution_identity,
+            )
         persist_response_event_id = self.locked.build_persist_response_event_id_effect(
             session_id=session_id,
             scope=history_scope,

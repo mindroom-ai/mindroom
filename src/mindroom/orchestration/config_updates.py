@@ -61,6 +61,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "cheap_model",
         "cold_cache",
         "compaction",
+        "contacts",
         "context_files",
         "created_agents_per_owner",
         "credential_managers",

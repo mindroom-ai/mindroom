@@ -68,6 +68,7 @@ def _generated_agent_data(
             "accept_invites": owners,
             "rooms": [],
             "automations": None,
+            "contacts": None,
             "delegate_to": [],
             "allow_self_config": False,
             "created_agents_per_owner": 0,

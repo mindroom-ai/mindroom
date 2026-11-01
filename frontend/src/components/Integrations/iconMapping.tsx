@@ -85,6 +85,7 @@ import { WiDaySunny } from "react-icons/wi";
 import { AwsRedshift } from "./awsIcons";
 import {
   PanelsTopLeft,
+  Users,
   MessageSquare,
   LayoutList,
   Mic,
@@ -112,7 +113,6 @@ import {
   Paperclip,
   Webhook,
   Minimize2,
-  Users,
   MonitorUp,
   Database,
   Network,
@@ -208,6 +208,7 @@ export const iconMap: Record<
   WiDaySunny,
   AwsRedshift,
   PanelsTopLeft,
+  Users,
   MessageSquare,
   LayoutList,
   Mic,
@@ -235,7 +236,6 @@ export const iconMap: Record<
   Paperclip,
   Webhook,
   Minimize2,
-  Users,
   MonitorUp,
   Database,
   Network,

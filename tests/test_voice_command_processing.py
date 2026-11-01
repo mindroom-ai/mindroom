@@ -228,7 +228,7 @@ async def test_router_voice_text_for_a_user_is_conversation_not_a_command(tmp_pa
             },
         },
     )
-    facts = bot._ingress_validator.classify(event)
+    facts = bot._ingress_validator.classify(event, room_id=room.room_id)
     assert facts.source_kind == VOICE_SOURCE_KIND
     assert facts.lane_requester_id == "@alice:localhost"
 

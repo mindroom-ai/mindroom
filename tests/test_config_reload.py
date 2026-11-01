@@ -1776,6 +1776,7 @@ def _update_helper(**fields: object) -> Callable[[dict[str, Any]], object]:
         ),
         pytest.param(_update_helper(participation={"decline_reaction": "👍"}), "helper", id="participation"),
         pytest.param(_update_helper(mid_turn={"judgment": {"provider": "typesafe"}}), "helper", id="mid-turn"),
+        pytest.param(_update_helper(contacts={"rules": ["Be brief."]}), "helper", id="contacts"),
         pytest.param(_update_helper(cheap_model="fast"), "helper", id="cheap-model"),
         pytest.param(_update_helper(cheap_model="fast", cold_cache={}), "helper", id="cold-cache"),
         pytest.param(_update_helper(access={"users": ["@alice:localhost"]}), "helper", id="access"),

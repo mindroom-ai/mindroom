@@ -28,6 +28,7 @@ EVENT_SESSION_STARTED = "session:started"
 EVENT_TOOL_BEFORE_CALL = "tool:before_call"
 EVENT_TOOL_AFTER_CALL = "tool:after_call"
 EVENT_TOOL_ENVIRONMENT = "tool:environment"
+EVENT_CONTACT_BEFORE_SEND = "contact:before_send"
 
 BUILTIN_EVENT_NAMES = frozenset(
     {
@@ -52,10 +53,24 @@ BUILTIN_EVENT_NAMES = frozenset(
         EVENT_TOOL_BEFORE_CALL,
         EVENT_TOOL_AFTER_CALL,
         EVENT_TOOL_ENVIRONMENT,
+        EVENT_CONTACT_BEFORE_SEND,
     },
 )
 _RESERVED_EVENT_NAMESPACES = frozenset(
-    {"message", "system", "agent", "bot", "compaction", "schedule", "reaction", "room", "config", "session", "tool"},
+    {
+        "message",
+        "system",
+        "agent",
+        "bot",
+        "compaction",
+        "schedule",
+        "reaction",
+        "room",
+        "config",
+        "session",
+        "tool",
+        "contact",
+    },
 )
 _EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$")
 _DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
@@ -80,6 +95,7 @@ _DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
     EVENT_TOOL_BEFORE_CALL: 200,
     EVENT_TOOL_AFTER_CALL: 300,
     EVENT_TOOL_ENVIRONMENT: 200,
+    EVENT_CONTACT_BEFORE_SEND: 10000,
 }
 _DEFAULT_CUSTOM_EVENT_TIMEOUT_MS = 1000
 

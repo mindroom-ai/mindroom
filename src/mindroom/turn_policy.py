@@ -14,6 +14,7 @@ from mindroom.authorization import (
     is_sender_allowed_for_responder,
 )
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.contacts.turns import answers_alone, leaves_to_other_agent
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
@@ -463,6 +464,13 @@ class TurnPolicy:
         available_responders_in_room: list[MatrixID],
     ) -> TeamResolution:
         """Decide team formation using sender-visible candidates without losing explicit intent."""
+        if answers_alone(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room_id=room.room_id,
+            agent_name=self.deps.agent_name,
+        ):
+            return TeamResolution.none()
         planning_thread_history = context.planning_thread_history
         if (
             context.is_thread
@@ -640,6 +648,8 @@ class TurnPolicy:
         )
         if router_plan is not None:
             return router_plan
+        if self._leaves_to_other_contact_agent(dispatch):
+            return DispatchPlan(kind="ignore")
 
         action = await self._resolve_response_action(
             dispatch,
@@ -649,6 +659,22 @@ class TurnPolicy:
         if action.kind == "skip":
             return DispatchPlan(kind="ignore")
         return DispatchPlan(kind="respond", response_action=action)
+
+    def _leaves_to_other_contact_agent(self, dispatch: PreparedDispatch) -> bool:
+        """Return whether an unmentioned message in this agent's contact room is the other agent's to answer."""
+        context = dispatch.context
+        return (
+            not context.am_i_mentioned
+            and not context.mentioned_agents
+            and not context.has_non_agent_mentions
+            and leaves_to_other_agent(
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                room_id=dispatch.target.room_id,
+                agent_name=self.deps.agent_name,
+                sender_id=dispatch.envelope.origin.transport_sender_id,
+            )
+        )
 
     def _adaptive_response_action(
         self,

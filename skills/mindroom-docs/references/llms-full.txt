@@ -1766,6 +1766,7 @@ agents:
 | `participation` | object | `null` | Opt into adaptive replies in existing multi-human threads; see [Adaptive Participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation) |
 | `mid_turn` | object | `null` | Judge whether messages queued during a response can wait until it finishes; see [Mid-Turn Coalescing](https://docs.mindroom.chat/configuration/threads/#mid-turn-coalescing) |
 | `cold_cache` | object | `null` | Move an idle thread to `cheap_model` for good when a judge accepts it; see [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
+| `contacts` | object | `null` | Let a personal agent talk to other people's personal agents and people after both owners approve; see [Agent Contacts](https://docs.mindroom.chat/agent-contacts/) |
 | `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
 | `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
 | `markdown` | bool | `null` | Tell the agent in its system prompt that its replies are shown as Markdown; chat replies are rendered as Markdown either way. Team leaders follow `defaults.markdown`, and voice calls leave the line out |
@@ -7387,6 +7388,7 @@ They never appear in the saved config file, and the dashboard and `config_manage
 By default nobody except the owner and administrators can use a generated agent, so agents do not reach each other.
 To let them, set `access` under the template's `agent:`, for example `members_of_rooms: [lobby]` or `current_room_members: true`.
 With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onboarded user can use every other user's agent.
+To let two people's agents talk only after both owners approve, with each agent acting for its own owner under rules set for that pair, use [Agent Contacts](https://docs.mindroom.chat/agent-contacts/) instead.
 
 > [!WARNING]
 > **Whoever `access` admits works with the owner's agent.**
@@ -7582,6 +7584,224 @@ Failed onboarding retries after 30 seconds, then at doubling intervals up to one
   Make the namespace cover the rendered name, including the `_<MINDROOM_NAMESPACE>` suffix, or change the pattern.
 - Each user adds a Matrix account, a sync loop, and an encryption device.
   That is fine for dozens of users and heavy for hundreds.
+
+# Agent Contacts
+
+Contacts let a [personal agent](https://docs.mindroom.chat/personal-agents/) talk to another person's personal agent, or to another person, after both owners approve.
+Each contact gets its own room where the two sides talk, and each agent there keeps acting for its own owner, under rules its owner sets for that contact.
+Every message an agent sends to the other side first passes a policy that can send it, rewrite it, return it to the agent with feedback, or block it.
+
+Use contacts when two specific people want their agents to work together, such as agreeing on a meeting time, with consent on both sides and limits for each pair.
+Use the template's `access` (see [Letting Agents Talk to Each Other](https://docs.mindroom.chat/personal-agents/#letting-agents-talk-to-each-other)) when everyone it admits may work with an agent directly; an agent reached that way acts for the person who asked, not for its owner.
+
+## Setup
+
+```yaml
+rooms:
+  lobby: {}
+personal_agents:
+  mind:
+    agent:
+      display_name: "{user_display_name}'s Mind"
+      model: sonnet
+      tools: [google_calendar]
+      contacts:
+        rules:
+          - Never share passwords, keys, or other credentials.
+          - From my calendar, share only when I am free or busy, never what the events are.
+        tools: [google_calendar]
+        judge:
+          provider: llm
+          model: fast
+personal_rooms:
+  agent: mind
+  onboarding_rooms: [lobby]
+```
+
+Setting `contacts` under a template's `agent:` enables contacts for every personal agent built from it, and a `users` override can change or remove it for one person.
+An agent with `contacts` gets the `contacts` and `matrix_message` tools automatically, so you do not list them under `tools`.
+Requests are delivered to, and accepted through, the agent of each person's [personal room](https://docs.mindroom.chat/personal-rooms/), so the template that `personal_rooms.agent` names needs `contacts` too, or nobody can send its users a request.
+Agents of other templates can be contacts as well when their template sets `contacts`.
+
+> [!WARNING]
+> **A contact lets the other side put your agent to work.**
+> The other side of a contact can start turns of your agent that run with your authority, limited to the tools you approved for that contact.
+> Anything those tools can reach, the other side can ask for, and a code-execution tool such as `shell` reaches everything your agent's worker or process can.
+> A contact turn also sees your agent's instructions, preloaded files, and recalled memories.
+> Rules and the judge are model judgments, not a security boundary: they reduce accidental disclosure, but a determined counterparty can still extract whatever your agent's context and contact tools expose.
+> Approve only tools whose reach you are willing to share with the other side.
+
+## How a Contact Works
+
+1. Alice asks her agent to get in touch with Bob's agent, and the agent calls `request_contact`, which shows Alice an approval card.
+2. Bob's personal-room agent posts the request as a new thread in Bob's personal room, naming Alice's agent and Alice, quoting the reason, and listing the rules that would apply to Bob's agent.
+3. Bob replies in that thread, and his personal-room agent accepts with `accept_contact`, which shows Bob an approval card with the exact rules and tools, or declines with `decline_contact`.
+4. On acceptance, an invite-only contact room is created holding both agents, Alice, and Bob, without the router.
+   Alice and Bob each get an invitation they accept in their Matrix client to watch or write there.
+5. Alice's agent is told in the thread where she asked and continues her task in the contact room on its own.
+   After a decline, that thread gets a notice and Alice's agent does nothing further.
+6. The agents talk in the contact room, and Alice and Bob can read along and write there at any time.
+
+The target of a request is a personal agent's name or Matrix ID, or a person's Matrix ID.
+A request to a person reaches that person's own personal room, where their personal-room agent accepts or declines for them; once accepted, the person talks to the requesting agent in the contact room themselves.
+With `party="me"`, Alice herself is the requesting party instead of her agent, so she talks to Bob's agent in the contact room directly.
+A contact needs an agent on at least one side and two different owners.
+
+Asking again for a pair that already has a pending or active contact returns that contact unchanged instead of creating another, and asking again with `rules` or `tools` is refused; change them with `update_contact`.
+After a decline, new requests for that pair are refused until the owner who declined removes the declined contact with `remove_contact`.
+Removing a contact makes its agents leave the contact room; the owners keep the room and its history.
+From then on its agents send nothing more into that room, not even from a turn that was already running, and no message there starts their turns.
+
+## Configuration
+
+`contacts` is an object on an agent; set it to `{}` to enable contacts with no default rules, tools, or judge.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `rules` | list of strings | `[]` | Rules for every contact of this agent; owners can add rules for a contact but cannot remove these |
+| `tools` | list of tool names | `[]` | Tools a contact turn offers when the owner chose none for that contact; `matrix_message` is always offered |
+| `judge` | object or null | `null` | A [judgment backend](https://docs.mindroom.chat/configuration/threads/#judgment-backends) that checks each message against the rules; `null` runs no judge |
+
+`tools` names the agent's own toolkits, never function names.
+It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, or `dynamic_tools`, which fail validation with `contacts.tools may not include <tool>`.
+Tools that need the room they run in, such as `scheduler`, `todo`, `attachments`, `script`, and the other `matrix_*` and `thread_*` tools, are never offered in contact turns even when listed; `matrix_message` is the only one a contact turn gets.
+Changes to `contacts` apply from the agent's next turn without a restart.
+
+Only personal agents built from a `personal_agents` template can be contacts; agents authored under `agents:` and agents created with `create_agent` cannot.
+
+## Tools
+
+| Function | Approval card | What it does |
+| --- | --- | --- |
+| `list_contacts()` | No | Lists your contacts with their ID, status, which side you are on, the other party, the reason, and your side's rules and tools, plus other owners' personal agents that you can ask |
+| `request_contact(target, reason, rules=None, tools=None, party="agent")` | Yes | Asks the target's owner for a contact; `rules` and `tools` set your agent's side, and with `party="me"` you ask as yourself and set neither |
+| `accept_contact(contact_id, rules=None, tools=None)` | Yes | Accepts a pending request to you and opens the contact room; `rules` and `tools` set the side of your agent that was asked |
+| `decline_contact(contact_id)` | No | Declines a pending request to you and tells the thread it came from |
+| `update_contact(contact_id, rules=None, tools=None)` | Yes | Changes your side's rules or tools from the next turn in that contact; blank `rules` clear them |
+| `remove_contact(contact_id)` | No | Ends a contact; its agents leave the contact room |
+
+Only the agent's owner can use these tools; anyone else, administrators included, gets `Only <owner> may use the contacts of <agent>`.
+`request_contact`, `accept_contact`, and `update_contact` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the owner with the exact values, even when `tool_approval.default` is `auto_approve`, and only the owner's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
+A request is accepted only through the target owner's personal-room agent, usually by replying in the request's thread.
+`list_contacts` shows every other owner's personal agents that have contacts, together with their owners' Matrix IDs.
+Scripts and workflow participants cannot call these tools, and `contacts` cannot be deferred.
+
+```python
+request_contact(
+    target="bob_mind",
+    reason="Find a 30-minute slot for the project review next week.",
+    rules="Share only free and busy times.",
+    tools=["google_calendar"],
+)
+```
+
+## Rules and Tools per Contact
+
+Each agent side of a contact has its own rules and tools, and only that side's owner sets them, always on an approval card.
+A person's side has neither.
+
+An agent's rules for a contact are its `contacts.rules` followed by the rules its owner set for that contact, so an administrator's baseline always applies.
+The agent sees these rules in every contact turn, and the judge checks each message against them.
+
+The tools an owner chooses for a contact replace `contacts.tools` for that contact; without a choice, the configured default applies.
+An owner can choose only tools their agent has, and a call naming anything else fails with `Not among the tools a contact may use: <tools>; allowed: <tools>`.
+A tool the agent later loses is left out of every contact until the agent has it again.
+
+## Contact Turns
+
+Every turn of an agent in its own contact room is a contact turn, and it runs as the agent's owner: it uses the owner's credentials and counts toward the owner's usage and [budgets](https://docs.mindroom.chat/budgets/).
+Only the other side (the other agent and its owner, or the other person) and the agent's own owner start its turns there; a message from anyone else, administrators included, starts nothing.
+When both sides are agents, an unmentioned message from an owner is answered only by that owner's agent, while a mentioned agent always answers.
+Agents never form a team in a contact room, so mentioning both agents gets one contact turn from each.
+Agents wake each other only by mentioning, which `matrix_message` does when it names a `recipient`.
+
+A contact turn answers only by calling `matrix_message` into the contact room.
+Its final reply is never shown, and it shows no placeholder, typing, streaming, tool calls, reaction, or error notice.
+An agent that ends a contact turn without calling `matrix_message` leaves the other side without an answer.
+
+A contact turn keeps the agent's identity, instructions, preloaded files, and memory recall, and differs from a normal turn in these ways:
+
+- It offers only the contact's tools plus `matrix_message`, and no skills, knowledge bases, or interactive questions.
+- It leaves out every function that would ask for approval, so a `tool_approval` rule that gates `matrix_message` leaves the agent unable to answer.
+- `matrix_message` can read and write the contact room, and send a plain message to the owner in their personal room, in its timeline or a new thread, when the agent serves that room; it cannot send attachments or collapsible sections into a contact room.
+- Other tools that post into rooms refuse the contact room.
+- It saves nothing to the agent's memory, starts no skill review, and its conversations are neither summarized into file memory nor added to the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) or the agent's [thread exports](https://docs.mindroom.chat/thread-exports/), so your agent's other conversations do not remember it.
+
+A contact gives the other side no access to your other rooms.
+Even your own messages in a contact room start contact turns, so use your personal room for anything that needs your agent's full tools.
+
+## Message Policy
+
+Every message, edit, and reaction an agent sends into its contact room passes the policy before anything is sent, including one you ask it to send from your personal room.
+The checks run in order:
+
+1. A new message is refused once the conversation already ends with [`defaults.max_consecutive_agent_replies`](https://docs.mindroom.chat/configuration/agents/#defaults) agent messages in a row, until a person writes.
+2. Plugin hooks on [`contact:before_send`](https://docs.mindroom.chat/hooks/#policy) run in priority order and can rewrite, return, or block the message.
+3. When `contacts.judge` is set, the judge decides whether the text follows the agent's rules for the contact.
+   It sees only the message and the rules, not the conversation.
+
+| Outcome | Result |
+| --- | --- |
+| Send | Sent as written |
+| Rewrite | The new text is sent, and the agent's tool result says it was changed and shows what was sent |
+| Revise | Nothing is sent; the agent gets the feedback and can write a new message in the same turn |
+| Deny | Nothing is sent; the agent gets the reason |
+
+The judge answering no is a revise whose feedback quotes the rules.
+The policy fails closed: a hook that fails or times out, a hook that leaves the message blank, a judge that fails, times out, or abstains, and a message the judge cannot be given all deny.
+The judge is never given a message that looks like it contains a secret such as an API key or password, or a message that, together with the rules, exceeds 16 KB, so with a judge set such messages are denied; without a judge, nothing checks for secrets.
+
+[Policy hooks](https://docs.mindroom.chat/hooks/#policy) explains how to write a `contact:before_send` hook; this one rewrites every message to hide email addresses:
+
+```python
+import re
+
+from mindroom.plugin_api import hook
+
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+
+@hook("contact:before_send")
+async def hide_email_addresses(ctx):
+    ctx.rewrite(EMAIL.sub("[email hidden]", ctx.text))
+```
+
+## Limitations
+
+- Agents of another MindRoom deployment, on this homeserver or another one, cannot be contacted yet.
+- In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), an agent can answer in contact turns only when the contact's tools include `shell`.
+
+## Troubleshooting
+
+The contacts tools return errors to the agent as `Error: <message>`, and `matrix_message` reports a stopped message as `Not sent: <reason>`.
+
+| Message | Cause and fix |
+| --- | --- |
+| `<target> cannot be contacted: contacts are not enabled for it` | The target's template has no `contacts`; an administrator adds it |
+| `<target> cannot be contacted: only personal agents and people can be contacted` | The target is an authored or created agent; use its `access` instead |
+| `<target> cannot be contacted: it is neither a personal agent nor a Matrix user ID` | The name is wrong; `list_contacts` shows the agents that can be asked |
+| `<agent> is not a personal agent; only personal agents can have contacts` | `contacts` is set on an authored agent; set it on a `personal_agents` template instead |
+| `<owner>'s personal agent <agent> does not take contact requests` | The agent of the target owner's personal room has no `contacts`; add `contacts` to the template `personal_rooms.agent` names |
+| `<owner> has no personal room yet, so the request cannot reach them; ask again once they have one` | The target owner has no personal room on this deployment; ask again after they have one |
+| `<agent> is not running, so it cannot post the request; ask again later` | The target owner's personal-room agent is stopped or still starting |
+| `A contact needs two different owners` | Both parties belong to the same person, such as two of your own agents; a contact is always between two owners |
+| `A contact needs an agent on one side` | `party="me"` was used with a person as the target; ask through your agent instead, or target the person's agent |
+| `<owner> declined this contact; they can remove it to allow a new request` | The pair was declined; only the owner who declined can call `remove_contact` on it |
+| `Contact <id> with <party> already exists and is <status>; change your side's rules or tools with update_contact` | A request repeated `rules` or `tools` for an existing contact; call `update_contact` with that contact ID instead |
+| `Only <agent>, the agent of <owner>'s personal room, may accept this contact` | Accept by replying in the request's thread in your personal room |
+| `<agent> is not running, so the contact room cannot be set up; accept again later` | One agent of the contact is stopped; accept again once it runs |
+| `Error: in a contact conversation you can only write to this room or to your owner's personal room` | A contact turn tried another room |
+| `Error: in a contact conversation you can only send a plain message to your owner's personal room` | A contact turn tried to read, edit, react, or name a recipient in the owner's personal room |
+| `Error: in a contact conversation you cannot use idempotency_key in your owner's personal room` | A contact turn sent to the owner's personal room with `idempotency_key`; send the message without it |
+| `Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread` | A contact turn named an existing thread of the owner's personal room; send to the timeline or a new thread |
+| `Error: contact rooms accept text only` | Attachments and collapsible sections cannot go into a contact room |
+| `Error: contact <id> was removed, so nothing more can be sent into its room` | The contact was removed; ask for a new contact to talk again |
+| `Not sent: The conversation already has <n> agent messages in a row; wait for a person to write.` | The agents reached `defaults.max_consecutive_agent_replies`; any person writing in the conversation resets it |
+| `Not sent: A contact policy hook failed.` | A `contact:before_send` hook raised or timed out; check the plugin's logs |
+| `Not sent: The message could not be checked; try again later.` | The judge failed, timed out, or abstained |
+| `Not sent: The message cannot be checked (essential_input_redacted).` | With a judge set, the message looks like it contains a secret; remove it |
+| `Not sent: The message cannot be checked (essential_input_too_large).` | With a judge set, the message and rules exceed 16 KB; send a shorter message |
+| An agent never answers in the contact room | Check that the sender is the other side or the agent's owner (MindRoom logs `contact_room_sender_refused` otherwise), that an unmentioned message came from that agent's own owner, that no `tool_approval` rule gates `matrix_message`, and that the agent called `matrix_message`, since its final reply never shows |
 
 # Bridges
 
@@ -8287,7 +8507,7 @@ These configurations fail validation:
 - `initial: true` without `defer: true` fails with `Tool entry initial=true requires defer=true`.
 - Deferral is per agent, so `defaults.tools` entries reject both flags with `defaults.tools does not support defer or initial flags: <tools>`.
 - Presets such as [`openclaw_compat`](https://docs.mindroom.chat/openclaw/) cannot be deferred; set the flags on the individual member tools instead.
-- The control-plane tools `agent_manager`, `delegate`, `dynamic_tools`, `external_trigger_manager`, `invite_router`, `self_config`, and `skill_manage` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
+- The control-plane tools `agent_manager`, `contacts`, `delegate`, `dynamic_tools`, `external_trigger_manager`, `invite_router`, `self_config`, and `skill_manage` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
 
 ## Native Server-Side Tool Search
 
@@ -8570,7 +8790,7 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 - A non-empty `allowed_tools` list restricts the script to those toolkits, and their functions run without approval.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
 - Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
-- The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, `skill_manage`, and `slack` toolkits are never available to scripts, even when the agent has them.
+- The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `contacts`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, `skill_manage`, and `slack` toolkits are never available to scripts, even when the agent has them.
 - Functions that can stop the agent's current model step, such as `thread_model`'s `switch_thread_model`, are never available to scripts either; the toolkit's other functions are.
 - Listing `config_manager` or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
 - Operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
@@ -12094,6 +12314,7 @@ Only the chosen recipient responds, even if the text or a sent file's name menti
 An unknown or unavailable name returns `Recipient '<name>' is not available in this room. Available recipients: ...`.
 Recipients can be agents or teams.
 An agent can address itself only when a human requested the current turn; otherwise use `run_subagent` for a fresh self-run.
+In an agent's [contact room](https://docs.mindroom.chat/agent-contacts/#contact-turns), `matrix_message` sends text only, reaches only that room and the owner's personal room, and reports a message the contact policy stops as `Not sent: <reason>`.
 
 Sending returns immediately with the delivered event IDs; read the conversation later to see the response.
 The recipient's reply wakes the sender only when it mentions the sender.
@@ -14253,6 +14474,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 
 Related tools documented elsewhere:
 
+- [`contacts`](https://docs.mindroom.chat/agent-contacts/#tools) - Ask other people's personal agents, or people, for an approved contact, and manage the contacts an agent has.
 - [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's worker-routed `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones.
 - [`oauth_connections`](https://docs.mindroom.chat/oauth-framework/#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](https://docs.mindroom.chat/openclaw/#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
@@ -14599,7 +14821,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 - **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, a text `description`, and `enum`.
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
-    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
+    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `contacts`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
     Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
     It searches no knowledge bases, even when its profile lists `knowledge`.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
@@ -16313,7 +16535,7 @@ A Docker dedicated worker's environment includes the non-secret startup names it
 The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve; models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
-The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, auto-approve windows, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
+The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, auto-approve windows, the shared-directory membership ledger, the contacts store, and the primary's copy of each private-instance owner record, together with their locks.
 Agent and private-instance conversation databases stay in those directories, so opening a conversation store refuses a `sessions` directory or database file that is a link; the store's later operations do not check again (see [Known gaps](#known-gaps)).
 The runtime images link SQLite 3.53.3 or later instead of Debian's 3.46, which plays back a journal file planted beside a database and deletes whatever file the journal names as its super-journal; the newer library deletes only real super-journals, so a journal written beside a database the primary opens through Python's `sqlite3` cannot make the primary delete other files.
 Team memory lives in `team_memory/`, which no worker mounts; the one-time merge of the per-member team copies earlier releases kept below `agents/` reads file copies without following links, and opens only the Mem0 stores the runtime itself opens, and only when they hold nothing but directories and regular files.
@@ -16581,6 +16803,13 @@ Do not report or "fix" these; they are deliberate.
   The `/connections` page shell is served without authentication, while every API stays protected.
 - With `personal_rooms.agent` naming a `personal_agents` template, every human member of an onboarding room gets a Matrix account and a running agent; membership of that room is the only gate, so its join policy and invitations control who gets one.
 - A `personal_agents` template whose `access` admits other people exposes each owner's agent, including its memory, files, and shared credentials, to them and to their own agents acting for them; owner-only access is the default.
+- An accepted [contact](https://docs.mindroom.chat/agent-contacts/) lets the other side start turns of an agent that run with its owner's authority, limited to the tools the owner approved for that contact; anything those tools can reach, the other side can ask for, and a code-execution tool such as `shell` reaches everything the agent's worker or process can.
+  A contact turn also keeps the agent's instructions, preloaded files, and memory recall, so the other side can try to extract them.
+- A contact's rules and judge are model judgments, not a security boundary; they reduce accidental disclosure, but a determined counterparty can still extract what the agent's context and contact tools expose.
+- A contact grants no Matrix access outside its contact room: a contact turn never offers approval-gated functions or Matrix room tools, its `matrix_message` writes only to the contact room and sends only a plain message to the owner's personal room's timeline or a new thread, and other tools that post into rooms refuse the contact room.
+  Once a contact is removed, no turn of its agents writes into its room, including a turn that started before the removal, and no message there starts one.
+- In a contact room, only the counterparty and the agent's owner start the agent's turns; a message from anyone else, administrators included, starts nothing.
+- Contact turns write no long-term memory and start no skill review, and their conversations are left out of the memory flush, the knowledge graph, and exploration leads, so text the other side wrote does not persist into the owner's normal turns.
 - `POST /api/slack/events` is public: it has no dashboard login, accepts a request only when it carries a valid signature from the Slack app's signing secret made within five minutes, and answers 404 while no Slack app is configured.
 - A Slack message wakes a project agent as the MindRoom account that its author's confirmed Slack email maps to through `slack.email_domain` and `slack.matrix_user_id_template`, still subject to the agent's `access`, so whoever can set that email on a full member account of the workspace can act as that MindRoom account; guests, bots, other workspaces, and emails that map to one of MindRoom's own accounts or to a configured `bot_accounts` entry never map.
   Slack text is delivered as a fenced block that is never parsed for Matrix mentions, so it cannot wake other agents.
@@ -17683,7 +17912,7 @@ To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to m
 # Hooks
 
 Hooks are async functions in a [plugin](https://docs.mindroom.chat/plugins/) that run when MindRoom events happen.
-Use them to add context to prompts, rewrite or suppress replies, allow or decline tool calls, set the environment of the shell commands a tool call runs, and react to messages, reactions, schedules, room membership, sessions, compaction, startup, shutdown, and config reloads.
+Use them to add context to prompts, rewrite or suppress replies, allow or decline tool calls, set the environment of the shell commands a tool call runs, rewrite, send back, or block a message an agent sends to a contact, and react to messages, reactions, schedules, room membership, sessions, compaction, startup, shutdown, and config reloads.
 Each hook has a timeout, and a failing hook is logged without crashing the bot.
 The [Plugins](https://docs.mindroom.chat/plugins/) page covers manifests, `plugins:` entries, installation, and hot reload.
 
@@ -17783,7 +18012,7 @@ A hook with `rooms` set never fires for `config:reloaded` or for custom events e
 
 ## Execution modes
 
-Each event runs its hooks in one of four modes.
+Each event runs its hooks in one of five modes.
 
 ### Observer
 
@@ -17857,6 +18086,24 @@ async def block_secret_reads(ctx):
         ctx.decline("Sensitive files must stay unread.")
 ```
 
+### Policy
+
+Used by `contact:before_send`.
+Hooks run one after another in priority order, and each sees the text the previous hook left in `ctx.text`.
+A hook leaves the message alone, calls `ctx.rewrite(text)` to send different text, calls `ctx.revise(feedback)` to send nothing and give the agent the feedback so it can write a new message, or calls `ctx.deny(reason)` to send nothing and give the agent the reason.
+The first `revise` or `deny` stops the chain.
+Unlike a gate, a policy fails closed: a hook that fails or times out denies the message.
+
+```python
+from mindroom.plugin_api import hook
+
+
+@hook("contact:before_send", priority=10)
+async def keep_prices_private(ctx):
+    if "price" in ctx.text.lower():
+        ctx.revise(f"Do not share prices with {ctx.counterparty_name}.")
+```
+
 ## Built-in events
 
 | Event | Mode | Context type | When it fires | Mutable fields | Default timeout (ms) |
@@ -17882,6 +18129,7 @@ async def block_secret_reads(ctx):
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
 | `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
+| `contact:before_send` | Policy | `ContactBeforeSendContext` | Before an agent's message is sent to a contact | `rewrite()`, `revise()`, `deny()` | 10000 |
 
 Custom events default to 1000 ms.
 
@@ -17892,7 +18140,7 @@ Custom events default to 1000 ms.
   Once a streamed reply is visible it cannot be suppressed; use `message:final_response_transform` for one text-only replacement after a streamed reply succeeds.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
   A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
-- **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, or `empty_prompt` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
+- **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, `empty_prompt`, or `contact_turn` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
@@ -17911,6 +18159,9 @@ Custom events default to 1000 ms.
   Once MindRoom has created the [server emoji room](https://docs.mindroom.chat/custom-emoji/#let-mindroom-create-the-room), `room:member_joined` also fires when MindRoom Chat joins a user to it, even after `server_emoji` is turned off, so filter on `ctx.room_id` if a handler should only react to joins in certain rooms.
   `room:member_left` reports the `display_name` and `avatar_url` the user had while joined.
   Either event can be delivered more than once for the same join or leave after a restart, so handlers that create rooms, send invites, or write state must be idempotent.
+- **`contact:before_send`**: `ctx.text` is the message the agent wants to send, and `ctx.rules` holds the rules that apply to it.
+  The default timeout is 10 seconds because a useful hook may call a model.
+  `agents` matches the sending agent, and `rooms` matches the room the message goes to.
 
 ## Message enrichment (`message:enrich`)
 
@@ -18062,7 +18313,7 @@ await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 
 Each hook runs under its timeout.
 A timeout cannot interrupt blocking code such as a CPU-bound loop, so a hook stuck in one stalls MindRoom until it returns.
-An exception or timeout is logged with the plugin and hook name and affects only that hook for that event, as described per mode under [Execution modes](#execution-modes), except for a required `agent:started` hook.
+An exception or timeout is logged with the plugin and hook name and affects only that hook for that event, as described per mode under [Execution modes](#execution-modes), except for a required `agent:started` hook and a `contact:before_send` hook, whose failure denies the message.
 MindRoom does not retry a failed hook, so implement retries inside the hook if it needs them.
 A failing hook is invoked again on the next matching event, with no quarantine or cooldown, so fixing the code under [hot reload](https://docs.mindroom.chat/plugins/#live-development-hot-reload) takes effect on the next event.
 
@@ -18124,6 +18375,7 @@ All contexts include these fields:
 | `CustomEventContext` | `payload`, `source_plugin`, `room_id`, `thread_id`, `sender_id` |
 | `ToolBeforeCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `declined`, `decline_reason`, `decline(reason)` |
 | `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `result`, `error`, `blocked`, `duration_ms` |
+| `ContactBeforeSendContext` | `agent_name`, `room_id`, `thread_id`, `requester_id`, `contact_id`, `counterparty_id`, `counterparty_name`, `rules`, `text`, `message_received_depth`, `verdict` (`"send"`, `"revise"`, or `"deny"`), `feedback`, `rewrite(text)`, `revise(feedback)`, `deny(reason)` |
 | `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `declined`, `decline_reason`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)`, `prepend_path(directory)`, `decline(reason)` |
 
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
@@ -18157,6 +18409,7 @@ TurnOrigin(
     intent: TurnIntent,            # see below
     source_kind: str,
     trust: TurnTrust,              # "external", "trusted_internal", or "trusted_user_relay"
+    acts_for_requester: bool,      # the sender's message runs for another requester, as in a contact room
 )
 
 ResponseDraft(
@@ -20052,7 +20305,7 @@ agents:
 The tools that default to workers when no list is set are `browser_mcp`, `coding`, `docker`, `file`, `python`, and `shell`.
 Any other registered tool can be listed in `worker_tools`, except tools that need the primary runtime or room context, which stay in the primary runtime even when listed.
 These include the Matrix, scheduling, todo, attachment, and thread tools, `gmail` and the other Google tools, `github`, `atlassian`, `slack`, `spotify`, `homeassistant`, `reasoning`, `daytona`, `e2b`, `mem0`, `claude_agent`, `config_manager`, and `oauth_connections`, plus `browserbase`, `composio`, `duckdb`, `pandas`, `sql`, and `zep`, which keep a session, connection, or other state between calls.
-The built-in `memory`, `delegate`, `self_config`, and `agent_manager` tools and configured MCP `mcp_<server_id>` tools also always run in the primary runtime.
+The built-in `memory`, `delegate`, `self_config`, `agent_manager`, and `contacts` tools and configured MCP `mcp_<server_id>` tools also always run in the primary runtime.
 The `browser` tool chooses per call: `target: desktop` stays in the primary runtime, while `target: host` follows the worker routing.
 
 ### Execution modes

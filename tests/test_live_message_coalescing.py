@@ -277,7 +277,7 @@ async def _enqueue_for_dispatch(
     if is_matrix_media_dispatch_event(event):
         event = prepare_media_ingress(event)
     event = replace(event, active_follow_up=active_follow_up, payload_trusted=payload_trusted)
-    facts = bot._ingress_validator.classify(event)
+    facts = bot._ingress_validator.classify(event, room_id=room.room_id)
     facts = replace(
         facts,
         source_kind=source_kind,
@@ -5331,7 +5331,7 @@ async def test_replay_guard_does_not_supersede_non_interactive_origin_turns() ->
 
     should_skip = await has_newer_unresponded_in_thread(
         older_event,
-        "@mindroom_general:localhost",
+        ("@mindroom_general:localhost", None),
         [newer_msg],
         may_be_superseded_by_newer_requester_turn=False,
         classify=lambda sender, _source: make_ingress_facts(sender, sender_entity_name="general"),
@@ -5370,7 +5370,7 @@ async def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> 
 
     should_skip = await has_newer_unresponded_in_thread(
         older_event,
-        "@user:localhost",
+        ("@user:localhost", None),
         [visible_echo],
         may_be_superseded_by_newer_requester_turn=True,
         classify=lambda sender, source: make_ingress_facts(
@@ -5416,7 +5416,7 @@ async def test_full_history_replay_guard_counts_non_router_visible_echo_marker()
 
     should_skip = await has_newer_unresponded_in_thread(
         older_event,
-        "@user:localhost",
+        ("@user:localhost", None),
         [marked_helper_relay],
         may_be_superseded_by_newer_requester_turn=True,
         classify=lambda sender, _source: make_ingress_facts(
@@ -7505,7 +7505,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
             hydrated,
             "@requester:localhost",
             facts=replace(
-                bot._ingress_validator.classify(hydrated),
+                bot._ingress_validator.classify(hydrated, room_id=room.room_id),
                 source_kind="scheduled",
                 lane_requester_id="@requester:localhost",
             ),

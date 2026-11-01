@@ -55,6 +55,7 @@ from mindroom.final_delivery import (
     Owed,
     StreamTransportOutcome,
     Suppressed,
+    hook_failure_reason,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
@@ -378,6 +379,8 @@ class ResponseIdentity:
     correlation_id: str
     sources: ResponseSources
     participating_agent_names: tuple[str, ...] = ()
+    # Set for a contact turn, whose answer is never shown.
+    contact_turn: bool = False
 
 
 @dataclass(frozen=True)
@@ -1115,14 +1118,24 @@ class DeliveryGateway:
         *,
         ending: Cancelled | Failed,
         delivery_started: bool,
+        contact_turn: bool,
     ) -> FinalDeliveryOutcome | None:
         """End a span whose response was stopped, interrupted, or failed, as ``interrupted_end`` decides.
 
+        A contact turn shows nothing in its contact room, so its note is only logged and its reply ends unshown.
         Returns the outcome of the terminal row it wrote, or ``None`` when the span ended without one.
         """
         reply = await self.deps.outbox.replies.load(handle.reply_id)
         assert reply is not None, "a span's reply exists while the span ends"
         end = interrupted_end(reply, ending, delivery_started=delivery_started)
+        if end is not None and contact_turn:
+            self.deps.logger.warning(
+                "contact_turn_ended_unshown",
+                reason=hook_failure_reason(ending),
+                **target.log_context,
+            )
+            await self.end_reply_span(handle, suppress_decision(handle))
+            return None
         if end is not None:
             return await self._end_reply_span_with_note(handle, target, state=end.state, note=end.note, ending=ending)
         await self.end_reply_span(handle, release_decision(handle))

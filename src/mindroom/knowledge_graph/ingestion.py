@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypedDict
 
 from mindroom.automations.threads import automation_threads
+from mindroom.contacts.turns import contact_session_check
 from mindroom.durable_write import write_json_file_durable
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.history.session_runs import Cursor, back_off, caught_up, due_conversations, start_seq, unredacted
@@ -327,6 +328,8 @@ class KnowledgeGraphIngestionWorker:
             now=now,
             idle_seconds=settings.idle_seconds,
             limit=limit,
+            # The other side of a contact drove the conversations in its contact room.
+            skip=contact_session_check(config, self.runtime_paths, scope.agent_name),
         )
         for session_id, updated_at in scan.empty:
             _finish(sessions.setdefault(session_id, _new_session_state()), updated_at)

@@ -351,6 +351,8 @@ class ResponseTurnContext:
     agent_mode: AgentMode = "standard"
     # Set only for authored subagents: their authored prompt and tool subset.
     persona: SubagentPersona | None = None
+    # Set only for contact turns: the agent's own tools the turn may offer, with no skills or knowledge.
+    tool_names: tuple[str, ...] | None = None
     # Set only for responses that count toward skill learning, so the review can fork their final request.
     skill_review_capture: SkillReviewCapture | None = None
     # Which events this turn's history derives from are redacted, each with the source a legacy summary consumed

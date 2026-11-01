@@ -1626,10 +1626,14 @@ class Config(BaseModel):
             msg = f"Unknown defaults.cheap_model: {self.defaults.cheap_model!r}"
             raise ValueError(msg)
         for agent_name, agent in self.agents.items():
-            for settings in (agent.participation, agent.mid_turn, agent.cold_cache):
-                if settings is None:
-                    continue
-                judgment = settings.judgment
+            judgments = [
+                settings.judgment
+                for settings in (agent.participation, agent.mid_turn, agent.cold_cache)
+                if settings is not None
+            ]
+            if agent.contacts is not None:
+                judgments.append(agent.contacts.judge)
+            for judgment in judgments:
                 if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
                     msg = f"Unknown judgment model for agent {agent_name!r}: {judgment.model!r}"
                     raise ValueError(msg)

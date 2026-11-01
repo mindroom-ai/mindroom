@@ -19,6 +19,7 @@ from mindroom.automations.steps import Ask, AutomationContext, Done
 from mindroom.automations.threads import automation_threads
 from mindroom.config.automations import ExplorationAutomation
 from mindroom.config.resolution import edits_knowledge_graph
+from mindroom.contacts.turns import contact_session_check
 from mindroom.durable_write import write_json_file_durable
 from mindroom.history.session_runs import matrix_turns, start_seq, updated_sessions
 from mindroom.knowledge_graph.episodes import classify_thread, is_evidence, tool_arguments
@@ -73,9 +74,13 @@ def _collect_leads(
     # Read before the conversations, so every turn stored after this check's reads takes a place after it.
     checked_end = storage.log_end()
     automation_thread_ids = automation_threads(ctx.runtime_paths)
+    in_contact_room = contact_session_check(ctx.config, ctx.runtime_paths, ctx.agent_name)
     seen: dict[tuple[str, str], tuple[int, int]] = {}
     active = False
     for session_id, _updated_at in updated_sessions(storage, since=since):
+        # The other side of a contact drove the tool calls in its contact room, so they never steer exploration.
+        if in_contact_room(session_id):
+            continue
         try:
             turns = matrix_turns(storage, session_id)
         except Exception as exc:

@@ -679,7 +679,7 @@ def _build_agent_model_provider(
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")
-def build_agent_toolkit(  # noqa: C901, PLR0911
+def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     tool_name: str,
     *,
     agent_tools: AgentTools,
@@ -775,6 +775,11 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         info = config.generated_agent(agent_name)
         generated, created = info is not None, info is not None and info.created
         return wrap_direct(AgentManagerTools(agent_name, can_create=can_create, generated=generated, created=created))
+
+    if tool_name == "contacts":
+        from mindroom.custom_tools.contacts import ContactsTools  # noqa: PLC0415
+
+        return wrap_direct(ContactsTools(agent_name))
 
     if tool_name == "skill_manage":
         from mindroom.custom_tools.skill_manage import SkillManageTools  # noqa: PLC0415
@@ -1097,6 +1102,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
     persona: SubagentPersona | None,
+    narrowed_tools: tuple[str, ...] | None,
     plugins: ConfigPlugins,
     knowledge: AgentKnowledge | None,
     skills: SkillsToolkit | None,
@@ -1105,6 +1111,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
 
     The configured toolkits come first and the knowledge search and skills generated beside them after, so a
     generated function never displaces a configured one; the names across all of them are resolved once, here.
+    ``narrowed_tools`` keeps only the toolkits and functions it names; an authored persona's list also refuses to start
+    without every entry it names.
     """
     config = agent_tools.config
     agent_name = agent_tools.agent_name
@@ -1116,8 +1124,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     room_tools, matrix_room_tools = turn_room_flags(execution_identity)
     # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the toolkits a
     # saved approval needs; every other runtime attaches them all. Native tool search sends deferred ones marked as
-    # deferred, portable tool search keeps them off the wire, and personas with their own tool list, plus voice calls
-    # on models without native tool search, send them as ordinary tools.
+    # deferred, portable tool search keeps them off the wire, and builds narrowed to an explicit tool list, plus voice
+    # calls on models without native tool search, send them as ordinary tools.
     selected = agent_tools.candidates(
         depth=delegation_depth,
         room_tools=room_tools,
@@ -1181,9 +1189,12 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
         # Adapted once, right after it is built; every step below works on the functions it offers.
         adapted = adapt_toolkit(toolkit, key=authored_name, registered=tool_name)
-        if persona_tools is not None:
+        if narrowed_tools is not None:
             # Match the concrete toolkit; a preset's or implied tool's functions name the tool bringing them in.
-            adapted = _keep_functions(adapted, lambda function: persona_allows(persona_tools, tool_name, function.name))
+            adapted = _keep_functions(
+                adapted,
+                lambda function: persona_allows(narrowed_tools, tool_name, function.name),
+            )
         if tool_function_filter is not None:
             adapted = _keep_functions(adapted, tool_function_filter)
         if not adapted.functions:
@@ -1610,6 +1621,7 @@ def create_agent(
     agent_mode: AgentMode = "standard",
     agent_cli_in_shell: bool = False,
     persona: SubagentPersona | None = None,
+    tool_names: tuple[str, ...] | None = None,
 ) -> AgentBuild:
     """Build an agent from configuration: its model, tools, prompt, request settings, and surface.
 
@@ -1647,6 +1659,9 @@ def create_agent(
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
         persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool, skill, and knowledge base subsets.
+        tool_names: The agent's own toolkits or ``toolkit.function`` entries the build may offer, as a contact turn
+            narrows them; unlike a persona it keeps the agent's identity, instructions, and memory, but loads no
+            skills or knowledge, and a listed toolkit that fails to build is left out like in any other build.
         required_tool_names: Authored toolkits needed by a saved approval, which a minimal-mode agent
             attaches directly instead of through mindroom-agent.
 
@@ -1679,21 +1694,23 @@ def create_agent(
         execution_identity,
     )
     # An authored persona's prompt replaces the agent's identity; it gets only the caller skills and knowledge bases
-    # its persona keeps.
+    # its persona keeps, and a narrowed build none.
     # An explicit tool list is small and must be present from the first request, so every toolkit it names loads
     # up front; it also hides generated functions without an owning toolkit, other than kept skills and knowledge.
     persona_prompt = persona.system_prompt if persona is not None else None
-    persona_tools = persona.tools if persona is not None else None
-    eager_deferred_tools = eager_deferred_tools or persona_tools is not None
+    narrowed_tools = persona.tools if persona is not None else tool_names
+    kept_skills = persona.kept_skills if persona is not None else (None if tool_names is None else ())
+    kept_knowledge = persona.kept_knowledge if persona is not None else (None if tool_names is None else ())
+    eager_deferred_tools = eager_deferred_tools or narrowed_tools is not None
     native_deferred_tools = (
-        agent_mode == "standard" and persona_tools is None and provider.capabilities.native_tool_search
+        agent_mode == "standard" and narrowed_tools is None and provider.capabilities.native_tool_search
     )
     portable_deferred_tools = agent_mode == "standard" and not eager_deferred_tools and not native_deferred_tools
 
     agent = config.resolve_agent(agent_name)
     agent_tools = AgentTools(config=config, facts=agent.tools, tools=plugins.tools)
     tool_function_filter, disabled_tool_names = persona_tool_policy(
-        persona_tools,
+        narrowed_tools,
         lambda: caller_toolkit_names(agent_name, config, plugins.tools, delegation_depth=delegation_depth),
         tool_function_filter,
     )
@@ -1717,21 +1734,21 @@ def create_agent(
             workspace_root=workspace.root,
             plugin_skill_roots=plugins.skill_roots,
             output_file_policy=output_file_policy,
-            only=persona.kept_skills if persona is not None else None,
+            only=kept_skills,
             refused=refused_skills,
         )
     )
     prompt_skills = None if hidden_skill_functions == SKILL_FUNCTION_NAMES else skills
     # The graph is one more source of the knowledge search, which agents call far more than search_graph.
     # A persona that names its knowledge bases searches only those, as it skips file memory.
-    if agent.knowledge_graph and (persona is None or persona.kept_knowledge is None):
+    if agent.knowledge_graph and kept_knowledge is None:
         from mindroom.custom_tools.knowledge_graph import with_knowledge_graph  # noqa: PLC0415
 
         knowledge = with_knowledge_graph(knowledge, agent_name, config, runtime_paths, execution_identity)
     enabled_knowledge = (
         knowledge
         if not disable_runtime_capabilities
-        and (persona is None or persona.kept_knowledge != ())
+        and kept_knowledge != ()
         and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
         else None
     )
@@ -1754,6 +1771,7 @@ def create_agent(
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
         persona=persona,
+        narrowed_tools=narrowed_tools,
         plugins=plugins,
         knowledge=enabled_knowledge,
         skills=offered_skills,
@@ -1801,7 +1819,7 @@ def create_agent(
         disable_runtime_capabilities=disable_runtime_capabilities,
         native_deferred_tool_names=() if portable_deferred_tools else tool_assembly.deferred_tool_names,
         portable_deferred_toolkits=tool_assembly.deferred_toolkits if portable_deferred_tools else (),
-        skill_authoring=persona is None,
+        skill_authoring=persona is None and tool_names is None,
     )
 
     toolkits = tool_assembly.toolkits
@@ -1853,10 +1871,10 @@ def create_agent(
     )
     if agent_mode == "minimal":
         # The roster names each toolkit by the registered tool the agent CLI reaches it under.
-        # A persona's roster names the toolkits it actually built, deferred ones it named included.
+        # A persona's or narrowed build's roster names the toolkits it actually built, deferred ones it named included.
         roster = (
             agent_tools.toolkit_names(agent_tools.candidates())
-            if persona is None
+            if persona is None and tool_names is None
             else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names]
         )
         surface = replace(

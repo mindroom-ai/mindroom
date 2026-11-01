@@ -63,8 +63,8 @@ ARGUMENTS_PATH = FIXTURE_DIR / "arguments.json"
 UNBUILDABLE = frozenset({"apify", "composio"})
 AGENT_NAME = "golden"
 # Tools are built for one agent of a config shaped like `mindroom config init` output: file memory gives the agent a
-# workspace, so output-file wrapping applies; delegation, the knowledge graph and agent creation enable the tools that
-# need them, and an empty worker tool list builds every tool in this process.
+# workspace, so output-file wrapping applies; delegation, the knowledge graph, agent creation and contacts enable the
+# tools that need them, and an empty worker tool list builds every tool in this process.
 CONFIG = {
     "models": {"default": {"provider": "openai", "id": "golden-model"}},
     "memory": {"backend": "file"},
@@ -75,6 +75,7 @@ CONFIG = {
             "role": "Captures tool schemas.",
             "delegate_to": ["helper"],
             "created_agents_per_owner": 1,
+            "contacts": {},
             "knowledge_graph": True,
             "knowledge_graph_edits": True,
             "worker_tools": [],

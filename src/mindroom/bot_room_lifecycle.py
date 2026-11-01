@@ -13,6 +13,7 @@ from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.contacts.store import contact_room_ids
 from mindroom.managed_room_notice import managed_room_join_notice
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.invited_rooms_store import (
@@ -232,8 +233,15 @@ class BotRoomLifecycle:
         return pending_room_invites_path(self.deps.runtime_paths, self.deps.agent_name)
 
     def invited_room_ids(self) -> frozenset[str]:
-        """Return the rooms this entity keeps across restarts because it accepted their invites."""
-        return read_invited_rooms(self.deps.runtime_paths, self._config(), self.deps.agent_name)
+        """Return the rooms this entity keeps across restarts because it accepted their invites.
+
+        A personal agent's contact rooms never count, though it may have accepted their invites: it keeps a contact
+        room only while the contact is active.
+        """
+        invited = read_invited_rooms(self.deps.runtime_paths, self._config(), self.deps.agent_name)
+        if not invited or self._config().personal_agent_instance(self.deps.agent_name) is None:
+            return invited
+        return invited - contact_room_ids(self.deps.runtime_paths, self.deps.agent_name, include_removed=True)
 
     async def _invited_room_ids_after_joined_invites(self) -> frozenset[str]:
         """Return invited rooms once every pending invite this client already joined is persisted.
@@ -433,6 +441,9 @@ class BotRoomLifecycle:
         configured_rooms = set(self.deps.get_configured_rooms())
         configured_rooms.update(await self.deps.get_cleanup_exclusions())
         configured_rooms.update(await self._invited_room_ids_after_joined_invites())
+        # A contact room is kept while its contact is active, whatever this agent's invite policy says.
+        contact_rooms = await asyncio.to_thread(contact_room_ids, self.deps.runtime_paths, self.deps.agent_name)
+        configured_rooms.update(contact_rooms)
         if self.deps.agent_name == ROUTER_AGENT_NAME:
             # The router maintains the root Space and the server emoji room outside the configured rooms.
             state = matrix_state_for_runtime(self.deps.runtime_paths)

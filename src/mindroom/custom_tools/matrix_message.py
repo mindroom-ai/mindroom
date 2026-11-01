@@ -9,6 +9,8 @@ from pathlib import Path  # noqa: TC003 - tool config sync evaluates constructor
 from threading import Lock
 from typing import TYPE_CHECKING, ClassVar, Literal
 
+from mindroom.contacts.parties import personal_room_of
+from mindroom.contacts.turns import contact_room
 from mindroom.custom_tools import matrix_conversation_operations
 from mindroom.custom_tools.attachment_helpers import (
     explicit_thread_root,
@@ -31,6 +33,52 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+
+_CONTACT_DESTINATION_ERROR = (
+    "Error: in a contact conversation you can only write to this room or to your owner's personal room"
+)
+_CONTACT_OWNER_ROOM_ERROR = (
+    "Error: in a contact conversation you can only send a plain message to your owner's personal room"
+)
+_CONTACT_OWNER_ROOM_KEY_ERROR = (
+    "Error: in a contact conversation you cannot use idempotency_key in your owner's personal room"
+)
+_CONTACT_OWNER_ROOM_THREAD_ERROR = (
+    "Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread"
+)
+
+
+def _contact_turn_target_error(
+    context: ToolRuntimeContext,
+    room_id: str,
+    *,
+    action: str,
+    recipient: str | None,
+    thread_id: str | None,
+    idempotency_key: str | None,
+) -> str | None:
+    """Return why this turn may not act in ``room_id`` this way, or None when it may.
+
+    A turn in a room that is or was the agent's contact room is a contact turn here, even after a removal mid-turn.
+    A contact turn acts only in its own room, apart from a plain message to its owner in their personal room with it,
+    in that room's timeline or a new thread, never in one of the owner's own threads.
+    Anything more there, such as naming a recipient, would start a normal turn with the owner's full authority.
+    A keyed send there shares the owner's own keyed sends, so a matching key would deliver what the owner's turn
+    prepared, such as a pending request to an agent, instead of the contact turn's message.
+    """
+    config = context.current_config
+    contact = contact_room(config, context.runtime_paths, context.room_id, context.agent_name)
+    if contact is None or room_id == context.room_id:
+        return None
+    record, side = contact
+    if personal_room_of(config, context.runtime_paths, record.party(side).owner) != (context.agent_name, room_id):
+        return _CONTACT_DESTINATION_ERROR
+    if action != "send" or recipient is not None:
+        return _CONTACT_OWNER_ROOM_ERROR
+    if thread_id not in {None, "room"}:
+        return _CONTACT_OWNER_ROOM_THREAD_ERROR
+    return _CONTACT_OWNER_ROOM_KEY_ERROR if idempotency_key is not None else None
 
 
 def _optional_string(value: str | None, name: str) -> str | None:
@@ -160,7 +208,17 @@ class MatrixMessageTools(Toolkit):
         resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
-        if not await room_access_allowed(context, resolved_room_id):
+        target_error = _contact_turn_target_error(
+            context,
+            resolved_room_id,
+            action=action,
+            recipient=recipient,
+            thread_id=thread_id,
+            idempotency_key=idempotency_key,
+        )
+        if target_error is not None:
+            return self._payload("error", room_id=resolved_room_id, message=target_error)
+        if not await room_access_allowed(context, resolved_room_id, contact_room_ok=True):
             return self._payload("error", room_id=resolved_room_id, message="Not authorized to access the target room.")
         dispatch = partial(
             self._dispatch_action,

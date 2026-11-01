@@ -111,6 +111,7 @@ class World:
             IngressValidatorDeps(
                 runtime=runtime,
                 runtime_paths=self.paths,
+                agent_name="launch",
                 matrix_id=launch_id,
                 turn_store=MagicMock(),
                 turn_policy=MagicMock(),
@@ -134,7 +135,11 @@ class World:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        envelope = resolver.build_envelope(event=event, facts=validator.classify(event), target=target)
+        envelope = resolver.build_envelope(
+            event=event,
+            facts=validator.classify(event, room_id="!room:localhost"),
+            target=target,
+        )
         assert envelope.requester_id == ADA
         return envelope
 

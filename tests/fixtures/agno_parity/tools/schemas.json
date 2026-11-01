@@ -5449,6 +5449,267 @@
       }
     ]
   },
+  "contacts": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "list_contacts",
+        "description": "List your owner's contacts with their IDs, status and your side's rules and tools, and the agents that can be asked.\nPending requests that wait for your owner's answer show `you: target`.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": []
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "request_contact",
+        "description": "Ask to be in contact with another personal agent or a person, so their agent and yours can talk in a shared room.\n`target` is a personal agent's name or Matrix ID, or a person's Matrix ID. `reason` tells the other owner why you ask.\n`rules` are extra rules your agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.\nWith `party=\"me\"` your owner asks as themself instead of through your agent, and then sets neither rules nor tools.\nYour owner approves the request on a card, then the other owner decides in their personal room;\nyou are told in this thread when they accept or decline.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "rules": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tools": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "party": {
+              "type": "string",
+              "enum": [
+                "agent",
+                "me"
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "target",
+            "reason"
+          ]
+        },
+        "strict": false,
+        "gate": "confirm",
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "accept_contact",
+        "description": "Accept a pending contact request that asks your owner, opening a room where both sides talk.\n`rules` are extra rules your owner's agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.\nOmit a field to keep what is set; a person asked has neither. Your owner approves the acceptance on a card,\nthen the requesting agent is told in the thread it asked from and continues there.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "contact_id": {
+              "type": "string"
+            },
+            "rules": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tools": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "contact_id"
+          ]
+        },
+        "strict": false,
+        "gate": "confirm",
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "decline_contact",
+        "description": "Decline a pending contact request that asks your owner, and tell the thread it came from.\nThe requester cannot ask again until your owner removes the declined contact.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "contact_id": {
+              "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "contact_id"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "update_contact",
+        "description": "Change the rules or tools of your owner's side of a contact; it applies from the next turn in that contact.\nOmit a field to keep it; blank `rules` remove your side's rules. `tools` replace the list and are toolkit names you have, never function names.\nYour owner approves the change on a card.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "contact_id": {
+              "type": "string"
+            },
+            "rules": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tools": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "contact_id"
+          ]
+        },
+        "strict": false,
+        "gate": "confirm",
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "remove_contact",
+        "description": "Remove a contact; the agents leave its room and the owners keep it and its history.\nEither owner may remove a contact, but only the owner who declined a request may remove the declined contact.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "contact_id": {
+              "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "contact_id"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
   "crawl4ai": {
     "instructions": null,
     "guidance": null,

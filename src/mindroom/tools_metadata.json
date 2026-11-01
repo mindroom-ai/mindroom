@@ -60,6 +60,37 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [],
+      "description": "Ask other people's personal agents or people for contact, and manage the contacts you have",
+      "display_name": "Contacts",
+      "docs_url": "https://docs.mindroom.chat/agent-contacts/#tools",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "list_contacts",
+        "request_contact",
+        "accept_contact",
+        "decline_contact",
+        "update_contact",
+        "remove_contact"
+      ],
+      "helper_text": null,
+      "icon": "Users",
+      "icon_color": "text-cyan-500",
+      "name": "contacts",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
       "config_fields": [
         {
           "authored_override": false,

@@ -22,6 +22,7 @@ from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools import (
     agent_manager,
     compact_context,
+    contacts,
     delegate,
     dynamic_tools,
     dynamic_workflow,

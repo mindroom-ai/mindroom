@@ -356,6 +356,7 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         IngressValidatorDeps(
             runtime=runtime,
             runtime_paths=runtime_paths,
+            agent_name="secret",
             matrix_id=ids["secret"],
             turn_store=turn_store,
             turn_policy=TurnPolicy(
@@ -389,12 +390,16 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         "@mallory:localhost",
         mindroom_user_id(config, runtime_paths),
     ]
-    authorized_facts = validator.classify(authorized_event)
+    authorized_facts = validator.classify(authorized_event, room_id=room.room_id)
     assert authorized_facts.lane_requester_id == "@alice:localhost"
     assert await validator.precheck_event(room, authorized_event, authorized_facts)
     # A human who may not address the assignee gets no turn from the poke.
-    assert not await validator.precheck_event(room, unauthorized_event, validator.classify(unauthorized_event))
-    internal_facts = validator.classify(internal_event)
+    assert not await validator.precheck_event(
+        room,
+        unauthorized_event,
+        validator.classify(unauthorized_event, room_id=room.room_id),
+    )
+    internal_facts = validator.classify(internal_event, room_id=room.room_id)
     assert internal_facts.lane_requester_id == secret_id
     assert await validator.precheck_event(room, internal_event, internal_facts)
     turn_store.record_turn.assert_awaited_once_with(

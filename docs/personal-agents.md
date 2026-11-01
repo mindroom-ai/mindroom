@@ -89,6 +89,7 @@ They never appear in the saved config file, and the dashboard and `config_manage
 By default nobody except the owner and administrators can use a generated agent, so agents do not reach each other.
 To let them, set `access` under the template's `agent:`, for example `members_of_rooms: [lobby]` or `current_room_members: true`.
 With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onboarded user can use every other user's agent.
+To let two people's agents talk only after both owners approve, with each agent acting for its own owner under rules set for that pair, use [Agent Contacts](agent-contacts.md) instead.
 
 > [!WARNING]
 > **Whoever `access` admits works with the owner's agent.**

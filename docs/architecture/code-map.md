@@ -136,6 +136,14 @@ Matrix sync callback
 | `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
 | `personal_room_lifecycle.py` | Personal-room command and membership policy, personal-agent provisioning from a template, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
 | `personal_agents.py` | Onboarding one user's personal agent: name choice, Matrix account registration, then the roster entry |
+| `config/contacts.py` | Opt-in `contacts` agent settings (rules, default tools, judge) and the control tools a contact never offers |
+| `contacts/store.py` | The contact records and their primary-only store: cached reads, locked read-modify-write, the lookup of the contact a room belongs to in any status, and the contact rooms an agent keeps across restarts |
+| `contacts/parties.py` | Who can be a party of a contact (personal agents with `contacts`, and people by canonical Matrix ID), target resolution, how a party is named, the Matrix accounts that speak for a party, and a user's personal room |
+| `contacts/policy.py` | The contact message policy: the consecutive-agent-message limit, the `contact:before_send` hooks, and the optional judge, failing closed, plus an agent's effective rules for a contact |
+| `contacts/admission.py` | Who a turn of an agent party in its contact room runs as: its owner when the counterparty or the owner sent it, and nobody for anyone else |
+| `contacts/turns.py` | Contact turns: which rooms are or were an agent's contact rooms, where its turns are contact turns, the tools a contact may offer and a contact turn's tool list and instructions, which agent answers an unmentioned message in a contact room and that agents never form a team there, and the check that keeps contact-room conversations out of memory, the knowledge graph, and exploration |
+| `contacts/flow.py` | The contact operations behind the `contacts` tools: request (with the notice in the target owner's personal room), accept (creating the contact room, seating both parties, and starting the requesting agent's turn), decline, update, remove, and list, each checked against the requester's ownership |
+| `custom_tools/contacts.py` | `ContactsTools`: the toolkit injected for agents with `contacts`, with confirmation cards on requests, acceptances, and rule changes |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `thread_summary/state.py` | `SummaryState`: one walk of a thread's history into trusted summary notices, authorized human pins, and ordinary messages, and the current-title readers listings, exports, and calls share |
 | `thread_summary/schedule.py` | The process's per-thread summary baselines and write locks, the next threshold, and the pre-queue gate |
@@ -609,3 +617,4 @@ An agent's conversation database is `agents/<agent>/sessions/<agent>.db`, and pr
 Its tables are named after its sessions table `<agent>_sessions`: `_log_runs` holds a row per run, `_log_messages` a row per stored message, `_log_tools` a row per tool execution, `_log_summaries` the compaction summary rows, `_log_removed` the runs that edits and redactions removed, `_log_meta` the layout version, run counter, and owner, and `_usage` the usage ledger.
 A database converted from the Agno layout keeps its pre-conversion copy beside it as `<agent>.db.pre-storage-v2`, and one converted from layout version 2 or 3 as `<agent>.db.pre-storage-v4`.
 `tracking/personal_agents.json` is the roster of agents generated from `personal_agents` templates, read on every config load.
+`tracking/contacts.json` holds the contacts between personal agents and people, written only by the primary.

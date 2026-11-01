@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.participation import ParticipationConfig
+    from mindroom.contacts.store import ContactRecord, SideName
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -102,6 +103,10 @@ class ResponseRequest:
     # replaces only then, so a Stop that refuses the claim leaves that history whole.
     on_reply_claimed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
+    # The contact and side of a contact turn, read once when the turn starts: everything the turn shows and offers
+    # follows it, so a contact removed while the turn runs still hides its final reply and its errors, and a turn
+    # whose contact was already removed runs nothing.
+    contact: tuple[ContactRecord, SideName] | None = None
     # When the turn was requested, before its run started; budgets date the reply's cost by it.
     requested_at: datetime = field(default_factory=lambda: datetime.now(UTC), compare=False)
 
@@ -131,7 +136,7 @@ class ResponseRequest:
 
 
 def is_silent_schedule_response(request: ResponseRequest) -> bool:
-    """Return whether one response must avoid provisional Matrix activity."""
+    """Return whether one response answers a silent schedule, which shows only its findings."""
     return request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
 
 
@@ -164,10 +169,11 @@ async def response_typing_indicator(
     request: ResponseRequest,
     *,
     response_run_id: str | None,
+    quiet: bool,
     participation: ParticipationGate | None = None,
 ) -> AsyncIterator[None]:
-    """Expose typing only for response kinds whose progress may be visible."""
-    if is_silent_schedule_response(request):
+    """Expose typing only for a response whose progress may be visible, which a ``quiet`` one's never is."""
+    if quiet:
         yield
         return
 

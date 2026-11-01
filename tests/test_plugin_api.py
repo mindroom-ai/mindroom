@@ -22,6 +22,7 @@ _EXPORTS = [
     "EVENT_COMPACTION_AFTER",
     "EVENT_COMPACTION_BEFORE",
     "EVENT_CONFIG_RELOADED",
+    "EVENT_CONTACT_BEFORE_SEND",
     "EVENT_MESSAGE_AFTER_RESPONSE",
     "EVENT_MESSAGE_BEFORE_RESPONSE",
     "EVENT_MESSAGE_CANCELLED",
@@ -50,6 +51,7 @@ _EXPORTS = [
     "CompactionHookContext",
     "ConfigField",
     "ConfigReloadedContext",
+    "ContactBeforeSendContext",
     "CurrentCall",
     "CustomEventContext",
     "Done",
@@ -158,6 +160,10 @@ _SIGNATURES = {
     "ConfigReloadedContext": (
         f"({_HOOK}, changed_entities, added_entities, removed_entities, plugin_changes, *, {_HOOK_HELPERS})"
     ),
+    "ContactBeforeSendContext": (
+        f"({_TOOL_HOOK}, agent_name, room_id, thread_id, requester_id, contact_id, counterparty_id, "
+        "counterparty_name, rules, text, message_received_depth, verdict, feedback)"
+    ),
     "CurrentCall": "(*, call_id, toolkit, session_id, session_state, history_scope, runtime)",
     "CustomEventContext": (
         f"({_HOOK}, payload, source_plugin, room_id, thread_id, sender_id, message_received_depth, *, {_HOOK_HELPERS})"
@@ -239,7 +245,7 @@ _SIGNATURES = {
     "TranscriptLine": "(role, sender, display_name, text)",
     "TurnOrigin": (
         "(transport_sender_id, requester_id, sender_entity_name, requester_entity_name, sender_kind, requester_kind, "
-        "intent, source_kind, trust)"
+        "intent, source_kind, trust, acts_for_requester)"
     ),
     "atlassian_connection_oauth_provider": "(connection)",
     "automation": "(name, *, requires_file_memory)",

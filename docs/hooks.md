@@ -5,7 +5,7 @@ icon: lucide/webhook
 # Hooks
 
 Hooks are async functions in a [plugin](plugins.md) that run when MindRoom events happen.
-Use them to add context to prompts, rewrite or suppress replies, allow or decline tool calls, set the environment of the shell commands a tool call runs, and react to messages, reactions, schedules, room membership, sessions, compaction, startup, shutdown, and config reloads.
+Use them to add context to prompts, rewrite or suppress replies, allow or decline tool calls, set the environment of the shell commands a tool call runs, rewrite, send back, or block a message an agent sends to a contact, and react to messages, reactions, schedules, room membership, sessions, compaction, startup, shutdown, and config reloads.
 Each hook has a timeout, and a failing hook is logged without crashing the bot.
 The [Plugins](plugins.md) page covers manifests, `plugins:` entries, installation, and hot reload.
 
@@ -105,7 +105,7 @@ A hook with `rooms` set never fires for `config:reloaded` or for custom events e
 
 ## Execution modes
 
-Each event runs its hooks in one of four modes.
+Each event runs its hooks in one of five modes.
 
 ### Observer
 
@@ -179,6 +179,24 @@ async def block_secret_reads(ctx):
         ctx.decline("Sensitive files must stay unread.")
 ```
 
+### Policy
+
+Used by `contact:before_send`.
+Hooks run one after another in priority order, and each sees the text the previous hook left in `ctx.text`.
+A hook leaves the message alone, calls `ctx.rewrite(text)` to send different text, calls `ctx.revise(feedback)` to send nothing and give the agent the feedback so it can write a new message, or calls `ctx.deny(reason)` to send nothing and give the agent the reason.
+The first `revise` or `deny` stops the chain.
+Unlike a gate, a policy fails closed: a hook that fails or times out denies the message.
+
+```python
+from mindroom.plugin_api import hook
+
+
+@hook("contact:before_send", priority=10)
+async def keep_prices_private(ctx):
+    if "price" in ctx.text.lower():
+        ctx.revise(f"Do not share prices with {ctx.counterparty_name}.")
+```
+
 ## Built-in events
 
 | Event | Mode | Context type | When it fires | Mutable fields | Default timeout (ms) |
@@ -204,6 +222,7 @@ async def block_secret_reads(ctx):
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
 | `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
+| `contact:before_send` | Policy | `ContactBeforeSendContext` | Before an agent's message is sent to a contact | `rewrite()`, `revise()`, `deny()` | 10000 |
 
 Custom events default to 1000 ms.
 
@@ -214,7 +233,7 @@ Custom events default to 1000 ms.
   Once a streamed reply is visible it cannot be suppressed; use `message:final_response_transform` for one text-only replacement after a streamed reply succeeds.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
   A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
-- **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, or `empty_prompt` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
+- **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, `empty_prompt`, or `contact_turn` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
@@ -233,6 +252,9 @@ Custom events default to 1000 ms.
   Once MindRoom has created the [server emoji room](custom-emoji.md#let-mindroom-create-the-room), `room:member_joined` also fires when MindRoom Chat joins a user to it, even after `server_emoji` is turned off, so filter on `ctx.room_id` if a handler should only react to joins in certain rooms.
   `room:member_left` reports the `display_name` and `avatar_url` the user had while joined.
   Either event can be delivered more than once for the same join or leave after a restart, so handlers that create rooms, send invites, or write state must be idempotent.
+- **`contact:before_send`**: `ctx.text` is the message the agent wants to send, and `ctx.rules` holds the rules that apply to it.
+  The default timeout is 10 seconds because a useful hook may call a model.
+  `agents` matches the sending agent, and `rooms` matches the room the message goes to.
 
 ## Message enrichment (`message:enrich`)
 
@@ -384,7 +406,7 @@ await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 
 Each hook runs under its timeout.
 A timeout cannot interrupt blocking code such as a CPU-bound loop, so a hook stuck in one stalls MindRoom until it returns.
-An exception or timeout is logged with the plugin and hook name and affects only that hook for that event, as described per mode under [Execution modes](#execution-modes), except for a required `agent:started` hook.
+An exception or timeout is logged with the plugin and hook name and affects only that hook for that event, as described per mode under [Execution modes](#execution-modes), except for a required `agent:started` hook and a `contact:before_send` hook, whose failure denies the message.
 MindRoom does not retry a failed hook, so implement retries inside the hook if it needs them.
 A failing hook is invoked again on the next matching event, with no quarantine or cooldown, so fixing the code under [hot reload](plugins.md#live-development-hot-reload) takes effect on the next event.
 
@@ -446,6 +468,7 @@ All contexts include these fields:
 | `CustomEventContext` | `payload`, `source_plugin`, `room_id`, `thread_id`, `sender_id` |
 | `ToolBeforeCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `declined`, `decline_reason`, `decline(reason)` |
 | `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `result`, `error`, `blocked`, `duration_ms` |
+| `ContactBeforeSendContext` | `agent_name`, `room_id`, `thread_id`, `requester_id`, `contact_id`, `counterparty_id`, `counterparty_name`, `rules`, `text`, `message_received_depth`, `verdict` (`"send"`, `"revise"`, or `"deny"`), `feedback`, `rewrite(text)`, `revise(feedback)`, `deny(reason)` |
 | `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `declined`, `decline_reason`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)`, `prepend_path(directory)`, `decline(reason)` |
 
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
@@ -479,6 +502,7 @@ TurnOrigin(
     intent: TurnIntent,            # see below
     source_kind: str,
     trust: TurnTrust,              # "external", "trusted_internal", or "trusted_user_relay"
+    acts_for_requester: bool,      # the sender's message runs for another requester, as in a contact room
 )
 
 ResponseDraft(

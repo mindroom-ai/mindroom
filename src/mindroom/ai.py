@@ -778,6 +778,7 @@ async def _prepare_agent_and_prompt(
                 agent_mode=ctx.agent_mode,
                 agent_cli_in_shell=True,
                 persona=ctx.persona,
+                tool_names=ctx.tool_names,
             )
         return runtime_model, build
 

@@ -21,6 +21,7 @@ from mindroom.agent_loop.helper import complete_prompt
 from mindroom.background_tasks import SupervisedLoop
 from mindroom.config.resolution import entity_model_name, memory_backend
 from mindroom.constants import tracking_dir
+from mindroom.contacts.turns import contact_session_check
 from mindroom.durable_write import write_json_file_durable
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.history.conversation_text import one_line, utterances
@@ -428,6 +429,7 @@ class _MemoryAutoFlushWorker:
             execution_identity=scope.execution_identity,
         )
         conversations = state["scopes"].setdefault(scope.key, {})
+        in_contact_room = contact_session_check(config, self.runtime_paths, scope.agent_name)
         scan = due_conversations(
             storage,
             conversations,
@@ -437,8 +439,9 @@ class _MemoryAutoFlushWorker:
             now=now,
             idle_seconds=settings.idle_seconds,
             limit=limit,
-            # A delegated task's prompt comes from another agent, so it is not the delegate's conversation.
-            skip=lambda session_id: session_id.startswith(DELEGATION_SESSION_PREFIX),
+            # A delegated task's prompt comes from another agent, so it is not the delegate's conversation, and the
+            # other side of a contact drove the conversations in its contact room.
+            skip=lambda session_id: session_id.startswith(DELEGATION_SESSION_PREFIX) or in_contact_room(session_id),
         )
         for session_id, updated_at in scan.empty:
             caught_up(conversations.setdefault(session_id, _new_conversation()), updated_at)
