@@ -42,8 +42,8 @@ export function QuickActions({ subscription, subscriptionLoading }: QuickActions
     },
     {
       name: 'Get Support',
-      description: 'Contact our support team',
-      href: '/dashboard/support',
+      description: 'Email support@mindroom.chat',
+      href: 'mailto:support@mindroom.chat',
       icon: HelpCircle,
       external: false,
     },
