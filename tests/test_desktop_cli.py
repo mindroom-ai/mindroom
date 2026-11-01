@@ -428,25 +428,24 @@ def test_desktop_setup_pairs_only_the_controller_the_bridge_journal_is_bound_to(
     assert native_config_path(tmp_path).exists() is accepted
 
 
-@pytest.mark.parametrize(("browser_enabled", "hint_shown"), [(False, True), (True, False)])
+@pytest.mark.parametrize("shell_enabled", [False, True])
 @pytest.mark.usefixtures("cli_runtime")
-def test_desktop_setup_suggests_choosing_access_only_when_none_is_saved(
+def test_desktop_setup_asks_for_access_while_only_a_browser_is_saved(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
-    browser_enabled: bool,
-    hint_shown: bool,
+    shell_enabled: bool,
 ) -> None:
-    """Saved browser access already lets the bridge start, so setup does not ask for more access."""
+    """Browser control needs a saved app, so setup asks for access until apps, folders, or shell are saved."""
     save_desktop_session(
         tmp_path / "desktop_bridge" / "matrix_session.json",
         DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
     )
     saved = replace(
-        _run_config(roots=()),
+        _run_config(roots=(), shell_enabled=shell_enabled),
         revision=0,
         controller=PinnedMatrixDevice("@computer:example.org", "CLOUD", "cloud-fingerprint"),
-        browser=NativeBrowserConfig(enabled=browser_enabled),
+        browser=NativeBrowserConfig(enabled=True),
     )
     save_native_config(native_config_path(tmp_path), saved, expected_revision=0)
     monkeypatch.setattr(desktop_cli, "desktop_pair", MagicMock())
@@ -454,8 +453,8 @@ def test_desktop_setup_suggests_choosing_access_only_when_none_is_saved(
     result = runner.invoke(desktop_app, _SETUP_ARGS)
 
     assert result.exit_code == 0, result.output
-    assert load_native_config(native_config_path(tmp_path)).browser.enabled is browser_enabled
-    assert ("open Computer access" in result.output) is hint_shown
+    assert load_native_config(native_config_path(tmp_path)).shell.enabled is shell_enabled
+    assert ("open Computer access" in result.output) is not shell_enabled
 
 
 @pytest.mark.parametrize(
@@ -555,17 +554,21 @@ def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, 
     assert bridge.await_args.kwargs["http_headers"] == {"X-Access-Client": "test-secret"}
 
 
-@pytest.mark.parametrize("browser_enabled", [False, True])
-def test_desktop_run_starts_with_saved_browser_access_alone(
+@pytest.mark.parametrize("shell_enabled", [False, True])
+def test_desktop_run_refuses_a_saved_browser_without_apps_folders_or_shell(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
-    browser_enabled: bool,
+    shell_enabled: bool,
 ) -> None:
-    """Saved browser access is enough to start a run; with nothing saved, the run says what to choose."""
+    """A browser alone cannot be controlled without a saved app, so the run says what to choose instead of starting."""
     save_native_config(
         native_config_path(tmp_path),
-        replace(_run_config(roots=()), revision=0, browser=NativeBrowserConfig(enabled=browser_enabled)),
+        replace(
+            _run_config(roots=(), shell_enabled=shell_enabled),
+            revision=0,
+            browser=NativeBrowserConfig(enabled=True),
+        ),
         expected_revision=0,
     )
     bridge = AsyncMock()
@@ -574,9 +577,9 @@ def test_desktop_run_starts_with_saved_browser_access_alone(
 
     result = runner.invoke(desktop_app, ["run"])
 
-    assert result.exit_code == (0 if browser_enabled else 1), result.output
-    assert bridge.await_count == int(browser_enabled)
-    assert ("Choose and save apps, folders, or shell access" in result.output) is not browser_enabled
+    assert result.exit_code == (0 if shell_enabled else 1), result.output
+    assert bridge.await_count == int(shell_enabled)
+    assert ("Choose and save apps, folders, or shell access" in result.output) is not shell_enabled
 
 
 def test_desktop_run_restores_saved_cloudflare_access_mode(

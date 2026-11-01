@@ -1593,6 +1593,21 @@ def test_set_allowed_apps_requires_saved_configuration_and_stopped_access(tmp_pa
         asyncio.run(host.handle(_request("start")))
 
 
+def test_start_refuses_a_saved_browser_without_apps_folders_or_shell(tmp_path: Path) -> None:
+    """Browser control needs a saved app, so a browser alone is not a capability the helper starts with."""
+    runtime = FakeRuntime()
+    host = _host(tmp_path, runtime)
+    payload = _config_payload()
+    payload.update(allowed_app_ids=[], browser={**cast("dict[str, object]", payload["browser"]), "enabled": True})
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
+
+    with pytest.raises(NativeProtocolError, match="at least one local capability") as caught:
+        asyncio.run(host.handle(_request("start")))
+
+    assert caught.value.code == "configuration_missing"
+    assert not runtime.running
+
+
 @pytest.mark.parametrize(
     "app_ids",
     [

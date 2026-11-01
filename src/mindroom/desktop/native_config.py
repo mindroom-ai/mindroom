@@ -100,8 +100,8 @@ class NativeDesktopConfig:
 
     @property
     def has_local_capability(self) -> bool:
-        """Whether any app, folder, shell, or browser access is saved, without which a run cannot start."""
-        return bool(self.allowed_app_ids or self.files.roots or self.shell.enabled or self.browser.enabled)
+        """Whether apps, folders, or shell access are saved; browser control needs a saved app, so a browser is not enough."""
+        return bool(self.allowed_app_ids or self.files.roots or self.shell.enabled)
 
     @classmethod
     def from_payload(cls, raw: object, *, validate_browser_paths: bool = True) -> NativeDesktopConfig:
