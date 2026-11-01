@@ -172,7 +172,7 @@ def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
 
 def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
     """Return the hard cap for inline primary-to-worker attachment saves, by default the retained media limit."""
-    raw_value = runtime_paths.env_value(INLINE_ATTACHMENT_BYTES_ENV) or str(RETAINED_MEDIA_MAX_BYTES)
+    raw_value = runtime_paths.env_value(INLINE_ATTACHMENT_BYTES_ENV, default=str(RETAINED_MEDIA_MAX_BYTES))
     try:
         limit = int(raw_value)
     except ValueError:
