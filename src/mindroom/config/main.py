@@ -140,6 +140,8 @@ from mindroom.workspaces import control_plane_owns_private_templates, validate_w
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
 
+    from pydantic_core import ErrorDetails
+
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.personal_agents import PersonalAgentRoster
     from mindroom.tool_system.registry import ToolRegistry
@@ -214,24 +216,24 @@ CONFIG_LOAD_USER_ERROR_TYPES = (
 )
 
 
+def validation_issue_message(error: ErrorDetails) -> str:
+    """Return what a user reads for one Pydantic error: how to fix an unknown key, or the message a validator raised."""
+    if error["type"] == "extra_forbidden":
+        return f"Unknown key '{error['loc'][-1]}': remove it or correct its spelling"
+    # Pydantic writes a validator's raised message after this prefix.
+    return error["msg"].removeprefix("Value error, ")
+
+
 def config_validation_issues(
     exc: Exception,
 ) -> list[tuple[tuple[str | int, ...], str]]:
     """Return the user-facing messages of one config validation exception, each with its config location.
 
-    An issue about the whole config is located at `config`, and a validator's issue shows the message it raised.
+    An issue about the whole config is located at `config`.
     """
     if isinstance(exc, ValidationError):
         return [
-            (
-                tuple(error["loc"]) or ("config",),
-                (
-                    f"Unknown key '{error['loc'][-1]}': remove it or correct its spelling"
-                    if error["type"] == "extra_forbidden"
-                    # Pydantic writes a validator's raised message after this prefix.
-                    else error["msg"].removeprefix("Value error, ")
-                ),
-            )
+            (tuple(error["loc"]) or ("config",), validation_issue_message(error))
             for error in exc.errors(include_context=False)
         ]
     if isinstance(exc, (ConfigRuntimeValidationError, ConfigIncludeError)):

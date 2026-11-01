@@ -2101,6 +2101,7 @@ depends_on = [
     "mindroom.api.oauth",
     "mindroom.authorization",
     "mindroom.config.egress_broker",
+    "mindroom.config.main",
     "mindroom.credentials.manager",
     "mindroom.egress_broker",
     "mindroom.oauth.credential_lifecycle",
