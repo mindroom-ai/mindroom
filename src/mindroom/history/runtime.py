@@ -213,7 +213,7 @@ async def prepare_scope_history(
         history_settings=resolved_inputs.history_settings,
         counter=counter,
     )
-    reported_history_tokens = await _reported_or_measured_history(
+    reported_history_tokens, estimated_history_tokens = await _history_sizes(
         session=session,
         visible_runs=visible_runs,
         resolved_inputs=resolved_inputs,
@@ -222,8 +222,6 @@ async def prepare_scope_history(
         non_prompt_tokens=non_prompt_tokens,
         native_route=native_route,
     )
-    # Large provider projections spend seconds in tokenizers that release the GIL.
-    estimated_history_tokens = await asyncio.to_thread(estimate_history_tokens, native_route=native_route)
     # The provider's count of the latest request is closer than an estimate of the whole history.
     current_history_tokens = estimated_history_tokens if reported_history_tokens is None else reported_history_tokens
     compaction_decision = classify_compaction_decision(
@@ -324,7 +322,7 @@ async def prepare_scope_history(
     )
 
 
-async def _reported_or_measured_history(
+async def _history_sizes(
     *,
     session: ConversationSession,
     visible_runs: list[AnyRunRecord],
@@ -333,12 +331,15 @@ async def _reported_or_measured_history(
     model: ModelProvider,
     non_prompt_tokens: int,
     native_route: str | None,
-) -> int | None:
-    """Return the history size the provider reported for the scope's latest request, if it still describes the history.
+) -> tuple[int | None, int]:
+    """Return the history size the provider reported for the scope's latest request, if still current, and its estimate.
 
-    Without one, the provider counts the scope's prompt-visible history instead, and the reply waits for that count, so
-    its estimate of the history reads exact counts; history that holds a native checkpoint keeps the estimate.
+    Without a report, the reply first waits for the provider to count the history, so the estimate reads exact counts;
+    history that holds a native checkpoint keeps its estimate. Large provider projections spend seconds in tokenizers
+    that release the GIL, so sizing runs in worker threads.
     """
+    counter = model.token_counter
+    history_settings = resolved_inputs.history_settings
     reported = (
         await asyncio.to_thread(
             partial(
@@ -356,18 +357,26 @@ async def _reported_or_measured_history(
         else None
     )
     if reported is None:
-        counter = model.token_counter
         texts = await asyncio.to_thread(
             partial(
                 prompt_visible_history_texts,
                 session=session,
-                history_settings=resolved_inputs.history_settings,
+                history_settings=history_settings,
                 counter=counter,
                 native_route=native_route,
             ),
         )
         await measure(counter, *texts)
-    return reported
+    estimated = await asyncio.to_thread(
+        partial(
+            estimate_prompt_visible_history_tokens,
+            session=session,
+            history_settings=history_settings,
+            counter=counter,
+            native_route=native_route,
+        ),
+    )
+    return reported, estimated
 
 
 def _reported_history_tokens(
