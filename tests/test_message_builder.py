@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_builder import (
     build_matrix_edit_content,
+    build_message_content,
     build_reaction_content,
     build_thread_relation,
     markdown_to_html,
@@ -18,6 +20,14 @@ def test_build_thread_relation_returns_fallback_reply_relation() -> None:
         "is_falling_back": True,
         "m.in_reply_to": {"event_id": "$latest"},
     }
+
+
+def test_room_level_reply_names_its_target_without_a_client_quote() -> None:
+    """A reply outside a thread keeps its target for MindRoom but gives clients no ``m.in_reply_to`` to quote."""
+    content = build_message_content("Answer", reply_to_event_id="$prompt")
+
+    assert content["m.relates_to"] == {"io.mindroom.in_reply_to": {"event_id": "$prompt"}}
+    assert EventInfo.from_event({"content": content}).reply_to_event_id == "$prompt"
 
 
 def test_build_matrix_edit_content_wraps_replacement_content() -> None:

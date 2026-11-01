@@ -12,6 +12,9 @@ from typing import cast
 
 _THREAD_RELATION_EVENT_TYPES = frozenset({"m.room.encrypted", "m.room.message"})
 
+# The m.relates_to key a room-level MindRoom reply names its source under, so clients do not quote the source.
+UNQUOTED_REPLY_RELATION_KEY = "io.mindroom.in_reply_to"
+
 
 def event_type_supports_thread_relations(event_type: object) -> bool:
     """Return whether this Matrix event family can affect conversation thread state."""
@@ -29,14 +32,14 @@ def origin_server_ts_from_event_source(event_source: object) -> int | float | No
 
 
 def reply_to_event_id_from_content(content: Mapping[str, object] | None) -> str | None:
-    """Return the explicit reply target encoded on one Matrix content payload."""
+    """Return the explicit reply target encoded on one Matrix content payload, quoted by clients or not."""
     if content is None:
         return None
     relates_to = content.get("m.relates_to")
     if not isinstance(relates_to, Mapping):
         return None
     relates_to = cast("Mapping[str, object]", relates_to)
-    in_reply_to = relates_to.get("m.in_reply_to")
+    in_reply_to = relates_to.get("m.in_reply_to", relates_to.get(UNQUOTED_REPLY_RELATION_KEY))
     if not isinstance(in_reply_to, Mapping):
         return None
     in_reply_to = cast("Mapping[str, object]", in_reply_to)

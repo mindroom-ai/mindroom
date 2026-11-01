@@ -115,12 +115,13 @@ class TestEventRelations:
         assert info.is_edit is False
         assert info.is_reaction is False
 
-    def test_analyze_standalone_reply(self) -> None:
-        """Test that standalone replies (rich replies) are properly detected."""
+    @pytest.mark.parametrize("reply_key", ["m.in_reply_to", "io.mindroom.in_reply_to"])
+    def test_analyze_standalone_reply(self, reply_key: str) -> None:
+        """Standalone replies are detected alike whether clients quote them or not."""
         event_source = {
             "content": {
                 "m.relates_to": {
-                    "m.in_reply_to": {
+                    reply_key: {
                         "event_id": "$reply_to_xyz",
                     },
                 },
@@ -221,6 +222,24 @@ class TestEventRelations:
                 {"m.relates_to": {"m.in_reply_to": {"event_id": "$target:localhost"}}},
             )
             == "$target:localhost"
+        )
+
+        assert (
+            reply_to_event_id_from_content(
+                {"m.relates_to": {"io.mindroom.in_reply_to": {"event_id": "$unquoted:localhost"}}},
+            )
+            == "$unquoted:localhost"
+        )
+        assert (
+            reply_to_event_id_from_content(
+                {
+                    "m.relates_to": {
+                        "m.in_reply_to": {"event_id": "$quoted:localhost"},
+                        "io.mindroom.in_reply_to": {"event_id": "$unquoted:localhost"},
+                    },
+                },
+            )
+            == "$quoted:localhost"
         )
 
         assert reply_to_event_id_from_content(None) is None
