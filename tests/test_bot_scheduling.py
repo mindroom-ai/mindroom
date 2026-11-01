@@ -479,8 +479,8 @@ class TestCommandHandling:
         self.config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                    "finance": AgentConfig(display_name="Finance", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
+                    "finance": AgentConfig(display_name="Finance", rooms=["!test:example.org"]),
                 },
                 teams={},
                 room_models={},

@@ -114,7 +114,12 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
 )
 from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN
-from mindroom.entity_resolution import call_room_ownership_key, resolve_agent_thread_mode, router_agents_for_room
+from mindroom.entity_resolution import (
+    call_room_ownership_key,
+    names_room,
+    resolve_agent_thread_mode,
+    router_agents_for_room,
+)
 from mindroom.file_locks import advisory_file_lock
 from mindroom.git_urls import credential_free_repo_url
 
@@ -963,6 +968,38 @@ class Config(BaseModel):
             msg = (
                 "Managed room keys conflict with the reserved root Space alias "
                 f"'{reserved_alias_localpart}': {formatted}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_room_references_name_rooms(self, info: ValidationInfo) -> Config:
+        """Reject a room reference that the runtime cannot map to a room ID."""
+        runtime_paths = _context_runtime_paths(info)
+        if runtime_paths is None:
+            return self
+        references: list[tuple[str, str | None]] = [("rooms", room) for room in self.rooms]
+        for name, agent in self.agents.items():
+            references += [(f"agents.{name}.rooms", room) for room in agent.rooms]
+            references += [(f"agents.{name}.room_thread_modes", room) for room in agent.room_thread_modes]
+            references += [
+                (f"agents.{name}.automations.{automation.name}.room", automation.room)
+                for automation in agent.automations or ()
+            ]
+        references += [(f"teams.{name}.rooms", room) for name, team in self.teams.items() for room in team.rooms]
+        references += [
+            (f"defaults.automations.{automation.name}.room", automation.room)
+            for automation in self.defaults.automations
+        ]
+        unknown_rooms = sorted(
+            f"{location} -> {room}"
+            for location, room in references
+            if room is not None and not names_room(self, room, runtime_paths)
+        )
+        if unknown_rooms:
+            msg = (
+                "Each room reference must be a room key MindRoom manages, that room's full alias, or a ! room ID: "
+                + ", ".join(unknown_rooms)
             )
             raise ValueError(msg)
         return self

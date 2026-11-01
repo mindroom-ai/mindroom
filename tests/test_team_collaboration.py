@@ -107,10 +107,10 @@ class TestTeamFormation:
         self.config = _runtime_bound_config(
             Config(
                 agents={
-                    "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
-                    "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
-                    "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
-                    "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
+                    "code": AgentConfig(display_name="Code", rooms=["!test:example.org"]),
+                    "security": AgentConfig(display_name="Security", rooms=["!test:example.org"]),
+                    "research": AgentConfig(display_name="Research", rooms=["!test:example.org"]),
+                    "analyst": AgentConfig(display_name="Analyst", rooms=["!test:example.org"]),
                 },
                 teams={},
                 room_models={},
@@ -151,10 +151,10 @@ class TestTeamResponseBehavior:
         self.config = _runtime_bound_config(
             Config(
                 agents={
-                    "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
-                    "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
-                    "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
-                    "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
+                    "code": AgentConfig(display_name="Code", rooms=["!test:example.org"]),
+                    "security": AgentConfig(display_name="Security", rooms=["!test:example.org"]),
+                    "research": AgentConfig(display_name="Research", rooms=["!test:example.org"]),
+                    "analyst": AgentConfig(display_name="Analyst", rooms=["!test:example.org"]),
                 },
                 teams={},
                 room_models={},

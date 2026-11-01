@@ -338,17 +338,66 @@ def test_store_rejects_unconfigured_target_room(tmp_path: Path) -> None:
     """Trigger target rooms must already be configured for the target entity."""
     store = ExternalTriggerStore(_runtime_paths(tmp_path))
 
-    with pytest.raises(ExternalTriggerStoreError, match="target room"):
+    with pytest.raises(ExternalTriggerStoreError, match="must already be configured for the target entity"):
         store.create_record(
             trigger_id="campground",
             owner_user_id=_OWNER,
             created_by_agent_name="watcher",
             created_in_room_id="!room:example.org",
             created_in_thread_id=None,
-            target=_target(room_id="other"),
+            target=_target(room_id="!other:example.org"),
             public_key=_PUBLIC_KEY,
             config=_config(),
         )
+
+
+@pytest.mark.parametrize(
+    ("room_id", "rooms"),
+    [("#ideas:other.org", ["lobby", "#ideas:other.org"]), ("#lobby:other.org", ["lobby"])],
+    ids=["configured-outside-alias", "managed-localpart-on-another-server"],
+)
+def test_store_rejects_a_target_alias_that_names_no_room(tmp_path: Path, room_id: str, rooms: list[str]) -> None:
+    """Delivery reads the room through MindRoom's record, so a target alias it cannot map is refused at creation."""
+    config = _config()
+    config.agents["watcher"].rooms = rooms
+    store = ExternalTriggerStore(_runtime_paths(tmp_path))
+
+    with pytest.raises(ExternalTriggerStoreError, match="target room must be a room key MindRoom manages"):
+        store.create_record(
+            trigger_id="campground",
+            owner_user_id=_OWNER,
+            created_by_agent_name="watcher",
+            created_in_room_id="!room:example.org",
+            created_in_thread_id=None,
+            target=_target(room_id=room_id),
+            public_key=_PUBLIC_KEY,
+            config=config,
+        )
+
+
+def test_store_delivers_a_target_given_by_the_full_alias_mindroom_gives_its_room(tmp_path: Path) -> None:
+    """The managed room's full alias is accepted and delivered to the room MindRoom recorded for it."""
+    runtime_paths = _runtime_paths(tmp_path)
+    matrix_state = MatrixState()
+    matrix_state.add_room("lobby", "!lobby:example.org", "#lobby:example.org", "Lobby")
+    save_matrix_state(matrix_state, runtime_paths)
+    config = _config()
+    store = ExternalTriggerStore(runtime_paths)
+    record = store.create_record(
+        trigger_id="campground",
+        owner_user_id=_OWNER,
+        created_by_agent_name="watcher",
+        created_in_room_id="!room:example.org",
+        created_in_thread_id=None,
+        target=_target(room_id="#lobby:example.org"),
+        public_key=_PUBLIC_KEY,
+        config=config,
+    )
+
+    snapshot = store.delivery_snapshot(record.trigger_id, config=config, config_generation=1)
+
+    assert snapshot is not None
+    assert snapshot.resolved_room_id == "!lobby:example.org"
 
 
 def test_store_accepts_federated_owner_with_managed_localpart(tmp_path: Path) -> None:
