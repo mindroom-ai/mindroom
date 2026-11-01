@@ -388,6 +388,23 @@ async def test_non_admin_cannot_target_other_agent_or_room(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target_room_id", ["lobby", "#lobby:example.org", "!lobby:example.org"])
+async def test_non_admin_can_name_the_current_room_by_key_alias_or_id(tmp_path: Path, target_room_id: str) -> None:
+    """A non-admin naming the current room in any form it resolves from targets that room, not a different one."""
+    tool = ExternalTriggerManagerTools()
+    state = MatrixState.load(_runtime_paths(tmp_path))
+    state.add_room("lobby", "!lobby:example.org", "#lobby:example.org", "Lobby")
+    save_matrix_state(state, _runtime_paths(tmp_path))
+    with tool_runtime_context(_context(tmp_path, room_id="!lobby:example.org")):
+        payload = _payload(
+            await tool.create_trigger("lobby-trigger", public_key=_PUBLIC_KEY, target_room_id=target_room_id),
+        )
+
+    assert payload["status"] == "ok", payload
+    assert payload["trigger"]["target"]["room_id"] == target_room_id
+
+
+@pytest.mark.asyncio
 async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(tmp_path: Path) -> None:
     """A reply event ID as target_thread_id is stored as its thread root, since Matrix rejects a reply as a thread root."""
     tool = ExternalTriggerManagerTools()
@@ -395,7 +412,10 @@ async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(tmp_pa
     state.add_room("lobby", "!lobby:example.org", "#lobby:example.org", "Lobby")
     save_matrix_state(state, _runtime_paths(tmp_path))
     homeserver = thread_reply_client("$reply:example.org", "$root:example.org")
-    context = replace(_context(tmp_path), relations=make_relation_lookup(client=homeserver))
+    context = replace(
+        _context(tmp_path, room_id="!lobby:example.org"),
+        relations=make_relation_lookup(client=homeserver),
+    )
     with tool_runtime_context(context):
         payload = _payload(
             await tool.create_trigger("replies", public_key=_PUBLIC_KEY, target_thread_id="$reply:example.org"),
