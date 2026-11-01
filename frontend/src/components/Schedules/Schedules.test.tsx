@@ -217,6 +217,31 @@ describe("Schedules", () => {
       expect(confirmLeavingUnsavedDrafts()).toBe(true);
     });
 
+    it("keeps another schedule clean when a save finishes after switching to it", async () => {
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+      await editQuietTask();
+      let finishSave: (response: Response) => void = () => {};
+      vi.mocked(global.fetch)
+        .mockImplementationOnce(
+          () =>
+            new Promise<Response>((resolve) => {
+              finishSave = resolve;
+            }),
+        )
+        .mockRejectedValueOnce(new Error("list unavailable"));
+
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      fireEvent.click(screen.getByText("Visible status check"));
+      expect(screen.getByLabelText("Description")).toHaveValue(
+        "Visible status check",
+      );
+      finishSave({ ok: true, json: async () => ({}) } as Response);
+
+      expect(await screen.findByText("list unavailable")).toBeInTheDocument();
+      confirmSpy.mockReturnValue(false);
+      expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    });
+
     it("does not ask when the selected schedule is selected again", async () => {
       const confirmSpy = vi.spyOn(window, "confirm");
       await editQuietTask();

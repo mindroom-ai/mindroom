@@ -415,7 +415,10 @@ export function Schedules() {
     setIsSaving(true);
     try {
       await updateSchedule(selectedTask.task_id, payload);
-      setSavedDraft(draft);
+      // The saved draft is the baseline only while its schedule is still open.
+      setSavedDraft((current) =>
+        current?.task_id === draft.task_id ? draft : current,
+      );
       await load(true);
       toast({
         title: "Schedule updated",
