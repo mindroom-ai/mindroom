@@ -2236,7 +2236,7 @@ def make_relation_lookup(
 
 
 def make_thread_reply_lookup(reply_event_id: str, thread_root_id: str) -> RelationLookup:
-    """Return a relation lookup whose homeserver serves one reply inside a thread."""
+    """Return a relation lookup whose homeserver answers every event lookup with one reply inside a thread."""
     client = MagicMock()
     client.room_get_event = AsyncMock(
         return_value=nio.RoomGetEventResponse.from_dict(

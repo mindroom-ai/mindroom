@@ -16,7 +16,7 @@ from mindroom.custom_tools import matrix_message_idempotency as durable
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.conftest import make_latest_thread_event_id_mock
+from tests.conftest import make_latest_thread_event_id_mock, make_thread_reply_lookup
 from tests.identity_helpers import entity_ids
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_matrix_agent_discovery import context as context  # noqa: PLC0414
@@ -93,6 +93,35 @@ async def test_repeated_key_replays_first_event(
     assert first["thread_id"] == first["event_id"]
     assert len(transport.events) == len(transport.attempts) == 1
     assert next(iter(transport.events.values()))["content"]["body"].endswith("first")
+
+
+async def test_a_replayed_threaded_send_does_not_resolve_its_thread_again(
+    context: ToolRuntimeContext,
+    transport: MatrixTransport,
+) -> None:
+    """A replay returns its receipt from local storage, without asking Matrix about the thread again."""
+    context = replace(context, relations=make_thread_reply_lookup("$reply-in-thread:localhost", "$root:localhost"))
+    lookups = cast("AsyncMock", context.relations.runtime.client.room_get_event)
+    with tool_runtime_context(context):
+        first = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="into the thread",
+                thread_id="$reply-in-thread:localhost",
+                idempotency_key="threaded",
+            ),
+        )
+        second = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="into the thread",
+                thread_id="$reply-in-thread:localhost",
+                idempotency_key="threaded",
+            ),
+        )
+    assert first["status"] == "ok"
+    assert first["thread_id"] == "$root:localhost"
+    assert second == first
+    assert len(transport.attempts) == 1
+    lookups.assert_awaited_once()
 
 
 @pytest.mark.parametrize("failure", ["transport", "receipt", "receipt_fsync"])
