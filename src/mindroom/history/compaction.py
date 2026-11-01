@@ -669,11 +669,8 @@ async def _report_committed(
 
 def _summary_input_tokens(summary_model: ModelProvider) -> Callable[[str], int]:
     """Return the summary model's count of summary input text, as its route counts it."""
-    return partial(_counted_tokens, summary_model.token_counter)
-
-
-def _counted_tokens(counter: TokenCounter, text: str) -> int:
-    return _summary_input_count(counter, text).tokens
+    counter = summary_model.token_counter
+    return lambda text: _summary_input_count(counter, text).tokens
 
 
 def _summary_input_count(counter: TokenCounter, text: str) -> TokenCount:

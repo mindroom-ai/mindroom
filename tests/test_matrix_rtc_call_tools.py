@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import TokenCounter
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.invocation import ToolMiddleware, ToolNext
@@ -1910,6 +1911,55 @@ async def test_call_responder_adds_origin_brief_enrichment(
         EnrichmentItem(key="voice_call", text="Speak briefly.", cache_policy="stable"),
         *expected_origin_items,
     )
+
+
+@pytest.mark.asyncio
+async def test_call_responder_sizes_the_origin_brief_with_its_own_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The brief goes to the responder's model, so that model's counter fits it, not the default model's."""
+    config = Config(
+        agents={AGENT: AgentConfig(display_name="Helper", model="thinker")},
+        models={"thinker": ModelConfig(provider="openai", id="gpt-4o")},
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    brief_counters: list[str] = []
+
+    def brief(counter: TokenCounter) -> str:
+        brief_counters.append(counter.key)
+        return "brief text"
+
+    async def fake_ai_response(_turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        return TurnResult("answer")
+
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable={})),
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.model_token_counter",
+        lambda _config, _paths, model_name, **_kwargs: fake_token_counter(key=model_name),
+    )
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+        voice_instructions="Speak briefly.",
+        origin_brief=brief,
+    )
+    assert tooling.responder is not None
+
+    await tooling.responder("What did we decide?", None)
+
+    assert brief_counters == ["thinker"]
 
 
 @pytest.mark.asyncio
