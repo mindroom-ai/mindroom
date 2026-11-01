@@ -64,7 +64,6 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import persist_entity_accounts
 from tests.streaming_helpers import FakeReplyRecords, reply_hooks
 
 if TYPE_CHECKING:
@@ -131,8 +130,7 @@ class _FakeGateway:
 @pytest.fixture
 def config() -> Config:
     """Minimal bound config for direct streaming tests."""
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    config = bind_runtime_paths(
+    return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"])},
             teams={},
@@ -140,10 +138,8 @@ def config() -> Config:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
         ),
-        runtime_paths,
+        test_runtime_paths(Path(tempfile.mkdtemp())),
     )
-    persist_entity_accounts(config, runtime_paths_for(config))
-    return config
 
 
 @pytest.fixture

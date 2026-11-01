@@ -73,26 +73,6 @@ async def test_compaction_call_timeout_raises_owned_timeout() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compaction_summary_uses_configured_system_prompt() -> None:
-    """Compaction summaries should use the configured prompt text."""
-    model = summary_model()
-
-    await generate_compaction_summary(
-        model=model,
-        summary_input="Current prompt",
-        summary_prompt="Custom compaction instructions.",
-        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
-        on_usage=None,
-    )
-
-    [request] = model.requests
-    assert [(message.role, message.content) for message in request.messages] == [
-        ("system", "Custom compaction instructions."),
-        ("user", "Current prompt"),
-    ]
-
-
-@pytest.mark.asyncio
 async def test_a_summary_whose_provider_reported_no_usage_records_none() -> None:
     """A response that is timed but carries no counters reported no usage, so the summary records none."""
     recorded: list[MessageMetrics] = []

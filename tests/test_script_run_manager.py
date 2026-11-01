@@ -63,6 +63,7 @@ from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     bound_worker_launch_config,
+    loop_runs_while_blocked,
     make_conversation_reader_mock,
     make_relation_lookup,
 )
@@ -2735,21 +2736,15 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
     manager, _backend, _client = _manager(tmp_path, mode="local")
     context = _context(tmp_path, mode="local")
     loop = asyncio.get_running_loop()
-    loop_processed_workspace_callback = threading.Event()
     workspace = agent_workspace_root_path(context.runtime_paths.storage_root, context.agent_name)
-    workspace_resolutions = 0
+    resolution_saw_loop_running: list[bool] = []
     if path is not None:
         workspace.mkdir(parents=True)
         (workspace / path).write_text("print('ok')\n", encoding="utf-8")
 
     def blocking_workspace(_context: ToolRuntimeContext, *, create: bool = False) -> Path:
         del create
-        nonlocal workspace_resolutions
-        workspace_resolutions += 1
-        loop.call_soon_threadsafe(loop_processed_workspace_callback.set)
-        if not loop_processed_workspace_callback.wait(timeout=SETTLE_TIMEOUT_SECONDS):
-            msg = "workspace resolution blocked the event loop"
-            raise AssertionError(msg)
+        resolution_saw_loop_running.append(loop_runs_while_blocked(loop))
         return workspace
 
     monkeypatch.setattr(ToolRuntimeContext, "agent_workspace_root", blocking_workspace)
@@ -2758,7 +2753,7 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
     run = await manager.run(context, source=source, path=path)
 
     assert run.state is ScriptRunState.RUNNING
-    assert workspace_resolutions == (1 if source is not None else 2)
+    assert resolution_saw_loop_running == [True] * (1 if source is not None else 2)
 
 
 @pytest.mark.asyncio

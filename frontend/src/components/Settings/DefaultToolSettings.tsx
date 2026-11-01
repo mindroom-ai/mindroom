@@ -39,7 +39,6 @@ export function DefaultToolSettings({ tools }: { tools: ToolInfo[] }) {
         target={{ kind: "defaults" }}
         toolName={toolName}
         toolDisplayName={info?.display_name}
-        overrideFields={info?.agent_override_fields ?? null}
         configFields={info?.config_fields ?? null}
       />
     </div>

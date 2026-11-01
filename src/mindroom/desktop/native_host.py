@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 import stat
 import sys
@@ -133,7 +132,9 @@ class NativeDesktopHost:
         except NativeConfigError as exc:
             self._config = None
             self._config_error_revision = exc.revision
-            self._config_error = _error_payload(exc.code, str(exc)) if exc.code != "configuration_missing" else None
+            self._config_error = (
+                NativeProtocolError(exc.code, str(exc)).to_payload() if exc.code != "configuration_missing" else None
+            )
         else:
             if self._config is not None and self._config.controller != config.controller:
                 self._pairing_state = "unpaired"
@@ -324,10 +325,7 @@ class NativeDesktopHost:
                 else:
                     config = config.with_canonical_new_roots(previous.files.roots if previous else ())
             try:
-                check_controller_binding(
-                    self._runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
-                    json.dumps([config.controller.user_id, config.controller.device_id, config.controller.ed25519]),
-                )
+                check_controller_binding(self._runtime_paths.storage_root, config.controller)
             except DesktopCommandJournalError as exc:
                 raise NativeProtocolError("invalid_request", str(exc)) from exc
             expected_revision = _required_int(parameters, "expected_revision", minimum=0)
@@ -413,7 +411,7 @@ class NativeDesktopHost:
             config = self._require_config()
             if not config.enabled:
                 raise NativeProtocolError("configuration_missing", "Enable Desktop Control before starting.")
-            if not (config.allowed_app_ids or config.files.roots or config.shell.enabled or config.browser.enabled):
+            if not config.has_local_capability:
                 raise NativeProtocolError(
                     "configuration_missing",
                     "Select and save at least one local capability before starting.",
@@ -679,12 +677,12 @@ class NativeBridgeRuntime:
                 "lease_expires_at_ms": None,
                 "emergency_stop_latched": False,
                 "active_action": None,
-                "last_error": _error_payload(
+                "last_error": NativeProtocolError(
                     "internal_error",
                     self._fault,
                     recovery="Stop and restart the desktop bridge.",
                     retryable=True,
-                ),
+                ).to_payload(),
                 "browser_connected": False,
             }
         return {"gui_mode": "stopped", "control_available": False, "browser_connected": False}
@@ -1136,16 +1134,6 @@ def _saved_session_identity(runtime_paths: RuntimePaths) -> tuple[str, dict[str,
 
 def _redacted_identity(details: dict[str, object]) -> dict[str, object]:
     return {key: details[key] for key in ("homeserver", "user_id", "device_id", "ed25519") if key in details}
-
-
-def _error_payload(
-    code: str,
-    message: str,
-    *,
-    recovery: str | None = None,
-    retryable: bool = False,
-) -> dict[str, object]:
-    return {"code": code, "message": message, "recovery": recovery, "retryable": retryable}
 
 
 def _matrix_http_headers_path(runtime_paths: RuntimePaths) -> Path | None:

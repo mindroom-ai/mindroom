@@ -230,12 +230,12 @@ async def test_upload_rejects_workspace_root_replaced_before_construction(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
-async def test_upload_removes_staging_after_browser_failure(
+async def test_failed_upload_keeps_the_files_the_page_may_have_selected_until_its_tab_closes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: type[BaseException],
 ) -> None:
-    """Failure and cancellation remove every private staged upload."""
+    """A selection that fails or is stopped may already hold the staged files, which a later submit reads."""
     tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
     source = root / "upload.txt"
     source.write_bytes(b"authorized bytes")
@@ -244,15 +244,44 @@ async def test_upload_removes_staging_after_browser_failure(
     async def fail(paths: list[str], *, timeout: int) -> None:  # noqa: ASYNC109
         assert timeout == 1234
         staging.extend(Path(path) for path in paths)
-        assert staging[0].read_bytes() == b"authorized bytes"
         raise failure
 
     consumer.side_effect = fail
     with pytest.raises(failure):
         await _upload(tool, [source])
-    assert staging
+    assert staging[0].read_bytes() == b"authorized bytes"
+
+    await tool._close_tab("mindroom", "tab-1")
+
     assert not staging[0].exists()
     assert source.read_bytes() == b"authorized bytes"
+
+
+@pytest.mark.asyncio
+async def test_upload_to_a_tab_that_closes_during_selection_removes_its_staged_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tab that closes while its selection runs has already released its uploads, so these go too."""
+    tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
+    source = root / "upload.txt"
+    source.write_bytes(b"authorized bytes")
+    tab = tool._session.profiles["mindroom"].tabs["tab-1"]
+    staging: list[Path] = []
+
+    async def close_during_selection(paths: list[str], *, timeout: int) -> None:  # noqa: ASYNC109
+        assert timeout == 1234
+        staging.extend(Path(path) for path in paths)
+        tab.page.is_closed = lambda: True
+        msg = "Target page, context or browser has been closed"
+        raise RuntimeError(msg)
+
+    consumer.side_effect = close_during_selection
+    with pytest.raises(RuntimeError, match="has been closed"):
+        await _upload(tool, [source])
+
+    assert not staging[0].exists()
+    assert (tab.upload_staging, tab.upload_staged_bytes) == ([], 0)
 
 
 @pytest.mark.asyncio
