@@ -13,7 +13,6 @@ import pytest
 
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing.batch import (
-    ActiveFollowUpCoalescingOwner,
     CoalescingKey,
     PendingEvent,
     PreparedTurn,
@@ -330,7 +329,7 @@ def test_requester_coalescing_key_wraps_requester_owner() -> None:
 
 def test_is_active_follow_up_coalescing_key_matches_owner_variant_only() -> None:
     """The follow-up classifier reads the owner variant, never requester id text."""
-    assert is_active_follow_up_coalescing_key(CoalescingKey("!r", None, ActiveFollowUpCoalescingOwner()))
+    assert is_active_follow_up_coalescing_key(active_follow_up_coalescing_key("!r", None))
     assert not is_active_follow_up_coalescing_key(CoalescingKey("!r", None, RequesterCoalescingOwner("@u")))
     legacy_prefixed = CoalescingKey("!r", None, RequesterCoalescingOwner("__mindroom_active_follow_up__:room"))
     assert not is_active_follow_up_coalescing_key(legacy_prefixed)
@@ -339,7 +338,7 @@ def test_is_active_follow_up_coalescing_key_matches_owner_variant_only() -> None
 def test_coalescing_owner_variants_hash_into_distinct_gate_entries() -> None:
     """Owner variants hash differently and occupy distinct coalescing gate entries."""
     requester_key = CoalescingKey("!r", None, RequesterCoalescingOwner("@u"))
-    follow_up_key = CoalescingKey("!r", None, ActiveFollowUpCoalescingOwner())
+    follow_up_key = active_follow_up_coalescing_key("!r", None)
     assert hash(requester_key) != hash(follow_up_key)
 
     gate = CoalescingGate(

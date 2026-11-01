@@ -1171,19 +1171,87 @@ def test_google_drive_large_file_error_names_exposed_download_function(tmp_path:
     assert service.files_resource.get_media_kwargs is None
 
 
-def test_google_drive_read_error_names_enabled_download_function(
+_MIB = 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("metadata", "refusal", "download_error"),
+    [
+        pytest.param(
+            {"name": "Architecture", "mimeType": "application/vnd.google-apps.drawing"},
+            "Cannot read application/vnd.google-apps.drawing as text.",
+            None,
+            id="drawing",
+        ),
+        pytest.param(
+            {"name": "Q3 plans", "mimeType": "application/vnd.google-apps.folder"},
+            "Cannot read application/vnd.google-apps.folder as text.",
+            "Unsupported Workspace file type for download: application/vnd.google-apps.folder",
+            id="folder",
+        ),
+        pytest.param(
+            {"name": "Launch video", "mimeType": "application/vnd.google-apps.vid"},
+            "Cannot read application/vnd.google-apps.vid as text.",
+            "Unsupported Workspace file type for download: application/vnd.google-apps.vid",
+            id="vids",
+        ),
+        pytest.param(
+            {"name": "Budget 2025/26.pdf", "mimeType": "application/pdf", "size": "9"},
+            "Cannot read application/pdf as text.",
+            "Unsafe Google Drive filename: Budget 2025/26.pdf",
+            id="unsafe-name",
+        ),
+        pytest.param(
+            {"name": "scan.pdf", "mimeType": "application/pdf", "size": str(50 * _MIB)},
+            f"File is {50 * _MIB} bytes, exceeds max_read_size ({10 * _MIB}).",
+            None,
+            id="over-read-size",
+        ),
+        pytest.param(
+            {"name": "recording.mp4", "mimeType": "video/mp4", "size": str(200 * _MIB)},
+            f"File is {200 * _MIB} bytes, exceeds max_read_size ({10 * _MIB}).",
+            f"File is {200 * _MIB} bytes, exceeds max_download_size ({100 * _MIB}).",
+            id="over-download-size",
+        ),
+    ],
+)
+def test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metadata: dict[str, object],
+    refusal: str,
+    download_error: str | None,
+) -> None:
+    """A refused read names the download function only for a file it saves, and otherwise gives its refusal."""
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = metadata
+    tool._download_bytes = lambda _request: b"%PDF-1.7\n"
+
+    result = json.loads(tool.read_file("shared-drive-file-id"))
+
+    if download_error is None:
+        assert result["error"] == f"{refusal} Use google_drive_download_file instead."
+    else:
+        assert result["error"] == f"{refusal} google_drive_download_file would refuse it too: {download_error}"
+    assert json.loads(tool.download_file("shared-drive-file-id")).get("error") == download_error
+
+
+def test_google_drive_download_exports_a_workspace_type_without_a_default_export_to_a_requested_format(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An explicit export format reaches Drive for a Workspace type that has no default download export."""
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {"name": "Whiteboard", "mimeType": "application/vnd.google-apps.jam"}
 
-    result = json.loads(tool.read_file("shared-drive-folder-id"))
+    result = json.loads(tool.download_file("shared-drive-file-id", export_format="application/pdf"))
 
-    assert (
-        result["error"]
-        == "Cannot read application/vnd.google-apps.folder as text. Use google_drive_download_file instead."
-    )
-    assert service.files_resource.get_media_kwargs is None
+    assert result["status"] == "exported"
+    assert Path(result["path"]) == tmp_path / "google-drive-downloads" / "Whiteboard.pdf"
+    assert service.files_resource.export_media_kwargs == {
+        "fileId": "shared-drive-file-id",
+        "mimeType": "application/pdf",
+    }
 
 
 def test_google_drive_download_media_supports_shared_drive_files(

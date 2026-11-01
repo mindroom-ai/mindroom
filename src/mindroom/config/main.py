@@ -56,6 +56,7 @@ from mindroom.config.matrix import (
     MatrixSpaceConfig,
     MatrixSyncConfig,
     MindRoomUserConfig,
+    ServerEmojiConfig,
 )
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import (
@@ -132,6 +133,7 @@ from mindroom.matrix_identifiers import (
     is_managed_room_key,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
+    server_emoji_alias_localpart,
 )
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
@@ -188,6 +190,7 @@ _OPTIONAL_SECTION_NAMES = (
     "mcp_servers",
     "prompts",
     "matrix_space",
+    "server_emoji",
     "debug",
     "external_trigger_policy",
     "matrix_sync",
@@ -462,6 +465,10 @@ class Config(BaseModel):
     matrix_space: MatrixSpaceConfig = Field(
         default_factory=MatrixSpaceConfig,
         description="Optional root Matrix Space for grouping managed rooms",
+    )
+    server_emoji: ServerEmojiConfig = Field(
+        default_factory=ServerEmojiConfig,
+        description="Optional room whose emoji packs every MindRoom Chat user on the homeserver can use",
     )
     authorization: AuthorizationConfig = Field(
         default_factory=AuthorizationConfig,
@@ -950,26 +957,26 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_root_space_alias_does_not_collide_with_managed_rooms(self, info: ValidationInfo) -> Config:
-        """Ensure no managed room key maps to the reserved root Space alias."""
-        if not self.matrix_space.enabled:
-            return self
+    def validate_reserved_aliases_do_not_collide_with_managed_rooms(self, info: ValidationInfo) -> Config:
+        """Ensure no managed room key maps to the reserved alias of the root Space or the server emoji room."""
         runtime_paths = _context_runtime_paths(info)
         if runtime_paths is None:
             return self
-        reserved_alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
-        colliding_rooms = sorted(
-            room_key
-            for room_key in self.managed_room_keys()
-            if managed_room_alias_localpart(room_key, runtime_paths=runtime_paths) == reserved_alias_localpart
-        )
-        if colliding_rooms:
-            formatted = ", ".join(colliding_rooms)
-            msg = (
-                "Managed room keys conflict with the reserved root Space alias "
-                f"'{reserved_alias_localpart}': {formatted}"
+        reserved_aliases: dict[str, str] = {}
+        if self.matrix_space.enabled:
+            reserved_aliases[managed_space_alias_localpart(runtime_paths=runtime_paths)] = "root Space"
+        if self.server_emoji.enabled:
+            reserved_aliases[server_emoji_alias_localpart(runtime_paths)] = "server emoji room"
+        for reserved_alias_localpart, owner in reserved_aliases.items():
+            colliding_rooms = sorted(
+                room_key
+                for room_key in self.managed_room_keys()
+                if managed_room_alias_localpart(room_key, runtime_paths=runtime_paths) == reserved_alias_localpart
             )
-            raise ValueError(msg)
+            if colliding_rooms:
+                formatted = ", ".join(colliding_rooms)
+                msg = f"Managed room keys conflict with the reserved {owner} alias '{reserved_alias_localpart}': {formatted}"
+                raise ValueError(msg)
         return self
 
     @model_validator(mode="after")

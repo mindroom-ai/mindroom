@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 type _Classify = Callable[[str, Mapping[str, object]], IngressFacts]
 # Which of these events already have a terminal outcome, answered or redacted in the turn's room.
 type _HandledLookup = Callable[[Collection[str]], Awaitable[frozenset[str]]]
+# Whether a stored message mentions only other agents or people, so this agent ignores it.
+type _ForAnotherParticipant = Callable[[Mapping[str, object]], bool]
 
 
 async def has_newer_unresponded_in_thread(
@@ -30,6 +32,7 @@ async def has_newer_unresponded_in_thread(
     may_be_superseded_by_newer_requester_turn: bool,
     classify: _Classify,
     is_handled: _HandledLookup,
+    for_another_participant: _ForAnotherParticipant,
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
     """Return True when full thread history proves a newer unhandled requester turn exists."""
@@ -52,6 +55,7 @@ async def has_newer_unresponded_in_thread(
             requester_user_id=requester_user_id,
             classify=classify,
             handled=handled,
+            for_another_participant=for_another_participant,
         ):
             continue
         logger.info(
@@ -71,14 +75,16 @@ def _is_unresponded_requester_event(
     requester_user_id: str,
     classify: _Classify,
     handled: Collection[str],
+    for_another_participant: _ForAnotherParticipant,
 ) -> bool:
     """Return whether a normalized candidate is an unanswered requester turn.
 
     The filters SQL cannot express. Whose turn an event really is depends on
     trusted relay metadata inside its content, a router transcript echo is a
-    display artifact rather than a turn, and a command exits dispatch long
-    before a response would be owed -- so none of the three can be decided from
-    a column.
+    display artifact rather than a turn, this agent ignores a message for
+    another participant without ever answering it, and a command exits dispatch
+    long before a response would be owed -- so none of the four can be decided
+    from a column.
 
     ``handled`` stays even though a pending row is the journal's own answer
     to "unfinished". The two records settle at different moments: a source is
@@ -91,7 +97,7 @@ def _is_unresponded_requester_event(
     content = source.get("content")
     if is_router_voice_echo(facts, content) or facts.lane_requester_id != requester_user_id:
         return False
-    if event.event_id in handled:
+    if event.event_id in handled or for_another_participant(source):
         return False
     if not isinstance(body, str):
         return True
@@ -111,6 +117,7 @@ async def has_newer_unresponded_journal_thread_event(
     pending_turns: PendingTurnView,
     classify: _Classify,
     is_handled: _HandledLookup,
+    for_another_participant: _ForAnotherParticipant,
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
     """Return positive journal proof of a newer requester turn for degraded replay history.
@@ -150,6 +157,7 @@ async def has_newer_unresponded_journal_thread_event(
             requester_user_id=requester_user_id,
             classify=classify,
             handled=handled,
+            for_another_participant=for_another_participant,
         ):
             logger.info(
                 "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",

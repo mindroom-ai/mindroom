@@ -7,7 +7,7 @@ import mimetypes
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
 from agno.tools.google.drive import MediaIoBaseDownload, WorkspaceType, authenticate
@@ -115,17 +115,6 @@ def _unsafe_drive_filename_error(filename: object) -> str | None:
     return None
 
 
-def _download_metadata_error(metadata: dict[str, Any], max_download_size: float) -> str | None:
-    """Refuse a download whose filename is unsafe or whose Drive size exceeds the limit."""
-    unsafe_filename_error = _unsafe_drive_filename_error(metadata.get("name"))
-    if unsafe_filename_error:
-        return unsafe_filename_error
-    file_size = int(metadata.get("size", 0))
-    if file_size > max_download_size:
-        return f"File is {file_size} bytes, exceeds max_download_size ({max_download_size})."
-    return None
-
-
 def _download_target_path(workspace_root: Path, filename: str, extension: str) -> Path | None:
     target_path = workspace_root.absolute() / "google-drive-downloads" / filename
     if extension and not target_path.suffix:
@@ -158,6 +147,19 @@ class GoogleDriveTools(
 
     _oauth_provider = google_oauth_provider("google_drive")
     _oauth_tool_name = "google_drive"
+    # AGNO_COMPAT: Drive `download_file` exports Google Vids, which the Drive API never exports.
+    # Reason: Agno 3.0.9 maps `application/vnd.google-apps.vid` to a `video/mp4` export, but `files.export` refuses
+    # every Vids file with `fileNotExportable`, so a Vids download, and the download advice a refused read gives,
+    # end in an API error. Without the mapping, MindRoom refuses Vids as an unsupported Workspace type.
+    # Upstream issue: Tracking gap; no matching issue identified.
+    # Upstream PR: None identified.
+    # Remove when: Agno's `DOWNLOAD_EXPORT_TYPES` no longer maps Google Vids to a `files.export` format.
+    # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves.
+    DOWNLOAD_EXPORT_TYPES: ClassVar[dict[str, tuple[str, str]]] = {
+        mime_type: export
+        for mime_type, export in AgnoGoogleDriveTools.DOWNLOAD_EXPORT_TYPES.items()
+        if mime_type != WorkspaceType.VID
+    }
 
     def __init__(
         self,
@@ -317,11 +319,31 @@ class GoogleDriveTools(
             field_name="Google Drive local_path",
         )
 
-    def _download_guidance(self) -> str:
-        """Name the download function, while this toolkit offers it, as the way past a read it refuses."""
+    def _download_refusal(self, metadata: dict[str, Any], export_format: str | None = None) -> str | None:
+        """Return the error `download_file` gives from a file's metadata, before requesting its content, or None."""
+        unsafe_filename_error = _unsafe_drive_filename_error(metadata.get("name"))
+        if unsafe_filename_error:
+            return unsafe_filename_error
+        file_size = int(metadata.get("size", 0))
+        if file_size > self.max_download_size:
+            return f"File is {file_size} bytes, exceeds max_download_size ({self.max_download_size})."
+        mime_type = metadata.get("mimeType", "")
+        if (
+            not export_format
+            and mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX)
+            and mime_type not in self.DOWNLOAD_EXPORT_TYPES
+        ):
+            return f"Unsupported Workspace file type for download: {mime_type}"
+        return None
+
+    def _read_refusal(self, error: str, metadata: dict[str, Any]) -> str:
+        """Refuse a read; name the download function while offered, or quote why it would refuse the file too."""
         if "google_drive_download_file" in toolkit_function_names(self):
-            return " Use google_drive_download_file instead."
-        return ""
+            if download_refusal := self._download_refusal(metadata):
+                error += f" google_drive_download_file would refuse it too: {download_refusal}"
+            else:
+                error += " Use google_drive_download_file instead."
+        return json.dumps({"error": error, "file": metadata})
 
     @authenticate
     def _upload_file(
@@ -471,27 +493,22 @@ class GoogleDriveTools(
             log_error(f"Could not trash Google Drive file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    def _text_read_refusal(self, mime_type: str, metadata: dict[str, Any]) -> str:
-        return json.dumps(
-            {
-                "error": f"Cannot read {mime_type} as text.{self._download_guidance()}",
-                "file": metadata,
-            },
-        )
-
     # AGNO_COMPAT: Drive `read_file` refuses text by MIME type and names a download function that may not exist.
     # Reason: Agno 3.0.9 refuses every `application/octet-stream` file, including text MindRoom's own uploads
     # store that way, and ends errors with "Use download_file instead." although MindRoom exposes
-    # `google_drive_download_file` or disables it. This override decides text by content instead. It also
+    # `google_drive_download_file` or disables it, and although its `download_file` refuses folders and other
+    # Workspace types it cannot export. This override decides text by content instead. It also
     # refuses Office files, which Agno's MIME-based branch would extract without tables, grouped shapes, or
     # line breaks, or reject with an install hint when the extraction packages are missing.
     # Upstream issue: Tracking gap; no matching issue identified.
-    # Upstream PR: None identified; https://github.com/agno-agi/agno/pull/10501 (open) covers only `.docx` tables.
-    # Remove when: Agno's `read_file` decides text by content rather than MIME type, lets a toolkit name its
-    # download function, and extracts complete Office text with dependencies MindRoom ships or refuses it;
-    # keep MindRoom's function aliases.
+    # Upstream PR: https://github.com/agno-agi/agno/pull/10473 (in 3.0.11; MindRoom pins 3.0.9) covers only grouped
+    # shapes and line breaks in `.pptx` text; https://github.com/agno-agi/agno/pull/10501 (open) covers only `.docx` tables.
+    # Remove when: Agno's `read_file` decides text by content rather than MIME type, lets a toolkit word the advice
+    # after a refused read, and extracts complete Office text with dependencies MindRoom ships or refuses it;
+    # keep MindRoom's function aliases and the advice that quotes `_download_refusal`.
     # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refuses_binary_content_and_names_enabled_download_function;
     # tests/test_google_drive_oauth_tool.py::test_google_drive_read_names_no_download_function_its_filters_leave_out;
+    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves;
     # tests/test_google_drive_oauth_tool.py::test_google_drive_read_returns_text_without_nul_bytes.
     @authenticate
     def read_file(self, file_id: str) -> str:
@@ -504,7 +521,7 @@ class GoogleDriveTools(
             if mime_type in self.TEXT_EXPORT_TYPES:
                 export_mime = self.TEXT_EXPORT_TYPES[mime_type]
             elif mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
-                return self._text_read_refusal(mime_type, metadata)
+                return self._read_refusal(f"Cannot read {mime_type} as text.", metadata)
             else:
                 export_mime = None
 
@@ -514,13 +531,8 @@ class GoogleDriveTools(
             else:
                 file_size = int(metadata.get("size", 0))
                 if file_size > self.max_read_size:
-                    return json.dumps(
-                        {
-                            "error": f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size})."
-                            f"{self._download_guidance()}",
-                            "file": metadata,
-                        },
-                    )
+                    error = f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size})."
+                    return self._read_refusal(error, metadata)
                 request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
                 content_bytes = self._download_bytes(request)
 
@@ -529,7 +541,7 @@ class GoogleDriveTools(
             # none. A PDF can be NUL-free when its streams are uncompressed, so its signature counts too.
             # UTF-16 text is refused as well.
             if content_bytes.startswith(b"%PDF-") or b"\x00" in content_bytes:
-                return self._text_read_refusal(mime_type, metadata)
+                return self._read_refusal(f"Cannot read {mime_type} as text.", metadata)
             content = content_bytes.decode("utf-8", errors="replace")
             return json.dumps(
                 {
@@ -555,16 +567,14 @@ class GoogleDriveTools(
             metadata = self._get_file_metadata(file_id, "id,name,mimeType,size")
             mime_type = metadata.get("mimeType", "")
             filename = metadata.get("name")
-            metadata_error = _download_metadata_error(metadata, self.max_download_size)
-            if metadata_error:
-                return json.dumps({"error": metadata_error, "file": metadata})
+            refusal = self._download_refusal(metadata, export_format)
+            if refusal:
+                return json.dumps({"error": refusal, "file": metadata})
 
             target_mime, ext = self.DOWNLOAD_EXPORT_TYPES.get(mime_type, (None, ""))
             if export_format:
                 target_mime = export_format
                 ext = mimetypes.guess_extension(export_format) or ""
-            elif target_mime is None and mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
-                return json.dumps({"error": f"Unsupported Workspace file type for download: {mime_type}"})
 
             path = _download_target_path(self._workspace_root, cast("str", filename), ext)
             if path is None:
