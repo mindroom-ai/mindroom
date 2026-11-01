@@ -419,3 +419,24 @@ def test_calls_template_whose_agent_lists_rooms_is_rejected(tmp_path: Path) -> N
         match=r"calls\.agents names personal_agents\.mind, whose agent lists rooms",
     ):
         _runtime_config(tmp_path, data)
+
+
+def test_explicit_call_profile_for_a_generated_agent_wins_and_is_saved(tmp_path: Path) -> None:
+    """An agent named in calls.agents keeps its own profile over its template's, and saving keeps both entries."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    data["calls"]["profiles"]["other"] = data["calls"]["profiles"]["voice"] | {"voice": "cedar"}
+    data["calls"]["agents"]["mind_bob"] = "other"
+    config = _runtime_config(tmp_path, data, roster=(_entry(), _entry("@bob:example.org")))
+    assert config.calls.agents == {"mind_alice_smith": "voice", "mind_bob": "other"}
+    assert config.authored_model_dump()["calls"]["agents"] == {"mind": "voice", "mind_bob": "other"}
+
+
+def test_calls_template_whose_user_override_lists_rooms_is_rejected(tmp_path: Path) -> None:
+    """A per-user override must not put a calls-enabled template's agent into rooms either, onboarded or not."""
+    data = deepcopy(BASE) | {"calls": deepcopy(_CALLS)}
+    data["personal_agents"]["mind"]["users"] = {"@carol:example.org": {"rooms": ["lobby"]}}
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"calls\.agents names personal_agents\.mind, whose agent lists rooms",
+    ):
+        _runtime_config(tmp_path, data)

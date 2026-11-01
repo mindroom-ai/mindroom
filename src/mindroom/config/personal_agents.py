@@ -336,10 +336,14 @@ def _call_templates(config: Mapping[str, Any], templates: Mapping[str, dict[str,
         return {}
     assigned = {key: profile for key, profile in call_agents.items() if key in templates}
     for key in assigned:
-        if templates[key]["agent"].get("rooms"):
+        users = templates[key].get("users")
+        overrides = (
+            [override for override in users.values() if isinstance(override, dict)] if isinstance(users, dict) else []
+        )
+        if any(agent.get("rooms") for agent in (templates[key]["agent"], *overrides)):
             msg = (
-                f"calls.agents names personal_agents.{key}, whose agent lists rooms; every user's agent would join "
-                "them, and a room takes only one calls-enabled agent"
+                f"calls.agents names personal_agents.{key}, whose agent lists rooms in the template or a user's "
+                "override; a room takes only one calls-enabled agent, and every user's agent would join them"
             )
             raise ValueError(msg)
     return assigned
@@ -350,12 +354,15 @@ def _with_call_agents(
     call_templates: Mapping[str, str],
     instances: Mapping[str, PersonalAgentInstance],
 ) -> dict[str, Any]:
-    """Replace each template key in calls.agents with the agents generated from that template."""
+    """Replace each template key in calls.agents with the agents generated from that template.
+
+    An agent that calls.agents names itself keeps that profile.
+    """
     calls = config["calls"]
     call_agents = {key: profile for key, profile in calls["agents"].items() if key not in call_templates}
     for agent_name, instance in instances.items():
         if instance.template in call_templates:
-            call_agents[agent_name] = call_templates[instance.template]
+            call_agents.setdefault(agent_name, call_templates[instance.template])
     return {**config, "calls": {**calls, "agents": call_agents}}
 
 
