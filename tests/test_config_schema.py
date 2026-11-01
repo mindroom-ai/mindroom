@@ -46,6 +46,10 @@ def _walk_fields() -> Iterator[tuple[type[BaseModel], str, FieldInfo]]:
             pending.extend(_nested_models(field.annotation))
 
 
+def _field_reference(field: FieldInfo) -> object:
+    return cast("dict[str, dict[str, object]]", field.json_schema_extra or {}).get(HINT_KEY, {}).get("reference")
+
+
 def _collect_hints(node: object) -> Iterator[dict[str, object]]:
     if isinstance(node, dict):
         for key, value in node.items():
@@ -116,7 +120,6 @@ def test_reference_fields_are_annotated() -> None:
     defs = schema["$defs"]
     assert defs["PersonalRoomsConfig"]["properties"]["agent"][HINT_KEY] == {"reference": "personal_room_agent"}
     assert defs["PersonalRoomsConfig"]["properties"]["onboarding_rooms"][HINT_KEY] == {"reference": "room"}
-    assert defs["DefaultsConfig"]["properties"]["tools"][HINT_KEY] == {"reference": "tool"}
     assert schema["properties"]["room_thread_summary_models"][HINT_KEY] == {
         "reference": "model",
         "key_reference": "room",
@@ -139,12 +142,23 @@ def test_every_field_that_names_a_configured_model_offers_the_model_picker() -> 
     unhinted = {
         f"{model.__name__}.{name}"
         for model, name, field in _walk_fields()
-        if name.endswith(("model", "models"))
-        and name != "models"
-        and cast("dict[str, dict[str, object]]", field.json_schema_extra or {}).get(HINT_KEY, {}).get("reference")
-        != "model"
+        if name.endswith(("model", "models")) and name != "models" and _field_reference(field) != "model"
     }
     assert unhinted == _PROVIDER_MODEL_ID_FIELDS
+
+
+# Tool lists that name an MCP server's own tools, not registered MindRoom tools.
+_MCP_SERVER_TOOL_FIELDS = {"MCPServerConfig.include_tools", "MCPServerConfig.exclude_tools"}
+
+
+def test_every_field_that_lists_tools_offers_the_tool_picker() -> None:
+    """A tools list names registered tools, which the dashboard edits with the tool picker, or an MCP server's own tools."""
+    unhinted = {
+        f"{model.__name__}.{name}"
+        for model, name, field in _walk_fields()
+        if name.endswith(("tools", "toolkits")) and field.annotation is not bool and _field_reference(field) != "tool"
+    }
+    assert unhinted == _MCP_SERVER_TOOL_FIELDS
 
 
 def test_secret_fields_are_annotated() -> None:

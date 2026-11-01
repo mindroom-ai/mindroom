@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { isPlainObject } from "@/lib/configSchema";
 import { fetchUsage } from "@/services/usageService";
 import { listSchedules } from "@/services/scheduleService";
 import type { ScheduleTask } from "@/types/schedule";
@@ -63,12 +64,9 @@ export function scheduleTime(at: string, timezone: string) {
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 function isHomeSchedule(value: unknown): value is HomeSchedule {
   return (
-    isRecord(value) &&
+    isPlainObject(value) &&
     typeof value.task_id === "string" &&
     typeof value.room_id === "string" &&
     (value.room_alias === null || typeof value.room_alias === "string") &&
@@ -97,7 +95,7 @@ export async function fetchRuntimeActivity(
     throw new Error("Runtime unavailable");
   const data: unknown = await response.json();
   if (
-    !isRecord(data) ||
+    !isPlainObject(data) ||
     typeof data.runtime_phase !== "string" ||
     (data.admission_paused !== null &&
       typeof data.admission_paused !== "boolean") ||
@@ -151,7 +149,7 @@ export function useHomeData() {
       const data: unknown = await listSchedules();
       // Invalid service timezone/data must stay local to this section.
       if (
-        !isRecord(data) ||
+        !isPlainObject(data) ||
         !Array.isArray(data.tasks) ||
         !data.tasks.every(isHomeSchedule) ||
         !Array.isArray(data.unreadable_rooms) ||

@@ -55,30 +55,28 @@ async def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool
     ) and await requester_joined_target_room(context, room_id)
 
 
+def unknown_room_error(room_id: str) -> str:
+    """Return the error for a requested room that names no known room."""
+    return f"Unknown room {room_id!r}; pass a room ID, alias, or configured room name."
+
+
 def resolve_requested_room_id(
     context: ToolRuntimeContext,
     room_id: str | None,
 ) -> tuple[str | None, str | None]:
-    """Resolve the requested room target or return a validation error."""
+    """Resolve the requested room target or return a validation error.
+
+    A configured room name resolves to its room ID; any other name that is neither a room ID nor an alias is unknown.
+    """
     if room_id is None:
         return context.room_id, None
     normalized_room_id = room_id.strip()
     if not normalized_room_id:
         return None, "room_id must be a non-empty string."
-    return resolve_room_id(normalized_room_id, context.runtime_paths), None
-
-
-def resolve_optional_room_id(
-    context: ToolRuntimeContext,
-    room_id: str | None,
-) -> str:
-    """Resolve an optional room target, defaulting to the active room."""
-    if room_id is None:
-        return context.room_id
-    normalized_room_id = room_id.strip()
-    if not normalized_room_id:
-        return context.room_id
-    return resolve_room_id(normalized_room_id, context.runtime_paths)
+    resolved_room_id = resolve_room_id(normalized_room_id, context.runtime_paths)
+    if not resolved_room_id.startswith(("!", "#")):
+        return None, unknown_room_error(normalized_room_id)
+    return resolved_room_id, None
 
 
 def resolve_context_thread_id(
