@@ -520,7 +520,7 @@ async def test_relay_tunnels_through_an_https_egress_proxy_and_survives_client_h
 
 @pytest.mark.parametrize("reset", [True, False], ids=["reset", "close"])
 def test_relay_ends_cleanly_when_the_browser_closes_while_the_destination_sends_under_uvloop(reset: bool) -> None:
-    """Dedicated workers serve on uvloop, which reports a write to a connection the browser closed as RuntimeError."""
+    """Sandbox runners serve on uvloop, which reports a write to a connection the browser closed as RuntimeError."""
     uvloop = pytest.importorskip("uvloop")
 
     async def send_after_browser_closes(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

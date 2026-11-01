@@ -369,7 +369,16 @@ async def test_admin_cross_target_private_agent_rejects_current_dynamic_room(tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("target_agent", "target_room_id"), [("other", None), (None, "other-room")])
+@pytest.mark.parametrize(
+    ("target_agent", "target_room_id"),
+    [
+        ("other", None),
+        (None, "other-room"),
+        (None, "#other-room:example.org"),
+        (None, "!other-room:example.org"),
+        (None, "#elsewhere:example.org"),
+    ],
+)
 async def test_non_admin_cannot_target_other_agent_or_room(
     tmp_path: Path,
     target_agent: str | None,
@@ -377,8 +386,12 @@ async def test_non_admin_cannot_target_other_agent_or_room(
 ) -> None:
     """Non-admin callers can only create triggers for the current agent and room, and a refused room is never read."""
     tool = ExternalTriggerManagerTools()
+    _record_rooms(tmp_path)
     homeserver = event_serving_client("$other-thread:example.org", content={"msgtype": "m.text", "body": "root"})
-    context = replace(_context(tmp_path), relations=make_relation_lookup(client=homeserver))
+    context = replace(
+        _context(tmp_path, room_id="!lobby:example.org"),
+        relations=make_relation_lookup(client=homeserver),
+    )
     with tool_runtime_context(context):
         payload = _payload(
             await tool.create_trigger(

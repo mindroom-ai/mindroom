@@ -433,6 +433,6 @@ class BrowserDestinationProxy:
             # TLS to an upstream proxy cannot half-close; the tunnel then ends with the other direction.
             if writer.can_write_eof():
                 writer.write_eof()
-        # uvloop, which dedicated workers serve on, raises RuntimeError for a write to a transport its peer closed.
+        # uvloop, which sandbox runners serve on, raises RuntimeError for a write to a transport its peer closed.
         except (OSError, RuntimeError):
             writer.transport.abort()
