@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import itertools
 import os
 import re
 import signal
@@ -46,6 +47,8 @@ _POST_EXIT_READER_GRACE_SECONDS = 0.5
 # A running command reports the tail of its output at most this often, and only when it changed; replies show it live.
 _PROGRESS_INTERVAL_SECONDS = 0.5
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
+# Numbers every append to any output buffer, so a reader can tell which stream printed last.
+_APPEND_SEQUENCE = itertools.count(1)
 
 
 @dataclass
@@ -57,13 +60,14 @@ class _OutputBuffer:
     chunks: deque[str] = field(default_factory=deque)
     byte_count: int = 0
     truncated: bool = False
-    # Counts appends, so a reader can tell new output from a full buffer that rotated to the same size.
-    appends: int = 0
+    # The number of this buffer's latest append, so a reader can tell new output from a full buffer that rotated to
+    # the same size, and which stream printed last.
+    last_append: int = 0
 
     def append(self, text: str) -> None:
         if not text:
             return
-        self.appends += 1
+        self.last_append = next(_APPEND_SEQUENCE)
 
         encoded = text.encode("utf-8", errors="replace")
         if len(encoded) > self.max_bytes:
@@ -157,19 +161,25 @@ class _OutputProgress:
         self._stdout_buf = stdout_buf
         self._stderr_buf = stderr_buf
         self._sent = ""
-        self._appends = (0, 0)
+        self._last_appends = (0, 0)
         self._due = time.monotonic() + _PROGRESS_INTERVAL_SECONDS
 
     def poll(self) -> None:
         now = time.monotonic()
-        appends = (self._stdout_buf.appends, self._stderr_buf.appends)
-        if now < self._due or appends == self._appends:
+        last_appends = (self._stdout_buf.last_append, self._stderr_buf.last_append)
+        if now < self._due or last_appends == self._last_appends:
             return
         self._due = now + _PROGRESS_INTERVAL_SECONDS
-        self._appends = appends
+        self._last_appends = last_appends
         text = _progress_lines(self._stdout_buf)
         if errors := _progress_lines(self._stderr_buf):
-            text = f"{text}\nStderr:\n{errors}" if text else f"Stderr:\n{errors}"
+            # The stream that printed last ends the report, where the live view shows its tail.
+            if not text:
+                text = f"Stderr:\n{errors}"
+            elif self._stderr_buf.last_append > self._stdout_buf.last_append:
+                text = f"{text}\nStderr:\n{errors}"
+            else:
+                text = f"Stderr:\n{errors}\nStdout:\n{text}"
         if text and text != self._sent:
             self._sent = text
             self._report(text)

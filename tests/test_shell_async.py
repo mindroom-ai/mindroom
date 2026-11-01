@@ -835,6 +835,24 @@ async def test_a_running_commands_output_is_reported_whole(tmp_path: Path) -> No
     assert "A" * 56 not in shown_progress(reports[0])
 
 
+def test_the_stream_that_printed_last_ends_the_report() -> None:
+    """Warnings on stderr do not hide a build's newer progress on stdout, which the live view shows as the tail."""
+    reports: list[str] = []
+    stdout, stderr = _OutputBuffer(), _OutputBuffer()
+
+    with patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0):
+        progress = _OutputProgress(reports.append, stdout, stderr)
+        stderr.append("".join(f"warning: unused variable {index}\n" for index in range(80)))
+        stdout.append("step 1/2\n")
+        progress.poll()
+        stderr.append("error: link failed\n")
+        progress.poll()
+
+    assert reports[0].endswith("step 1/2")
+    assert reports[0].startswith("Stderr:\nwarning: unused variable 0")
+    assert reports[1].endswith("error: link failed")
+
+
 def test_a_quiet_commands_unchanged_output_is_not_read_again() -> None:
     """A command that prints nothing new, such as a dev server waiting for requests, costs its progress checks nothing."""
     reports: list[str] = []
