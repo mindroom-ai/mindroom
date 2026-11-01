@@ -366,7 +366,7 @@ class OutlookMailTools(Toolkit):
     ) -> str:
         """Refuse malformed arguments before any request, then run the operation.
 
-        Every result and Graph error of a call that names a mailbox repeats that mailbox; a connect prompt does not.
+        Every result and Graph error of a call that names a valid mailbox repeats it; a connect prompt does not.
         """
 
         def run() -> Mapping[str, object]:

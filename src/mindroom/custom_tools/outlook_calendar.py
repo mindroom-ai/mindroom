@@ -412,7 +412,7 @@ class OutlookCalendarTools(Toolkit):
     ) -> str:
         """Refuse malformed arguments before any request, then send the request and render its answer.
 
-        Every result and Graph error of a call that names a calendar owner repeats it; a connect prompt does not.
+        Every result and Graph error of a call that names a valid calendar owner repeats it; a connect prompt does not.
         """
 
         def run() -> Mapping[str, object]:

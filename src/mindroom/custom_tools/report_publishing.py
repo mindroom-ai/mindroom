@@ -52,8 +52,8 @@ class ReportPublishingTools(Toolkit):
 
         Args:
             source_type: Either dynamic_workflow_run or static_site.
-            source: For dynamic_workflow_run, the workflow_id and run_id of a completed run; for static_site, a
-                workspace-relative path to a directory with index.html or to one HTML file, and a title.
+            source: For dynamic_workflow_run, workflow_id and run_id of a completed run; for static_site, path
+                (workspace-relative, to a directory with index.html or to one HTML file) and title.
             confirm_public: Must be true; anyone with the link can open the report until it is revoked.
 
         """
