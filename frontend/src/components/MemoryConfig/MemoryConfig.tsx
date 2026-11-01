@@ -429,7 +429,7 @@ export function MemoryConfig() {
               helperText={
                 memory.embedder.provider === "ollama"
                   ? "Empty uses OLLAMA_HOST, else http://localhost:11434. A configured OLLAMA_HOST also takes precedence over this URL."
-                  : "Leave empty for official OpenAI API, or set for OpenAI-compatible servers"
+                  : "Empty uses OPENAI_BASE_URL, else the official OpenAI API. Set it for an OpenAI-compatible server."
               }
               htmlFor="host"
             >

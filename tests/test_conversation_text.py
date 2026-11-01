@@ -179,6 +179,18 @@ def test_user_messages_mindroom_stores_in_a_turn_are_nobodys_words(stored: Messa
     assert [kind for kind, _, _ in _kinds(run, agent_work=True)] == ["said", "reply", "runtime", "reply"]
 
 
+@pytest.mark.parametrize("agent_work", [False, True], ids=["conversation", "agent-work"])
+def test_a_turns_stored_context_is_neither_said_nor_agent_work(agent_work: bool) -> None:
+    """Memory results, live enrichment, and the approval receipt a run stores never reach a transcript or memory."""
+    run = _run(
+        Message(role="user", content="Deploy it."),
+        Message(role="user", content="<mindroom_transient_context>Alice lives in Delft.", add_to_agent_memory=False),
+        Message(role="assistant", content="Deployed."),
+    )
+
+    assert _kinds(run, agent_work=agent_work) == [("said", "@alice:x", "Deploy it."), ("reply", None, "Deployed.")]
+
+
 def test_a_prompt_a_mid_turn_compaction_marked_stays_the_requesters() -> None:
     """A mid-turn compaction marks the prompt its summary follows; only MindRoom's own marks make a message MindRoom's."""
     prompt = Message(role="user", content="Deploy it.")

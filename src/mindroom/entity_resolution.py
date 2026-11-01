@@ -9,9 +9,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
-from mindroom.matrix_identifiers import (
-    room_alias_identifier_candidates,
-)
+from mindroom.matrix_identifiers import managed_room_alias, room_alias_identifier_candidates
 from mindroom.requester_identity import INTERNAL_USER_ENTITY_NAME, mindroom_user_id, runtime_matrix_domain
 
 if TYPE_CHECKING:
@@ -40,6 +38,20 @@ def call_room_ownership_key(room_ref: str, runtime_paths: RuntimePaths) -> str:
     return room_alias_identifier_candidates(room_ref, runtime_paths)[-1]
 
 
+def names_room(config: Config, room_ref: str, runtime_paths: RuntimePaths) -> bool:
+    """Return whether the runtime can map a configured room reference to a room ID, as it does through MindRoom's record.
+
+    A configured room key and the alias MindRoom gives it name a room before the room is created and recorded.
+    """
+    room_keys = config.managed_room_keys()
+    domain = runtime_matrix_domain(runtime_paths)
+    return (
+        room_ref in room_keys
+        or room_ref in {managed_room_alias(room_key, domain, runtime_paths) for room_key in room_keys}
+        or matrix_state.resolve_room_id(room_ref, runtime_paths).startswith("!")
+    )
+
+
 def configured_call_agent_name_for_room(
     config: Config,
     room_id: str,
@@ -47,8 +59,13 @@ def configured_call_agent_name_for_room(
     *,
     room_aliases: Iterable[str] = (),
     invited_rooms_by_agent: Mapping[str, AbstractSet[str]],
+    personal_rooms_by_agent: Mapping[str, AbstractSet[str]],
 ) -> str | None:
-    """Return the sole calls-enabled agent for a live room, failing on ambiguity."""
+    """Return the sole calls-enabled agent for a live room, failing on ambiguity.
+
+    An agent creates its owners' personal rooms itself, so ``personal_rooms_by_agent`` lists rooms that are neither
+    configured nor invited.
+    """
     routable_names = configured_routable_entity_names_for_room(
         config,
         room_id,
@@ -59,9 +76,11 @@ def configured_call_agent_name_for_room(
     if len(call_agents) == 1:
         return next(iter(call_agents))
     for agent_name in config.calls.agents:
-        if not should_persist_invited_rooms(config, agent_name):
-            continue
-        if room_id in invited_rooms_by_agent.get(agent_name, ()):
+        invited = should_persist_invited_rooms(config, agent_name) and room_id in invited_rooms_by_agent.get(
+            agent_name,
+            (),
+        )
+        if invited or room_id in personal_rooms_by_agent.get(agent_name, ()):
             call_agents.add(agent_name)
     call_agents = sorted(call_agents)
     if len(call_agents) > 1:

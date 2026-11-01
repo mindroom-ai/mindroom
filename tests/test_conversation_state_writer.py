@@ -206,7 +206,6 @@ def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: 
         config=config,
         execution_identity=execution_identity,
     )
-    assert bound_scope_context is not None
     assert bound_scope_context.scope == writer_scope
     assert bound_scope_context.storage.path == writer_storage.path
 

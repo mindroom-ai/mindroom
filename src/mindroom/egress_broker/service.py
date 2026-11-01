@@ -41,6 +41,7 @@ from mindroom.egress_broker.secrets import (
 from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 from mindroom.egress_broker.user_services import consistent_read, effective_config, services_for_agent
 from mindroom.logging_config import get_logger
+from mindroom.origins import configured_public_url
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     EGRESS_BROKER_ENV_BY_KEY,
@@ -184,8 +185,8 @@ def manage_url(runtime_paths: RuntimePaths) -> str | None:
     The dashboard sets only shared and unscoped keys, so a refusal for a personal scope names no page without the
     personal one (see `ScopeInfo`).
     """
-    public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip().rstrip("/")
-    if not public_url:
+    public_url = configured_public_url(runtime_paths)
+    if public_url is None:
         return None
     if personal_page_served(runtime_paths):
         return f"{public_url}/connections/egress"

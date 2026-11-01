@@ -107,7 +107,7 @@ class TestMemoryIntegration:
             conversation=ConversationRef("test_session", (None, None)),
         )
 
-        # The recalled memory follows the prompt as transient context the run never stores.
+        # The recalled memory follows the prompt as turn context, which the run stores there.
         [request] = model.requests
         _stable, _turn, prompt, transient = request.messages
         assert prompt.role == "user"

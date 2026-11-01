@@ -170,7 +170,7 @@ The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each h
 Fable 5.1, Opus 5.5, and Sonnet 5.5 follow the same [tool-choice rules](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide): `auto` and `none` are allowed, while forcing `any` or a named tool returns an error.
 They reject `thinking: {type: disabled}` and manual `budget_tokens`; lower effort with `extra_kwargs.output_config: {effort: low}` instead, or use `extra_kwargs.thinking: {type: between_tools}` on [Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5#turn-off-up-front-thinking).
 With adaptive thinking, the notes these models write between tool calls are hidden, so responses show tool traces without that narration; Sonnet 5.5's `between_tools` setting returns those notes as text.
-Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because that turn had context of its own, such as memory search results or enrichment, or because the date in the system prompt has changed.
+Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because the date or other content of the system prompt has changed, or a compaction or replay limit rewrote earlier turns.
 With Sonnet 5.5's `between_tools` or on `bedrock_claude`, earlier turns' reasoning is never sent, while the current turn's reasoning between tool calls always is; Haiku 5.5 with `thinking: {type: disabled}` writes no reasoning to send.
 A reply that resumes after a tool approval or a delegation keeps its reasoning, unless its history was trimmed to fit the context window or another reply or a compaction ran in the conversation while it waited; then it answers without that reasoning, and with `between_tools` or on `bedrock_claude`, an account created on or after August 31, 2026 can get a 400 error ``Invalid `signature` in `thinking` block`` on that resume.
 
@@ -205,7 +205,7 @@ ZAI_API_KEY=...
 For Amazon Bedrock Claude, use standard AWS credential resolution:
 
 ```bash
-AWS_REGION=us-east-1          # AWS_DEFAULT_REGION is used when AWS_REGION is unset
+AWS_REGION=us-east-1          # or AWS_DEFAULT_REGION; either one exported in the process environment wins over the .env
 # Optional static credentials:
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
@@ -254,7 +254,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key
 ```
 
-This works for every model provider key and every variable a tool's settings read (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
+This works for every model provider key and every endpoint, project, region, Azure, and CLI login home variable MindRoom reads for model providers, every variable a tool's settings read, `TYPESAFE_API_KEY`, and the variables a skill's `requires.env` names (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
 The plain variable wins when the process environment or the `.env` beside `config.yaml` sets it, and a blank value or an unedited starter-template placeholder counts as unset, so an exported blank variable does not hide the `.env` value.
 
 ## OpenAI API Models
@@ -277,6 +277,8 @@ models:
 [GPT-6 Astra, GPT-6.1 Sol, and GPT-6.1 Terra require Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Luna supports function calling in Chat Completions only with `reasoning_effort: none`.
 Through a proxy or custom alias, set `api: responses` for GPT-6 models, or tool calls on Astra, Sol, Terra, and Luna fail at their default reasoning effort.
 Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
+A reply shows the model's reasoning while it thinks only when the model requests a reasoning summary, with `extra_kwargs.reasoning_summary: auto` or `extra_kwargs.reasoning: {summary: auto}`.
+An unverified OpenAI organization then gets `Your organization must be verified to generate reasoning summaries`; verify the organization or remove the setting.
 Selecting Responses keeps any `extra_kwargs.store: false` setting.
 How `api` affects tool search is described in [Native Server-Side Tool Search](../tools/dynamic-tools.md#native-server-side-tool-search).
 
@@ -351,6 +353,7 @@ defaults:
 
 Use `258000` as the context window: it fits the Codex window of every model above, which is smaller than the OpenAI API window.
 Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.1 Sol, GPT-6 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
+Codex models ask for a reasoning summary (`auto`, as the Codex CLI does) unless `extra_kwargs.reasoning_summary` or `extra_kwargs.reasoning.summary` sets another, so a reply shows the model's reasoning while it thinks.
 Codex clients also offer Ultra for Sol, Astra, and Terra, but Ultra's Codex-managed subagents are not available through MindRoom.
 The provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.
 The adapter depends on the Codex CLI login format and backend, so a Codex CLI update can require a MindRoom update; use `provider: openai` for the public API contract and API billing.

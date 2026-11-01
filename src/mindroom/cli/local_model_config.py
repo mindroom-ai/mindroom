@@ -12,7 +12,7 @@ from rich.markup import escape
 
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.cli.config import activate_cli_runtime, console
-from mindroom.config.main import Config
+from mindroom.config.main import Config, config_validation_summary
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 
 if TYPE_CHECKING:
@@ -68,6 +68,6 @@ def apply_local_model(*, model: str, base_url: str, api_key: str, path: Path | N
         source = _updated_source(original, runtime, model, base_url, api_key)
         _write_source(runtime.config_path, original, source)
     except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
-        console.print(f"[red]Local model configuration failed:[/red] {escape(str(exc))}")
+        console.print(f"[red]Local model configuration failed:[/red] {escape(config_validation_summary(exc))}")
         raise typer.Exit(1) from None
     console.print("[green]Default model now runs locally.[/green] Explicitly selected agent models were kept.")

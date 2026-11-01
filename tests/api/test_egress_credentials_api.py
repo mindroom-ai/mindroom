@@ -53,6 +53,7 @@ from mindroom.oauth.github import LOGIN_LOOKUP_TIMEOUT_SECONDS, github_oauth_pro
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.api.conftest import (
+    publish_api_payload,
     trusted_upstream_env,
     trusted_upstream_jwks,
     trusted_upstream_jwt,
@@ -62,9 +63,7 @@ from tests.api.test_oauth_api import (
     _fail_connection_status,
     _fake_provider,
     _oauth_credential_context,
-    _publish_config,
     _runtime_paths,
-    _use_runtime_auth_settings,
 )
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.oauth_test_utils import corrupt_oauth_credential_payload
@@ -165,8 +164,7 @@ def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_
     }
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    _publish_config(main.app, paths, payload)
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, payload)
     headers = {name: _signed_headers(key, name) for name in ("alice", "bob", "carol", "admin")}
     return {
         "client": TestClient(main.app, base_url="https://portal.example.org"),
@@ -215,8 +213,7 @@ def oauth_egress_portal(egress_portal: dict[str, Any], monkeypatch: pytest.Monke
         # The Connections portal lists a provider only for agents that have a tool using it.
         payload["agents"][agent]["tools"].append({"name": "google_drive", "defer": True})
     payload["egress_broker"]["services"].update(_oauth_services())
-    _publish_config(main.app, paths, payload)
-    _use_runtime_auth_settings(main.app)
+    _republish(egress_portal)
     return {**egress_portal, "providers": providers}
 
 
@@ -260,8 +257,7 @@ def mixed_log(audit_log: AuditLog) -> AuditLog:
 
 def _republish(portal: dict[str, Any]) -> None:
     """Publish the portal's edited config payload and apply it, as a dashboard save and reload do."""
-    _publish_config(main.app, portal["paths"], portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, portal["payload"])
 
 
 def _restart_with_env(portal: dict[str, Any], **env: str) -> None:
@@ -2672,7 +2668,10 @@ _LIMIT = {"restrict_only": True, "rules": [{"host": "api.github.com", "path_pref
     ("body", "fragment"),
     [
         ({"description": "no rules"}, "at least one rule"),
-        ({**_NOTES, "unknown_field": 1}, "unknown_field"),
+        (
+            {**_NOTES, "unknown_field": 1},
+            "unknown_field: Unknown key 'unknown_field': remove it or correct its spelling",
+        ),
         ({**_NOTES, "preset": "no_such_preset"}, "unknown egress preset"),
         (
             {"rules": [{"host": "https://api.notes.example.com", "auth": {"type": "bearer"}}]},

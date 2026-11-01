@@ -746,6 +746,44 @@ def test_google_oauth_provider_keeps_stale_client_when_refresh_is_unavailable(
     assert manager.load_credentials("google_oauth_client") == stale_credentials
 
 
+def test_google_oauth_provider_refuses_a_partial_pairing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pairing that lost part of its settings is a broken pairing to restore, not an install without a client."""
+    requests = _install_provisioning_transport(monkeypatch)
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_LOCAL_CLIENT_ID": "local-client"},
+    )
+
+    with pytest.raises(OAuthProviderError, match="Run `mindroom connect` to restore pairing"):
+        asyncio.run(google_oauth_provider("google_drive").client_config_resolution_async(runtime_paths))
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    ("status_code", "message"),
+    [
+        (401, "MindRoom pairing credentials are invalid or revoked"),
+        (403, "MindRoom pairing credentials are invalid or revoked"),
+        (503, "The MindRoom provisioning service has not configured the Google OAuth client yet"),
+    ],
+)
+def test_google_oauth_provider_refuses_a_failed_fetch_with_nothing_cached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    message: str,
+) -> None:
+    """A revoked or unready pairing with no cached client fails instead of looking like an install without a client."""
+    requests = _install_provisioning_transport(monkeypatch, status_code=status_code)
+    runtime_paths = _paired_runtime_paths(tmp_path)
+
+    with pytest.raises(OAuthProviderError, match=message):
+        asyncio.run(google_oauth_provider("google_drive").client_config_resolution_async(runtime_paths))
+    assert len(requests) == 1
+    assert get_runtime_credentials_manager(runtime_paths).load_credentials("google_oauth_client") is None
+
+
 def test_oauth_connection_required_payload_preserves_structured_fields() -> None:
     """OAuth-required tool payloads keep the established public field names."""
     exc = OAuthConnectionRequired(

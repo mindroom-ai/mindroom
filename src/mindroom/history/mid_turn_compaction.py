@@ -1,8 +1,8 @@
 """Compact a long turn between two of its model requests.
 
 Before every provider request the request is sized. When it would exceed the replay window minus
-``reserve_tokens``, everything except the leading system messages, the current prompt, transient messages, and
-queued-message notices is folded into one summary, and the turn continues from
+``reserve_tokens``, everything except the leading system messages, the current prompt, the current turn's transient
+messages, and queued-message notices is folded into one summary, and the turn continues from
 ``[system, current prompt, summary, ...]``. A request without persisted replay keeps that summary as an ordinary
 message of its own run.
 """
@@ -525,7 +525,9 @@ def _layout(messages: list[Message], prompt_id: str | None, *, scoped: bool) -> 
     previous: str | None = None
     for exchange in _exchanges(messages[leading:]):
         head = exchange[0]
-        if head is prompt or not head.add_to_agent_memory or (is_queued_notice_message(head) and not head.from_history):
+        if head is prompt or (
+            not head.from_history and (not head.add_to_agent_memory or is_queued_notice_message(head))
+        ):
             kept.extend(exchange)
         elif is_compaction_summary(head) and not head.from_history and not scoped:
             previous = compaction_summary_text(head)

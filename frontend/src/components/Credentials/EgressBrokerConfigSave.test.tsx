@@ -66,7 +66,8 @@ function storedBroker() {
   const config = useConfigStore.getState().config;
   return config
     ? (readConfigRoot(config, "egress_broker") as
-        { services: Record<string, unknown> } | undefined)
+        | { services: Record<string, unknown> }
+        | undefined)
     : undefined;
 }
 
@@ -184,7 +185,7 @@ describe("egress broker panel with the real config store", () => {
           detail: [
             {
               loc: ["egress_broker", "services", "bad", "rules", 0, "host"],
-              msg: "Value error, host must not contain scheme",
+              msg: "host must not contain scheme",
               type: "value_error",
             },
           ],

@@ -126,7 +126,9 @@
         }
       ],
       "instructions": "You are a helpful assistant.",
-      "reasoning": {},
+      "reasoning": {
+        "summary": "auto"
+      },
       "store": false,
       "tool_choice": "none",
       "tools": [

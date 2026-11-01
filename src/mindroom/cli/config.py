@@ -338,7 +338,7 @@ def _append_missing_env_defaults(
     """Append missing env defaults without changing existing user-owned values."""
     from dotenv import dotenv_values  # noqa: PLC0415
 
-    existing_values = dotenv_values(env_path)
+    existing_values = dotenv_values(env_path, encoding="utf-8-sig")
     missing_defaults = [(key, value) for key, value in defaults if key not in existing_values]
     if not missing_defaults:
         return False

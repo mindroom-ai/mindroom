@@ -121,11 +121,11 @@ logger = get_logger(__name__)
 
 _STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
 # Replayed thinking whose earlier context changed is dropped instead of failing the request. The system prompt carries
-# the date and the turn's memory and enrichment, a turn's transient context leaves the history after it, and
-# compaction and replay limits rewrite earlier turns, so a request regularly replays thinking produced after a different
-# prefix; the API rejects such a request by default on accounts created from 2026-08-31. The default binding goes
-# only on the routes shown to accept the beta, because a platform rejects a beta it does not take, so not on Bedrock;
-# a request without a binding leaves out earlier turns' thinking instead (``_replays_earlier_thinking``).
+# the date and the turn's memory and enrichment, and compaction and replay limits rewrite earlier turns, so a request
+# regularly replays thinking produced after a different prefix; the API rejects such a request by default on accounts
+# created from 2026-08-31. The default binding goes only on the routes shown to accept the beta, because a platform
+# rejects a beta it does not take, so not on Bedrock; a request without a binding leaves out earlier turns' thinking
+# instead (``_replays_earlier_thinking``).
 _THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 _THINKING_BINDING_ROUTES: frozenset[ClaudeRouteKind] = frozenset({"anthropic", "vertexai_claude"})
 _VERTEX_ENDPOINTS = {
@@ -776,7 +776,9 @@ def _anthropic_kwargs(authored: dict[str, Any], api_key: str | None, runtime_pat
     """Fill the direct route's key and, unless ``client_params`` sets one, its endpoint from the runtime env."""
     kwargs: dict[str, Any] = {**authored, "api_key": api_key} if api_key else dict(authored)
     client_params = kwargs.get("client_params") or {}
-    if "base_url" not in client_params and (base_url := runtime_paths.env_value(ENDPOINT_VARIABLES["anthropic"])):
+    if "base_url" not in client_params and (
+        base_url := get_secret_from_env(ENDPOINT_VARIABLES["anthropic"], runtime_paths=runtime_paths)
+    ):
         kwargs["client_params"] = {**client_params, "base_url": base_url}
     return kwargs
 
@@ -784,16 +786,13 @@ def _anthropic_kwargs(authored: dict[str, Any], api_key: str | None, runtime_pat
 def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:
     """Fill Vertex project, region, endpoint, and Google credentials from the runtime env; a key is ignored."""
     kwargs = {key: value for key, value in authored.items() if key != "api_key"}
-    if "project_id" not in kwargs and (
-        project_id := get_secret_from_env(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"], runtime_paths=runtime_paths)
+    for config_key, env_key in (
+        ("project_id", VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]),
+        ("region", VERTEXAI_CLAUDE_ENV_BY_KEY["region"]),
+        ("base_url", ENDPOINT_VARIABLES["vertexai_claude"]),
     ):
-        kwargs["project_id"] = project_id
-    if "region" not in kwargs and (
-        region := get_secret_from_env(VERTEXAI_CLAUDE_ENV_BY_KEY["region"], runtime_paths=runtime_paths)
-    ):
-        kwargs["region"] = region
-    if "base_url" not in kwargs and (base_url := runtime_paths.env_value(ENDPOINT_VARIABLES["vertexai_claude"])):
-        kwargs["base_url"] = base_url
+        if config_key not in kwargs and (value := get_secret_from_env(env_key, runtime_paths=runtime_paths)):
+            kwargs[config_key] = value
     return with_runtime_application_credentials(kwargs, runtime_paths)
 
 
@@ -832,13 +831,10 @@ def _bedrock_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> di
     explicit_profile = authored.get("aws_profile")
     if "session" in kwargs:
         return kwargs
-    if "aws_region" not in kwargs:
-        aws_region = get_secret_from_env(
-            AWS_ENV_BY_KEY["region"],
-            runtime_paths=runtime_paths,
-        ) or get_secret_from_env(AWS_ENV_BY_KEY["default_region"], runtime_paths=runtime_paths)
-        if aws_region:
-            kwargs["aws_region"] = aws_region
+    if "aws_region" not in kwargs and (
+        found := runtime_paths.first_env_value((AWS_ENV_BY_KEY["region"], AWS_ENV_BY_KEY["default_region"]))
+    ):
+        kwargs["aws_region"] = found[0]
     if "aws_access_key" in kwargs or "aws_secret_key" in kwargs:
         _bedrock_static_credentials(kwargs, runtime_paths)
         if explicit_profile:
