@@ -14,6 +14,7 @@ from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.external_trigger_manager import ExternalTriggerManagerTools
+from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
@@ -23,8 +24,8 @@ from tests.conftest import (
     event_serving_client,
     make_conversation_reader_mock,
     make_relation_lookup,
-    make_thread_reply_lookup,
 )
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -338,10 +339,18 @@ async def test_non_admin_cannot_target_other_agent_or_room(tmp_path: Path) -> No
 async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(tmp_path: Path) -> None:
     """A reply event ID as target_thread_id is stored as its thread root, since Matrix rejects a reply as a thread root."""
     tool = ExternalTriggerManagerTools()
-    context = replace(
-        _context(tmp_path),
-        relations=make_thread_reply_lookup("$reply:example.org", "$root:example.org"),
+    state = MatrixState.load(_runtime_paths(tmp_path))
+    state.add_room("lobby", "!lobby:example.org", "#lobby:example.org", "Lobby")
+    save_matrix_state(state, _runtime_paths(tmp_path))
+    homeserver = event_serving_client(
+        "$reply:example.org",
+        content={
+            "msgtype": "m.text",
+            "body": "reply",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$root:example.org"},
+        },
     )
+    context = replace(_context(tmp_path), relations=make_relation_lookup(client=homeserver))
     with tool_runtime_context(context):
         payload = _payload(
             await tool.create_trigger("replies", public_key=_PUBLIC_KEY, target_thread_id="$reply:example.org"),
@@ -351,6 +360,7 @@ async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(tmp_pa
     assert payload["status"] == "ok"
     assert payload["trigger"]["target"]["thread_id"] == "$root:example.org"
     assert [trigger["target"]["thread_id"] for trigger in listed["triggers"]] == ["$root:example.org"]
+    homeserver.room_get_event.assert_awaited_with("!lobby:example.org", "$reply:example.org")
 
 
 @pytest.mark.asyncio
