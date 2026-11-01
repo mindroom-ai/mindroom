@@ -68,6 +68,16 @@ def test_older_openai_models_count_with_their_own_encoding(monkeypatch: pytest.M
     assert count(counter, "hello world") == TokenCount(11, "exact")
 
 
+def test_a_fine_tuned_model_counts_with_its_base_model_encoding() -> None:
+    """Tiktoken maps every ft:gpt-4 prefix to cl100k_base, including fine-tunes of gpt-4.1, which use o200k_base."""
+    for model_id, encoding in (
+        ("ft:gpt-4.1-2025-04-14:acme::abc123", "o200k_base"),
+        ("ft:gpt-3.5-turbo-0125:acme::abc123", "cl100k_base"),
+    ):
+        counter = counter_for_model(ModelIdentity(id=model_id, provider="openai"), local_encoder=True)
+        assert counter.key == f"tiktoken:{encoding}"
+
+
 def test_unmapped_ids_estimate_with_their_family_margin() -> None:
     load_o200k()
     text = "Ein Satz mit Zahlen 2026-10-31 und `code()`.\n" * 20

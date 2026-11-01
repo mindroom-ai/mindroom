@@ -56,7 +56,7 @@ _encoders: dict[str, _Encoder] = {}
 
 
 def _encoder(name: str) -> _Encoder:
-    return _encoders.setdefault(name, _Encoder())
+    return _encoders.get(name) or _encoders.setdefault(name, _Encoder())
 
 
 def _load(name: str) -> tiktoken.Encoding:
@@ -133,7 +133,13 @@ def _scaled_o200k_tokens(margin: float, text: str) -> int | None:
 
 
 def _own_encoding(name: str) -> str | None:
-    """Return the encoding tiktoken maps an OpenAI model id to, or None for an id it does not know."""
+    """Return the encoding tiktoken maps an OpenAI model id to, or None for an id it does not know.
+
+    A fine-tuned id (``ft:<base>:<org>::<id>``) maps by its base model, since tiktoken maps every ``ft:gpt-4`` prefix,
+    fine-tunes of gpt-4.1 included, to cl100k_base.
+    """
+    if name.startswith("ft:"):
+        name = name.removeprefix("ft:").split(":", 1)[0]
     try:
         encoding = tiktoken.model.encoding_name_for_model(name)
     except KeyError:
