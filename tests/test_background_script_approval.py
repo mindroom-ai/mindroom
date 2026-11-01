@@ -44,8 +44,9 @@ if TYPE_CHECKING:
 
     from mindroom.approval.manager import ApprovalManager
 
-# A background approval waiter wakes as its decision commits; this bound only
-# keeps a lost wake from hanging the test until the call's 30-second deadline.
+# An approval card send and a background approval waiter each finish as soon as
+# their journal writes commit; this bound only keeps a lost wake from hanging the
+# test until the call's 30-second deadline.
 _SETTLED_DECISION_WAIT_SECONDS = 5.0
 
 
@@ -387,7 +388,7 @@ async def test_cancelled_background_call_is_denied_retired_and_pruned_with_run(t
         ),
     )
     try:
-        await asyncio.wait_for(initial_sent.wait(), timeout=1.0)
+        await asyncio.wait_for(initial_sent.wait(), timeout=_SETTLED_DECISION_WAIT_SECONDS)
 
         settled = await manager.settle_background_approval(
             _origin(),
@@ -630,7 +631,7 @@ async def test_a_detached_ending_delivers_only_the_cards_it_decided(tmp_path: Pa
         ),
     )
     try:
-        await asyncio.wait_for(initial_sent.wait(), timeout=1.0)
+        await asyncio.wait_for(initial_sent.wait(), timeout=_SETTLED_DECISION_WAIT_SECONDS)
         if ending == "call":
             assert await manager.settle_background_approval(_origin(), reason="Cancelled.") is True
         elif ending == "run":

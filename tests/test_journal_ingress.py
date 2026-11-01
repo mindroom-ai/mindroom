@@ -53,7 +53,7 @@ from mindroom.pending_event_worker import _BATCH_SIZE, _MAX_RETRY_DELAY_SECONDS,
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
 from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import claim_continuation
-from tests.conftest import request_envelope
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, request_envelope
 from tests.journal_helpers import admit_dispatch_event
 from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
@@ -2335,7 +2335,7 @@ class TestRoomRetryBackoff:
             await TestPendingEventWorker._admit(alice, text_event(event_id))
         worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda event: event.event_id in live)
         try:
-            await asyncio.wait_for(worker.drain_once(), timeout=1)
+            await asyncio.wait_for(worker.drain_once(), timeout=SETTLE_TIMEOUT_SECONDS)
             assert attempts == ["$first", "$second"]
             await _eventually(lambda: len(retry_sleeps) == 1)
             assert retry_sleeps[0][0] == 1
@@ -2373,7 +2373,7 @@ class TestRoomRetryBackoff:
         await TestPendingEventWorker._admit(alice, text_event("$healthy"), "!healthy:example.org")
         worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: False)
         try:
-            await asyncio.wait_for(worker.drain_once(), timeout=1)
+            await asyncio.wait_for(worker.drain_once(), timeout=SETTLE_TIMEOUT_SECONDS)
             assert sorted(attempts) == ["$earlier", "$healthy"]
             await _eventually(lambda: len(retry_sleeps) == 1)
             assert retry_sleeps[0][0] == 1
@@ -2640,7 +2640,7 @@ class TestRoomRetryBackoff:
             await TestPendingEventWorker._admit(alice, text_event("$later"))
             await TestPendingEventWorker._admit(alice, text_event("$healthy"), "!healthy:example.org")
             if drain:
-                await asyncio.wait_for(worker.drain_once(), timeout=1)
+                await asyncio.wait_for(worker.drain_once(), timeout=SETTLE_TIMEOUT_SECONDS)
             else:
                 await _dispatch_worker_pass(worker)
 
