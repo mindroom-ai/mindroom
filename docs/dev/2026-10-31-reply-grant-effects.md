@@ -12,7 +12,7 @@ It records reasons, rejected alternatives, evidence, and accepted limitations; t
 - Every grant change starts calls after its revocation, including an authoritative refresh that still leaves a refresh owed: each call start rechecks its requester against the current grants, so a grant room the router cannot query denies only the calls it alone would allow.
 - Every loss of grant authority restarts the refresh backoff, so the next router sync refreshes at once.
   The backoff bounds retries that no new loss asked for; an invalidation makes every grant room unready, so waiting out an earlier backoff held every grant-room requester's replies for up to 300 s whenever one grant room the router cannot query kept the refresh failing.
-  A failing refresh therefore runs once per loss plus its backed-off retries, the rate a healthy refresh already runs at.
+  A failing refresh therefore runs once per loss, as a healthy one does, plus its backed-off retries.
 - Every loss of grant authority ends the calls it denied: each invalidation and each room a pre-admission fence makes unready schedule every bot's revocation.
   The former latch issued one revocation wave per gap and reopened only when nothing remained to refresh, so a refresh that readied one grant room while another stayed unqueryable restored authority without reopening it, and a call authorized through the ready room survived the next invalidation until something else rechecked it.
   The latch came from #1921, which turned invalidation from full reconciliation (a room-state read per call room) into revocation only; revocation reads no Matrix state for calls that still pass.
