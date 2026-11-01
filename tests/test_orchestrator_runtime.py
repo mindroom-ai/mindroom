@@ -618,21 +618,23 @@ class TestAgentBot(AgentBotTestBase):
     async def test_orchestrator_main_fails_after_losing_its_event_journal(self, tmp_path: Path) -> None:
         """A runtime that stopped because it lost its journal exits with a failure, so a supervisor restarts it."""
         reset_runtime_state()
+
+        async def _block_until_cancelled(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
         mock_orchestrator = _mock_runtime_orchestrator()
-        mock_orchestrator.start = AsyncMock(side_effect=lambda: asyncio.Event().wait())
+        # The orchestrator keeps running, so only the journal watcher can end the runtime.
+        mock_orchestrator.start = AsyncMock(side_effect=_block_until_cancelled)
         mock_orchestrator.stop = AsyncMock()
         mock_orchestrator.running = False
         mock_orchestrator.event_journal_still_usable = AsyncMock(return_value=False)
-
-        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
-            await asyncio.Event().wait()
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
-            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_block_until_cancelled),
             patch("mindroom.orchestrator._EVENT_JOURNAL_CHECK_SECONDS", 0),
             pytest.raises(EventJournalLostError),
         ):

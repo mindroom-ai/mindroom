@@ -1595,8 +1595,9 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
     idle = asyncio.Event()
     calls: list[PreparedTurn] = []
 
-    async def record_dispatch(batch: PreparedTurn) -> None:
+    async def record_dispatch(batch: PreparedTurn) -> bool:
         calls.append(batch)
+        return True
 
     async def wait_for_thread_response_idle(_room_id: str, _thread_id: str | None) -> None:
         await idle.wait()
@@ -3253,8 +3254,9 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
     )
     calls: list[PreparedTurn] = []
 
-    async def record_dispatch(turn: PreparedTurn) -> None:
+    async def record_dispatch(turn: PreparedTurn) -> bool:
         calls.append(turn)
+        return True
 
     with patch.object(
         TurnDispatcher,
@@ -6628,31 +6630,19 @@ def test_prepared_turn_preserves_formatted_body_mentions() -> None:
     assert "@mindroom_test_agent:localhost" in batch.payload.formatted_bodies[0]
 
 
-def _mentioned_matrix_ids_from_source(source: dict[str, object]) -> list[MatrixID]:
-    content = source.get("content", {})
-    if not isinstance(content, dict):
-        return []
-    mentioned_ids: list[MatrixID] = []
-    for candidate in (content, content.get("m.new_content")):
-        if mentioned_ids or not isinstance(candidate, dict):
-            continue
-        mentions = candidate.get("m.mentions")
-        if not isinstance(mentions, dict):
-            continue
-        mentioned_ids = [
-            MatrixID.parse(user_id) for user_id in mentions.get("user_ids", []) if isinstance(user_id, str)
-        ]
-    return mentioned_ids
-
-
 async def _capture_gate_dispatches(
     bot: AgentBot,
     room: nio.MatrixRoom,
     enqueued: Sequence[tuple[nio.Event | PreparedIngress, str, str | None, dict[str, object]]],
     *,
     captured_plan_extra_content: list[object] | None = None,
+    captured_context_event_ids: list[str] | None = None,
 ) -> tuple[list[MessageEnvelope], list[list[object]], list[DispatchPayloadWithAttachmentsRequest]]:
-    """Dispatch queued events through the real handoff path and capture final envelopes."""
+    """Dispatch queued events through the real handoff path and capture final envelopes.
+
+    The dispatch context reads no thread history; its mentions are the resolver's for the turn's payload, as
+    production's are. ``captured_context_event_ids`` collects the events whose context took that normal path.
+    """
     envelopes: list[MessageEnvelope] = []
     media_batches: list[list[object]] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
@@ -6685,18 +6675,25 @@ async def _capture_gate_dispatches(
         return await original_coalescing_thread_id(room, event)
 
     async def extract_dispatch_context(
-        _room: nio.MatrixRoom,
-        event: nio.Event | PreparedIngress,
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
         *,
         thread_id: str | None,
-        **_kwargs: object,
+        payload_metadata: DispatchPayloadMetadata | None = None,
     ) -> object:
+        if captured_context_event_ids is not None:
+            captured_context_event_ids.append(event.event_id)
+        mentioned_agents, _am_i_mentioned = bot._conversation_resolver.pre_hydration_mentions(
+            room=room,
+            event=event,
+            payload_metadata=payload_metadata,
+        )
         return MessageContext(
             am_i_mentioned=True,
             is_thread=thread_id is not None,
             thread_id=thread_id,
             thread_history=[],
-            mentioned_agents=_mentioned_matrix_ids_from_source(event.source),
+            mentioned_agents=mentioned_agents,
             has_non_agent_mentions=False,
         )
 
@@ -6896,18 +6893,13 @@ async def test_trusted_router_relay_context_uses_handoff_ingress_metadata(tmp_pa
         has_non_agent_mentions=False,
     )
 
-    with (
-        patch.object(
-            bot._conversation_resolver,
-            "extract_trusted_router_relay_context",
-            new=AsyncMock(return_value=trusted_context),
-        ) as trusted_context_mock,
-        patch.object(
-            bot._conversation_resolver,
-            "extract_dispatch_context",
-            new=AsyncMock(return_value=trusted_context),
-        ) as normal_context_mock,
-    ):
+    normal_context_event_ids: list[str] = []
+
+    with patch.object(
+        bot._conversation_resolver,
+        "extract_trusted_router_relay_context",
+        new=AsyncMock(return_value=trusted_context),
+    ) as trusted_context_mock:
         envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
             bot,
             room,
@@ -6919,10 +6911,11 @@ async def test_trusted_router_relay_context_uses_handoff_ingress_metadata(tmp_pa
                     {"requester_user_id": "@external:example.org"},
                 ),
             ],
+            captured_context_event_ids=normal_context_event_ids,
         )
 
     trusted_context_mock.assert_awaited_once()
-    normal_context_mock.assert_not_awaited()
+    assert normal_context_event_ids == []
     assert envelopes[0].source_kind == "trusted_internal_relay"
 
 
@@ -7071,13 +7064,13 @@ async def test_coalesced_non_primary_mention_reaches_final_envelope(tmp_path: Pa
     """Mention metadata from non-primary coalesced events should reach context extraction."""
     bot = _make_bot(tmp_path, debounce_ms=10)
     room = _make_room()
-    first = _text_event(event_id="$plain", body="first")
-    second = _mention_text_event(
+    # The batch's last event is its primary one, so the mention rides on an earlier event.
+    first = _mention_text_event(
         event_id="$mention",
-        body="@test_agent second",
+        body="@test_agent first",
         mentioned_user_ids=["@mindroom_test_agent:localhost"],
-        server_timestamp=1001,
     )
+    second = _text_event(event_id="$plain", body="second", server_timestamp=1001)
 
     envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
         bot,
