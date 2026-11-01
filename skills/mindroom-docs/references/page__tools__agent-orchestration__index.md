@@ -630,10 +630,11 @@ Which functions an agent gets depends on what it is:
 | `create_agent(name, display_name, role, instructions=None, tools=None)` | Agents with `created_agents_per_owner` above 0 | Creates an agent for the person asking, with some of the creator's tools, and returns its Matrix ID |
 | `agent_settings()` | Every generated agent | Shows the agent's editable settings, its owners if it was created, and the toolkit names `tools` may use as `allowed_tools` |
 | `update_agent(changes)` | Every generated agent | Changes its `display_name`, `role`, `instructions`, or `tools`; for a created agent, its owner may also change `co_owners` |
+| `set_avatar(attachment_id)` | Every generated agent | Sets its Matrix profile picture to an image attached in the conversation, cropped to its center square |
 | `delete_agent()` | Created agents | Deletes the agent for its owner; its Matrix account stays, so the name stays taken |
 
 Only an agent's owners may read or change it, and only a created agent's owner may delete it or change its co-owners.
-`create_agent`, `update_agent`, and `delete_agent` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
+`create_agent`, `update_agent`, `set_avatar`, and `delete_agent` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
 In a room without the router the call is denied, and the agent recovers with `invite_router` as described in [When the Router Is Missing](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing).
 Scripts and workflow participants cannot call it, and it cannot be deferred.
 

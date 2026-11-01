@@ -12,11 +12,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.final_delivery import Cancelled, Completed, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
+from mindroom.llm.runs import RunStatus
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import SpanOutcome
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
+from mindroom.tool_system.events import FailedReply
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import _handled_response_event_id, make_test_agent_bot
 from tests.bot_helpers import _noop_typing_indicator as _noop_typing  # noqa: F401
@@ -131,6 +133,27 @@ def streamed_answer(answer: Callable[..., Awaitable[str]]) -> Callable[..., Asyn
                 completed_tools=(),
             )
         yield text
+
+    return stream
+
+
+def failed_answer(text: str) -> Callable[..., AsyncIterator[FailedReply]]:
+    """Return a turn stream whose model fails, ending in ``text`` as the reply shown in place of an answer.
+
+    Like the turn driver after a model error, the stream records the turn interrupted before it yields that reply.
+    """
+
+    async def stream(*_args: object, sinks: TurnSinks | None = None, **_kwargs: object) -> AsyncIterator[FailedReply]:
+        if sinks is not None and sinks.turn_recorder is not None:
+            sinks.turn_recorder.record_interrupted(
+                run_id=None,
+                run_metadata=None,
+                assistant_text="",
+                completed_tools=(),
+                interrupted_tools=(),
+                original_status=RunStatus.error,
+            )
+        yield FailedReply(text, RuntimeError(text))
 
     return stream
 

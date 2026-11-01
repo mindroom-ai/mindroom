@@ -1239,14 +1239,15 @@ async def test_the_request_cap_ends_a_runaway_tool_loop_and_logs_the_pinned_even
 
 
 @pytest.mark.asyncio
-async def test_a_turn_that_reads_the_approval_receipt_keeps_it_for_its_run_and_never_stores_it(
+async def test_a_turn_that_reads_the_approval_receipt_keeps_it_for_its_run_which_stops_without_storing_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """The bound receipt follows the reading run's input in each of its requests and never enters a stored run.
+    """The bound receipt follows the reading run's input in each of its requests.
 
-    The model switch ends the first attempt, so the turn's answer comes from a second attempt without it.
+    The model switch stops that run, so it stores no turn context, and the turn's answer comes from a second attempt
+    without the receipt.
     """
     reply = _reply(
         tmp_path,

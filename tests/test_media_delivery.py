@@ -147,7 +147,7 @@ def test_animation_is_reduced_to_first_frame_with_disclosure() -> None:
 
 def test_decoded_pixel_limit_rejects_before_loading(monkeypatch: pytest.MonkeyPatch) -> None:
     """Compressed images cannot bypass the decoded size limit."""
-    monkeypatch.setattr(media_delivery, "_MAX_PIXELS", 100)
+    monkeypatch.setattr(media_delivery, "MAX_DECODED_PIXELS", 100)
     result = media_delivery.image_result(image_bytes(), metadata={})
     assert not result.images
     assert "pixel" in result.content

@@ -111,7 +111,7 @@ Without either, deliveries post to the room's main timeline.
 The requester who asks for the trigger becomes its owner and must be a human user, not a bot account.
 An administrator who creates a trigger for another agent or room still owns it.
 Shared agents and teams can only be targeted in rooms already configured for them.
-A [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) creating its own trigger may target its current room even when that room is not listed in `rooms`.
+A [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances), [personal agent](https://docs.mindroom.chat/personal-agents/), or [created agent](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) creating its own trigger may also target its current room when no agent or team lists that room in `rooms`, such as a personal room.
 Triggers never create rooms or make agents join rooms.
 
 ### Managing triggers
@@ -225,7 +225,7 @@ A successful request returns `202` with `accepted: true`, the `event_id`, and th
 | `413` | `External trigger body exceeds configured limit` | Shrink the body or raise `max_body_bytes`. |
 | `422` | `External trigger kind is not allowed` | `kind` is not in the trigger's `allowed_kinds`; other `422` responses list invalid body fields. |
 | `429` | `External trigger replay limit reached` | Too many recent events for one trigger; wait for older entries to expire. |
-| `503` | `External trigger target runtime is not available` | The router or target bot is not running or not joined to the room yet; retry later. |
+| `503` | `External trigger target runtime is not available` | The router or target bot is not running or not joined to the room yet; retry later. A room without the router, such as a personal room, needs the agent to call [`invite_router`](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing) first. |
 
 ## Watcher Behavior
 

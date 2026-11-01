@@ -30,7 +30,7 @@ from mindroom.agent_loop.run import (
 )
 from mindroom.agent_loop.tools import PreparedTools, sorted_specs
 from mindroom.history.request_messages import build_resume_request
-from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
@@ -381,7 +381,8 @@ class _MemberRuns:
         try:
             async with closing_async_stream(stream):
                 async for event in stream:
-                    if not isinstance(event, RunFinished):
+                    # A team reply shows no member's live tool output.
+                    if not isinstance(event, RunFinished | ToolProgress):
                         self.emit(MemberEvent(member.id, member.name, run_id, event))
         except Exception as error:
             logger.warning(

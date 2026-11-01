@@ -74,7 +74,7 @@ def strip_enrichment_blocks(text: str) -> str:
 
 
 def render_transient_context(parts: Sequence[str]) -> str:
-    """Wrap non-persisted current-turn context in one recognizable block."""
+    """Wrap per-turn MindRoom context, such as memory results, transient enrichment, or notes, in one block."""
     body = "\n\n".join(part for part in parts if part)
     if not body:
         return ""

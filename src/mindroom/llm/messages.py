@@ -106,10 +106,10 @@ class Message:
     """One message in a model conversation.
 
     A ``system`` message is a prompt, which history never replays and only a paused run stores. ``from_history``
-    marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks context sent
-    to the model that history never replays: a run that pauses stores it, so its resume sends it again where it was,
-    and a run that ends drops it. Rows rewritten outside that ending, minimal mode's checkpoint and a paused delegated
-    child that recovery stopped, keep it but never replay.
+    marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks turn context
+    MindRoom sent to the model rather than conversation, such as memory results and the approval receipt: a run stores
+    it where it was sent, unless it stopped after a call, so a resume and later turns send it again unchanged, except
+    under a message limit, while text summaries and the readers of what was said leave it out.
     """
 
     role: Literal["system", "user", "assistant", "tool"]
@@ -164,7 +164,7 @@ class Message:
 
         A flag is written only when it differs from its default, which ``from_dict`` reads for an absent key:
         ``from_history`` and ``stop_after_tool_call`` only when True, and ``add_to_agent_memory`` only when False, which
-        a paused run's context holds.
+        a run's turn context holds.
         """
         values: dict[str, Any] = {
             "id": self.id,

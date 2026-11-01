@@ -546,9 +546,7 @@ class Driver(ABC):
             turn.body.append(self._message(run_id, "a", "assistant", f"answer {run_id}", metrics=_usage(2)))
             record.status = RunStatus.completed
             record.content = f"answer {run_id}"
-        record.messages = [
-            message for message in turn.messages if message.add_to_agent_memory and not message.from_history
-        ]
+        record.messages = [message for message in turn.messages if not message.from_history]
         record.metrics = RunMetrics(tokens=_usage(turn.tokens + 2).tokens)
         if isinstance(record, TeamRunRecord):
             record.ended_member_runs = []

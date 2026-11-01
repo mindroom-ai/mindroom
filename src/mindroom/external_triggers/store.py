@@ -657,23 +657,24 @@ def _validate_target(record: ExternalTriggerRecord, config: Config, runtime_path
     )
     if target.agent in configured_entities:
         return
-    if _targets_private_current_room(record, config, runtime_paths):
+    # A room with configured responders answers only them, so another agent's trigger there would never be answered.
+    if not configured_entities and _targets_own_current_room(record, config, runtime_paths):
         return
     msg = "external trigger target room must already be configured for the target entity"
     raise ExternalTriggerStoreError(msg)
 
 
-def _targets_private_current_room(
+def _targets_own_current_room(
     record: ExternalTriggerRecord,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> bool:
-    """Allow private current-agent triggers for dynamic rooms created outside config."""
+    """Allow a private, personal, or created agent's own trigger for the dynamic room it was created in."""
     target = record.target
     if target.agent != record.created_by_agent_name:
         return False
     agent_config = config.agents.get(target.agent)
-    if agent_config is None or agent_config.private is None:
+    if agent_config is None or (agent_config.private is None and config.generated_agent(target.agent) is None):
         return False
     return _room_ids_match(target.room_id, record.created_in_room_id, runtime_paths)
 

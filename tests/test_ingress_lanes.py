@@ -1373,8 +1373,9 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
     response_running = asyncio.Event()
     calls: list[PreparedTurn] = []
 
-    async def record_dispatch(batch: PreparedTurn) -> None:
+    async def record_dispatch(batch: PreparedTurn) -> bool:
         calls.append(batch)
+        return True
 
     async def blocked_response() -> None:
         await lifecycle_lock.acquire()

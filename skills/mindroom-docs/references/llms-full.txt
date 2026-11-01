@@ -2095,7 +2095,7 @@ The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each h
 Fable 5.1, Opus 5.5, and Sonnet 5.5 follow the same [tool-choice rules](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide): `auto` and `none` are allowed, while forcing `any` or a named tool returns an error.
 They reject `thinking: {type: disabled}` and manual `budget_tokens`; lower effort with `extra_kwargs.output_config: {effort: low}` instead, or use `extra_kwargs.thinking: {type: between_tools}` on [Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5#turn-off-up-front-thinking).
 With adaptive thinking, the notes these models write between tool calls are hidden, so responses show tool traces without that narration; Sonnet 5.5's `between_tools` setting returns those notes as text.
-Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because that turn had context of its own, such as memory search results or enrichment, or because the date in the system prompt has changed.
+Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because the date or other content of the system prompt has changed, or a compaction or replay limit rewrote earlier turns.
 With Sonnet 5.5's `between_tools` or on `bedrock_claude`, earlier turns' reasoning is never sent, while the current turn's reasoning between tool calls always is; Haiku 5.5 with `thinking: {type: disabled}` writes no reasoning to send.
 A reply that resumes after a tool approval or a delegation keeps its reasoning, unless its history was trimmed to fit the context window or another reply or a compaction ran in the conversation while it waited; then it answers without that reasoning, and with `between_tools` or on `bedrock_claude`, an account created on or after August 31, 2026 can get a 400 error ``Invalid `signature` in `thinking` block`` on that resume.
 
@@ -2202,6 +2202,8 @@ models:
 [GPT-6 Astra, GPT-6.1 Sol, and GPT-6.1 Terra require Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Luna supports function calling in Chat Completions only with `reasoning_effort: none`.
 Through a proxy or custom alias, set `api: responses` for GPT-6 models, or tool calls on Astra, Sol, Terra, and Luna fail at their default reasoning effort.
 Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
+A reply shows the model's reasoning while it thinks only when the model requests a reasoning summary, with `extra_kwargs.reasoning_summary: auto` or `extra_kwargs.reasoning: {summary: auto}`.
+An unverified OpenAI organization then gets `Your organization must be verified to generate reasoning summaries`; verify the organization or remove the setting.
 Selecting Responses keeps any `extra_kwargs.store: false` setting.
 How `api` affects tool search is described in [Native Server-Side Tool Search](https://docs.mindroom.chat/tools/dynamic-tools/#native-server-side-tool-search).
 
@@ -2276,6 +2278,7 @@ defaults:
 
 Use `258000` as the context window: it fits the Codex window of every model above, which is smaller than the OpenAI API window.
 Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.1 Sol, GPT-6 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
+Codex models ask for a reasoning summary (`auto`, as the Codex CLI does) unless `extra_kwargs.reasoning_summary` or `extra_kwargs.reasoning.summary` sets another, so a reply shows the model's reasoning while it thinks.
 Codex clients also offer Ultra for Sol, Astra, and Terra, but Ultra's Codex-managed subagents are not available through MindRoom.
 The provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.
 The adapter depends on the Codex CLI login format and backend, so a Codex CLI update can require a MindRoom update; use `provider: openai` for the public API contract and API billing.
@@ -3080,6 +3083,8 @@ Set these fields in `defaults`, on an agent, or on a team (see [Team History and
 
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
+Each turn's context, such as retrieved memories, `persist=False` enrichment, and the note telling the agent how a tool approval was decided, replays with that turn until compaction, except under `num_history_messages`, which counts and replays only conversation messages.
+Text compaction summaries leave that context out, while a [native compaction](#native-compaction) summary can include it, and so can a later text summary that starts from a Claude checkpoint.
 Tool results replay unchanged.
 
 ## Context Window
@@ -3141,7 +3146,7 @@ With the default `reserve_tokens`, a summary model with a context window of roug
 
 A long reply, for example a tool loop that keeps reading files, can outgrow the context window before it finishes.
 Before each model request, MindRoom checks whether the request would exceed the replay window minus `reserve_tokens`; if it would, it compacts first and the reply continues.
-After that compaction the model sees its system prompt, the user's current message, any per-turn context, and a summary that records the progress made so far; earlier conversation and the reply's own earlier tool calls and results are replaced by that summary.
+After that compaction the model sees its system prompt, the user's current message, the current turn's context, and a summary that records the progress made so far; earlier conversation and the reply's own earlier tool calls and results are replaced by that summary.
 The tool calls still appear in the reply.
 If the summary and the current message together exceed the model's `context_window` minus `reserve_tokens`, the reply fails with `Saved conversation summary exceeds the available history budget` (see [Compacted history and redaction](#compacted-history-and-redaction)).
 If the summary model fails, the reply continues without compacting and may then fail with a provider error.
@@ -3239,6 +3244,7 @@ With `none`, the agent gets no memories in its prompt, stores none after its tur
 Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript sent to `mem0`; the transcript file itself is kept as spoken.
 What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written.
 Conversation history is separate and stays in the session; see [History & Compaction](https://docs.mindroom.chat/configuration/history/).
+Memories retrieved for a reply [stay in that conversation's history](https://docs.mindroom.chat/configuration/history/#history-settings), so its later replies can still see them after the memory is deleted.
 OpenClaw-compatible agents use this same backend selection.
 
 ## Memory Scopes
@@ -5051,6 +5057,7 @@ Agents also show a typing indicator while they work on a response.
 ## Live Updates
 
 When the homeserver relays live updates, as MindRoom's Tuwunel fork (`mindroom-tuwunel`) does for mindroom.chat, hosted MindRoom, and `mindroom-stack`, MindRoom Chat shows a streamed reply about ten times a second, including its tool calls, worker progress, and [reasoning](#reasoning), without editing the message each time.
+While a tool such as `shell` runs, MindRoom Chat also shows the last lines of its output under the call, with credentials masked as in tool results; the message keeps only the tool's result, and team replies do not show it.
 The message itself is then edited only every `update_interval` seconds (5 by default) and once at the end, so Element, bridges, and other clients show the reply in steps of about five seconds and end with the same final message.
 A reply that grows too large for a live update, as a very long reply with many tool calls can, switches to the progressive edits below for the rest of the reply.
 Live updates are encrypted like the reply in an encrypted room.
@@ -5341,7 +5348,7 @@ A calls-enabled agent shows `📞 Voice calls` in its Matrix presence status whe
 |-------|------|---------|-------------|
 | `calls.enabled` | bool | `false` | Lets agents join voice calls. |
 | `calls.profiles` | map of name to profile | `{}` | Reusable, complete voice pipelines; each has a `backend` and the fields below. |
-| `calls.agents` | map of agent name to profile name | `{}` | Each calls-enabled agent uses exactly one profile. |
+| `calls.agents` | map of agent name to profile name | `{}` | Each calls-enabled agent uses exactly one profile. A [`personal_agents`](https://docs.mindroom.chat/personal-agents/#voice-calls) template key gives every user's agent from that template the profile. |
 | `calls.livekit_service_url` | string | discovered | MatrixRTC authorization service URL to use instead of discovering it from the agent homeserver's `.well-known/matrix/client`. |
 
 `enabled` and `livekit_service_url` are global and cannot be set per agent.
@@ -5353,6 +5360,7 @@ Configuration loading fails with one of these errors when references are wrong:
 - `calls.agents references unknown profile(s): ...`
 - `calls.agents references unknown agent(s): ...`
 - `calls.agents configures multiple agents for room(s): ...`, because a room can have at most one calls-enabled agent.
+- `calls.agents names personal_agents.<key>, whose agent lists rooms in the template or a user's override; ...`, because a room takes only one calls-enabled agent.
 - `calls.profiles references unknown cascaded model(s): ...` or `calls.profiles references unknown Live agent model(s): ...`, when a profile's model alias is not in the top-level `models` mapping.
 
 ### Realtime profile fields
@@ -5531,9 +5539,9 @@ Different agents can use different profiles, for example one agent on `realtime`
 
 ## When an agent joins a call
 
-An agent joins a call when it starts in one of the agent's configured rooms, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting.
+An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](https://docs.mindroom.chat/personal-rooms/) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting.
 Ad-hoc rooms let a Matrix client create a private voice room and invite one agent without adding the room to `config.yaml`.
-A configured room assignment wins over invites; if several calls-enabled agents were only invited to the same room, none of them answers calls there.
+A configured room assignment wins over personal rooms and invites; if several calls-enabled agents are in the same room only through those, none of them answers calls there.
 
 The agent stays in a call only while one Matrix user is in it (that user may join from several devices) and only while that user passes the normal room and per-agent reply permissions.
 That user is the requester for tools, and requester-private agents use that user's workspace, memory, credentials, history, and knowledge.
@@ -7208,6 +7216,28 @@ With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onb
 > That includes the admitted person's own agent acting for them, because an agent mentioned in a reply acts for the person who requested that reply (see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents)).
 > Admit only people you would trust with everything an owner gives their agent.
 
+## Voice Calls
+
+Name the template key in [`calls.agents`](https://docs.mindroom.chat/voice-calls/#calls-configuration) to let every user call their own agent:
+
+```yaml
+calls:
+  enabled: true
+  profiles:
+    openai-live:
+      backend: live
+      model: gpt-live-1
+      credentials_service: openai-live
+      voice: marin
+  agents:
+    mind: openai-live
+```
+
+Each generated agent then uses that profile in its owner's personal room, including agents of people onboarded after the config was loaded.
+The saved config keeps `mind`, not the generated agent names.
+A generated agent that `calls.agents` also names directly keeps the profile given there.
+Neither the template's `agent` nor its `users` overrides may list `rooms`, because a room takes only one calls-enabled agent; config loading fails with `calls.agents names personal_agents.mind, whose agent lists rooms in the template or a user's override`.
+
 ## Onboarding Behavior
 
 The router handles a join, a `commands` entry, or a `backfill` hit in an onboarding room like any [personal-room](https://docs.mindroom.chat/personal-rooms/#onboarding-behavior) trigger, with these differences:
@@ -7250,7 +7280,7 @@ A template gives every person the same agent.
 A person cannot narrow its tools or reword its role, and cannot get a second agent with a narrower job unless an administrator edits `config.yaml` for them.
 The [`agent_manager`](https://docs.mindroom.chat/tools/agent-orchestration/#agent_manager) tool covers both, and MindRoom adds it by itself:
 
-- Every generated agent, personal or created, can show and change its own `display_name`, `role`, `instructions`, and `tools` for its owners.
+- Every generated agent, personal or created, can show and change its own `display_name`, `role`, `instructions`, and `tools`, and set its avatar, for its owners.
 - An agent with `created_agents_per_owner` above 0 can create new agents for the people who ask it.
 
 Every call that creates, changes, or deletes an agent waits for the person asking to approve it on a card; see [Approval Cards](#approval-cards).
@@ -7266,6 +7296,10 @@ It calls `agent_settings` to read its current values and the tool names it may c
   A chosen tool keeps the settings it has there, and so does each tool it brings along, such as `attachments` with `matrix_message`; any other tool that was not chosen is left out, even one from `defaults.tools`.
 - A change that the next config load would reject is refused with `The agent would not load with this change, so nothing was stored: <reason>`, and so is a new agent from `create_agent`.
 - A field with no edit follows its template or creator, so a later change to either reaches it.
+
+To change the agent's picture, attach a PNG, JPEG, GIF, or WebP image in a conversation with the agent and ask it to use the image as its avatar.
+It calls `set_avatar`, which crops the image to its center square, and the new picture applies without a reload.
+An animated image keeps only its first frame.
 
 Only the agent's owners may ask, and anyone else is refused with `Only <owners> may change <agent>`.
 A personal agent has one owner, the person it was made for, and cannot be deleted.
@@ -7321,12 +7355,12 @@ The person whose request creates an agent is its owner, resolved through any [br
 Only a person can own an agent, so a MindRoom account is refused, and so is a Matrix ID with `[`, `]`, a space, `*`, or `?`.
 
 An owner can share a created agent by passing `co_owners` to `update_agent`, and passing `null` clears them.
-Co-owners may use the agent, invite it, and change its `display_name`, `role`, `instructions`, and `tools`.
+Co-owners may use the agent, invite it, change its `display_name`, `role`, `instructions`, and `tools`, and set its avatar.
 Only the owner may change `co_owners` or delete the agent with `delete_agent`.
 
 ### Approval Cards
 
-`create_agent`, `update_agent`, and `delete_agent` each show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, whatever `tool_approval` says, because the agent asking may have read text its owner did not write.
+`create_agent`, `update_agent`, `set_avatar`, and `delete_agent` each show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, whatever `tool_approval` says, because the agent asking may have read text its owner did not write.
 The card shows the exact arguments, and only that person can approve it.
 The 5, 10, and 30 minute options on a card are never offered for these calls, but the person asking can skip their cards in a thread with [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything).
 `agent_settings` only reads and asks for no approval of its own, so it shows a card only when a `tool_approval` default or rule requires one.
@@ -14654,10 +14688,11 @@ Which functions an agent gets depends on what it is:
 | `create_agent(name, display_name, role, instructions=None, tools=None)` | Agents with `created_agents_per_owner` above 0 | Creates an agent for the person asking, with some of the creator's tools, and returns its Matrix ID |
 | `agent_settings()` | Every generated agent | Shows the agent's editable settings, its owners if it was created, and the toolkit names `tools` may use as `allowed_tools` |
 | `update_agent(changes)` | Every generated agent | Changes its `display_name`, `role`, `instructions`, or `tools`; for a created agent, its owner may also change `co_owners` |
+| `set_avatar(attachment_id)` | Every generated agent | Sets its Matrix profile picture to an image attached in the conversation, cropped to its center square |
 | `delete_agent()` | Created agents | Deletes the agent for its owner; its Matrix account stays, so the name stays taken |
 
 Only an agent's owners may read or change it, and only a created agent's owner may delete it or change its co-owners.
-`create_agent`, `update_agent`, and `delete_agent` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
+`create_agent`, `update_agent`, `set_avatar`, and `delete_agent` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
 In a room without the router the call is denied, and the agent recovers with `invite_router` as described in [When the Router Is Missing](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing).
 Scripts and workflow participants cannot call it, and it cannot be deferred.
 
@@ -16297,10 +16332,10 @@ Do not report or "fix" these; they are deliberate.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack uploads may still use every file in the agent workspace.
 - A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, or, with libraries on, through the addresses it requests, so agents should only show pages they wrote; see [Privacy and safety](https://docs.mindroom.chat/canvases/#privacy-and-safety).
-- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
+- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation, and `agent_manager`'s `set_avatar` accepts only those IDs; Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
 - `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, Outlook mail attachment downloads, Slack downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
-- Live reply frames in an encrypted room use the room's current Megolm session without counting toward its 100-message rotation, so one session covers more ciphertexts, including live-only text and reasoning that need not equal any stored event; age and membership rotation still apply.
+- Live reply frames in an encrypted room use the room's current Megolm session without counting toward its 100-message rotation, so one session covers more ciphertexts, including live-only text, reasoning, and running tools' output that need not equal any stored event; age and membership rotation still apply.
   Counting them would rotate the session about every ten seconds while a reply streams, each rotation sharing a new key with every device.
 - A skill review may resend the reviewed conversation unredacted to the provider that just received it, and a digest replay redacts credentials only on a best-effort basis; see [What a review sees](https://docs.mindroom.chat/skills/#what-a-review-sees).
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
@@ -16329,6 +16364,7 @@ Do not report or "fix" these; they are deliberate.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
 - A plugin's `tool:environment` hook decides which variables a tool call's `shell` commands receive, in the primary or a worker, including values it passes through from the primary's process environment; plugins already run with the primary's full trust, the variables travel only with that call's request, and other code in the same worker can read them, as with the CLI grant.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
+- A shared agent's later turns in a conversation replay each earlier turn's context, including another requester's `persist=False` hook items such as a location, so it can repeat them to anyone in that conversation, like persisted items; private agents keep each requester's conversations apart.
 - Unless `knowledge_graph_edits` is off, any requester of a shared agent, or a tool result that steers it, can have it delete facts and entities from the shared graph, merge its entities, or rewrite their summaries, as with any write tool; the edits reach only that agent's own graph.
 - Redacting a message does not remove facts the knowledge graph already extracted from it; ingestion skips turns derived from messages redacted before it reached them, so raising `knowledge_graph.generation` rebuilds the graphs without them; replies and voice calls already running finish on the old graphs, which stay stored until `knowledge_graph/` is deleted with MindRoom stopped; an `exploration` prompt can still list a redacted turn's tool calls until the agent next replies in that conversation.
 - An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
@@ -17501,7 +17537,7 @@ plugins:
       dawarich_url: http://dawarich.local
 ```
 
-Whenever an agent is about to answer a message, this hook adds the user's location to that turn's context, and `persist=False` keeps it out of session history.
+Whenever an agent is about to answer a message, this hook adds the user's location to that turn's context, and `persist=False` puts it in a separate context message instead of the user's message text.
 
 MindRoom finds `@hook` functions in the manifest's `hooks_module`, or in `tools_module` when `hooks_module` is omitted; see [Manifest format](https://docs.mindroom.chat/plugins/#manifest-format).
 
@@ -17728,8 +17764,10 @@ Persisted items are appended to the user message and kept in session history, so
 </mindroom_message_context>
 ```
 
-Items with `persist=False` go into a separate context message for the current turn only.
-Use `persist=False` for live data such as location or weather, so session history and provider prompt caches stay reusable.
+Items with `persist=False` go into a separate context message after the turn's prompt instead of into the message text.
+Later turns still see that message where it was sent, and unlike persisted items it stays out of text compaction summaries; see [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings).
+In a conversation several people use, those later turns include replies to someone else, so the agent can repeat one person's `persist=False` item, such as their location, to another; a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) keeps each requester's conversations apart.
+Use `persist=False` for live data such as location or weather.
 Use stable keys and deterministic text for persisted items.
 
 ## System prompt enrichment (`system:enrich`)
@@ -17760,7 +17798,7 @@ The key `matrix_message_target` is reserved; MindRoom replaces hook items that u
 
 ## Enrichment in minimal mode
 
-In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), system enrichment and non-persisted message enrichment are available to the agent through the CLI's enrichment context document instead of the prompt.
+In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), system enrichment and `persist=False` message enrichment are available to the agent through the CLI's enrichment context document instead of the prompt.
 Return an `EnrichmentItem` with `minimal_required=True` when the item must stay in the prompt without a tool call; `ctx.add_metadata()` and `ctx.add_instruction()` cannot set this flag.
 Persisted message enrichment and standard mode are unaffected.
 
@@ -18163,7 +18201,7 @@ Without either, deliveries post to the room's main timeline.
 The requester who asks for the trigger becomes its owner and must be a human user, not a bot account.
 An administrator who creates a trigger for another agent or room still owns it.
 Shared agents and teams can only be targeted in rooms already configured for them.
-A [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) creating its own trigger may target its current room even when that room is not listed in `rooms`.
+A [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances), [personal agent](https://docs.mindroom.chat/personal-agents/), or [created agent](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) creating its own trigger may also target its current room when no agent or team lists that room in `rooms`, such as a personal room.
 Triggers never create rooms or make agents join rooms.
 
 ### Managing triggers
@@ -18277,7 +18315,7 @@ A successful request returns `202` with `accepted: true`, the `event_id`, and th
 | `413` | `External trigger body exceeds configured limit` | Shrink the body or raise `max_body_bytes`. |
 | `422` | `External trigger kind is not allowed` | `kind` is not in the trigger's `allowed_kinds`; other `422` responses list invalid body fields. |
 | `429` | `External trigger replay limit reached` | Too many recent events for one trigger; wait for older entries to expire. |
-| `503` | `External trigger target runtime is not available` | The router or target bot is not running or not joined to the room yet; retry later. |
+| `503` | `External trigger target runtime is not available` | The router or target bot is not running or not joined to the room yet; retry later. A room without the router, such as a personal room, needs the agent to call [`invite_router`](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing) first. |
 
 ## Watcher Behavior
 
