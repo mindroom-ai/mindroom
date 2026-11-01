@@ -3675,7 +3675,7 @@ SETTLE_TIMEOUT_SECONDS = 30.0
 
 
 def loop_runs_while_blocked(loop: asyncio.AbstractEventLoop) -> bool:
-    """From inside a blocking call, return whether ``loop`` runs a callback meanwhile, which it can only off the loop."""
+    """From inside a blocking call, return whether ``loop`` runs a callback meanwhile, as it can only when the call runs off the loop."""
     loop_ran = threading.Event()
     loop.call_soon_threadsafe(loop_ran.set)
     return loop_ran.wait(timeout=SETTLE_TIMEOUT_SECONDS)
