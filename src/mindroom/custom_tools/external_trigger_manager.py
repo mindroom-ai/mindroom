@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.custom_tools.attachment_helpers import explicit_thread_root
 from mindroom.custom_tools.external_trigger_context import (
     ExternalTriggerContextError,
     require_external_trigger_owner_context,
@@ -16,12 +17,16 @@ from mindroom.external_triggers.store import (
     ExternalTriggerStoreError,
     ExternalTriggerTarget,
 )
+from mindroom.matrix.state import resolve_room_id
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+
+_TOOL_ERRORS = (ExternalTriggerContextError, ExternalTriggerStoreError, ValueError)
 
 
 class ExternalTriggerManagerTools(Toolkit):
@@ -48,7 +53,7 @@ class ExternalTriggerManagerTools(Toolkit):
         try:
             context = require_external_trigger_owner_context("External trigger manager")
             return action(context, ExternalTriggerStore(context.runtime_paths))
-        except (ExternalTriggerContextError, ExternalTriggerStoreError, ValueError) as exc:
+        except _TOOL_ERRORS as exc:
             return cls._payload("error", message=str(exc))
 
     @staticmethod
@@ -60,7 +65,7 @@ class ExternalTriggerManagerTools(Toolkit):
         )
 
     @classmethod
-    def _target(
+    async def _target(
         cls,
         context: ToolRuntimeContext,
         *,
@@ -76,12 +81,20 @@ class ExternalTriggerManagerTools(Toolkit):
         if not is_admin and target_room_id not in (None, context.room_id):
             msg = "Only external trigger admins can target a different room."
             raise ExternalTriggerStoreError(msg)
-        return ExternalTriggerTarget(
+        target = ExternalTriggerTarget(
             room_id=target_room_id or context.room_id,
             thread_id=target_thread_id,
             agent=target_agent or context.agent_name,
             new_thread=new_thread,
         )
+        if target.thread_id is None:
+            return target
+        thread_root = await explicit_thread_root(
+            context,
+            room_id=resolve_room_id(target.room_id, context.runtime_paths),
+            thread_id=target.thread_id,
+        )
+        return target.model_copy(update={"thread_id": thread_root})
 
     @staticmethod
     def _record_payload(record: ExternalTriggerRecord) -> dict[str, object]:
@@ -104,7 +117,7 @@ class ExternalTriggerManagerTools(Toolkit):
             "updated_at": record.updated_at,
         }
 
-    def create_trigger(
+    async def create_trigger(
         self,
         trigger_id: str,
         public_key: str,
@@ -140,9 +153,10 @@ class ExternalTriggerManagerTools(Toolkit):
             max_body_bytes: Optional body cap capped by config policy.
 
         """
-
-        def create(context: ToolRuntimeContext, store: ExternalTriggerStore) -> str:
-            target = self._target(
+        try:
+            context = require_external_trigger_owner_context("External trigger manager")
+            store = ExternalTriggerStore(context.runtime_paths)
+            target = await self._target(
                 context,
                 target_agent=target_agent,
                 target_room_id=target_room_id,
@@ -164,15 +178,15 @@ class ExternalTriggerManagerTools(Toolkit):
                 max_body_bytes=max_body_bytes,
                 config=context.config,
             )
-            return self._payload(
-                "ok",
-                action="create",
-                trigger=self._record_payload(record),
-                endpoint_path=f"/api/triggers/{record.trigger_id}",
-                public_key_fingerprint=record.public_key_fingerprint,
-            )
-
-        return self._with_store(create)
+        except _TOOL_ERRORS as exc:
+            return self._payload("error", message=str(exc))
+        return self._payload(
+            "ok",
+            action="create",
+            trigger=self._record_payload(record),
+            endpoint_path=f"/api/triggers/{record.trigger_id}",
+            public_key_fingerprint=record.public_key_fingerprint,
+        )
 
     def list_triggers(self) -> str:
         """List external triggers owned by the requester, or all triggers for admins."""

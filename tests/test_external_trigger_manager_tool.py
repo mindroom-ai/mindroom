@@ -19,7 +19,12 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
-from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.conftest import (
+    event_serving_client,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    make_thread_reply_lookup,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -109,12 +114,13 @@ def _payload(raw: str) -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(raw))
 
 
-def test_create_trigger_uses_current_context_and_hides_public_key(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_create_trigger_uses_current_context_and_hides_public_key(tmp_path: Path) -> None:
     """Trigger creation should use the current room and never echo raw key material."""
     tool = ExternalTriggerManagerTools()
     with tool_runtime_context(_context(tmp_path)):
         payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "campground",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
@@ -135,8 +141,9 @@ def test_create_trigger_uses_current_context_and_hides_public_key(tmp_path: Path
     assert payload["public_key_fingerprint"].startswith("sha256:")
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("administrator_source", ["trigger", "platform"])
-def test_external_trigger_admin_uses_current_policy(tmp_path: Path, administrator_source: str) -> None:
+async def test_external_trigger_admin_uses_current_policy(tmp_path: Path, administrator_source: str) -> None:
     """A long-lived tool context must not retain either revoked admin grant."""
     old_config = _config(
         admin_users=["@admin:example.org"] if administrator_source == "trigger" else None,
@@ -150,7 +157,7 @@ def test_external_trigger_admin_uses_current_policy(tmp_path: Path, administrato
 
     with tool_runtime_context(context):
         payload = _payload(
-            ExternalTriggerManagerTools().create_trigger(
+            await ExternalTriggerManagerTools().create_trigger(
                 "revoked-admin",
                 public_key=_PUBLIC_KEY,
                 target_agent="other",
@@ -161,14 +168,15 @@ def test_external_trigger_admin_uses_current_policy(tmp_path: Path, administrato
     assert "Only external trigger admins" in payload["message"]
 
 
-def test_private_agent_create_trigger_uses_owner_as_scope_owner(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_private_agent_create_trigger_uses_owner_as_scope_owner(tmp_path: Path) -> None:
     """Private current-agent trigger records should stay scoped to the human requester."""
     config = _config(private_watcher=True)
     tool = ExternalTriggerManagerTools()
 
     with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config)):
         payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "private-campground",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
@@ -186,7 +194,8 @@ def test_private_agent_create_trigger_uses_owner_as_scope_owner(tmp_path: Path) 
     }
 
 
-def test_private_agent_create_trigger_accepts_current_dynamic_room(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_private_agent_create_trigger_accepts_current_dynamic_room(tmp_path: Path) -> None:
     """Private agents may bind triggers to their current live room without static rooms config."""
     config = _config(private_watcher=True)
     config.agents["watcher"].rooms = []
@@ -201,7 +210,7 @@ def test_private_agent_create_trigger_accepts_current_dynamic_room(tmp_path: Pat
         ),
     ):
         payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "private-dynamic-campground",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
@@ -219,7 +228,8 @@ def test_private_agent_create_trigger_accepts_current_dynamic_room(tmp_path: Pat
     }
 
 
-def test_shared_agent_create_trigger_rejects_current_dynamic_room(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_shared_agent_create_trigger_rejects_current_dynamic_room(tmp_path: Path) -> None:
     """Shared agents still need a configured target room, even when it is the current room."""
     config = _config()
     config.agents["watcher"].rooms = []
@@ -234,7 +244,7 @@ def test_shared_agent_create_trigger_rejects_current_dynamic_room(tmp_path: Path
         ),
     ):
         payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "shared-dynamic-campground",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
@@ -245,7 +255,8 @@ def test_shared_agent_create_trigger_rejects_current_dynamic_room(tmp_path: Path
     assert "target room must already be configured" in payload["message"]
 
 
-def test_private_agent_create_trigger_rejects_other_dynamic_room(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_private_agent_create_trigger_rejects_other_dynamic_room(tmp_path: Path) -> None:
     """Private agents may not bind triggers to a different dynamic room."""
     config = _config(admin_users=["@admin:example.org"], private_watcher=True)
     config.agents["watcher"].rooms = []
@@ -260,7 +271,7 @@ def test_private_agent_create_trigger_rejects_other_dynamic_room(tmp_path: Path)
         ),
     ):
         payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "private-other-room",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
@@ -272,7 +283,8 @@ def test_private_agent_create_trigger_rejects_other_dynamic_room(tmp_path: Path)
     assert "target room must already be configured" in payload["message"]
 
 
-def test_admin_cross_target_private_agent_rejects_current_dynamic_room(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_admin_cross_target_private_agent_rejects_current_dynamic_room(tmp_path: Path) -> None:
     """Admins may not use a creator's dynamic room for a different private target agent."""
     config = _config(admin_users=["@admin:example.org"], private_other=True)
     config.agents["other"].rooms = []
@@ -287,7 +299,7 @@ def test_admin_cross_target_private_agent_rejects_current_dynamic_room(tmp_path:
         ),
     ):
         payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "private-cross-target-dynamic-room",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
@@ -300,29 +312,54 @@ def test_admin_cross_target_private_agent_rejects_current_dynamic_room(tmp_path:
     assert "target room must already be configured" in payload["message"]
 
 
-def test_non_admin_cannot_target_other_agent_or_room(tmp_path: Path) -> None:
-    """Non-admin callers can only create triggers for the current agent and room."""
+@pytest.mark.asyncio
+async def test_non_admin_cannot_target_other_agent_or_room(tmp_path: Path) -> None:
+    """Non-admin callers can only create triggers for the current agent and room, and a refused room is never read."""
     tool = ExternalTriggerManagerTools()
-    with tool_runtime_context(_context(tmp_path)):
+    homeserver = event_serving_client("$other-thread:example.org", content={"msgtype": "m.text", "body": "root"})
+    context = replace(_context(tmp_path), relations=make_relation_lookup(client=homeserver))
+    with tool_runtime_context(context):
         payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "campground",
                 public_key=_PUBLIC_KEY,
                 target_agent="other",
                 target_room_id="other-room",
+                target_thread_id="$other-thread:example.org",
             ),
         )
 
     assert payload["status"] == "error"
     assert "Only external trigger admins" in payload["message"]
+    homeserver.room_get_event.assert_not_awaited()
 
 
-def test_rotate_trigger_key_returns_the_new_key_fingerprint(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(tmp_path: Path) -> None:
+    """A reply event ID as target_thread_id is stored as its thread root, since Matrix rejects a reply as a thread root."""
+    tool = ExternalTriggerManagerTools()
+    context = replace(
+        _context(tmp_path),
+        relations=make_thread_reply_lookup("$reply:example.org", "$root:example.org"),
+    )
+    with tool_runtime_context(context):
+        payload = _payload(
+            await tool.create_trigger("replies", public_key=_PUBLIC_KEY, target_thread_id="$reply:example.org"),
+        )
+        listed = _payload(tool.list_triggers())
+
+    assert payload["status"] == "ok"
+    assert payload["trigger"]["target"]["thread_id"] == "$root:example.org"
+    assert [trigger["target"]["thread_id"] for trigger in listed["triggers"]] == ["$root:example.org"]
+
+
+@pytest.mark.asyncio
+async def test_rotate_trigger_key_returns_the_new_key_fingerprint(tmp_path: Path) -> None:
     """Rotation reports the fingerprint of the key it stored, never the key itself."""
     new_key_bytes = bytes(range(32))
     tool = ExternalTriggerManagerTools()
     with tool_runtime_context(_context(tmp_path)):
-        created = _payload(tool.create_trigger("rotating", public_key=_PUBLIC_KEY))
+        created = _payload(await tool.create_trigger("rotating", public_key=_PUBLIC_KEY))
         rotated = _payload(
             tool.rotate_trigger_key("rotating", public_key=base64.b64encode(new_key_bytes).decode("ascii")),
         )
@@ -334,19 +371,20 @@ def test_rotate_trigger_key_returns_the_new_key_fingerprint(tmp_path: Path) -> N
     assert "public_key" not in rotated["trigger"]
 
 
-def test_create_trigger_validation_error_returns_tool_error_payload(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_create_trigger_validation_error_returns_tool_error_payload(tmp_path: Path) -> None:
     """Bad model-backed tool input should remain a structured tool error."""
     tool = ExternalTriggerManagerTools()
     with tool_runtime_context(_context(tmp_path)):
         empty_thread_payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "campground",
                 public_key=_PUBLIC_KEY,
                 target_thread_id="  ",
             ),
         )
         conflict_payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "thread-conflict",
                 public_key=_PUBLIC_KEY,
                 target_thread_id="$thread",
@@ -360,14 +398,16 @@ def test_create_trigger_validation_error_returns_tool_error_payload(tmp_path: Pa
     assert "thread_id and new_thread" in conflict_payload["message"]
 
 
-def test_manager_requires_live_tool_context() -> None:
+@pytest.mark.asyncio
+async def test_manager_requires_live_tool_context() -> None:
     """Trigger management is available only inside a live Matrix tool call."""
-    payload = _payload(ExternalTriggerManagerTools().create_trigger("no-context", public_key=_PUBLIC_KEY))
+    payload = _payload(await ExternalTriggerManagerTools().create_trigger("no-context", public_key=_PUBLIC_KEY))
 
     assert payload["status"] == "error"
     assert payload["message"] == "External trigger manager requires live Matrix tool context."
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("requester_id", "message"),
     [
@@ -380,7 +420,7 @@ def test_manager_requires_live_tool_context() -> None:
     ],
     ids=["own-account", "other-agent", "router", "bot-account", "bot-alias-of-admin", "empty"],
 )
-def test_every_manager_function_refuses_a_requester_who_cannot_own_triggers(
+async def test_every_manager_function_refuses_a_requester_who_cannot_own_triggers(
     tmp_path: Path,
     requester_id: str,
     message: str,
@@ -391,11 +431,11 @@ def test_every_manager_function_refuses_a_requester_who_cannot_own_triggers(
     config.authorization.aliases = {"@trigger-admin:example.org": ["@alias-bot:example.org"]}
     tool = ExternalTriggerManagerTools()
     with tool_runtime_context(_context(tmp_path, config=config)):
-        assert _payload(tool.create_trigger("owned", public_key=_PUBLIC_KEY))["status"] == "ok"
+        assert _payload(await tool.create_trigger("owned", public_key=_PUBLIC_KEY))["status"] == "ok"
 
     with tool_runtime_context(_context(tmp_path, requester_id=requester_id, config=config)):
         payloads = [
-            _payload(tool.create_trigger("refused", public_key=_PUBLIC_KEY)),
+            _payload(await tool.create_trigger("refused", public_key=_PUBLIC_KEY)),
             _payload(tool.list_triggers()),
             _payload(tool.disable_trigger("owned")),
             _payload(tool.delete_trigger("owned")),
@@ -423,14 +463,15 @@ def test_manager_refuses_a_runtime_without_primary_control_state(tmp_path: Path)
     assert "requires primary control state" in payload["message"]
 
 
-def test_admin_can_create_trigger_for_configured_cross_target(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_admin_can_create_trigger_for_configured_cross_target(tmp_path: Path) -> None:
     """Trigger admins can target another configured agent and room explicitly."""
     config = _config(admin_users=["@admin:example.org"])
     tool = ExternalTriggerManagerTools()
 
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
         payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "admin-target",
                 public_key=_PUBLIC_KEY,
                 target_agent="other",
@@ -449,7 +490,8 @@ def test_admin_can_create_trigger_for_configured_cross_target(tmp_path: Path) ->
     }
 
 
-def test_platform_admin_can_create_trigger_for_configured_cross_target(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_platform_admin_can_create_trigger_for_configured_cross_target(tmp_path: Path) -> None:
     """Platform administrators must receive trigger administration without a second allowlist."""
     requester = "@platform-admin:example.org"
     config = _config(platform_administrators=[requester])
@@ -457,7 +499,7 @@ def test_platform_admin_can_create_trigger_for_configured_cross_target(tmp_path:
 
     with tool_runtime_context(_context(tmp_path, requester_id=requester, config=config)):
         payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "platform-admin-target",
                 public_key=_PUBLIC_KEY,
                 target_agent="other",
@@ -470,7 +512,8 @@ def test_platform_admin_can_create_trigger_for_configured_cross_target(tmp_path:
     assert payload["trigger"]["target"]["agent"] == "other"
 
 
-def test_external_trigger_admin_alias_has_canonical_authority(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_external_trigger_admin_alias_has_canonical_authority(tmp_path: Path) -> None:
     """A configured bridge alias must receive its canonical trigger administrator authority."""
     canonical_admin = "@trigger-admin:example.org"
     alias_admin = "@bridge-trigger-admin:example.org"
@@ -480,7 +523,7 @@ def test_external_trigger_admin_alias_has_canonical_authority(tmp_path: Path) ->
 
     with tool_runtime_context(_context(tmp_path, requester_id=alias_admin, config=config)):
         payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "alias-admin-target",
                 public_key=_PUBLIC_KEY,
                 target_agent="other",
@@ -493,14 +536,15 @@ def test_external_trigger_admin_alias_has_canonical_authority(tmp_path: Path) ->
     assert payload["trigger"]["target"]["agent"] == "other"
 
 
-def test_admin_create_trigger_for_private_cross_target_keeps_admin_owner(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_admin_create_trigger_for_private_cross_target_keeps_admin_owner(tmp_path: Path) -> None:
     """Admin-created private cross-target triggers should stay owned by the admin requester."""
     config = _config(admin_users=["@admin:example.org"], private_other=True)
     tool = ExternalTriggerManagerTools()
 
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
         payload = _payload(
-            tool.create_trigger(
+            await tool.create_trigger(
                 "admin-private-target",
                 public_key=_PUBLIC_KEY,
                 target_agent="other",
@@ -518,14 +562,15 @@ def test_admin_create_trigger_for_private_cross_target_keeps_admin_owner(tmp_pat
     }
 
 
-def test_admin_list_triggers_sees_all_owners(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_admin_list_triggers_sees_all_owners(tmp_path: Path) -> None:
     """Admins should be able to inspect trigger records across owners."""
     config = _config(admin_users=["@admin:example.org"])
     tool = ExternalTriggerManagerTools()
     with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config)):
-        assert _payload(tool.create_trigger("owner", public_key=_PUBLIC_KEY))["status"] == "ok"
+        assert _payload(await tool.create_trigger("owner", public_key=_PUBLIC_KEY))["status"] == "ok"
     with tool_runtime_context(_context(tmp_path, requester_id="@other-owner:example.org", config=config)):
-        assert _payload(tool.create_trigger("other", public_key=_PUBLIC_KEY))["status"] == "ok"
+        assert _payload(await tool.create_trigger("other", public_key=_PUBLIC_KEY))["status"] == "ok"
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
         payload = _payload(tool.list_triggers())
 
