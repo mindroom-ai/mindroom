@@ -22,7 +22,7 @@ from cryptography.exceptions import InvalidTag
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.credentials.manager import scoped_credentials_path
 from mindroom.durable_write import fsync_directory_durable
-from mindroom.oauth import legacy_credentials
+from mindroom.oauth import legacy_requester_bindings
 from mindroom.oauth.providers import OAuthProviderError
 
 if TYPE_CHECKING:
@@ -484,7 +484,7 @@ def _validate_scope_binding(
     actual_binding = {key: str(row[key]) for key in expected_binding}
     if actual_binding == expected_binding:
         return
-    legacy_key = legacy_credentials.compatible_legacy_worker_key(context, connection)
+    legacy_key = legacy_requester_bindings.compatible_legacy_worker_key(context, connection)
     if legacy_key is not None:
         expected_binding["worker_key"] = legacy_key
     if actual_binding != expected_binding:
