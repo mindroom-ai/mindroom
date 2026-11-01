@@ -2591,11 +2591,12 @@ async def test_blocking_backend_provider_cannot_stall_the_event_loop_past_pass_d
         pass_timeout_seconds=0.02,
     )
 
-    await _reconcile_once(runtime)
-
-    # The pass deadline ended the pass while the provider still held it.
-    assert not provider_returned.is_set()
-    release_provider.set()
+    try:
+        await _reconcile_once(runtime)
+        # The pass deadline ended the pass while the provider still held it.
+        assert not provider_returned.is_set()
+    finally:
+        release_provider.set()
     assert await asyncio.to_thread(provider_returned.wait, SETTLE_TIMEOUT_SECONDS)
     assert provider_saw_loop_running == [True]
 

@@ -6108,8 +6108,6 @@ def _forward_proxy_to_seeded_runner(
         },
     )
     sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runner_paths, runner_token=_TEST_AUTH_TOKEN)
-    # The forwarder decodes one JSON body, so a slow call on a loaded host must not stream keepalive lines too.
-    monkeypatch.setattr(sandbox_runner_module, "EXECUTE_KEEPALIVE_SECONDS", 3600.0)
     runner = TestClient(sandbox_runner_app)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     primary_paths = _configure_proxy_runtime(
@@ -6129,7 +6127,8 @@ def _forward_proxy_to_seeded_runner(
             json=payload,
             headers={"x-mindroom-sandbox-token": _TEST_AUTH_TOKEN},
         )
-        return response.json()
+        # A call slowed past the runner's progress or keepalive interval streams those lines before its result line.
+        return json.loads(response.text.splitlines()[-1])
 
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",

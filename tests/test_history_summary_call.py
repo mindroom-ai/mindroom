@@ -174,24 +174,27 @@ class _ProviderCall:
 @pytest.mark.asyncio
 async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_cleanup() -> None:
     call = _ProviderCall()
+    summary_task = asyncio.create_task(
+        generate_compaction_summary(
+            model=summary_model([Await(call.slow_cancel_cleanup)]),
+            summary_input="Current prompt",
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=0.01,
+            on_usage=None,
+        ),
+    )
 
-    with pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"):
-        # The cleanup waits for a release sent only after this returns, so a call waiting for it fails here.
-        await asyncio.wait_for(
-            generate_compaction_summary(
-                model=summary_model([Await(call.slow_cancel_cleanup)]),
-                summary_input="Current prompt",
-                summary_prompt=COMPACTION_SUMMARY_PROMPT,
-                timeout_seconds=0.01,
-                on_usage=None,
-            ),
-            timeout=SETTLE_TIMEOUT_SECONDS,
-        )
-
-    assert call.started.is_set()
-    assert not call.finished.is_set()
-    await asyncio.wait_for(call.cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-    call.release.set()
+    try:
+        # The cleanup waits for a release sent only after the call returned, so a call waiting for it is not done.
+        await asyncio.wait({summary_task}, timeout=SETTLE_TIMEOUT_SECONDS)
+        assert summary_task.done(), "the call waited for its cancelled request"
+        with pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"):
+            summary_task.result()
+        assert call.started.is_set()
+        assert not call.finished.is_set()
+        await asyncio.wait_for(call.cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+    finally:
+        call.release.set()
     await asyncio.wait_for(call.finished.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
 
@@ -265,16 +268,17 @@ async def test_compaction_summary_outer_cancellation_returns_without_waiting_for
         ),
     )
 
-    await asyncio.wait_for(call.started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-    summary_task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        # The cleanup waits for a release sent only after this returns, so a call waiting for it fails here.
-        await asyncio.wait_for(summary_task, timeout=SETTLE_TIMEOUT_SECONDS)
-
-    assert not call.finished.is_set()
-    await asyncio.wait_for(call.cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-    call.release.set()
+    try:
+        await asyncio.wait_for(call.started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        summary_task.cancel()
+        # The cleanup waits for a release sent only after the call returned, so a call waiting for it is not done.
+        await asyncio.wait({summary_task}, timeout=SETTLE_TIMEOUT_SECONDS)
+        assert summary_task.done(), "the cancelled call waited for its cancelled request"
+        assert summary_task.cancelled()
+        assert not call.finished.is_set()
+        await asyncio.wait_for(call.cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+    finally:
+        call.release.set()
     await asyncio.wait_for(call.finished.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
 
