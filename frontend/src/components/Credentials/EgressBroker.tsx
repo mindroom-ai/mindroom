@@ -173,10 +173,9 @@ function saveFailureMessage(
   const issues = getConfigValidationIssues(result.diagnostics)
     .filter((issue) => issue.loc[0] === "egress_broker")
     .map((issue) => {
-      const message = issue.msg.replace(/^Value error, /, "");
       // An issue on `egress_broker` itself has no field path to show.
       const where = issue.loc.slice(2).join(".");
-      return where ? `${where}: ${message}` : message;
+      return where ? `${where}: ${issue.msg}` : issue.msg;
     });
   return issues.length > 0 ? issues.join("; ") : result.message;
 }

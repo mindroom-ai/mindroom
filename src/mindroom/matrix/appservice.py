@@ -7,7 +7,7 @@ from typing import Literal, NamedTuple, NoReturn
 
 import httpx
 
-from mindroom.constants import RuntimePaths, runtime_env_path, runtime_matrix_ssl_verify
+from mindroom.constants import RuntimePaths, read_secret_file, runtime_env_path, runtime_matrix_ssl_verify
 from mindroom.matrix.client_session import matrix_startup_error
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.runtime_env_policy import (
@@ -36,7 +36,8 @@ class _ConfiguredToken(NamedTuple):
 
 
 def _appservice_token_from_env(runtime_paths: RuntimePaths) -> _ConfiguredToken | None:
-    token = (runtime_paths.env_value(MATRIX_APPSERVICE_TOKEN_ENV) or "").strip()
+    plain = runtime_paths.plain_env_value((MATRIX_APPSERVICE_TOKEN_ENV,))
+    token = plain[0].strip() if plain else ""
     file_path = runtime_env_path(runtime_paths, MATRIX_APPSERVICE_TOKEN_FILE_ENV)
     if token and file_path is not None:
         msg = f"Set only one of {MATRIX_APPSERVICE_TOKEN_ENV} or {MATRIX_APPSERVICE_TOKEN_FILE_ENV}"
@@ -46,7 +47,7 @@ def _appservice_token_from_env(runtime_paths: RuntimePaths) -> _ConfiguredToken 
     if file_path is None:
         return None
     try:
-        file_token = file_path.read_text(encoding="utf-8").strip()
+        file_token = read_secret_file(file_path)
     except OSError as exc:
         msg = f"{MATRIX_APPSERVICE_TOKEN_FILE_ENV} is not readable: {file_path}"
         raise matrix_startup_error(msg, permanent=True) from exc
@@ -58,7 +59,8 @@ def _appservice_token_from_env(runtime_paths: RuntimePaths) -> _ConfiguredToken 
 
 def resolve_managed_account_auth(runtime_paths: RuntimePaths) -> ManagedAccountAuth:
     """Resolve explicit password or application-service account authentication."""
-    raw_mode = (runtime_paths.env_value(MATRIX_MANAGED_ACCOUNT_AUTH_ENV) or "password").strip().lower()
+    mode = runtime_paths.plain_env_value((MATRIX_MANAGED_ACCOUNT_AUTH_ENV,))
+    raw_mode = (mode[0] if mode else "password").strip().lower()
     if raw_mode not in {"password", "appservice"}:
         msg = f"{MATRIX_MANAGED_ACCOUNT_AUTH_ENV} must be 'password' or 'appservice', got {raw_mode!r}"
         raise matrix_startup_error(msg, permanent=True)

@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 from mindroom.budgets.pricing import PricedModel, cost_usd
-from mindroom.usage.stats import collect_admin_usage
+from mindroom.usage.stats import collect_requester_daily_usage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -57,20 +57,19 @@ def collect_monthly_spend(
     start, end = month_bounds(now)
     # Usage dated by its start, such as a voice call that began the day before, can hold requests in this month.
     since = datetime.combine(start - timedelta(days=1), time(), UTC).timestamp()
-    report = collect_admin_usage(config=config, runtime_paths=runtime_paths, include_daily=True, since=since)
+    requester_days, coverage = collect_requester_daily_usage(config=config, runtime_paths=runtime_paths, since=since)
     spend: defaultdict[str, float] = defaultdict(float)
     unpriced: defaultdict[tuple[str, str], int] = defaultdict(int)
-    for user in report.user_breakdown:
-        for day in user.daily_breakdown or ():
+    for requester_id, days in requester_days.items():
+        for day in days:
             if not start <= date.fromisoformat(day.date) < end:
                 continue
             for row in day.model_breakdown:
                 priced = prices.get((row.model_provider, row.model))
                 if priced is None:
                     unpriced[(row.model_provider, row.model)] += row.totals.total_tokens
-                elif user.user_id is not None:
-                    spend[user.user_id] += cost_usd(row.totals, priced)
-    coverage = report.daily_coverage
+                elif requester_id is not None:
+                    spend[requester_id] += cost_usd(row.totals, priced)
     return SpendSnapshot(
         period_start=start,
         period_end=end,
@@ -80,6 +79,6 @@ def collect_monthly_spend(
             _UnpricedModelUsage(provider=provider, model=model, total_tokens=tokens)
             for (provider, model), tokens in sorted(unpriced.items())
         ),
-        scanned_sources=coverage.scanned_sources if coverage is not None else 0,
-        unavailable_sources=coverage.unavailable_sources if coverage is not None else 0,
+        scanned_sources=coverage.scanned_sources,
+        unavailable_sources=coverage.unavailable_sources,
     )

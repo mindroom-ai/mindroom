@@ -117,7 +117,6 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
         config=config,
         execution_identity=None,
     )
-    assert scope_context is not None
     assert scope_context.scope == team_scope
     session = _team_session(
         "session-1",

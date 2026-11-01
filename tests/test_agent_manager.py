@@ -212,6 +212,7 @@ async def test_refused_and_invalid_changes_come_back_as_errors_without_a_reload(
     assert all(result.startswith("Error: ") for result in results)
     assert results[3] == f"Error: Only {OWNER} may delete creator_research"
     assert results[4] == "Error: model cannot be changed; allowed: display_name, role, instructions, tools, co_owners"
+    assert results[5] == "Error: edits → display_name: Input should be a valid string"
     assert read_personal_agent_roster_file(paths) == stored
     orchestrator.config_reload.request_reload.assert_not_called()
 

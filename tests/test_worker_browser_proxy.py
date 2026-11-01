@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import ssl
+import struct
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -515,6 +516,47 @@ async def test_relay_tunnels_through_an_https_egress_proxy_and_survives_client_h
         upstream_server.close()
         await upstream_server.wait_closed()
     assert requests == [b"CONNECT 8.8.8.8:443 HTTP/1.1"]
+
+
+@pytest.mark.parametrize("reset", [True, False], ids=["reset", "close"])
+def test_relay_ends_cleanly_when_the_browser_closes_while_the_destination_sends_under_uvloop(reset: bool) -> None:
+    """Sandbox runners serve on uvloop, which reports a write to a connection the browser closed as RuntimeError."""
+    uvloop = pytest.importorskip("uvloop")
+
+    async def send_after_browser_closes(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await reader.read()
+            while True:
+                writer.write(b"x" * 1024)
+                await writer.drain()
+                # Let the relay return to reading between chunks, as it does between a server's writes.
+                await asyncio.sleep(0)
+        except (OSError, RuntimeError):
+            writer.transport.abort()
+
+    async def scenario() -> None:
+        server = await asyncio.start_server(send_after_browser_closes, "127.0.0.1", 0)
+        proxy = BrowserDestinationProxy(allow_loopback=True)
+        await proxy.start()
+        try:
+            _reader, writer, status = await socks5_connect(
+                proxy.endpoint,
+                "127.0.0.1",
+                server.sockets[0].getsockname()[1],
+            )
+            assert status == 0
+            (connection,) = proxy._connections
+            if reset:
+                writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            writer.close()
+            await asyncio.wait_for(connection, 5)
+        finally:
+            await proxy.close()
+            server.close()
+            await server.wait_closed()
+
+    with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
+        runner.run(scenario())
 
 
 @pytest.mark.asyncio

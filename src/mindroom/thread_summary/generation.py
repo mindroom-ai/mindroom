@@ -82,16 +82,11 @@ def resolve_thread_summary_model_name(
 ) -> str:
     """Return the model name for automatic thread summaries in one room.
 
-    Precedence: room-scoped override (alias or raw room ID) > responding
+    Precedence: room-scoped override (room ID, room key, or full alias) > responding
     entity's name as a ``room_thread_summary_models`` key (covers ad-hoc
     rooms with no managed alias) > ``defaults.thread_summary_model``.
     """
-    if override := resolve_room_scoped_model_override(
-        config.room_thread_summary_models,
-        room_id,
-        runtime_paths,
-        allow_raw_room_id=True,
-    ):
+    if override := resolve_room_scoped_model_override(config.room_thread_summary_models, room_id, runtime_paths):
         return override
     if entity_name and entity_name in config.room_thread_summary_models:
         return config.room_thread_summary_models[entity_name]

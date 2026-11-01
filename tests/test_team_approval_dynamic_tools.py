@@ -276,7 +276,6 @@ async def _exercise_team_member_assembly(
         runtime_paths=paths,
         execution_identity=identity,
     )
-    assert scope is not None
     scope.storage.save_run(
         scope.stored_or_first_session(),
         TeamRunRecord(

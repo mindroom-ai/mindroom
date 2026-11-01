@@ -5,8 +5,9 @@ import { useParams, useRouter } from 'next/navigation'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/button'
 import { ArrowLeft, User, Mail, Building, Calendar, Shield } from 'lucide-react'
-import { apiCall } from '@/lib/api'
+import { apiCall, type Subscription } from '@/lib/api'
 import { logger } from '@/lib/logger'
+import { formatRecordedPrice } from '@/lib/pricing-config'
 
 interface AccountDetails {
   id: string
@@ -21,15 +22,9 @@ interface AccountDetails {
     id: string
     tier: string
     status: string
-    price: number
-    billing_period: string
+    price_cents: Subscription['price_cents']
+    billing_cycle: Subscription['billing_cycle']
   }
-  instances?: Array<{
-    id: string
-    instance_id: string
-    status: string
-    created_at: string
-  }>
 }
 
 export default function AccountDetailsPage() {
@@ -43,8 +38,9 @@ export default function AccountDetailsPage() {
       try {
         const response = await apiCall(`/admin/accounts/${params.id}`)
         if (response.ok) {
+          // The response nests the account beside its subscription.
           const data = await response.json()
-          setAccount(data)
+          setAccount({ ...data.account, subscription: data.subscription })
         } else {
           logger.error('Failed to fetch account:', response.statusText)
         }
@@ -89,7 +85,7 @@ export default function AccountDetailsPage() {
           Back to Accounts
         </Button>
         <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Account Details</h1>
-        <p className="text-gray-600 dark:text-gray-400 mt-2">View and manage account information</p>
+        <p className="text-gray-600 dark:text-gray-400 mt-2">View account information</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -173,26 +169,15 @@ export default function AccountDetailsPage() {
                   <span className="text-gray-900 dark:text-gray-100">
                     {account.subscription.tier === 'free'
                       ? 'No plan'
-                      : `${account.subscription.tier} - $${(account.subscription.price / 100).toFixed(2)}/${account.subscription.billing_period}`}
+                      : account.subscription.price_cents == null
+                        ? account.subscription.tier
+                        : `${account.subscription.tier} - ${formatRecordedPrice(account.subscription.price_cents, account.subscription.billing_cycle)}`}
                   </span>
                 </div>
               </div>
             )}
           </CardContent>
         </Card>
-      </div>
-
-      {/* Actions */}
-      <div className="mt-6 flex gap-3">
-        <Button variant="outline">
-          Suspend Account
-        </Button>
-        <Button variant="outline">
-          Reset Password
-        </Button>
-        <Button variant="outline" className="text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300">
-          Delete Account
-        </Button>
       </div>
     </div>
   )

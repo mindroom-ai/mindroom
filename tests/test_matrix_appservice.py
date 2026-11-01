@@ -11,6 +11,7 @@ import pytest
 
 from mindroom import constants
 from mindroom.matrix.appservice import (
+    ManagedAccountAuth,
     login_appservice_credentials,
     register_appservice_user,
     resolve_managed_account_auth,
@@ -88,10 +89,11 @@ def test_resolve_managed_account_auth_rejects_empty_token_file(tmp_path: Path) -
         resolve_managed_account_auth(runtime_paths)
 
 
-def test_resolve_managed_account_auth_reads_token_file(tmp_path: Path) -> None:
-    """Appservice tokens can come from mounted secret files."""
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"], ids=["plain", "byte-order-mark"])
+def test_resolve_managed_account_auth_reads_token_file(tmp_path: Path, encoding: str) -> None:
+    """Appservice tokens can come from mounted secret files, saved with or without a byte order mark."""
     token_file = tmp_path / "appservice-token"
-    token_file.write_text(f"{APPSERVICE_TOKEN}\n", encoding="utf-8")
+    token_file.write_text(f"{APPSERVICE_TOKEN}\n", encoding=encoding)
     runtime_paths = _runtime_paths(
         tmp_path,
         MATRIX_MANAGED_ACCOUNT_AUTH="appservice",
@@ -102,6 +104,17 @@ def test_resolve_managed_account_auth_reads_token_file(tmp_path: Path) -> None:
 
     assert auth.mode == "appservice"
     assert auth.appservice_token == APPSERVICE_TOKEN
+
+
+def test_blank_exported_appservice_settings_do_not_hide_the_env_file_values(tmp_path: Path) -> None:
+    """A blank export, as a compose passthrough of an unset variable produces, counts as unset."""
+    (tmp_path / ".env").write_text(
+        f"MATRIX_MANAGED_ACCOUNT_AUTH=appservice\nMATRIX_APPSERVICE_TOKEN={APPSERVICE_TOKEN}\n",
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths(tmp_path, MATRIX_MANAGED_ACCOUNT_AUTH="", MATRIX_APPSERVICE_TOKEN="")
+
+    assert resolve_managed_account_auth(runtime_paths) == ManagedAccountAuth("appservice", APPSERVICE_TOKEN)
 
 
 @pytest.mark.asyncio

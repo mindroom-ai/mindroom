@@ -120,8 +120,8 @@ class _Session:
     async def workspace_url(self) -> str:
         try:
             identity = await slack_bot_identity(self.client, self.app)
-        except SlackApiError:
-            raise _SlackRefusalError(SLACK_APP_NOT_CONFIGURED) from None
+        except SlackApiError as exc:
+            raise _SlackRefusalError(SLACK_UNREACHABLE if exc.transient else SLACK_APP_NOT_CONFIGURED) from None
         return identity.workspace_url
 
 

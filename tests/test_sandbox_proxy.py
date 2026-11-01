@@ -155,7 +155,8 @@ if TYPE_CHECKING:
     from mindroom.workers.models import WorkerLaunchConfig
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
-_TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
+# Set for each test by ``_env_runtime_storage_in_tmp_path``.
+_ENV_RUNTIME_STORAGE_ROOT: Path | None = None
 
 
 def _offered_entrypoint(tool: AnyToolkit, name: str) -> Callable[..., Any]:
@@ -163,6 +164,12 @@ def _offered_entrypoint(tool: AnyToolkit, name: str) -> Callable[..., Any]:
     function = toolkit_function(tool, name)
     assert function is not None
     return function.entrypoint
+
+
+@pytest.fixture(autouse=True)
+def _env_runtime_storage_in_tmp_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Store what ``_runtime_paths_from_env`` runtimes write under the test's own directory, never the checkout."""
+    monkeypatch.setattr(f"{__name__}._ENV_RUNTIME_STORAGE_ROOT", tmp_path / "mindroom_data")
 
 
 @pytest.fixture(autouse=True)
@@ -361,7 +368,9 @@ def test_attachment_save_protocol_receipt_validation_returns_dataclass() -> None
 
 
 def _runtime_paths_from_env() -> RuntimePaths:
-    return resolve_runtime_paths(config_path=Path("config.yaml"), process_env=dict(os.environ))
+    # A test's own MINDROOM_STORAGE_PATH export wins, as it does for the runtime.
+    storage_path = None if os.environ.get("MINDROOM_STORAGE_PATH") else _ENV_RUNTIME_STORAGE_ROOT
+    return resolve_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_path)
 
 
 def _runs_in_worker(runtime_paths: RuntimePaths, tool_name: str, worker_tools: Collection[str] | None) -> bool:
@@ -3089,7 +3098,7 @@ def test_get_tool_by_name_rejects_unsafe_tool_init_overrides() -> None:
     with pytest.raises(ToolInitOverrideError, match="api_key"):
         get_tool_by_name(
             "openai",
-            _TEST_RUNTIME_PATHS,
+            _runtime_paths_from_env(),
             tool_init_overrides={"api_key": "sk-test"},
             worker_target=None,
             tools=builtin_tool_registry(),
@@ -3101,7 +3110,7 @@ def test_get_tool_by_name_rejects_invalid_base_dir_override_type() -> None:
     with pytest.raises(ToolInitOverrideError, match="base_dir"):
         get_tool_by_name(
             "coding",
-            _TEST_RUNTIME_PATHS,
+            _runtime_paths_from_env(),
             tool_init_overrides={"base_dir": {"bad": "value"}},
             worker_target=None,
             tools=builtin_tool_registry(),
@@ -6127,7 +6136,9 @@ def _forward_proxy_to_seeded_runner(
             json=payload,
             headers={"x-mindroom-sandbox-token": _TEST_AUTH_TOKEN},
         )
-        return response.json()
+        # A call slowed past the runner's progress or keepalive interval streams those lines before its result line.
+        # Split on newlines alone, as the primary's client does, since JSON text may hold other Unicode line separators.
+        return json.loads(response.text.rstrip("\n").rpartition("\n")[2])
 
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",

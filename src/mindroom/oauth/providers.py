@@ -205,6 +205,14 @@ class _OAuthProviderNotConfiguredError(OAuthProviderError):
     """Raised when a provider has no usable OAuth client configuration."""
 
 
+class OAuthUserFacingError(OAuthProviderError):
+    """Raised when a provider cannot connect for a reason the person can act on; the message is safe to show."""
+
+
+class OAuthCallbackRefusedError(OAuthUserFacingError):
+    """Raised when the authorization server refuses a client for MindRoom's new callback."""
+
+
 _TERMINAL_REFRESH_ERROR_CODES = frozenset({"bad_refresh_token", "invalid_grant", "invalid_refresh_token"})
 
 
@@ -305,6 +313,9 @@ class OAuthRuntimeEndpoints:
     token_endpoint_auth_method: _TokenEndpointAuthMethod | None = None
     # Discovered token endpoints are dialed through the server-fetch address guard; None keeps fixed endpoints unguarded.
     token_fetch_allow_private_networks: bool | None = None
+    # Registers a client for the current callback when the stored dynamic registration names another one. Only status
+    # and connect, which hand out the callback, run it; a token refresh never needs the callback.
+    register_moved_callback: Callable[[], Awaitable[None]] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,11 +375,8 @@ def _split_csv(value: str | None) -> tuple[str, ...]:
 
 
 def _runtime_env_value(runtime_paths: RuntimePaths, names: tuple[str, ...]) -> str | None:
-    for name in names:
-        value = runtime_paths.env_value(name)
-        if value:
-            return value.strip()
-    return None
+    plain = runtime_paths.plain_env_value(names)
+    return None if plain is None else plain[0]
 
 
 def _decode_jwt_claims_unverified(token: str) -> dict[str, Any]:
@@ -741,14 +749,37 @@ class OAuthProvider:
         self,
         runtime_paths: RuntimePaths,
     ) -> OAuthClientConfigResolution | None:
-        """Return stored client settings, after any lazy runtime bootstrap."""
+        """Return stored client settings for handing out the callback, after any lazy bootstrap or moved-callback registration."""
         resolution = await asyncio.to_thread(self.client_config_resolution, runtime_paths)
-        if resolution is not None:
+        if self.runtime_bootstrapper is None or (
+            resolution is not None and not self.dynamic_client_callback_moved(resolution, runtime_paths)
+        ):
             return resolution
-        if self.runtime_bootstrapper is None:
-            return None
-        await self.runtime_endpoints(runtime_paths)
+        endpoints = await self.runtime_endpoints(runtime_paths)
+        if resolution is not None and endpoints.register_moved_callback is not None:
+            await endpoints.register_moved_callback()
         return await asyncio.to_thread(self.client_config_resolution, runtime_paths)
+
+    def dynamic_client_callback_moved(
+        self,
+        resolution: OAuthClientConfigResolution,
+        runtime_paths: RuntimePaths,
+    ) -> bool:
+        """Return whether a dynamic registration names another callback than this runtime's that a browser can use.
+
+        A dynamic client serves only a loopback callback or an HTTPS one on a public DNS name, so a move to any other
+        callback, such as an `http://` LAN address, keeps the stored client and the connections it issued.
+        """
+        redirect_uri = self.default_redirect_uri(runtime_paths)
+        hostname = urlparse(redirect_uri).hostname
+        return (
+            resolution.dynamically_registered
+            and resolution.config.redirect_uri != redirect_uri
+            and (
+                is_oauth_loopback_hostname(hostname)
+                or is_valid_hosted_oauth_callback_for_request(redirect_uri, hostname)
+            )
+        )
 
     def _stored_client_config_from_service(
         self,
@@ -788,8 +819,12 @@ class OAuthProvider:
         runtime_paths: RuntimePaths,
         token_url: str,
     ) -> OAuthClientConfig:
-        """Return client settings, refusing a dynamic registration issued for a different token endpoint."""
-        resolution = await self.client_config_resolution_async(runtime_paths)
+        """Return the stored client settings for a token request, refusing a registration for another token endpoint.
+
+        The caller has resolved `runtime_endpoints`, which bootstraps a missing client; token requests never register a
+        client for a moved callback, so connections keep refreshing whatever the current callback is.
+        """
+        resolution = await asyncio.to_thread(self.client_config_resolution, runtime_paths)
         if resolution is None:
             raise self._missing_client_config_error()
         if resolution.dynamically_registered and resolution.registered_token_url != token_url:

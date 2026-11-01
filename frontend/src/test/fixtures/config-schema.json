@@ -65,7 +65,7 @@
         },
         "rooms": {
           "default": [],
-          "description": "List of room IDs or names to auto-join",
+          "description": "Room keys or Matrix room IDs to join",
           "items": {
             "type": "string"
           },
@@ -334,7 +334,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "Per-room thread mode overrides keyed by room alias/name or Matrix room ID",
+          "description": "Per-room thread mode overrides keyed by room key or Matrix room ID",
           "title": "Room Thread Modes",
           "type": "object",
           "x-mindroom": {
@@ -1698,7 +1698,7 @@
             }
           ],
           "default": null,
-          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
           "title": "Room"
         },
         "model": {
@@ -2173,7 +2173,7 @@
             }
           ],
           "default": null,
-          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
           "title": "Room"
         },
         "model": {
@@ -4110,7 +4110,7 @@
             }
           ],
           "default": null,
-          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
           "title": "Room"
         },
         "model": {
@@ -4238,7 +4238,7 @@
             }
           ],
           "default": null,
-          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
           "title": "Room"
         },
         "model": {
@@ -4840,7 +4840,7 @@
         },
         "rooms": {
           "default": [],
-          "description": "List of room IDs or names to auto-join",
+          "description": "Room keys or Matrix room IDs to join",
           "items": {
             "type": "string"
           },

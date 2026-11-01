@@ -240,7 +240,7 @@ For Gemini on Vertex AI (`provider: google` with `extra_kwargs.vertexai: true`),
 Setting `GOOGLE_GENAI_USE_VERTEXAI=true` moves every `google` and `gemini` model to Vertex AI unless the model chooses its route itself: `extra_kwargs.client_params.enterprise`, then `extra_kwargs.client_params.vertexai`, then `extra_kwargs.vertexai`, set to `true` or `false`, wins over the variable.
 `GOOGLE_GENAI_USE_ENTERPRISE` selects nothing.
 
-`OPENAI_BASE_URL` is described in [Configuration — Model Providers](index.md#model-providers).
+`OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` are described in [Configuration — Model Providers](index.md#model-providers).
 
 ### File-based Secrets
 
@@ -693,7 +693,7 @@ Setting and resetting require a Matrix room admin; other users get `❌ Room adm
 The new default applies to later turns; a turn in progress or waiting for approval keeps the model it started with.
 `!room_model reset` removes the runtime override so `room_models` or each entity's configured model applies again.
 
-To set an authored room default in `config.yaml`, map managed room names to model names with `room_models` (default `{}`):
+To set an authored room default in `config.yaml`, map room keys or Matrix room IDs to model names with `room_models` (default `{}`):
 
 ```yaml
 room_models:

@@ -1362,7 +1362,7 @@ def test_memory_embedder_check_warns_when_endpoint_unreachable(
             "OPENAI_API_KEY",
             "memory.llm.config.openai_base_url",
         ),
-        # Mem0's OpenAI client reads OPENAI_BASE_URL itself, for the shared key and a configured one alike.
+        # The memory LLM reaches OPENAI_BASE_URL, for the shared key and a configured one alike.
         (
             "openai",
             {"model": "m"},
@@ -1377,7 +1377,7 @@ def test_memory_embedder_check_warns_when_endpoint_unreachable(
             "memory.llm.config.api_key",
             "OPENAI_BASE_URL",
         ),
-        # Mem0's Anthropic client leaves the endpoint to the SDK, which reads ANTHROPIC_BASE_URL.
+        # The Anthropic memory LLM reaches ANTHROPIC_BASE_URL.
         (
             "anthropic",
             {"model": "m", "api_key": "sk-litellm"},

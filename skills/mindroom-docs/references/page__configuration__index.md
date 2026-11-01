@@ -69,8 +69,8 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `calls` | Agents joining Element Call voice calls | [Voice Calls](https://docs.mindroom.chat/voice-calls/#calls-configuration) |
 | `administrators`, `authorization`, `bot_accounts` | Platform administrators, command access, bridge aliases, and bridge bots | [Authorization](https://docs.mindroom.chat/authorization/) |
 | `room_defaults`, `rooms` | Managed room policy, invitations, and room admins | [Rooms & Spaces](https://docs.mindroom.chat/rooms/#room-policy) |
-| `room_models` | Map of managed room name to model name, the authored model default for a room | [Models](https://docs.mindroom.chat/configuration/models/#room_model) (`!room_model`) |
-| `room_thread_summary_models` | Map of room alias or Matrix room ID to automatic thread summary model | [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
+| `room_models` | Map of room key or Matrix room ID to model name, the authored model default for a room | [Models](https://docs.mindroom.chat/configuration/models/#room_model) (`!room_model`) |
+| `room_thread_summary_models` | Map of room key, Matrix room ID, or agent or team name to automatic thread summary model | [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](https://docs.mindroom.chat/rooms/#matrix-space) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
@@ -233,7 +233,8 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_BASE_URL` | Base URL for `provider: openai` models, such as a local inference server; a model's `extra_kwargs.base_url` overrides it, and `extra_kwargs.client_params.base_url` overrides both |
+| `OPENAI_BASE_URL` | Base URL for `provider: openai` models and the `openai` memory embedder and memory LLM, such as a local inference server; a model's `extra_kwargs.base_url` overrides it, and `extra_kwargs.client_params.base_url` overrides both |
+| `ANTHROPIC_BASE_URL` | Base URL for `provider: anthropic` models and the `anthropic` memory LLM, such as a gateway; a model's `extra_kwargs.client_params.base_url` overrides it |
 
 ### Dashboard and API
 

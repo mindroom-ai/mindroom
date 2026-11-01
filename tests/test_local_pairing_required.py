@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.matrix.provisioning_env import local_pairing_required, provisioning_url_from_env
+from mindroom.matrix.provisioning_env import (
+    local_pairing_required,
+    provisioning_url_from_env,
+    registration_shared_secret_from_env,
+    registration_token_from_env,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -88,3 +93,17 @@ def test_local_pairing_not_required_with_shared_secret_file(tmp_path: Path) -> N
     }
 
     assert local_pairing_required(_runtime(tmp_path, env)) is False
+
+
+def test_blank_exported_registration_secrets_do_not_hide_the_env_file_values(tmp_path: Path) -> None:
+    """A blank export, as a compose passthrough of an unset variable produces, counts as unset."""
+    (tmp_path / ".env").write_text(
+        "MATRIX_REGISTRATION_TOKEN=t\nMATRIX_REGISTRATION_SHARED_SECRET=s\n",
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime(tmp_path, {"MATRIX_REGISTRATION_TOKEN": "", "MATRIX_REGISTRATION_SHARED_SECRET": " "})
+
+    assert (registration_token_from_env(runtime_paths), registration_shared_secret_from_env(runtime_paths)) == (
+        "t",
+        "s",
+    )
