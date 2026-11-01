@@ -14922,7 +14922,7 @@ agents:
 `composio` exposes the Composio actions listed in `actions` as agent tools.
 Callable names are the lowercase action IDs; for example, `GITHUB_GET_THE_AUTHENTICATED_USER` becomes `github_get_the_authenticated_user`.
 Before loading the tool, configure the API key and connect the apps' accounts for the chosen `entity_id` in Composio, because the agent cannot create connections itself.
-A missing or empty `actions` list fails with `Composio requires a nonempty actions list.`
+An empty `actions` list in a tool entry fails config validation, and when no setting provides `actions`, the tool fails to load with `Composio requires a nonempty actions list.`
 `composio` does not accept `include_tools` or `exclude_tools`; choose its functions with `actions`.
 It is not confined by `file_access` and cannot run in a worker, so enable it only for agents trusted with the primary runtime (see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access)).
 

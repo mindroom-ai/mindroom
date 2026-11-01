@@ -1381,13 +1381,54 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
             tool_metadata=builtin_tool_registry().entries,
         )
 
-    with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
+    with pytest.raises(
+        ToolConfigOverrideError,
+        match=r"unknown authored override field.*Allowed fields: exclude_tools, flag, include_tools\.$",
+    ):
         validate_authored_tool_entry_overrides(
             tool_name,
             {"missing": True},
             config_path_prefix="agents.code.tools[0]",
             tool_metadata=builtin_tool_registry().entries,
         )
+
+
+def test_password_fields_are_never_authorable() -> None:
+    """A password field holds a secret, so the tool metadata the dashboard reads marks it non-authorable."""
+    assert (
+        ConfigField(name="api_key", label="API Key", type="password", authored_override=True).authored_override is False
+    )
+
+    reddit = next(tool for tool in export_tools_metadata(_BUILTINS.entries) if tool["name"] == "reddit")
+    authorable = {field["name"]: field["authored_override"] for field in reddit["config_fields"]}
+    assert authorable == {
+        "client_id": True,
+        "client_secret": False,
+        "user_agent": True,
+        "username": True,
+        "password": False,
+        "allowed_subreddits": True,
+    }
+
+
+@pytest.mark.parametrize("config_path_prefix", ["agents.code.tools[0]", "defaults.tools[0]"])
+@pytest.mark.parametrize("actions", [None, [], [" "], "", " , "])
+def test_validate_authored_overrides_rejects_an_empty_required_list(config_path_prefix: str, actions: object) -> None:
+    """Composio cannot build without actions, so its required list must hold a value when the config loads."""
+    with pytest.raises(ToolConfigOverrideError, match=r"composio\.actions: this field is required"):
+        validate_authored_tool_entry_overrides(
+            "composio",
+            {"actions": actions},
+            config_path_prefix=config_path_prefix,
+            tool_metadata=_BUILTINS.entries,
+        )
+
+    assert validate_authored_tool_entry_overrides(
+        "composio",
+        {"actions": ["GITHUB_STAR_A_REPO"]},
+        config_path_prefix=config_path_prefix,
+        tool_metadata=_BUILTINS.entries,
+    ) == {"actions": ["GITHUB_STAR_A_REPO"]}
 
 
 def test_searxng_include_tools_override_filters_registered_functions(tmp_path: Path) -> None:
