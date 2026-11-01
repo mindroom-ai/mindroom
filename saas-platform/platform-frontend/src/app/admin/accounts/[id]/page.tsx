@@ -25,12 +25,6 @@ interface AccountDetails {
     price_cents: Subscription['price_cents']
     billing_cycle: Subscription['billing_cycle']
   }
-  instances?: Array<{
-    id: string
-    instance_id: string
-    status: string
-    created_at: string
-  }>
 }
 
 export default function AccountDetailsPage() {
@@ -44,9 +38,9 @@ export default function AccountDetailsPage() {
       try {
         const response = await apiCall(`/admin/accounts/${params.id}`)
         if (response.ok) {
-          // The response nests the account beside its subscription and instances.
+          // The response nests the account beside its subscription.
           const data = await response.json()
-          setAccount({ ...data.account, subscription: data.subscription, instances: data.instances })
+          setAccount({ ...data.account, subscription: data.subscription })
         } else {
           logger.error('Failed to fetch account:', response.statusText)
         }

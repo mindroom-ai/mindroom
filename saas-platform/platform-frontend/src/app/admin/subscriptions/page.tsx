@@ -100,7 +100,7 @@ export default function SubscriptionsPage() {
                       </td>
                       <td className="py-3 px-4">
                         <div className={`font-medium text-gray-900 dark:text-gray-100 ${noPlan ? '' : 'capitalize'}`}>
-                          {noPlan ? 'No plan' : subscription.tier || 'Unknown'}
+                          {noPlan ? 'No plan' : subscription.tier}
                         </div>
                       </td>
                       <td className="py-3 px-4">
