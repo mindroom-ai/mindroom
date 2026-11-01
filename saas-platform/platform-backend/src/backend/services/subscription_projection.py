@@ -1,10 +1,10 @@
 """Shared projection of Stripe subscriptions into hosted billing records."""
 
 from datetime import UTC, datetime
-from typing import Any, NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict, get_args
 
 from backend.entitlements import db_subscription_status
-from backend.pricing import get_stripe_price_match
+from backend.pricing import BillingCycle, get_stripe_price_match
 
 
 class PermanentEventError(ValueError):
@@ -21,32 +21,23 @@ def maybe_timestamp_to_iso(timestamp: float | None) -> str | None:
     return timestamp_to_iso(timestamp) if timestamp is not None else None
 
 
-def _get_tier_from_price(price: dict) -> str:
-    """Extract the canonical tier for a Stripe price."""
+def _plan_from_price(price: dict) -> tuple[str, BillingCycle]:
+    """Return the canonical tier and billing cycle of a Stripe price, from the pricing config or its metadata."""
     if match := get_stripe_price_match(price.get("id")):
-        return match.tier
+        return match.tier, match.billing_cycle
 
-    if (metadata := price.get("metadata", {})) and (tier := metadata.get("tier")):
-        return tier
-
-    msg = (
-        f"Unable to determine tier from price. "
-        f"Price metadata: {price.get('metadata')}, "
-        f"lookup_key: {price.get('lookup_key')}"
-    )
-    raise PermanentEventError(msg)
-
-
-def _get_billing_cycle_from_price(price: dict) -> str:
-    """Extract the canonical billing cycle for a Stripe price."""
-    if match := get_stripe_price_match(price.get("id")):
-        return match.billing_cycle
-
-    if (metadata := price.get("metadata", {})) and (cycle := metadata.get("billing_cycle")):
-        return cycle
-
-    msg = f"Unable to determine billing cycle from price. Price metadata: {price.get('metadata')}"
-    raise PermanentEventError(msg)
+    metadata = price.get("metadata") or {}
+    if not (tier := metadata.get("tier")):
+        msg = (
+            f"Unable to determine tier from price. "
+            f"Price metadata: {price.get('metadata')}, "
+            f"lookup_key: {price.get('lookup_key')}"
+        )
+        raise PermanentEventError(msg)
+    if (billing_cycle := metadata.get("billing_cycle")) not in get_args(BillingCycle):
+        msg = f"Unable to determine billing cycle from price. Price metadata: {price.get('metadata')}"
+        raise PermanentEventError(msg)
+    return tier, billing_cycle
 
 
 class _SubscriptionFields(TypedDict):
@@ -55,6 +46,8 @@ class _SubscriptionFields(TypedDict):
     stripe_subscription_id: str
     stripe_price_id: str | None
     tier: str
+    billing_cycle: BillingCycle
+    price_cents: int | None
     status: str
     trial_ends_at: str | None
     updated_at: str
@@ -68,13 +61,15 @@ def subscription_fields(sb: Any, subscription: dict) -> _SubscriptionFields:
     """Project the fields shared by subscription creation and update events."""
     item = subscription["items"]["data"][0] if subscription.get("items", {}).get("data") else {}
     price_data = item["price"] if item else {}
-    tier = _get_tier_from_price(price_data)
-    _get_billing_cycle_from_price(price_data)
+    tier, billing_cycle = _plan_from_price(price_data)
 
     subscription_data: _SubscriptionFields = {
         "stripe_subscription_id": subscription["id"],
         "stripe_price_id": price_data.get("id"),
         "tier": tier,
+        "billing_cycle": billing_cycle,
+        # Amount Stripe bills each billing cycle, in cents; null for tiered, pay-what-you-want, and sub-cent prices.
+        "price_cents": price_data.get("unit_amount"),
         "status": subscription_status(sb, subscription["status"], subscription["id"]),
         "trial_ends_at": maybe_timestamp_to_iso(subscription.get("trial_end")),
         "updated_at": datetime.now(UTC).isoformat(),

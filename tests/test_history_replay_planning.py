@@ -907,7 +907,6 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
 
 def test_resolve_turn_model_uses_room_override_for_team(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -922,7 +921,7 @@ def test_resolve_turn_model_uses_room_override_for_team(
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=32_000),
@@ -930,7 +929,6 @@ def test_resolve_turn_model_uses_room_override_for_team(
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     runtime_model = resolve_turn_model(
         config,
@@ -945,14 +943,13 @@ def test_resolve_turn_model_uses_room_override_for_team(
 
 def test_resolve_turn_model_uses_room_override_for_agent(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -960,7 +957,6 @@ def test_resolve_turn_model_uses_room_override_for_agent(
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     runtime_model = resolve_turn_model(
         config,

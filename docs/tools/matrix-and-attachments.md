@@ -269,7 +269,7 @@ For threads with more than 50 messages, the summary model sees only the first th
 
 The summary uses the first match of:
 
-1. `room_thread_summary_models`, keyed by managed room alias or Matrix room ID.
+1. `room_thread_summary_models`, keyed by room key or Matrix room ID.
 2. `room_thread_summary_models`, keyed by the responding agent or team name, which covers ad-hoc rooms without a managed alias.
 3. `defaults.thread_summary_model`.
 4. The `default` model.

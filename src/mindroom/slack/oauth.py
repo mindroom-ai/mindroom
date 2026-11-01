@@ -14,6 +14,7 @@ from mindroom.oauth.providers import (
     OAuthProviderError,
     OAuthRuntimeEndpoints,
     OAuthTokenResult,
+    OAuthUserFacingError,
 )
 from mindroom.slack.api import SLACK_UNREACHABLE, SlackApiError, slack_http_client
 from mindroom.slack.app import (
@@ -56,7 +57,7 @@ def _load_slack_app(runtime_paths: RuntimePaths) -> SlackAppCredentials:
     """Read the app from the runtime's own credential store; a requester-scoped store would be the wrong one."""
     app = load_slack_app(get_runtime_credentials_manager(runtime_paths))
     if app is None:
-        raise OAuthProviderError(SLACK_APP_NOT_CONFIGURED)
+        raise OAuthUserFacingError(SLACK_APP_NOT_CONFIGURED)
     return app
 
 
@@ -79,9 +80,9 @@ async def _slack_runtime_endpoints(provider: OAuthProvider, runtime_paths: Runti
         async with slack_http_client() as client:
             await slack_bot_identity(client, app)
     except SlackApiError as exc:
-        raise OAuthProviderError(SLACK_APP_NOT_CONFIGURED) from exc
+        raise OAuthUserFacingError(SLACK_UNREACHABLE if exc.transient else SLACK_APP_NOT_CONFIGURED) from exc
     except httpx.HTTPError as exc:
-        raise OAuthProviderError(SLACK_UNREACHABLE) from exc
+        raise OAuthUserFacingError(SLACK_UNREACHABLE) from exc
     return endpoints
 
 
