@@ -114,9 +114,6 @@ class TestTeamRoomUpdates:
                             bot.rooms = get_rooms_for_entity(bot.agent_name, active_config)
 
                     setup_rooms.side_effect = reconcile_rooms
-                    setup_rooms.reset_mock()
-                    for bot in created_bots.values():
-                        bot.stop.reset_mock()
 
                     # Update config with different rooms for the team
                     updated_config_data = initial_config_data.copy()
