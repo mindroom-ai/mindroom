@@ -470,8 +470,8 @@ async def test_deeply_nested_payload_is_invalid_credential(
     token = PyJWS().encode(payload, signing_key, algorithm="RS256", headers={"kid": "key-1"})
     assert len(token) <= 16384
     if parser == "python":
-        # Some dependencies, such as elevenlabs, raise the process-wide recursion limit when imported.
-        # A depth that exceeds a raised limit would not fit in the token cap, so pin CPython's default.
+        # Some dependencies, such as elevenlabs, raise the process-wide recursion limit when imported,
+        # so pin CPython's default to keep this payload deeper than the limit in any test order.
         request.addfinalizer(partial(sys.setrecursionlimit, sys.getrecursionlimit()))
         sys.setrecursionlimit(1000)
         decoder = json.JSONDecoder()
