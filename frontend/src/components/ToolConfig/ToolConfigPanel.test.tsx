@@ -488,7 +488,35 @@ describe("ToolConfigPanel", () => {
     );
   });
 
-  it("prefers overrideFields over configFields when both are present", () => {
+  it("offers an agent entry its config fields and its agent-only fields", () => {
+    seedStore({ agentTools: ["slack"] });
+    render(
+      <ToolConfigPanel
+        target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
+        toolName="slack"
+        toolDisplayName="Slack"
+        overrideFields={[
+          { name: "channels", label: "Project Channels", type: "string[]" },
+          { name: "room", label: "Room", type: "text" },
+        ]}
+        configFields={[
+          { name: "write", label: "Allow Write", type: "boolean" },
+        ]}
+      />,
+    );
+
+    expect(
+      screen
+        .getAllByRole("checkbox", { name: /^Override / })
+        .map((box) => box.getAttribute("aria-label")),
+    ).toEqual([
+      "Override Allow Write",
+      "Override Project Channels",
+      "Override Room",
+    ]);
+  });
+
+  it("shows a config field once, in the list form its agent-only twin takes", () => {
     seedStore();
     render(
       <ToolConfigPanel
@@ -502,12 +530,26 @@ describe("ToolConfigPanel", () => {
             type: "string[]",
           },
         ]}
-        configFields={[{ name: "timeout", label: "Timeout", type: "number" }]}
+        configFields={[
+          {
+            name: "enable_run_shell_command",
+            label: "Run Shell Command",
+            type: "boolean",
+          },
+          {
+            name: "extra_env_passthrough",
+            label: "Extra Env Passthrough",
+            type: "text",
+          },
+        ]}
       />,
     );
 
-    expect(screen.getByText("Env Passthrough")).toBeInTheDocument();
-    expect(screen.queryByText("Timeout")).not.toBeInTheDocument();
+    expect(
+      screen
+        .getAllByRole("checkbox", { name: /^Override / })
+        .map((box) => box.getAttribute("aria-label")),
+    ).toEqual(["Override Run Shell Command", "Override Env Passthrough"]);
   });
 
   it("keeps a draft to the agent it was typed for", () => {
