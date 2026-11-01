@@ -1673,7 +1673,7 @@ def validate_loaded_config_source(
     *,
     uses_includes: bool,
     tolerate_plugin_load_errors: bool = False,
-) -> tuple[Config, dict[Path, str]]:
+) -> Config:
     """Validate and, when needed, persist one already-parsed config source."""
     path = runtime_paths.config_path
     source_files = frozenset(source_digests)
@@ -1698,7 +1698,7 @@ def validate_loaded_config_source(
         exc.config_source_fingerprint = source_files_fingerprint(path, source_digests)  # ty: ignore[invalid-assignment]
         raise
     config.record_source_metadata(path, source_digests, uses_includes=uses_includes)
-    return config, source_digests
+    return config
 
 
 def load_config(
@@ -1714,7 +1714,7 @@ def load_config(
 
     original = path.read_bytes()
     data, source_digests, uses_includes = load_yaml_config_source_with_digests(path, source=original)
-    config, source_digests = validate_loaded_config_source(
+    config = validate_loaded_config_source(
         data,
         source_digests,
         original,
@@ -1722,7 +1722,7 @@ def load_config(
         uses_includes=uses_includes,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
-    logger.info("loaded_agent_configuration", path=str(path), source_file_count=len(source_digests))
+    logger.info("loaded_agent_configuration", path=str(path), source_file_count=len(config.source_files))
     logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
     return config
 
