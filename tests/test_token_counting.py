@@ -318,6 +318,26 @@ def test_an_estimated_counter_ignores_provider_counts() -> None:
     assert count(basis, "x" * 40) == before == TokenCount(10, "estimated")
 
 
+def test_an_estimated_counter_keeps_the_basis_it_started_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A counter made before the encoder loads keeps the stand-in, so its two measurements share one basis."""
+    release = threading.Event()
+    real_get_encoding = tiktoken.get_encoding
+
+    def slow_get_encoding(name: str) -> tiktoken.Encoding:
+        release.wait()
+        return real_get_encoding(name)
+
+    monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
+    monkeypatch.setattr(tiktoken, "get_encoding", slow_get_encoding)
+    basis = estimated(counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic")))
+    before = count(basis, "some memory text " * 50)
+
+    release.set()
+    load_o200k()
+
+    assert count(basis, "some memory text " * 50) == before
+
+
 def test_fit_text_always_fits() -> None:
     text = "".join(f"word{index} " for index in range(400))
     notice = "\n[cut]"

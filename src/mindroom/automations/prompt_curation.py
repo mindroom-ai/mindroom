@@ -26,7 +26,6 @@ from mindroom.memory import entrypoint_withholds_lines, read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.providers.registry import model_token_counter
 from mindroom.token_counting.counts import count, estimated
-from mindroom.token_counting.families import load_o200k
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -117,8 +116,7 @@ def _plan_curation(
 
     Raises ``OSError``, ``ValueError``, or ``UnicodeDecodeError`` for a file that cannot be read safely.
     """
-    # Verify compares its sizes with these, so both measure by the estimate alone, with the encoder it needs loaded.
-    load_o200k()
+    # Verify compares its sizes with these, so both measure by the estimate alone, on the encoder this plan had.
     measure = estimated(counter)
     curated_payloads = {
         path: payload for path in _curated_paths(config, agent_name) if (payload := _read(root, path)) is not None

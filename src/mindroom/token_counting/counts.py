@@ -121,11 +121,17 @@ def count(counter: TokenCounter, text: str, *, upper_bound: bool = False) -> Tok
 
 
 def estimated(counter: TokenCounter) -> TokenCounter:
-    """Return ``counter`` counting by its local estimate alone, never by provider counts cached for its key.
+    """Return ``counter`` counting by its local estimate alone, as its encoder stands now, never by provider counts.
 
-    Sizes measured at two times then compare on one basis, even when the provider counted one of the texts between.
+    Sizes measured at two times then compare on one basis, even when the provider counted one of the texts between or
+    the encoder finished loading; without the encoder, both use the stand-in.
     """
-    return replace(counter, key=f"{counter.key}#estimated", count=None)
+    loaded = counter.estimate("a") is not None
+
+    def estimate(text: str) -> int | None:
+        return counter.estimate(text) if loaded else None
+
+    return replace(counter, key=f"{counter.key}#estimated:{loaded}", estimate=estimate, count=None)
 
 
 def _cooling(counter: TokenCounter) -> bool:

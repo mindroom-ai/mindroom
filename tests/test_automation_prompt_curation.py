@@ -6,6 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
+import tiktoken
 
 from mindroom.automations.prompt_curation import (
     _curation_notice,
@@ -19,10 +20,12 @@ from mindroom.config.automations import PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.llm.provider import TokenCounter
+from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.memory import entrypoint_withholds_lines
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.token_counting import families
 from mindroom.token_counting.counts import count_exact
+from mindroom.token_counting.families import counter_for_model
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 from tests.fakes.token_counter import fake_token_counter
 
@@ -87,6 +90,24 @@ def test_the_files_are_measured_as_the_agent_s_model_estimates_them(tmp_path: Pa
 
     assert plan is not None
     assert plan.curated["MEMORY.md"] == len(MEMORY) // 2
+
+
+def test_curation_plans_without_the_vocabulary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An installation that cannot load o200k_base still plans a cut, on the stand-in estimate."""
+
+    def offline(_name: str) -> object:
+        msg = "no network"
+        raise OSError(msg)
+
+    monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
+    monkeypatch.setattr(tiktoken, "get_encoding", offline)
+    config, automation, root = _setup(tmp_path)
+    counter = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"))
+
+    plan = _plan_curation(config, root, "mind", automation, counter)
+
+    assert plan is not None
+    assert plan.curated["MEMORY.md"] == -(-len(MEMORY) // 4)
 
 
 def test_verify_measures_on_the_basis_the_plan_used(tmp_path: Path) -> None:
