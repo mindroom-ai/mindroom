@@ -58,7 +58,7 @@ from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.resolution import entity_timezone
-from mindroom.constants import AI_RUN_METADATA_KEY, RuntimePaths, runtime_env_flag
+from mindroom.constants import AI_RUN_METADATA_KEY, RuntimePaths
 from mindroom.error_handling import needs_provider_key
 from mindroom.failure_text import failure_text
 from mindroom.helper_usage import helper_usage_context
@@ -372,13 +372,9 @@ def _authenticate_request(  # noqa: PLR0911
     runtime_paths: RuntimePaths,
 ) -> JSONResponse | _AuthenticatedCaller:
     """Authenticate one `/v1` request."""
-    keys_env = runtime_paths.env_value("OPENAI_COMPAT_API_KEYS", default="") or ""
-    allow_unauthenticated = runtime_env_flag(
-        "OPENAI_COMPAT_ALLOW_UNAUTHENTICATED",
-        runtime_paths,
-        default=False,
-    )
-    if not keys_env.strip():
+    keys_env = runtime_paths.env_value("OPENAI_COMPAT_API_KEYS", default="")
+    allow_unauthenticated = runtime_paths.env_flag("OPENAI_COMPAT_ALLOW_UNAUTHENTICATED")
+    if not keys_env:
         if allow_unauthenticated:
             # A completion runs an agent with its tools, so a rebound or cross-site page must not trigger one.
             rejection = open_access_rejection(request.headers, request.method, runtime_paths)
@@ -415,8 +411,8 @@ def _authenticate_request(  # noqa: PLR0911
 
 def _api_key_requester(token: str, runtime_paths: RuntimePaths) -> JSONResponse | str | None:
     """Resolve a validated key's optional canonical requester binding."""
-    mappings_env = runtime_paths.env_value("OPENAI_COMPAT_API_KEY_REQUESTERS", default="") or ""
-    if not mappings_env.strip():
+    mappings_env = runtime_paths.env_value("OPENAI_COMPAT_API_KEY_REQUESTERS", default="")
+    if not mappings_env:
         return None
     try:
         mappings = TypeAdapter(dict[StrictStr, StrictStr]).validate_json(mappings_env)

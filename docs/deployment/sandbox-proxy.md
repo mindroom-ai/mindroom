@@ -192,7 +192,7 @@ Each worker gets a read-only copy of the [live config snapshot](#live-config-sna
 Agent-scoped workers get only their agent and its assigned knowledge bases, while `worker_scope: user` workers get every agent that shares them.
 Workers never see `~/.mindroom` or the config-adjacent `.env`.
 The called tool's own inline overrides still reach the worker, but if it needs a secret from `.env` or from elsewhere in `config.yaml`, provide it through a [credential lease](#credential-leases), [environment passthrough](#shell-environment-and-path), or `MINDROOM_DOCKER_WORKER_ENV_JSON` instead.
-Because worker code can reach the host network, `mindroom run` adds a generated `MINDROOM_API_KEY` to `.env` when a dedicated worker backend is configured and the dashboard has no credential; an explicitly empty `MINDROOM_API_KEY=` keeps open access.
+Because worker code can reach the host network, `mindroom run` adds a generated `MINDROOM_API_KEY` to `.env` when a dedicated worker backend is configured and the dashboard has no credential; an explicitly empty `MINDROOM_API_KEY=` in `.env` keeps open access.
 
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 

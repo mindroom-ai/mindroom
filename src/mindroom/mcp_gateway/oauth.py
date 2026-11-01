@@ -150,7 +150,7 @@ class GatewayOAuthProvider(
         self.issuer_url = origin + "/mcp/oauth"
         self.consent_url = origin + "/connections/mcp/authorize"
         self._clock = clock or (lambda: time.time())
-        self.scim_token = runtime_paths.env_value("MINDROOM_MCP_SCIM_TOKEN") or None
+        self.scim_token = runtime_paths.env_value("MINDROOM_MCP_SCIM_TOKEN")
         if self.scim_token is not None and len(self.scim_token) < 32:
             msg = "MINDROOM_MCP_SCIM_TOKEN must contain at least 32 characters"
             raise ValueError(msg)

@@ -8040,7 +8040,6 @@ path = "mindroom.api.computers"
 depends_on = [
     "mindroom.api.app_state",
     "mindroom.api.config_lifecycle",
-    "mindroom.constants",
     "mindroom.matrix_openid",
     "mindroom.worker_computer.client",
     "mindroom.worker_computer.sessions",
