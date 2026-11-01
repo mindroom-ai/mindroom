@@ -17,10 +17,6 @@ src/components/Integrations/iconMapping.tsx
 src/test/fixtures/config-schema.json
 src/test/fixtures/egressPresets.json
 
-# Coverage
-coverage/
-.nyc_output/
-
 # IDE
 .vscode/
 .idea/

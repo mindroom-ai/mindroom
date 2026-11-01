@@ -1090,11 +1090,13 @@ async def test_finished_script_kills_same_group_descendants(
 
 
 @pytest.mark.asyncio
-async def test_orphaned_supervisor_exits_and_kills_children() -> None:
-    """A supervisor whose parent dies must clean up its children and socket dir."""
-    runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-orphan-"))
+async def test_orphaned_supervisor_exits_and_removes_its_runtime_dir(tmp_path: Path) -> None:
+    """A supervisor whose parent dies must exit and remove its runtime dir."""
+    # The supervisor's own short prefix keeps the socket path within the 107-byte limit on two-digit xdist workers.
+    runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-"))
     socket_path = runtime_dir / "supervisor.sock"
-    supervisor_pid_file = runtime_dir / "supervisor.pid"
+    # Outside the runtime dir, which the orphaned supervisor removes, perhaps before this test reads the file.
+    supervisor_pid_file = tmp_path / "supervisor.pid"
     # Spawn the supervisor from a short-lived intermediate parent so it becomes
     # an orphan as soon as that parent exits.
     launcher = (

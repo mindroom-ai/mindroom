@@ -36,7 +36,7 @@ class _ScheduledAutomation(BaseModel):
     cron: str
     room: str | None = Field(
         default=None,
-        description="Room alias or ID for the prompt; defaults to the agent's first configured room",
+        description="Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
     )
     model: str | None = Field(
         default=None,

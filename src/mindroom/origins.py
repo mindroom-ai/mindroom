@@ -71,8 +71,8 @@ def local_api_origin(paths: RuntimePaths) -> str:
 
 
 def configured_public_url(paths: RuntimePaths) -> str | None:
-    """Return `MINDROOM_PUBLIC_URL` without its trailing slash, or None when it is unset."""
-    return (paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/") or None
+    """Return `MINDROOM_PUBLIC_URL` trimmed and without its trailing slash, the base of MindRoom's links, or None when unset."""
+    return (paths.env_value("MINDROOM_PUBLIC_URL") or "").strip().rstrip("/") or None
 
 
 def with_api_port(paths: RuntimePaths, api_port: int) -> RuntimePaths:
