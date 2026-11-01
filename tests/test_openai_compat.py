@@ -2943,8 +2943,10 @@ class TestAutoRouting:
     ) -> None:
         """An accepted no-fit returns an error before invoking any response agent."""
         test_config.router.judgment = TypeSafeJudgmentConfig(provider="typesafe")
-        runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true", "TYPESAFE_API_KEY": "synthetic"})
-        persist_entity_accounts(test_config, runtime_paths)
+        runtime_paths = _runtime_paths_for_config(
+            test_config,
+            {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true", "TYPESAFE_API_KEY": "synthetic"},
+        )
         posted = []
 
         async def post(_self: JudgmentClient, body: bytes) -> bytes:

@@ -1071,12 +1071,10 @@ async def test_a_cli_login_home_set_in_the_env_file_is_read(
         return encoded_response(reply)
 
     exported = {variable: ""} if source == "env-file-under-blank-export" else {}
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "data",
-        process_env=exported,
+    runtime = replace(
+        _runtime(tmp_path, **exported),
+        http_client=httpx2.AsyncClient(transport=httpx2_transport(respond)),
     )
-    runtime = provider_runtime(paths, http_client=httpx2.AsyncClient(transport=httpx2_transport(respond)))
 
     await complete(build_provider(ModelConfig(**model_config), runtime), ModelRequest(messages=[_user()]))
 

@@ -85,11 +85,5 @@ async def test_openai_endpoint_precedence_reaches_sdk_clients(
 
     [request] = wire.requests
     assert str(request.url) == expected_url + ("responses" if responses else "chat/completions")
-    if endpoint_source in {
-        "default",
-        "dotenv",
-        "dotenv_with_null_model_url",
-        "dotenv_under_blank_export",
-        "process_snapshot",
-    }:
+    if endpoint_source not in {"process", "model", "client_params"}:
         assert "OPENAI_BASE_URL" not in os.environ

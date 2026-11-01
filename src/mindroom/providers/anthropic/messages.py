@@ -786,18 +786,13 @@ def _anthropic_kwargs(authored: dict[str, Any], api_key: str | None, runtime_pat
 def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:
     """Fill Vertex project, region, endpoint, and Google credentials from the runtime env; a key is ignored."""
     kwargs = {key: value for key, value in authored.items() if key != "api_key"}
-    if "project_id" not in kwargs and (
-        project_id := get_secret_from_env(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"], runtime_paths=runtime_paths)
+    for config_key, env_key in (
+        ("project_id", VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]),
+        ("region", VERTEXAI_CLAUDE_ENV_BY_KEY["region"]),
+        ("base_url", ENDPOINT_VARIABLES["vertexai_claude"]),
     ):
-        kwargs["project_id"] = project_id
-    if "region" not in kwargs and (
-        region := get_secret_from_env(VERTEXAI_CLAUDE_ENV_BY_KEY["region"], runtime_paths=runtime_paths)
-    ):
-        kwargs["region"] = region
-    if "base_url" not in kwargs and (
-        base_url := get_secret_from_env(ENDPOINT_VARIABLES["vertexai_claude"], runtime_paths=runtime_paths)
-    ):
-        kwargs["base_url"] = base_url
+        if config_key not in kwargs and (value := get_secret_from_env(env_key, runtime_paths=runtime_paths)):
+            kwargs[config_key] = value
     return with_runtime_application_credentials(kwargs, runtime_paths)
 
 

@@ -409,18 +409,26 @@ async def test_abandoned_model_load_retains_capacity(
     assert len(judge.requests) == 1
 
 
-@pytest.mark.parametrize("source", ["file", "env-file-under-blank-export", "blank-export-only"])
-def test_typesafe_reads_its_key_as_provider_keys_are_read(tmp_path: Path, source: str) -> None:
+@pytest.mark.parametrize(
+    ("process_env", "env_file_values", "has_key"),
+    [
+        ({"TYPESAFE_API_KEY_FILE": "typesafe-key"}, {}, True),
+        ({"TYPESAFE_API_KEY": ""}, {"TYPESAFE_API_KEY": "sk-typesafe"}, True),
+        ({"TYPESAFE_API_KEY": ""}, {}, False),
+    ],
+    ids=["file", "env-file-under-blank-export", "blank-export-only"],
+)
+def test_typesafe_reads_its_key_as_provider_keys_are_read(
+    tmp_path: Path,
+    process_env: dict[str, str],
+    env_file_values: dict[str, str],
+    has_key: bool,
+) -> None:
     """``TYPESAFE_API_KEY_FILE`` supplies the System One key, and a blank export does not hide the ``.env`` key."""
-    key_file = tmp_path / "typesafe-key"
-    key_file.write_text("sk-typesafe\n", encoding="utf-8")
-    runtime_paths = replace(
-        test_runtime_paths(tmp_path),
-        process_env={"TYPESAFE_API_KEY_FILE": str(key_file)} if source == "file" else {"TYPESAFE_API_KEY": ""},
-        env_file_values={"TYPESAFE_API_KEY": "sk-typesafe"} if source == "env-file-under-blank-export" else {},
-    )
+    (tmp_path / "typesafe-key").write_text("sk-typesafe\n", encoding="utf-8")
+    runtime_paths = replace(test_runtime_paths(tmp_path), process_env=process_env, env_file_values=env_file_values)
     settings = TypeSafeJudgmentConfig(provider="typesafe")
 
     evaluator = create_choice_evaluator(settings, runtime_paths, owner="router", question_id="responder")
 
-    assert (evaluator is None) is (source == "blank-export-only")
+    assert (evaluator is not None) is has_key
