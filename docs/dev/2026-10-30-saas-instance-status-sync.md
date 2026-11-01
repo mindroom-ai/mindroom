@@ -51,7 +51,8 @@ Provisioning's own readiness writes follow the same rule: they record `running` 
 A Stripe price's amount cannot change, so the synchronizer reuses only an active price with the configured tier, billing cycle, and amount.
 Otherwise it creates a new price that takes over the plan's lookup key, because Stripe allows one price per lookup key and the replaced price still holds it.
 Existing subscribers stay on their old price and still map to their plan through its metadata.
-The synchronizer writes only the test-mode price fields; live-mode price IDs are still set by hand.
+The synchronizer writes only the test-mode price fields and refuses a live key, so live prices stay hand-made.
+Syncing live mode would replace hand-made live prices that may lack `tier` and `billing_cycle` metadata, and their subscribers would then map to no plan.
 
 ## Rejected alternatives
 

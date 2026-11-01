@@ -28,7 +28,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
 from tests.reply_span_helpers import reply_span, seed_finished_reply
 
 if TYPE_CHECKING:
@@ -53,7 +53,6 @@ def _context(tmp_path: Path) -> ToolRuntimeContext:
         Config(agents={"general": AgentConfig(display_name="General"), "helper": AgentConfig(display_name="Helper")}),
         test_runtime_paths(tmp_path),
     )
-    persist_entity_accounts(config, runtime_paths_for(config))
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = entity_ids(config, runtime_paths_for(config))["general"].full_id
     return make_test_tool_runtime_context(

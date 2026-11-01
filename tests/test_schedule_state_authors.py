@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import nio
 import pytest
 from structlog.testing import capture_logs
@@ -249,6 +250,28 @@ async def test_non_event_task_state_response_is_a_read_error(
 
     with pytest.raises(ScheduledTaskStateReadError, match=rf"was not returned as a full state event \({detail}\)"):
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_task_read_whose_create_event_check_raises_names_the_error(tmp_path: Path) -> None:
+    """A task read whose homeserver check on the room's create event raises reports the error's type and text."""
+    client = _room_with_task(_pending_content(_workflow(created_by="@alice:server")), sender=SCHEDULE_WRITER_ID)
+    serve_task = client._send.side_effect
+    broken_response = aiohttp.ClientPayloadError("Response payload is not completed")
+
+    async def create_read_breaks(response_class: type, method: str, path: str, **kwargs: object) -> object:
+        if path.startswith(CREATE_STATE_PATH):
+            raise broken_response
+        return await serve_task(response_class, method, path, **kwargs)
+
+    client._send.side_effect = create_read_breaks
+
+    with pytest.raises(ScheduledTaskStateReadError) as exc_info:
+        await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, schedule_runtime_paths(tmp_path))
+
+    assert str(exc_info.value) == (
+        f"Failed to read the create event of room `{ROOM_ID}`: ClientPayloadError: Response payload is not completed"
+    )
 
 
 @pytest.mark.asyncio

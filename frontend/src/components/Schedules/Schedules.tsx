@@ -19,9 +19,11 @@ import {
 import type {
   ScheduleTask,
   ScheduleType,
+  UnreadableScheduleRoom,
   UpdateScheduleRequest,
 } from "@/types/schedule";
 import { useToast } from "@/components/ui/use-toast";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -240,6 +242,9 @@ function toDraft(task: ScheduleTask, timezone: string): ScheduleDraft {
 export function Schedules() {
   const { toast } = useToast();
   const [tasks, setTasks] = useState<ScheduleTask[]>([]);
+  const [unreadableRooms, setUnreadableRooms] = useState<
+    UnreadableScheduleRoom[]
+  >([]);
   const [timezone, setTimezone] = useState("UTC");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ScheduleDraft | null>(null);
@@ -284,6 +289,7 @@ export function Schedules() {
     try {
       const response = await listSchedules();
       setTasks(response.tasks);
+      setUnreadableRooms(response.unreadable_rooms);
       setTimezone(response.timezone);
       setSelectedTaskId((current) =>
         current && response.tasks.some((task) => task.task_id === current)
@@ -528,6 +534,24 @@ export function Schedules() {
           </div>
         </CardContent>
       </Card>
+
+      {unreadableRooms.length > 0 && (
+        <Alert variant="destructive">
+          <AlertTitle>Schedules in some rooms could not be read</AlertTitle>
+          <AlertDescription>
+            <ul className="space-y-1">
+              {unreadableRooms.map((room) => (
+                <li key={room.room_id} className="break-words">
+                  <span className="font-medium">
+                    {room.room_alias || room.room_id}
+                  </span>
+                  : {room.error}
+                </li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 flex-1 min-h-0">
         <div

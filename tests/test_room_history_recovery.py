@@ -25,7 +25,7 @@ from mindroom.matrix import conversation_hydration
 from mindroom.matrix.conversation_hydration import (
     _MESSAGES_PAGE_LIMIT,
     ConversationHydrator,
-    _HydrationError,
+    ConversationReadError,
 )
 from mindroom.matrix.users import AgentMatrixUser
 from tests.bot_helpers import make_test_agent_bot
@@ -684,7 +684,7 @@ async def test_repair_pagination_error_leaves_the_obligation_repairable(principa
     )
     recovery = await record_room_history_recovery(principal, ROOM)
 
-    with pytest.raises(_HydrationError, match="Could not fetch history"):
+    with pytest.raises(ConversationReadError, match="Could not fetch history"):
         await hydrator(principal, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
     assert await principal.room_history_recovery(ROOM) == recovery
@@ -697,7 +697,7 @@ async def test_repair_repeated_token_leaves_the_obligation_repairable(principal:
     client = PagedClient(pages=[([], "same"), ([], "same")])
     recovery = await record_room_history_recovery(principal, ROOM)
 
-    with pytest.raises(_HydrationError, match="repeated pagination token"):
+    with pytest.raises(ConversationReadError, match="repeated pagination token"):
         await hydrator(principal, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
     assert client.calls == 2
