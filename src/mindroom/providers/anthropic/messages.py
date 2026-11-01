@@ -244,7 +244,7 @@ class ClaudeProvider:
             self.identity,
             count=self._count_text_tokens,
             # Only Bedrock has no endpoint identity; its region names where counts go.
-            endpoint=f"bedrock:{self.settings.aws_region}" if self.route == "bedrock_claude" else None,
+            endpoint=f"bedrock:{_bedrock_region(self.settings)}" if self.route == "bedrock_claude" else None,
         )
 
     async def _count_text_tokens(self, text: str) -> int:
@@ -734,6 +734,14 @@ def _raw_request_params(settings: ClaudeSettings, *, omit_thinking_setting: bool
     return request_params
 
 
+def _bedrock_region(settings: ClaudeSettings) -> str | None:
+    """Return the region a Bedrock client uses: ``client_params``' over the settings', then the boto3 session's."""
+    region = (settings.client_params or {}).get("aws_region") or settings.aws_region
+    if region is None and settings.session is not None:
+        region = settings.session.region_name
+    return region
+
+
 def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
     """Return this request's AWS credentials; a boto3 session resolves rotating credentials every time."""
     if settings.session is None:
@@ -741,7 +749,7 @@ def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
             "aws_access_key": settings.aws_access_key,
             "aws_secret_key": settings.aws_secret_key,
             "aws_session_token": settings.aws_session_token,
-            "aws_region": settings.aws_region,
+            "aws_region": _bedrock_region(settings),
         }
     resolved = settings.session.get_credentials()
     if resolved is None:
@@ -755,7 +763,7 @@ def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
         "aws_access_key": credentials.access_key,
         "aws_secret_key": credentials.secret_key,
         "aws_session_token": credentials.token,
-        "aws_region": settings.aws_region or settings.session.region_name,
+        "aws_region": _bedrock_region(settings),
     }
 
 

@@ -237,5 +237,9 @@ def test_counter_keys_tell_the_routes_of_one_model_apart(tmp_path: Path) -> None
 
     east = dict(ROUTE_CONFIGS["bedrock_claude"])
     west = {**east, "extra_kwargs": {**east["extra_kwargs"], "aws_region": "us-west-2"}}
-    bedrock_keys = {provider_for(config, tmp_path, httpx2.AsyncClient()).token_counter.key for config in (east, west)}
-    assert len(bedrock_keys) == 2
+    # client_params override the region the client counts in, as they do every other client setting.
+    eu = {**east, "extra_kwargs": {**east["extra_kwargs"], "client_params": {"aws_region": "eu-west-1"}}}
+    bedrock_keys = {
+        provider_for(config, tmp_path, httpx2.AsyncClient()).token_counter.key for config in (east, west, eu)
+    }
+    assert len(bedrock_keys) == 3
