@@ -210,6 +210,36 @@ def test_list_schedules_reads_a_room_configured_by_alias_under_its_room_id(
     ]
 
 
+def test_list_schedules_filtered_by_alias_reads_only_that_room(test_client: TestClient) -> None:
+    """A room filter written as an alias is read under the room ID it resolves to."""
+    client = make_matrix_client_mock()
+    client.room_resolve_alias = AsyncMock(
+        return_value=nio.RoomResolveAliasResponse(
+            room_alias="#lobby:example.org",
+            room_id="!lobby:localhost",
+            servers=[],
+        ),
+    )
+    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict([], room_id="!lobby:localhost"))
+    response = _send_with(test_client, client, "GET", path="/api/schedules", params={"room_id": "#lobby:example.org"})
+
+    assert response.status_code == 200
+    client.room_get_state.assert_awaited_once_with("!lobby:localhost")
+
+
+def test_list_schedules_without_rooms_needs_no_matrix_account(test_client: TestClient, temp_config_file: Path) -> None:
+    """With no room configured, the list is empty before MindRoom has created its Matrix accounts."""
+    config_data = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    config_data["agents"]["test_agent"]["rooms"] = []
+    temp_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app).loaded
+
+    response = test_client.get("/api/schedules")
+
+    assert response.status_code == 200
+    assert response.json() == {"timezone": "UTC", "tasks": [], "unreadable_rooms": []}
+
+
 def test_list_schedules_skips_a_configured_room_not_created_yet(test_client: TestClient) -> None:
     """A room key with no created room holds no tasks, so it is neither read nor reported unreadable."""
     client = make_matrix_client_mock()
