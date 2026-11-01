@@ -18,6 +18,7 @@ WORKFLOW_DIR = ROOT / ".github" / "workflows"
 _TEST_PATH = re.compile(r"(?<![\w./-])tests/[\w./-]+\.py\b")
 # Jobs that install or run repository or dependency code chosen by the pushed commit.
 _CODE_RUNNING_JOBS = (
+    ("dashboard-tests.yml", "dashboard"),
     ("docs.yml", "build"),
     ("macos-tests.yml", "packaging"),
     ("macos-tests.yml", "swift-tests"),
@@ -85,6 +86,7 @@ def test_generated_docs_are_checked_rather_than_pushed_from_ci() -> None:
         "build-mindroom.yml",
         "build-platform.yml",
         "calver-auto-release.yml",
+        "dashboard-tests.yml",
         "markdown-code-runner.yml",
         "platform-backend-tests.yml",
         "publish-helm-charts.yml",
