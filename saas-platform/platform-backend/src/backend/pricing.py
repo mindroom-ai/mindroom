@@ -68,12 +68,15 @@ class PricingConfig(BaseModel):
     discounts: Discounts
 
 
+BillingCycle = Literal["monthly", "yearly"]
+
+
 @dataclass(frozen=True)
 class StripePriceMatch:
     """Canonical plan metadata for a configured Stripe price ID."""
 
     tier: str
-    billing_cycle: Literal["monthly", "yearly"]
+    billing_cycle: BillingCycle
 
 
 def find_pricing_config_path() -> Path:
