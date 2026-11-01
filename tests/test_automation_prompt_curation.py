@@ -12,6 +12,7 @@ from mindroom.automations.prompt_curation import (
     _curation_prompt,
     _CurationPlan,
     _plan_curation,
+    _stable_counter,
     _verify_curation,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -22,6 +23,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.token_counting import families
+from mindroom.token_counting.counts import count
 from mindroom.token_counting.families import counter_for_model
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 from tests.fakes.token_counter import fake_token_counter, quarter_tokens
@@ -102,6 +104,20 @@ def test_curation_plans_without_the_vocabulary(tmp_path: Path, monkeypatch: pyte
 
     assert plan is not None
     assert plan.curated["MEMORY.md"] == -(-len(MEMORY) // 4)
+
+
+def test_curation_keeps_the_stand_in_while_the_model_s_own_encoding_loads() -> None:
+    """Plan and verify compare sizes on one basis, even when the model's own encoding loads between them.
+
+    o200k_base loads before planning, but an older OpenAI model counts with cl100k_base, which may still be loading.
+    """
+    loaded = [False]
+    counter = TokenCounter(estimate=lambda text: len(text) if loaded[0] else None)
+
+    stable = _stable_counter(counter)
+    loaded[0] = True
+
+    assert count(stable, "abcdefgh") == 2
 
 
 def test_files_under_the_trigger_ask_for_nothing(tmp_path: Path) -> None:

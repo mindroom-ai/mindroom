@@ -164,17 +164,19 @@ def counter_for_model(
     identity: ModelIdentity,
     *,
     local_encoder: bool = False,
+    family: str | None = None,
     replay: PortableReplayEstimator | None = None,
 ) -> TokenCounter:
     """Return the counter of the model ``identity`` names.
 
     ``local_encoder`` says the route serves OpenAI's own models, so the tokenizer tiktoken maps the model id to is the
     model's own; any other route may serve another model under an OpenAI name, so the name only picks its estimate.
+    ``family`` names the model family a route serves only, such as ``"claude"``, whose model ids need not name it.
     """
     name = identity.id.lower().rsplit("/", 1)[-1]
     if local_encoder and (encoding := _own_encoding(name)) is not None:
         return TokenCounter(estimate=partial(_encoding_tokens, encoding), replay=replay)
-    return TokenCounter(estimate=partial(_scaled_o200k_tokens, _margin(name)), replay=replay)
+    return TokenCounter(estimate=partial(_scaled_o200k_tokens, _margin(family or name)), replay=replay)
 
 
 def openai_model_counter(model_id: str) -> TokenCounter:

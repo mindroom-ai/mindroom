@@ -2197,6 +2197,18 @@ async def test_the_reported_request_size_takes_off_the_smaller_system_prompt(
 
 
 @pytest.mark.asyncio
+async def test_history_never_sizes_below_zero(tmp_path: Path) -> None:
+    """A short conversation's reported request can be smaller than the padded estimate of its system prompt and tools."""
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 200, "non_prompt_tokens": 5_000},
+        non_prompt_tokens=5_000,
+    )
+
+    assert prepared.compaction_decision.current_history_tokens == 0
+
+
+@pytest.mark.asyncio
 async def test_trimming_by_the_reported_size_turns_native_compaction_off(tmp_path: Path) -> None:
     """A provider's checkpoint of a trimmed request would replace history it never held, so trimming turns it off."""
     prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 3_500})

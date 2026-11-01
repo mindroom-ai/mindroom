@@ -238,8 +238,8 @@ class ClaudeProvider:
 
     @property
     def token_counter(self) -> TokenCounter:
-        """Claude's tokenizer does not run locally, so the route estimates."""
-        return counter_for_model(self.identity)
+        """Claude's tokenizer does not run locally, so the route estimates; a Bedrock profile ARN need not name Claude."""
+        return counter_for_model(self.identity, family="claude")
 
     def native_compaction_settings(
         self,

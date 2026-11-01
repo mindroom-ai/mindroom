@@ -84,8 +84,8 @@ class GeminiProvider:
 
     @property
     def token_counter(self) -> TokenCounter:
-        """Gemini's tokenizer does not run locally, so the route estimates."""
-        return counter_for_model(self.identity)
+        """Gemini's tokenizer does not run locally, so the route estimates; a tuned model's id need not name Gemini."""
+        return counter_for_model(self.identity, family="gemini")
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.

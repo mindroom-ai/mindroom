@@ -56,7 +56,7 @@ Provider tokens per o200k_base token on those samples:
 
 ## Limitations
 
-- Caps and compaction on Claude and Gemini act early, because their estimates are upper bounds: on the samples above, a Claude estimate is 1.0 to 1.47 times the real count and a Gemini estimate 1.03 to 1.68 times, so a 50,000-token `MEMORY.md` cap preloads 34,000 to 50,000 real Claude tokens.
+- Caps and compaction on Claude and Gemini act early, because their estimates are upper bounds: on the samples above, a Claude Opus 5.5 estimate is 1.0 to 1.47 times the real count, a Claude Haiku 4.5 estimate up to 1.75 times, and a Gemini estimate 1.03 to 1.68 times, so a 50,000-token `MEMORY.md` cap preloads 34,000 to 50,000 real Claude Opus 5.5 tokens.
 - The margins come from six samples; a future tokenizer that counts more than its family margin times o200k_base undercounts until the margin is measured again.
 - OpenAI models tiktoken does not map, such as the GPT-6 family, estimate with o200k_base at margin 1.0, which GPT-6 Astra's input-token endpoint matched exactly in the live run above.
 - Without a usable reported size, such as under a replay limit, after another model answered, or once a native checkpoint exists, history is sized by its estimate, so a Claude or Gemini conversation can compact early.

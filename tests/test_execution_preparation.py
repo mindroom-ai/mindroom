@@ -48,6 +48,7 @@ from mindroom.execution_preparation import (
     render_prepared_messages_text,
 )
 from mindroom.history import runtime as history_runtime
+from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
@@ -60,6 +61,7 @@ from mindroom.history.types import (
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TokenCounter
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.types import ConversationSession
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -571,9 +573,12 @@ def test_a_scheduled_limit_leaves_nothing_to_size_the_next_reply_by(limit: int) 
 
     capped = _prepared_history_with_scheduled_limit(prepared, limit)
 
-    # The run records no system prompt and tools, so the next reply sizes its history by estimate.
-    published = build_prepared_history_metadata_content(capped)[AI_RUN_METADATA_KEY]["prepared_context"]
-    assert "non_prompt_tokens" not in published
+    # The run records no system prompt and tools, even over metadata seeded from a paused run that recorded some, so
+    # the next reply sizes its history by estimate.
+    seed = build_prepared_history_metadata_content(prepared)
+    merged = deep_merge_metadata(without_run_usage(seed), build_prepared_history_metadata_content(capped))
+    assert merged is not None
+    assert "non_prompt_tokens" not in merged[AI_RUN_METADATA_KEY]["prepared_context"]
 
 
 def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:

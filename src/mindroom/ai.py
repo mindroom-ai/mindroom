@@ -503,7 +503,7 @@ def _agent_loop_hooks(
             prompt_id=prepared.turn.prompt.id,
             lifecycle=ctx.compaction_lifecycle,
             turn_recorder=run_context.turn_recorder,
-            reported_history=prepared.prepared_history.reported_history,
+            prepared_history_tokens=prepared.prepared_history.replayed_history_tokens,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,

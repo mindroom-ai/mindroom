@@ -75,6 +75,23 @@ def test_claude_and_gemini_routes_estimate_with_their_family_margin(tmp_path: Pa
     assert count(gemini.token_counter, text) == math.ceil(_o200k(text) * 1.35)
 
 
+def test_routes_that_know_their_family_estimate_with_its_margin_whatever_the_model_id(tmp_path: Path) -> None:
+    """A Bedrock inference profile ARN or a tuned Gemini model's id need not name the family."""
+    text = "A sentence with numbers 2026-11-01 and `code()`.\n" * 10
+    profile = {
+        **ROUTE_CONFIGS["bedrock_claude"],
+        "id": "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2",
+    }
+    claude = provider_for(profile, tmp_path, httpx2.AsyncClient())
+    gemini = build_adapter(
+        {"provider": "google", "id": "tunedModels/support-bot", "api_key": "k"},
+        tmp_path,
+        lambda _r: None,
+    )
+    assert count(claude.token_counter, text) == math.ceil(_o200k(text) * 1.8)
+    assert count(gemini.token_counter, text) == math.ceil(_o200k(text) * 1.35)
+
+
 def test_wrapped_provider_forwards_the_token_counter(tmp_path: Path) -> None:
     adapter = _openai_provider(tmp_path, provider="openai", id="gpt-6-astra", api_key="test-key")
     wrapped = WrappedProvider(adapter, lambda inner, request: inner.stream(request))

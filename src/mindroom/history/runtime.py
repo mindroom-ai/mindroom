@@ -381,7 +381,8 @@ def _reported_history_tokens(
     # Sized as the next request replays them: as history, whose earlier reasoning a model may render.
     replayed = [replace(message, from_history=True) for message in messages[anchor:]]
     newer_tokens = estimate_request_messages_tokens(replayed, counter=model.token_counter)
-    return reported + newer_tokens - min(recorded, non_prompt_tokens)
+    # The padded estimate of a large system prompt can exceed a short conversation's whole reported request.
+    return max(0, reported + newer_tokens - min(recorded, non_prompt_tokens))
 
 
 def _recorded_non_prompt_tokens(run: AnyRunRecord) -> int | None:
@@ -693,7 +694,6 @@ def finalize_history_preparation(
     counter = prepared_scope_history.counter
     if session is None:
         replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
-        reported_history = False
         replays_persisted_history = False
     else:
         estimate_history_tokens = partial(
@@ -738,7 +738,6 @@ def finalize_history_preparation(
                 estimated_tokens=current_history_tokens,
             )
         replays_persisted_history = has_effective_persisted_replay(session=session, replay_plan=replay_plan)
-        reported_history = reported_history_tokens is not None and replay_plan.mode == "configured"
 
     prepared_context_tokens = static_prompt_tokens + replay_plan.estimated_tokens
     if pipeline_timing is not None:
@@ -755,7 +754,6 @@ def finalize_history_preparation(
         compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
         prepared_context_tokens=prepared_context_tokens,
         non_prompt_tokens=prepared_scope_history.non_prompt_tokens if history_settings.replays_whole_history else None,
-        reported_history=reported_history,
         native_history=native_history,
     )
 

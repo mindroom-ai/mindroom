@@ -12,6 +12,7 @@ Files are read through no-follow descriptor walks, because worker code writes th
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
@@ -242,13 +243,14 @@ def _curation_notice(config: Config, plan: _CurationPlan, result: _CurationResul
 
 
 def _stable_counter(counter: TokenCounter) -> TokenCounter:
-    """Return ``counter`` once the vocabulary has loaded, else the stand-in, so verify counts on the plan's basis.
+    """Return ``counter`` once it counts with a loaded vocabulary, else the stand-in, so verify counts as the plan did.
 
-    Without network access and a cached vocabulary, loading fails on every run.
+    Without network access and a cached vocabulary, loading fails on every run, and an older OpenAI model's own
+    encoding may still be loading in the background.
     """
-    try:
+    with suppress(OSError, ValueError):
         load_o200k()
-    except (OSError, ValueError):
+    if counter.estimate("a") is None:
         return replace(counter, estimate=lambda _text: None)
     return counter
 
