@@ -4048,23 +4048,30 @@ def test_docker_worker_config_rejects_reserved_extra_env_names_from_env(tmp_path
         DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
 
+@pytest.mark.parametrize("credentials_in_env_file", [False, True], ids=["exported", "env-file-under-blank-export"])
 def test_docker_backend_rejects_extra_env_replacing_primary_secret_path_variables(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    credentials_in_env_file: bool,
 ) -> None:
-    """Dedicated worker extra env must not replace the primary's secret-path variables the worker inherits."""
+    """Dedicated worker extra env must not replace the primary's secret-path variables the worker inherits.
+
+    The primary's `GOOGLE_APPLICATION_CREDENTIALS` counts as set when its `.env` names it under a blank export.
+    """
     config_path = tmp_path / "config.yaml"
     secret_path = tmp_path / "secrets" / "openai.key"
     secret_path.parent.mkdir(parents=True, exist_ok=True)
     secret_path.write_text("sk-test\n", encoding="utf-8")
     credentials_path = tmp_path / "adc.json"
     credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    if credentials_in_env_file:
+        (tmp_path / ".env").write_text(f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path,
         process_env={
             "OPENAI_API_KEY_FILE": str(secret_path),
-            "GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path),
+            "GOOGLE_APPLICATION_CREDENTIALS": "" if credentials_in_env_file else str(credentials_path),
         },
     )
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
