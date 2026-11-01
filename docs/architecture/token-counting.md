@@ -47,7 +47,7 @@ Provider tokens per o200k_base token on those samples:
   History is the exception where it can: the compaction check sizes it from the request size the provider reported for the latest answer ([compaction](compaction.md)), so the margins apply only to a history without one, such as the first reply after another model answered.
 - Estimates are o200k_base scaled by a margin per family: Claude 1.8, Gemini 1.35, OpenAI 1.0, any other model 1.25.
   The Claude and Gemini margins cover the largest ratios measured above (JSON 1.798, Markdown notes 1.309); the other margin covers a Qwen thread where o200k undercounted by about 10% (see [compaction](compaction.md)).
-  Calibration replaces the margin once the provider has counted text.
+  Calibration replaces the margin once the provider has counted text, except in compaction input, which a single route-wide ratio could undercount when its content differs from the text the provider counted; the `MEMORY.md` cut uses the file's own rate instead.
 - Calibration learns only from the provider's counts of text, never from the input tokens a request reported.
   Reported usage is a different quantity: it carries message framing, content the provider adds (Claude's structured-output tool, Gemini's cached content, earlier thinking), and per-route cache accounting, so a ratio learned from it would skew every text count.
   History sizing keeps the reported size of the latest request as its own anchor ([compaction](compaction.md)).

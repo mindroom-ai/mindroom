@@ -12,7 +12,7 @@ from structlog.testing import capture_logs
 from mindroom.history.compaction import _rewrite_working_session_for_compaction
 from mindroom.llm.provider import TokenCounter
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_counting.counts import count, count_exact
+from mindroom.token_counting.counts import TokenCount, count_exact
 from tests.conftest import seed_session
 from tests.fakes.summary_model import summary_model as _summary_model
 from tests.fakes.token_counter import fake_token_counter, quarter_tokens
@@ -76,14 +76,23 @@ async def _endpoint(text: str) -> int:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["estimated", "calibrated", "exact"])
-async def test_chunk_events_report_how_the_summary_input_was_counted(tmp_path: Path, kind: str) -> None:
+@pytest.mark.parametrize(
+    ("route", "kind"),
+    [
+        ("uncounted", "estimated"),
+        # A summary input that undercounts fails its request, so the family margin stays after the provider counted
+        # other text, whose rate may differ from the conversation's.
+        ("calibrated", "estimated"),
+        ("own-tokenizer", "exact"),
+    ],
+)
+async def test_chunk_events_report_how_the_summary_input_was_counted(tmp_path: Path, route: str, kind: str) -> None:
     counter = (
         TokenCounter(key="local", estimate=quarter_tokens, exact_locally=True)
-        if kind == "exact"
+        if route == "own-tokenizer"
         else fake_token_counter(count=_endpoint)
     )
-    if kind == "calibrated":
+    if route == "calibrated":
         # The endpoint counted other text at four times its estimate.
         await count_exact(counter, "x" * 40)
     config, runtime_paths = _make_config(tmp_path)
@@ -110,8 +119,7 @@ async def test_chunk_events_report_how_the_summary_input_was_counted(tmp_path: P
         )
 
     assert rewrite_result is not None
-    sent = count(counter, summary_inputs[0])
-    assert sent.kind == kind
+    sent = TokenCount(quarter_tokens(summary_inputs[0]), kind)
     for event in ("Compaction summary chunk request", "Compaction summary chunk completed"):
         _assert_truthful_sizing_fields(
             _single_event(logs, event),

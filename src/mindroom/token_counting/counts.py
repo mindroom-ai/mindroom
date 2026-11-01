@@ -112,8 +112,12 @@ def cached_count(counter: TokenCounter, text: str) -> int | None:
         return _state.exact.get(key)
 
 
-def count(counter: TokenCounter, text: str) -> TokenCount:
-    """Count ``text`` for ``counter``'s model from local state only, never over the network."""
+def count(counter: TokenCounter, text: str, *, calibrated: bool = True) -> TokenCount:
+    """Count ``text`` for ``counter``'s model from local state only, never over the network.
+
+    ``calibrated=False`` keeps an estimate's family margin, for a size that must not undercount: one ratio per route
+    cannot fit every text's content.
+    """
     if not text:
         return TokenCount(0, "exact")
     if counter.exact_locally:
@@ -129,7 +133,7 @@ def count(counter: TokenCounter, text: str) -> TokenCount:
     estimate = counter.estimate(text)
     if estimate is None:
         return _without_encoder(text)
-    if ratio is not None:
+    if ratio is not None and calibrated:
         counted, estimated = ratio
         return TokenCount(math.ceil(estimate * counted / estimated), "calibrated")
     return TokenCount(estimate, "estimated")
