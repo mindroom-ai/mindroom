@@ -2202,7 +2202,8 @@ models:
 [GPT-6 Astra, GPT-6.1 Sol, and GPT-6.1 Terra require Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Luna supports function calling in Chat Completions only with `reasoning_effort: none`.
 Through a proxy or custom alias, set `api: responses` for GPT-6 models, or tool calls on Astra, Sol, Terra, and Luna fail at their default reasoning effort.
 Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
-A reply shows the model's reasoning while it thinks only when the model requests a reasoning summary, with `extra_kwargs.reasoning_summary: auto` or `extra_kwargs.reasoning: {summary: auto}`; some API organizations may not request reasoning summaries.
+A reply shows the model's reasoning while it thinks only when the model requests a reasoning summary, with `extra_kwargs.reasoning_summary: auto` or `extra_kwargs.reasoning: {summary: auto}`.
+An unverified OpenAI organization then gets `Your organization must be verified to generate reasoning summaries`; verify the organization or remove the setting.
 Selecting Responses keeps any `extra_kwargs.store: false` setting.
 How `api` affects tool search is described in [Native Server-Side Tool Search](https://docs.mindroom.chat/tools/dynamic-tools/#native-server-side-tool-search).
 
