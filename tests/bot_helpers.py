@@ -63,7 +63,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.conftest import replace_turn_policy_deps as shared_replace_turn_policy_deps
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
 from tests.journal_helpers import admit_dispatch_event
 from tests.runtime_fakes import ReadyRuntime, ready_runtime
 
@@ -414,12 +414,10 @@ def _response_request(
 
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     """Return a runtime-bound config for bot tests."""
-    bound_config = bind_runtime_paths(
+    return bind_runtime_paths(
         config,
         test_runtime_paths(runtime_root),
     )
-    persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
-    return bound_config
 
 
 def _configured_team_test_config(runtime_root: Path) -> Config:

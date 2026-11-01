@@ -20,7 +20,7 @@ from mindroom.entity_resolution import configured_routable_entity_ids_for_room, 
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
-from tests.identity_helpers import entity_names_for_ids, persist_entity_accounts
+from tests.identity_helpers import entity_names_for_ids
 from tests.matrix_state_helpers import save_matrix_state
 
 
@@ -35,12 +35,10 @@ class TestResponderCandidateSelection:
     @staticmethod
     def _bind_runtime(config: Config) -> Config:
         runtime_root = Path(tempfile.mkdtemp())
-        bound = bind_runtime_paths(
+        return bind_runtime_paths(
             config,
             orchestrator_runtime_paths(runtime_root, config_path=runtime_root / "config.yaml"),
         )
-        persist_entity_accounts(bound, runtime_paths_for(bound))
-        return bound
 
     def setup_method(self) -> None:
         """Set up test config."""

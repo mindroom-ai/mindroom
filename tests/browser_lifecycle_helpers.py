@@ -52,6 +52,11 @@ class LifecyclePage:
         """Navigate without performing external network I/O."""
         self.url = url
 
+    async def close(self) -> None:
+        """Close the page and deliver its native close event."""
+        self.closed = True
+        await self.emit("close", self)
+
 
 class LifecycleBrowser:
     """Driver/context boundary with deferred phases and observable live resources."""

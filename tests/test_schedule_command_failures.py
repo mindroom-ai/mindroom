@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import nio
 import pytest
 
@@ -16,6 +17,7 @@ from mindroom.commands.parsing import command_parser
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.matrix.conversation_hydration import ConversationReadError
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
@@ -36,6 +38,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
 
 ROOM_ID = "!test:server"
@@ -45,6 +48,7 @@ TASK_ID = "task123"
 _STATE_ERROR = nio.RoomGetStateError.from_dict({"errcode": "M_FORBIDDEN", "error": "Not authorized"}, room_id=ROOM_ID)
 _STATE_WRITE_REFUSED = nio.RoomPutStateError(message="denied", status_code="M_FORBIDDEN")
 _TASK_READ_LIMITED = nio.RoomGetStateEventError(message="rate limited", status_code="M_LIMIT_EXCEEDED")
+_BROKEN_RESPONSE = aiohttp.ClientPayloadError("Response payload is not completed")
 _PARSE_FAILURE = (
     "Could not determine when to run the one-time task.\n\n"
     '💡 Include an explicit time like "today at 11:45 PM" or "in 10 minutes".'
@@ -97,6 +101,7 @@ async def _reply(
     client: AsyncMock,
     responders: list[MatrixID] | None = None,
     acts_for_requester: bool = False,
+    conversation_reader: ConversationReader | None = None,
 ) -> str:
     """Run one chat command through the command handler and return the reply it posts."""
     runtime_paths = schedule_runtime_paths(tmp_path)
@@ -110,7 +115,7 @@ async def _reply(
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_reader=make_conversation_reader_mock(),
+        conversation_reader=conversation_reader or make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve(ROOM_ID, THREAD_ID, "$event"),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
@@ -174,17 +179,47 @@ async def test_schedule_mentioning_an_unavailable_agent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_schedule_whose_room_state_cannot_be_read(tmp_path: Path) -> None:
-    """A schedule that cannot choose its runner reports the failed room read."""
+@pytest.mark.parametrize(
+    ("read", "reason"),
+    [
+        (AsyncMock(return_value=_STATE_ERROR), str(_STATE_ERROR)),
+        (AsyncMock(side_effect=_BROKEN_RESPONSE), "ClientPayloadError: Response payload is not completed"),
+    ],
+    ids=["error response", "broken-off response"],
+)
+async def test_schedule_whose_room_state_cannot_be_read(tmp_path: Path, read: AsyncMock, reason: str) -> None:
+    """A schedule that cannot choose its runner reports the failed room read, and nothing is saved."""
     client = make_matrix_client_mock()
-    client.room_get_state = AsyncMock(return_value=_STATE_ERROR)
+    client.room_get_state = read
     with patch("mindroom.scheduling.tasks.complete_prompt", new=_parse_returning(_workflow())):
         reply = await _reply(tmp_path, "!schedule in 5 minutes check logs", client=client)
 
     assert reply == (
-        f"❌ Failed to schedule: Could not read the state of room {ROOM_ID} to choose which bot runs the task: "
-        f"{_STATE_ERROR}"
+        f"❌ Failed to schedule: Could not read the state of room {ROOM_ID} to choose which bot runs the task: {reason}"
     )
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "prefix"),
+    [
+        ("!schedule in 5 minutes check logs", ""),
+        (f"!edit_schedule {TASK_ID} in 10 minutes check logs", f"Failed to edit task `{TASK_ID}`.\n\n"),
+    ],
+)
+async def test_schedule_or_edit_whose_thread_cannot_be_read(tmp_path: Path, body: str, prefix: str) -> None:
+    """A thread-scoped schedule or edit whose thread read fails says why, and saves nothing."""
+    client = make_matrix_client_mock()
+    _serve_task(client, _workflow())
+    reader = make_conversation_reader_mock()
+    reader.read_strict.side_effect = ConversationReadError("Could not fetch thread root '$thread': M_UNKNOWN")
+    with patch("mindroom.scheduling.tasks.complete_prompt", new=AsyncMock()) as parse:
+        reply = await _reply(tmp_path, body, client=client, conversation_reader=reader)
+
+    assert reply == f"❌ {prefix}Could not read this thread's history: Could not fetch thread root '$thread': M_UNKNOWN"
+    parse.assert_not_awaited()
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -240,7 +275,6 @@ async def test_edit_the_parser_carries_over_unchanged(tmp_path: Path) -> None:
     client = make_matrix_client_mock()
     stored = _workflow(created_by="@creator:server")
     _serve_task(client, stored)
-    # The edit prompt shows the parser only these fields, which it carries over.
     carried_over = ScheduledWorkflow(
         schedule_type="once",
         execute_at=stored.execute_at,
@@ -271,27 +305,41 @@ async def test_edit_of_a_task_whose_state_no_longer_parses(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("body", [f"!edit_schedule {TASK_ID} in 10 minutes check logs", f"!cancel_schedule {TASK_ID}"])
-async def test_edit_or_cancel_whose_task_cannot_be_read(tmp_path: Path, body: str) -> None:
-    """An edit or cancellation whose task read fails says so, and changes nothing."""
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (_TASK_READ_LIMITED, str(_TASK_READ_LIMITED)),
+        (_BROKEN_RESPONSE, "ClientPayloadError: Response payload is not completed"),
+    ],
+    ids=["error response", "broken-off response"],
+)
+async def test_edit_or_cancel_whose_task_cannot_be_read(
+    tmp_path: Path,
+    body: str,
+    failure: object,
+    reason: str,
+) -> None:
+    """An edit or cancellation whose task read fails or raises says why, and changes nothing."""
     client = make_matrix_client_mock()
-    client.room_get_state_event = AsyncMock(return_value=_TASK_READ_LIMITED)
+    client.room_get_state_event = AsyncMock(side_effect=[failure])
     serve_task_state_events(client)
 
     reply = await _reply(tmp_path, body, client=client)
 
-    assert reply == f"❌ Failed to get scheduled task '{TASK_ID}' from room '{ROOM_ID}': {_TASK_READ_LIMITED}"
+    assert reply == f"❌ Failed to get scheduled task `{TASK_ID}` from room `{ROOM_ID}`: {reason}"
     client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_list_whose_room_state_cannot_be_read(tmp_path: Path) -> None:
-    """Listing schedules in a room whose state cannot be read fails like every other schedule command."""
+@pytest.mark.parametrize("body", ["!list_schedules", "!cancel_schedule all"])
+async def test_list_or_cancel_all_whose_room_state_cannot_be_read(tmp_path: Path, body: str) -> None:
+    """Listing or cancelling every schedule in a room whose state cannot be read says why."""
     client = make_matrix_client_mock()
     client.room_get_state = AsyncMock(return_value=_STATE_ERROR)
 
-    reply = await _reply(tmp_path, "!list_schedules", client=client)
+    reply = await _reply(tmp_path, body, client=client)
 
-    assert reply == "❌ Unable to retrieve scheduled tasks."
+    assert reply == f"❌ Unable to retrieve scheduled tasks: {_STATE_ERROR}"
 
 
 @pytest.mark.asyncio
@@ -332,17 +380,6 @@ async def test_cancel_whose_state_write_is_refused(tmp_path: Path) -> None:
         f"RoomPutStateError: M_FORBIDDEN denied. Ensure {client.user_id} is joined with permission to write room "
         "state, then retry."
     )
-
-
-@pytest.mark.asyncio
-async def test_cancel_all_whose_room_state_cannot_be_read(tmp_path: Path) -> None:
-    """Cancelling every schedule in a room whose state cannot be read says so."""
-    client = make_matrix_client_mock()
-    client.room_get_state = AsyncMock(return_value=_STATE_ERROR)
-
-    reply = await _reply(tmp_path, "!cancel_schedule all", client=client)
-
-    assert reply == "❌ Unable to retrieve scheduled tasks."
 
 
 def _serve_pending_tasks(client: AsyncMock, *task_ids: str) -> None:

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.matrix.conversation_hydration import _HydrationError
+from mindroom.matrix.conversation_hydration import ConversationReadError
 from mindroom.matrix.conversation_reads import ConversationReader, complete_thread_history, refetched_thread_history
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.projected_thread_membership import resolve_thread_root_event_id
@@ -180,7 +180,7 @@ class TestRefetchedThreadHistory:
         )
         client.principal = principal
 
-        with pytest.raises(_HydrationError, match="rewalk kept losing its membership epoch"):
+        with pytest.raises(ConversationReadError, match="rewalk kept losing its membership epoch"):
             await hydrator(principal, client).rewalk(room_id=ROOM, thread_id="$root", unreadable_is_missing=True)
 
 
