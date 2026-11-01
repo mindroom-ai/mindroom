@@ -730,11 +730,24 @@ async def test_a_model_sending_a_non_string_slug_is_refused_before_the_revoke_ru
 
 
 @pytest.mark.asyncio
-async def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("public_url", "link_base"),
+    [
+        ("https://acme.mindroom.chat/mindroom", "https://acme.mindroom.chat/mindroom"),
+        (" https://acme.mindroom.chat/mindroom/ ", "https://acme.mindroom.chat/mindroom"),
+        ("", None),
+    ],
+    ids=["public-url", "padded-public-url", "no-public-url"],
+)
+async def test_report_publishing_tool_publishes_dynamic_workflow_run_report(
+    tmp_path: Path,
+    public_url: str,
+    link_base: str | None,
+) -> None:
     """Report Publishing should expose Dynamic Workflow reports through a source reference."""
     dynamic_workflow_tool = DynamicWorkflowTools()
     report_tool = ReportPublishingTools()
-    context = _make_context(tmp_path, public_url="https://acme.mindroom.chat/mindroom")
+    context = _make_context(tmp_path, public_url=public_url)
 
     with tool_runtime_context(context):
         _tool_payload(await dynamic_workflow_tool.create_workflow(_workflow_spec(), reason="initial design"))
@@ -764,8 +777,12 @@ async def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_
         "workflow_id": "competitor-research-report",
         "run_id": run["run_id"],
     }
-    assert published["public_url"] == f"https://acme.mindroom.chat/mindroom/reports/public/{published['slug']}"
-    assert published["public_path"] == f"/mindroom/reports/public/{published['slug']}"
+    report_path = f"/reports/private/agent/general/competitor-research-report/{run['run_id']}"
+    assert run["report_url"] == (None if link_base is None else f"{link_base}{report_path}")
+    assert published["public_url"] == (None if link_base is None else f"{link_base}/reports/public/{published['slug']}")
+    assert published["public_path"] == (
+        f"/reports/public/{published['slug']}" if link_base is None else f"/mindroom/reports/public/{published['slug']}"
+    )
     assert revoked["status"] == "ok"
     assert revoked["revoked_at"] is not None
 

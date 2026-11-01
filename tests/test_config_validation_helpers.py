@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -13,10 +14,16 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import LiveCallProfile, RealtimeCallProfile
 from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig
 from mindroom.config.knowledge import KnowledgeRerankerConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, config_validation_issues
 from mindroom.config.models import DefaultsConfig, EmbedderConfig, ToolConfigEntry
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.config.voice import SpeechServiceConfig, VoiceSTTConfig
+from mindroom.constants import resolve_runtime_paths
+from mindroom.matrix.state import update_matrix_state
+from tests.conftest import test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_duplicate_items_preserves_first_duplicate_encounter_order() -> None:
@@ -261,3 +268,211 @@ def test_a_team_entry_with_an_unknown_mode_or_key_fails_naming_it(authored: dict
     with pytest.raises(ValueError, match=message) as raised:
         TeamConfig.model_validate({"display_name": "Team", "role": "Work", "agents": ["code"], **authored})
     assert next(iter(authored)) in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "second_room",
+    ["voice", "#voice:localhost"],
+    ids=["same-spelling-model-validator", "alias-spelling-runtime-validation"],
+)
+def test_one_rule_reports_one_location_and_message_from_either_validator(tmp_path: Path, second_room: str) -> None:
+    """A call room shared by spelling or by alias fails with the same issue, named at `config`, without Pydantic's prefix."""
+    data = {
+        "agents": {
+            "one": {"display_name": "One", "rooms": ["voice"]},
+            "two": {"display_name": "Two", "rooms": [second_room]},
+        },
+        "calls": {
+            "enabled": True,
+            "profiles": {
+                "voice": {
+                    "backend": "realtime",
+                    "model": "gpt-realtime",
+                    "credentials_service": "openai",
+                    "voice": "marin",
+                },
+            },
+            "agents": {"one": "voice", "two": "voice"},
+        },
+    }
+    with pytest.raises(ValueError, match="configures multiple agents") as raised:
+        Config.validate_with_runtime(data, test_runtime_paths(tmp_path))
+
+    assert config_validation_issues(raised.value) == [
+        (("config",), "calls.agents configures multiple agents for room(s): voice (one, two)"),
+    ]
+
+
+_OUTSIDE_ALIAS = "#ideas:example.org"
+_FILE_MEMORY_AGENT = {"display_name": "General", "rooms": ["lobby"], "memory_backend": "file"}
+_MODELS = {"default": {"provider": "openai", "id": "test-model"}}
+
+
+@pytest.mark.parametrize(
+    ("authored", "location", "room"),
+    [
+        (
+            {"agents": {"general": {"display_name": "General", "rooms": [_OUTSIDE_ALIAS]}}},
+            "agents.general.rooms",
+            _OUTSIDE_ALIAS,
+        ),
+        (
+            {
+                "agents": {"code": {"display_name": "Code", "rooms": ["lobby"]}},
+                "teams": {
+                    "ops": {"display_name": "Ops", "role": "Work", "agents": ["code"], "rooms": [_OUTSIDE_ALIAS]},
+                },
+            },
+            "teams.ops.rooms",
+            _OUTSIDE_ALIAS,
+        ),
+        (
+            {"rooms": {_OUTSIDE_ALIAS: {}}, "agents": {"general": _FILE_MEMORY_AGENT}},
+            "rooms",
+            _OUTSIDE_ALIAS,
+        ),
+        (
+            {"agents": {"general": {**_FILE_MEMORY_AGENT, "room_thread_modes": {_OUTSIDE_ALIAS: "room"}}}},
+            "agents.general.room_thread_modes",
+            _OUTSIDE_ALIAS,
+        ),
+        (
+            {
+                "agents": {
+                    "general": {
+                        **_FILE_MEMORY_AGENT,
+                        "automations": [{"name": "prompt_curation", "room": _OUTSIDE_ALIAS}],
+                    },
+                },
+            },
+            "agents.general.automations.prompt_curation.room",
+            _OUTSIDE_ALIAS,
+        ),
+        (
+            {
+                "defaults": {"automations": [{"name": "prompt_curation", "room": "ideas"}]},
+                "agents": {"general": _FILE_MEMORY_AGENT},
+            },
+            "defaults.automations.prompt_curation.room",
+            "ideas",
+        ),
+        (
+            {"agents": {"general": _FILE_MEMORY_AGENT}, "room_models": {"lobbby": "default"}},
+            "room_models",
+            "lobbby",
+        ),
+        (
+            {"agents": {"general": _FILE_MEMORY_AGENT}, "room_thread_summary_models": {_OUTSIDE_ALIAS: "default"}},
+            "room_thread_summary_models",
+            _OUTSIDE_ALIAS,
+        ),
+    ],
+    ids=[
+        "agent-rooms",
+        "team-rooms",
+        "top-level-rooms",
+        "room-thread-modes",
+        "agent-automation",
+        "unlisted-key",
+        "room-models",
+        "room-thread-summary-models",
+    ],
+)
+def test_a_room_reference_that_names_no_room_fails_naming_where(
+    tmp_path: Path,
+    authored: dict[str, object],
+    location: str,
+    room: str,
+) -> None:
+    """An outside alias or an unlisted key resolves to no room at runtime, so loading the config names it."""
+    with pytest.raises(ValueError, match="room ID") as raised:
+        Config.validate_with_runtime({**authored, "models": _MODELS}, test_runtime_paths(tmp_path))
+
+    assert config_validation_issues(raised.value) == [
+        (
+            ("config",),
+            "Each room reference must be a room key MindRoom manages, that room's full alias, or a ! room ID: "
+            f"{location} -> {room}",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("namespace", "alias", "valid"),
+    [
+        ("", "#lobby:localhost", True),
+        ("team1", "#lobby_team1:localhost", True),
+        ("team1", "#lobby:localhost", False),
+        ("", "#lobby:example.org", False),
+    ],
+    ids=["plain", "namespaced", "namespace-missing", "other-server"],
+)
+def test_only_the_exact_alias_mindroom_creates_for_a_room_key_names_that_room(
+    tmp_path: Path,
+    namespace: str,
+    alias: str,
+    *,
+    valid: bool,
+) -> None:
+    """The full alias of a configured room key stays valid; the same localpart on another server or namespace does not."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_paths.config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env={**runtime_paths.process_env, "MINDROOM_NAMESPACE": namespace},
+    )
+    authored = {
+        "models": _MODELS,
+        "agents": {
+            "one": {"display_name": "One", "rooms": ["lobby"]},
+            "two": {
+                "display_name": "Two",
+                "rooms": [alias],
+                "memory_backend": "file",
+                "room_thread_modes": {alias: "room"},
+                "automations": [{"name": "prompt_curation", "room": alias}],
+            },
+        },
+    }
+    if valid:
+        assert Config.validate_with_runtime(authored, runtime_paths).agents["two"].rooms == [alias]
+    else:
+        with pytest.raises(ValueError, match=re.escape(f"agents.two.rooms -> {alias}")):
+            Config.validate_with_runtime(authored, runtime_paths)
+
+
+def test_room_model_maps_accept_rooms_and_summary_models_accept_entities(tmp_path: Path) -> None:
+    """Model maps take a room key, its full alias, or a ! room ID, and summary models also take an agent or team."""
+    rooms = {"lobby": "default", "#lobby:localhost": "default", "!outside:example.org": "default"}
+    authored = {
+        "models": _MODELS,
+        "agents": {"general": _FILE_MEMORY_AGENT},
+        "teams": {"crew": {"display_name": "Crew", "role": "Work", "agents": ["general"]}},
+        "room_models": rooms,
+        "room_thread_summary_models": {**rooms, "general": "default", "crew": "default"},
+    }
+
+    config = Config.validate_with_runtime(authored, test_runtime_paths(tmp_path))
+
+    assert config.room_models == rooms
+
+
+def test_a_room_mindroom_recorded_keeps_its_alias_and_key_after_its_key_leaves_the_config(tmp_path: Path) -> None:
+    """MindRoom's record still maps a room it created, so its alias and key keep naming it once no entity lists the key."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    update_matrix_state(
+        runtime_paths,
+        lambda state: state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby"),
+    )
+    authored = {
+        "models": _MODELS,
+        "agents": {
+            "general": {
+                **_FILE_MEMORY_AGENT,
+                "rooms": ["#lobby:localhost"],
+                "room_thread_modes": {"lobby": "room"},
+            },
+        },
+    }
+
+    assert Config.validate_with_runtime(authored, runtime_paths).agents["general"].rooms == ["#lobby:localhost"]

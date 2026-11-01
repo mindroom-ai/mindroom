@@ -1264,6 +1264,7 @@ async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path
         sources=ResponseSources(("$event2", "$event"), ("$event", "$event2")),
     )
     response = None
+    first_answer = "Answer one."
     if interruption == "superseded":
         # A redaction made the claimed turn's locked history stale, so its span ended with both sources pending.
         stale = AsyncMock(side_effect=[SourcePreparation(), RevisionSnapshotChangedError("stale")])
@@ -1271,6 +1272,9 @@ async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path
             await _answer(bot, replace(coalesced, prepare_source_turn=stale), AsyncMock(return_value="never"))
     else:
         response = await _blocked_stream(bot, "Partial", coalesced)
+        # Once the reply showed "Partial", the replay continues it below that text.
+        await asyncio.wait_for(_wait_until_sent(bot, "Partial"), timeout=5)
+        first_answer = f"Partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nAnswer one."
         bot = _bot(tmp_path)
         unique_room_send_responses(bot.client)
         await bot._take_over_replies()
@@ -1284,7 +1288,7 @@ async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path
             response.cancel()
             with suppress(asyncio.CancelledError):
                 await response
-    assert _sent_bodies(bot)[-2:] == ["Answer one.", "Answer two."]
+    assert _sent_bodies(bot)[-2:] == [first_answer, "Answer two."]
     assert not await bot._reply_runtime.store.is_pending("$event2")
 
 

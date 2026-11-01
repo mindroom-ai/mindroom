@@ -1100,7 +1100,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     config = bind_runtime_paths(
         Config(
             agents={AGENT: AgentConfig(display_name="Helper", model="default")},
-            room_models={"lobby": "large"},
+            room_models={"!room:example.org": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model"),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -1144,7 +1144,6 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     monkeypatch.setattr("mindroom.providers.registry.build_model_provider", scripted_provider)
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
     monkeypatch.setattr("mindroom.ai.build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable=())),

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from httpx import Response
 
 from mindroom.api import config_lifecycle, main
+from mindroom.matrix.state import update_matrix_state
 from mindroom.scheduling.tasks import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
 from tests.conftest import make_matrix_client_mock
 from tests.scheduling_helpers import SCHEDULE_WRITER_ID, scheduled_task_state_event, serve_stored_task
@@ -59,8 +60,25 @@ def _task(
     )
 
 
+def _record_test_room() -> None:
+    """Record the configured ``test_room`` as created, so listing reads its tasks under ``!test_room:localhost``."""
+    update_matrix_state(
+        main._app_runtime_paths(main.app),
+        lambda state: state.add_room("test_room", "!test_room:localhost", "#test_room:localhost", "Test Room"),
+    )
+
+
+def _configure_agent_rooms(temp_config_file: Path, rooms: list[str]) -> None:
+    """Give ``test_agent`` these rooms and load the config into the app."""
+    config_data = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    config_data["agents"]["test_agent"]["rooms"] = rooms
+    temp_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app).loaded
+
+
 def test_list_schedules_success(test_client: TestClient) -> None:
     """List schedules should return serialized pending tasks."""
+    _record_test_room()
     tasks = [
         _task(
             "once1234",
@@ -126,10 +144,7 @@ def test_list_schedules_reports_an_unreadable_room_beside_the_readable_ones(
     reason: str,
 ) -> None:
     """A room whose state cannot be read is reported with the reason instead of looking empty or failing the list."""
-    config_data = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
-    config_data["agents"]["test_agent"]["rooms"] = ["!readable:localhost", "!unreadable:localhost"]
-    temp_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
-    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app).loaded
+    _configure_agent_rooms(temp_config_file, ["!readable:localhost", "!unreadable:localhost"])
     stored = _stored()
 
     async def room_get_state(room_id: str) -> object:
@@ -158,8 +173,119 @@ def test_list_schedules_reports_an_unreadable_room_beside_the_readable_ones(
     ]
 
 
+def test_list_schedules_reads_a_room_configured_by_alias_under_its_room_id(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """A configured alias is read once under the room ID it resolves to, and one that does not resolve says why."""
+    _configure_agent_rooms(temp_config_file, ["#test_room:localhost", "test_room", "gone", "#gone:localhost"])
+    # The room key and the alias name the same room, which must be read once.
+    _record_test_room()
+
+    client = make_matrix_client_mock()
+    client.room_resolve_alias = AsyncMock(
+        return_value=nio.RoomResolveAliasError.from_dict(
+            {"errcode": "M_NOT_FOUND", "error": "Room alias #gone:localhost not found"},
+        ),
+    )
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse.from_dict(
+            [scheduled_task_state_event("abc12345", _stored(), room_id="!test_room:localhost")],
+            room_id="!test_room:localhost",
+        ),
+    )
+    response = _send_with(test_client, client, "GET", path="/api/schedules")
+
+    assert response.status_code == 200
+    data = response.json()
+    client.room_resolve_alias.assert_awaited_once_with("#gone:localhost")
+    client.room_get_state.assert_awaited_once_with("!test_room:localhost")
+    assert [(task["task_id"], task["room_id"]) for task in data["tasks"]] == [("abc12345", "!test_room:localhost")]
+    assert data["unreadable_rooms"] == [
+        {
+            "room_id": "#gone:localhost",
+            "room_alias": "#gone:localhost",
+            "error": "Unable to resolve room alias: RoomResolveAliasError: M_NOT_FOUND Room alias #gone:localhost not found",
+        },
+    ]
+
+
+def test_list_schedules_reports_an_alias_whose_lookup_broke_off_beside_the_readable_rooms(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """An alias lookup that breaks off is reported with the reason, and the other rooms' tasks are still listed."""
+    # The broken-off lookup comes first, so the next reference must not inherit its outcome.
+    _configure_agent_rooms(temp_config_file, ["flaky", "#flaky:localhost", "readable", "#readable:localhost"])
+
+    client = make_matrix_client_mock()
+    client.room_resolve_alias = AsyncMock(
+        side_effect=[
+            aiohttp.ClientPayloadError("Response payload is not completed"),
+            nio.RoomResolveAliasResponse(room_alias="#readable:localhost", room_id="!readable:localhost", servers=[]),
+        ],
+    )
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse.from_dict(
+            [scheduled_task_state_event("abc12345", _stored(), room_id="!readable:localhost")],
+            room_id="!readable:localhost",
+        ),
+    )
+    response = _send_with(test_client, client, "GET", path="/api/schedules")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [(task["task_id"], task["room_id"]) for task in data["tasks"]] == [("abc12345", "!readable:localhost")]
+    assert data["unreadable_rooms"] == [
+        {
+            "room_id": "#flaky:localhost",
+            "room_alias": "#flaky:localhost",
+            "error": "Unable to resolve room alias: ClientPayloadError: Response payload is not completed",
+        },
+    ]
+
+
+def test_list_schedules_filtered_by_alias_reads_only_that_room(test_client: TestClient) -> None:
+    """A room filter written as an alias is read under the room ID it resolves to."""
+    client = make_matrix_client_mock()
+    client.room_resolve_alias = AsyncMock(
+        return_value=nio.RoomResolveAliasResponse(
+            room_alias="#lobby:example.org",
+            room_id="!lobby:localhost",
+            servers=[],
+        ),
+    )
+    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict([], room_id="!lobby:localhost"))
+    response = _send_with(test_client, client, "GET", path="/api/schedules", params={"room_id": "#lobby:example.org"})
+
+    assert response.status_code == 200
+    client.room_get_state.assert_awaited_once_with("!lobby:localhost")
+
+
+def test_list_schedules_without_rooms_needs_no_matrix_account(test_client: TestClient, temp_config_file: Path) -> None:
+    """With no room configured, the list is empty before MindRoom has created its Matrix accounts."""
+    _configure_agent_rooms(temp_config_file, [])
+
+    response = test_client.get("/api/schedules")
+
+    assert response.status_code == 200
+    assert response.json() == {"timezone": "UTC", "tasks": [], "unreadable_rooms": []}
+
+
+def test_list_schedules_skips_a_configured_room_not_created_yet(test_client: TestClient) -> None:
+    """A room key with no created room holds no tasks, so it is neither read nor reported unreadable."""
+    client = make_matrix_client_mock()
+    response = _send_with(test_client, client, "GET", path="/api/schedules")
+
+    assert response.status_code == 200
+    assert response.json()["tasks"] == []
+    assert response.json()["unreadable_rooms"] == []
+    client.room_get_state.assert_not_awaited()
+
+
 def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> None:
     """Invalid stored cron values should not crash schedule listing."""
+    _record_test_room()
     tasks = [
         _task(
             "badcron1",
@@ -185,6 +311,7 @@ def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> N
 
 def test_list_schedules_describes_each_task_in_its_own_timezone(test_client: TestClient) -> None:
     """A task stored with a timezone is described in it; one without falls back to the global timezone (UTC here)."""
+    _record_test_room()
     midnight_utc = {"minute": "0", "hour": "0", "day": "*", "month": "*", "weekday": "*"}
     tasks = [
         _task("tokyo123", schedule_type="cron", cron_fields=midnight_utc, timezone="Asia/Tokyo"),

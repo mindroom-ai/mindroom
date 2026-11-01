@@ -1684,7 +1684,7 @@ describe("egress broker service editor", () => {
           kind: "validation",
           issue: {
             loc: ["egress_broker", "services", "myapi", "rules", 0, "host"],
-            msg: "Value error, host must not contain scheme",
+            msg: "host must not contain scheme",
             type: "value_error",
           },
         },
@@ -1726,7 +1726,7 @@ describe("egress broker service editor", () => {
           kind: "validation",
           issue: {
             loc: ["egress_broker"],
-            msg: "Value error, services must not be empty",
+            msg: "services must not be empty",
             type: "value_error",
           },
         },
@@ -1734,7 +1734,7 @@ describe("egress broker service editor", () => {
           kind: "validation",
           issue: {
             loc: ["egress_broker", "services"],
-            msg: "Value error, too many services",
+            msg: "too many services",
             type: "value_error",
           },
         },

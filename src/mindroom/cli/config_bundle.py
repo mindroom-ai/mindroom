@@ -43,7 +43,7 @@ def initialize_runtime_bundle(
     # Both modules load Pydantic config models and cryptography-backed credentials;
     # keep that graph out of CLI help startup (see tests/test_import_graph.py).
     from mindroom.config.bundle import install_config_bundle  # noqa: PLC0415
-    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
+    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, config_validation_summary  # noqa: PLC0415
 
     runtime = activate_cli_runtime(config_path, storage_path=storage_path)
     process_env = exported_process_env()
@@ -59,7 +59,7 @@ def initialize_runtime_bundle(
             process_env=process_env,
         )
     except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
-        typer.echo(f"Bundle initialization failed: {exc}", err=True)
+        typer.echo(f"Bundle initialization failed: {config_validation_summary(exc)}", err=True)
         raise typer.Exit(2) from None
 
 
@@ -87,7 +87,7 @@ def config_install_bundle(
     # Defer the Pydantic/cryptography config graph until this command runs,
     # preserving the slim CLI import contract.
     from mindroom.config.bundle import install_config_bundle  # noqa: PLC0415
-    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
+    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, config_validation_summary  # noqa: PLC0415
 
     try:
         # Native config loading may log to stdout before logging is configured.
@@ -103,10 +103,11 @@ def config_install_bundle(
                 revision=revision,
             )
     except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
+        detail = config_validation_summary(exc)
         if json_output:
-            typer.echo(json.dumps({"status": "failed", "detail": str(exc)}))
+            typer.echo(json.dumps({"status": "failed", "detail": detail}))
         else:
-            typer.echo(f"Bundle installation failed: {exc}", err=True)
+            typer.echo(f"Bundle installation failed: {detail}", err=True)
         raise typer.Exit(2) from None
     if json_output:
         typer.echo(json.dumps(_install_json(result)))
@@ -228,7 +229,7 @@ def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
     # Defer the Pydantic/cryptography config graph until this command runs,
     # preserving the slim CLI import contract.
     from mindroom.config.bundle import install_config_bundle  # noqa: PLC0415
-    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
+    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, config_validation_summary  # noqa: PLC0415
 
     try:
         runtime_paths = activate_cli_runtime(target / config)
@@ -243,7 +244,7 @@ def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
                 expected_digest=expected_digest,
             )
     except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
-        return _ApplyReceipt("failed", str(exc))
+        return _ApplyReceipt("failed", config_validation_summary(exc))
     status = _settled_status(runtime_paths, url, install.fingerprint, wait, timeout)
     if status in _SETTLED:
         return _ApplyReceipt(*_SETTLED[status], install, status)
@@ -268,7 +269,7 @@ def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
                 expected_digest=install.previous_digest,
             )
     except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
-        detail = f"The runtime rejected the candidate, and restoring the previous tree failed: {exc}"
+        detail = f"The runtime rejected the candidate, and restoring the previous tree failed: {config_validation_summary(exc)}"
         return _ApplyReceipt("unconfirmed", detail, install, status)
     rollback_status = _settled_status(runtime_paths, url, rollback.fingerprint, wait, timeout)
     if rollback_status == "applied":

@@ -100,34 +100,17 @@ repos:
       - id: pyproject-fmt
         args: ["--table-format", "long", "--no-generate-python-version-classifiers"]
 
-  # TypeScript/JavaScript hooks
-  - repo: https://github.com/pre-commit/mirrors-prettier
-    rev: v4.0.0-alpha.8
-    hooks:
-      - id: prettier
-        files: ^frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
-        exclude: ^(frontend/package-lock\.json|frontend/tsconfig.*\.json|frontend/src/test/fixtures/(config-schema|egressPresets)\.json|frontend/src/components/Integrations/iconMapping\.tsx|.*\.min\.(js|css))$
-        args: ["--cache", "--cache-location", ".cache/prettier-precommit.json"]
-        require_serial: true
-
-  - repo: https://github.com/pre-commit/mirrors-eslint
-    rev: v10.8.0
-    hooks:
-      - id: eslint
-        files: ^frontend/.*\.(js|jsx|ts|tsx)$
-        args: ['--fix', '--config', 'frontend/.eslintrc.json']
-        additional_dependencies:
-          - eslint@8.56.0
-          - '@typescript-eslint/eslint-plugin@6.19.0'
-          - '@typescript-eslint/parser@6.19.0'
-          - 'eslint-plugin-react@7.33.2'
-          - 'eslint-plugin-react-hooks@4.6.0'
-          - 'eslint-config-prettier@9.1.0'
-          - 'typescript@5.3.3'
-
   - repo: local
     hooks:
       # Each hook must bootstrap a fresh checkout without downloading Puppeteer's browser.
+      # Prettier reads `frontend/.prettierignore`, so this hook needs no exclude list.
+      - id: prettier
+        name: Prettier
+        entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bunx prettier --write "${@#frontend/}"' --
+        language: system
+        files: ^frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
+        require_serial: true
+
       - id: check-bun-lock
         name: Check bun.lock is up to date
         entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile'
@@ -139,7 +122,14 @@ repos:
         name: TypeScript type checking
         entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bun run type-check'
         language: system
-        files: ^frontend/.*\.(ts|tsx)$
+        files: ^frontend/(.*\.(ts|tsx|json)|bun\.lock)$
+        pass_filenames: false
+
+      - id: eslint
+        name: ESLint
+        entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bun run lint'
+        language: system
+        files: ^frontend/(.*\.(ts|tsx|js|cjs|mjs)|package\.json|bun\.lock)$
         pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -151,4 +141,4 @@ repos:
       - id: pretty-format-json
         args: ['--autofix', '--indent=2']
         files: ^frontend/.*\.json$
-        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/\.eslintrc\.json|frontend/src/test/fixtures/config-schema\.json)$
+        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/src/test/fixtures/config-schema\.json)$

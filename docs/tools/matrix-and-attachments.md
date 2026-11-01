@@ -31,6 +31,7 @@ These tools work only while an agent is responding in a Matrix conversation.
 Unless the call passes explicit IDs, they act on the current room and thread.
 `matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root.
 `thread_tags`, `thread_resolution`, `thread_move`, and `thread_summary` refuse a thread target with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
+`room_id` takes a room ID, alias, or configured room name; `matrix_api` takes only a room ID.
 Tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
 `matrix_api` is the exception: it defaults `room_id` to the current room but never infers event IDs, thread IDs, or state keys from the conversation.
 Attachment IDs (`att_*`) are limited to the current conversation and IDs registered earlier in the same tool run; see [Attachments](../attachments.md#attachment-ids).
@@ -155,7 +156,6 @@ It is not in starter configs or default tool sets.
 
 Matrix cannot move messages between rooms, so `move_thread(room_id, thread_id=None)` copies the thread into a new thread in the target room and copies its tags.
 The original thread gets a `Moved to <link>` notice and is marked `resolved`.
-`room_id` accepts a room ID, alias, or configured room name.
 Without `thread_id`, it moves the active thread.
 
 Each agent re-posts its own messages, so the agents in the thread continue the conversation in the new thread with its earlier messages as context.
@@ -269,7 +269,7 @@ For threads with more than 50 messages, the summary model sees only the first th
 
 The summary uses the first match of:
 
-1. `room_thread_summary_models`, keyed by managed room alias or Matrix room ID.
+1. `room_thread_summary_models`, keyed by room key or Matrix room ID.
 2. `room_thread_summary_models`, keyed by the responding agent or team name, which covers ad-hoc rooms without a managed alias.
 3. `defaults.thread_summary_model`.
 4. The `default` model.

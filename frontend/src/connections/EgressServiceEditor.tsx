@@ -231,7 +231,7 @@ export function EgressServiceEditor({
   const [apiKey, setApiKey] = useState("");
   const [moreOpen, setMoreOpen] = useState(() => usesMoreOptions(form));
   const loadPresetsRef = useRef(loadPresets);
-  const openedWith = useRef(form);
+  const [openedWith] = useState(form);
   // The repositories typed in the helper, which a save applies when the person
   // did not. A limit that is edited starts with the ones it is limited to, and
   // with the labels the helper wrote for them, which follow a changed list.
@@ -300,12 +300,12 @@ export function EgressServiceEditor({
   const problems = attempted ? validateService(form, options, settings) : [];
   const dirty = useMemo(
     () =>
-      JSON.stringify(form) !== JSON.stringify(openedWith.current) ||
+      JSON.stringify(form) !== JSON.stringify(openedWith) ||
       apiKey !== "" ||
       // Text in a helper that is not shown is not a change.
       (showGithubHelper &&
         helperSignature(helperInput) !== helperSignature(restored.input)),
-    [form, apiKey, helperInput, restored, showGithubHelper],
+    [form, openedWith, apiKey, helperInput, restored, showGithubHelper],
   );
   const nameLocked = editing || savedSignature !== null;
   const disabled = busy !== null;

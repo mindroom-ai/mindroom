@@ -72,6 +72,7 @@ from mindroom.oauth.credential_lifecycle import (
     resolve_oauth_credential_context,
 )
 from mindroom.oauth.google import with_google_account_picker
+from mindroom.oauth.providers import OAuthUserFacingError
 from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.oauth.reset import (
     BrowserOAuthResetIntent,
@@ -217,6 +218,8 @@ async def _client_config_resolution_for_request(
     """Resolve an OAuth client that can return to the requesting browser host."""
     try:
         resolution = await provider.client_config_resolution_async(runtime_paths)
+    except OAuthUserFacingError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OAuthProviderError as exc:
         logger.warning(
             "oauth_client_config_resolution_failed",
@@ -343,6 +346,8 @@ async def _issue_authorization_url(
             state=state,
             code_verifier=code_verifier,
         )
+    except OAuthUserFacingError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OAuthProviderError as exc:
         logger.warning(
             "oauth_authorization_start_failed",

@@ -1321,7 +1321,8 @@ describe("Knowledge", () => {
     );
 
     const update = mockUpdateKnowledgeBase.mock.lastCall?.[1] as
-      KnowledgeBaseConfig | undefined;
+      | KnowledgeBaseConfig
+      | undefined;
     expect(update?.git).toBeDefined();
     // The store merges updates into the existing base, then JSON.stringify drops undefined keys.
     const savedBase = JSON.parse(
