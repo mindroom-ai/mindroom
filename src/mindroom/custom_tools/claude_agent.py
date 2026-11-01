@@ -92,6 +92,8 @@ class _ClaudeSessionState:
     stderr_lines: collections.deque[str] = field(
         default_factory=lambda: collections.deque(maxlen=_MAX_STDERR_LINES),
     )
+    # Prompts whose result is still unread, oldest first, each marked once Claude Code has echoed it.
+    unanswered: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -331,6 +333,22 @@ async def _prompt_message(prompt: str, prompt_id: str) -> AsyncIterator[dict[str
         "parent_tool_use_id": None,
         "uuid": prompt_id,
     }
+
+
+def _settle_prompts(session: _ClaudeSessionState, result: ResultMessage) -> list[str]:
+    """Stop waiting for the prompts ``result`` answers, and return them.
+
+    A result answers the prompts echoed in its turn, which may be a turn Claude Code started on its own. Without an
+    echo, a result of a turn Claude Code did not start itself answers the oldest prompt, one that ran no turn, such as
+    a command headless Claude Code does not offer or a prompt a hook blocked. Results are read only while the reading
+    call's own prompt waits, so an oldest prompt always exists.
+    """
+    answered = [prompt for prompt, echoed in session.unanswered.items() if echoed]
+    if not answered and (result.origin is None or result.origin["kind"] == "human"):
+        answered = [next(iter(session.unanswered))]
+    for prompt in answered:
+        del session.unanswered[prompt]
+    return answered
 
 
 def _response_text(text_parts: list[str], result: ResultMessage | None) -> str:
@@ -604,6 +622,7 @@ class ClaudeAgentTools(Toolkit):
                     await session.client.set_model(resolved_model)
                     session.model = resolved_model
                 prompt_id = str(uuid4())
+                session.unanswered[prompt_id] = False
                 await session.client.query(_prompt_message(trimmed_prompt, prompt_id))
                 response_text, tool_names, turns = await self._collect_response(session, prompt_id)
                 session.last_used_at = monotonic()
@@ -634,21 +653,20 @@ class ClaudeAgentTools(Toolkit):
         session: _ClaudeSessionState,
         prompt_id: str,
     ) -> tuple[str, list[str], list[_ClaudeTurn]]:
-        """Read Claude Code's turns through the one that used the prompt sent as ``prompt_id``.
+        """Read Claude Code's turns through the one that answers the prompt sent as ``prompt_id``.
 
         Claude Code also starts turns on its own, such as when a background task finishes, and a prompt sent while
-        such a turn runs joins it. Turns read before the prompt's own stay in its reply and usage, so the agent still
-        sees what Claude reported.
+        such a turn runs joins it; a call stopped before reading its result leaves that result unread. Turns read
+        before this prompt's answer stay in its reply and usage, so the agent still sees what Claude reported.
         """
         text_parts: list[str] = []
         tool_names: list[str] = []
         turns = [_ClaudeTurn()]
-        answered = False
 
         async for message in session.client.receive_messages():
             turn = turns[-1]
-            if isinstance(message, UserMessage) and message.uuid == prompt_id:
-                answered = True
+            if isinstance(message, UserMessage) and message.uuid in session.unanswered:
+                session.unanswered[message.uuid] = True
             elif isinstance(message, AssistantMessage):
                 # Placeholder messages, such as a request that failed every retry, name no real model.
                 if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL and message.message_id:
@@ -662,7 +680,7 @@ class ClaudeAgentTools(Toolkit):
             elif isinstance(message, ResultMessage):
                 turn.result = message
                 session.claude_session_id = message.session_id
-                if answered:
+                if prompt_id in _settle_prompts(session, message):
                     break
                 turns.append(_ClaudeTurn())
 

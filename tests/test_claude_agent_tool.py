@@ -188,14 +188,22 @@ _ECHO = UserMessage(content="Stands for Claude Code's replay of the newest promp
 
 @dataclass
 class _ScriptedClaudeSDKClient(_FakeClaudeSDKClient):
-    """Fake client replaying Claude Code's message stream; each read yields the next script, then waits for more."""
+    """Fake client whose one message stream gets the next script after each prompt and otherwise waits for more."""
 
     turns: ClassVar[list[list[Message]]] = []
 
-    async def receive_messages(self) -> AsyncGenerator[Message]:
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.stream: asyncio.Queue[Message] = asyncio.Queue()
+
+    async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:
+        await super().query(prompt, session_id=session_id)
         for message in type(self).turns.pop(0):
-            yield self._echo() if message is _ECHO else message
-        await asyncio.Event().wait()
+            self.stream.put_nowait(self._echo() if message is _ECHO else message)
+
+    async def receive_messages(self) -> AsyncGenerator[Message]:
+        while True:
+            yield await self.stream.get()
 
 
 @dataclass
@@ -1376,6 +1384,61 @@ async def test_claude_send_answers_its_own_prompt_after_claude_code_starts_a_tur
         ("@alice:localhost", "claude-sonnet-5-5", 1000, 200, 0, 0),
         ("@bob:localhost", "claude-sonnet-5-5", 800, 90, 0, 0),
     ]
+
+
+@pytest.mark.asyncio
+async def test_claude_send_returns_the_result_of_a_prompt_that_runs_no_turn(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command headless Claude Code does not offer, or a prompt a hook blocked, gets a result but no echo."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    unavailable = replace(_claude_result(0), result="/status isn't available in this environment.")
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[unavailable]])
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+
+    reply = await asyncio.wait_for(_in_call(run_context, tools.claude_send("/status")), timeout=10)
+
+    assert reply.startswith("/status isn't available in this environment.\n\n")
+
+
+@pytest.mark.asyncio
+async def test_claude_send_after_a_stopped_call_returns_its_own_reply(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call stopped before Claude answered leaves that answer unread, and the next call reads past it to its own."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    turns = [
+        [_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000, text="Working on the first task.")],
+        [
+            _claude_result(200),
+            _ECHO,
+            _claude_response("claude-sonnet-5-5", "msg-2", 500, text="Second."),
+            _claude_result(60),
+        ],
+    ]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
+    prompted = asyncio.Event()
+    send_script = _ScriptedClaudeSDKClient.query
+
+    async def send_and_signal(self: _ScriptedClaudeSDKClient, prompt: AsyncIterable[dict[str, Any]]) -> None:
+        await send_script(self, prompt)
+        prompted.set()
+
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "query", send_and_signal)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+
+    first = asyncio.create_task(_in_call(run_context, tools.claude_send("first")))
+    await prompted.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    second = await asyncio.wait_for(_in_call(run_context, tools.claude_send("second")), timeout=10)
+
+    assert second.startswith("Second.\n\n")
 
 
 @pytest.mark.asyncio
