@@ -51,9 +51,7 @@ async function loadFixture(
   config: object,
   agentPolicies: AgentPoliciesByAgent = {},
 ) {
-  (global.fetch as any).mockResolvedValueOnce(
-    Response.json(structuredClone(config)),
-  );
+  (global.fetch as any).mockResolvedValueOnce(Response.json(config));
   (global.fetch as any).mockResolvedValueOnce(
     Response.json({ agent_policies: agentPolicies }),
   );
