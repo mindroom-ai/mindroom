@@ -523,6 +523,8 @@ async def _compact_before_reply(
                 on_usage=scope_usage_recorder(storage, session.session_id),
             ),
             available_history_budget=history_budget,
+            # A trigger-level pass may store a summary above its target, but never one the reply cannot replay.
+            max_summary_tokens=resolved_inputs.execution_plan.hard_replay_budget_tokens,
             before_tokens=before_tokens,
             replay_window_tokens=resolved_inputs.execution_plan.replay_window_tokens,
             threshold_tokens=resolved_inputs.execution_plan.trigger_threshold_tokens,
