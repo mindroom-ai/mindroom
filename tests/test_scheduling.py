@@ -907,6 +907,7 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
     """One-time tasks should execute using the latest persisted workflow data."""
     client = make_matrix_client_mock()
     client.room_get_state_event.side_effect = joined_member_state
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
     config = Config()
     initial_workflow = ScheduledWorkflow(
         created_by="@user:server",
