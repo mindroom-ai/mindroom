@@ -19,7 +19,8 @@ People on other homeservers cannot pick them, but MindRoom Chat shows them the p
 3. MindRoom Chat hides the room from room lists, search, and room mentions.
 4. The room's emoji packs appear in the emoji board and `:` autocomplete of every room, next to that room's own packs and the user's personal one.
 5. To add an emoji, a user presses **+** (**Add custom emoji**) in the emoji board, picks an image, gives it a shortcode, and presses **Add**.
-   If the pack already has that shortcode, MindRoom Chat adds a number to it, such as `party-parrot1`.
+   An image larger than 128 pixels is shrunk to 128 pixels before upload, and a GIF is kept as it is so it keeps animating, up to 256 KB.
+   A shortcode that is already taken is refused with "That name is taken. Pick another."
 6. When the user may add to the room, MindRoom Chat saves the emoji to its pack, and each member's next sync delivers it.
 
 The room is an ordinary Matrix room, and its packs are ordinary [MSC2545](https://github.com/matrix-org/matrix-spec-proposals/pull/2545) image packs (`im.ponies.room_emotes` state events).
@@ -131,5 +132,6 @@ If you create the room by hand, raise it too.
 - Every account that runs MindRoom Chat becomes a member of the room, so its member list names all of them.
   Only MindRoom Chat hides the room, so other clients logged in to the same account list it like any other room.
 - Other Matrix clients do not join the room or add to its packs by themselves.
-- Custom emoji do not appear under Recent or in the quick reactions, which hold only Unicode emoji.
+- Custom emoji a user picks appear under Recent, in the `:` autocomplete list and in the quick reactions, ranked by use like Unicode emoji.
+- The shrinking, the GIF limit and the taken-name check apply to **Add custom emoji** in the emoji board; the pack editor under **Settings → Emojis & Stickers**, which also serves sticker packs, uploads images as they are and numbers duplicate names.
 - Emoji show no "added by", and existing personal emoji do not move to the server, so add them again to share them.
