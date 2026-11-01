@@ -59,7 +59,8 @@ def _appservice_token_from_env(runtime_paths: RuntimePaths) -> _ConfiguredToken 
 
 def resolve_managed_account_auth(runtime_paths: RuntimePaths) -> ManagedAccountAuth:
     """Resolve explicit password or application-service account authentication."""
-    raw_mode = (runtime_paths.env_value(MATRIX_MANAGED_ACCOUNT_AUTH_ENV) or "password").strip().lower()
+    mode = runtime_paths.plain_env_value((MATRIX_MANAGED_ACCOUNT_AUTH_ENV,))
+    raw_mode = (mode[0] if mode else "password").strip().lower()
     if raw_mode not in {"password", "appservice"}:
         msg = f"{MATRIX_MANAGED_ACCOUNT_AUTH_ENV} must be 'password' or 'appservice', got {raw_mode!r}"
         raise matrix_startup_error(msg, permanent=True)
