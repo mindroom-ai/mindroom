@@ -401,7 +401,7 @@ await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 
 Each hook runs under its timeout.
 A timeout cannot interrupt blocking code such as a CPU-bound loop, so a hook stuck in one stalls MindRoom until it returns.
-An exception or timeout is logged with the plugin and hook name and affects only that hook for that event, as described per mode under [Execution modes](#execution-modes), except for a required `agent:started` hook.
+An exception or timeout is logged with the plugin and hook name and affects only that hook for that event, as described per mode under [Execution modes](#execution-modes), except for a required `agent:started` hook and a `contact:before_send` hook, whose failure denies the message.
 MindRoom does not retry a failed hook, so implement retries inside the hook if it needs them.
 A failing hook is invoked again on the next matching event, with no quarantine or cooldown, so fixing the code under [hot reload](https://docs.mindroom.chat/plugins/#live-development-hot-reload) takes effect on the next event.
 

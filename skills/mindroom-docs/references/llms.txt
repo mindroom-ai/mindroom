@@ -39,6 +39,7 @@
 - [Rooms & Spaces](https://docs.mindroom.chat/rooms/)
 - [Personal Rooms](https://docs.mindroom.chat/personal-rooms/)
 - [Personal Agents](https://docs.mindroom.chat/personal-agents/)
+- [Agent Contacts](https://docs.mindroom.chat/agent-contacts/)
 - [Bridges](https://docs.mindroom.chat/deployment/bridges/)
 - [Telegram Bridge](https://docs.mindroom.chat/deployment/bridges/telegram/)
 - [Enable & Configure Tools](https://docs.mindroom.chat/tools/)

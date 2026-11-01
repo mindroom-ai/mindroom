@@ -46,6 +46,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Matrix | Rooms & Spaces | `rooms.md` | `rooms/index.md` | `page__rooms__index.md` |
 | Matrix | Personal Rooms | `personal-rooms.md` | `personal-rooms/index.md` | `page__personal-rooms__index.md` |
 | Matrix | Personal Agents | `personal-agents.md` | `personal-agents/index.md` | `page__personal-agents__index.md` |
+| Matrix | Agent Contacts | `agent-contacts.md` | `agent-contacts/index.md` | `page__agent-contacts__index.md` |
 | Matrix | Bridges | `deployment/bridges/index.md` | `deployment/bridges/index.md` | `page__deployment__bridges__index.md` |
 | Matrix | Telegram Bridge | `deployment/bridges/telegram.md` | `deployment/bridges/telegram/index.md` | `page__deployment__bridges__telegram__index.md` |
 | Tools | Enable & Configure Tools | `tools/index.md` | `tools/index.md` | `page__tools__index.md` |
