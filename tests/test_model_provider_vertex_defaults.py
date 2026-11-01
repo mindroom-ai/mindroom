@@ -85,7 +85,8 @@ def test_generated_vertex_environment_reaches_runtime_endpoint(
 
 @pytest.mark.parametrize(
     ("process_region", "model_region", "expected_region"),
-    [(None, None, "global"), ("us", None, "us"), ("us", "eu", "eu")],
+    [(None, None, "global"), ("", None, "global"), ("us", None, "us"), ("us", "eu", "eu")],
+    ids=["unset", "blank-process", "process", "model"],
 )
 def test_vertex_generated_environment_keeps_override_precedence(
     tmp_path: Path,
@@ -93,7 +94,7 @@ def test_vertex_generated_environment_keeps_override_precedence(
     model_region: str | None,
     expected_region: str,
 ) -> None:
-    """Process and model choices must still override the generated global endpoint."""
+    """Process and model choices must still override the generated global endpoint; a blank export is unset."""
     _write_env_file(
         tmp_path / ".env",
         "mindroom.chat",
