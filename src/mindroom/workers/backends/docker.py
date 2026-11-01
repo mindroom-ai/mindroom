@@ -16,6 +16,7 @@ import httpx
 
 from mindroom.constants import (
     RuntimePaths,
+    runtime_env_path,
     runtime_env_values,
     runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
@@ -219,7 +220,7 @@ def _protected_runtime_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
         for env_name in {*runtime_paths.process_env, *runtime_paths.env_file_values}
         if env_name.endswith("_FILE")
     }
-    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
+    if runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS") is not None:
         protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
     return frozenset(protected_names)
 

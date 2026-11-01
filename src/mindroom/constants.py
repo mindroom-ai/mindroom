@@ -172,19 +172,27 @@ class RuntimePaths:
             return self.env_file_values[name]
         return default
 
-    def first_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
-        """Return the first usable value of ``names`` and the variable that supplied it.
+    def _plain_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
+        """Return the first usable value of ``names`` in the process env, then the `.env`, and the variable that set it.
 
-        Tries each name in the process env, then each in the `.env`, then the stripped contents of the file each
-        name's `<NAME>_FILE` names, so an earlier value never resolves a file path. A blank or unedited
-        starter-template placeholder value of a name counts as unset in all three, so an exported one does not hide
-        a `.env` value.
+        A blank or unedited starter-template placeholder value counts as unset, so an exported one does not hide a
+        `.env` value.
         """
         for layer in (self.process_env, self.env_file_values):
             for name in names:
                 value = layer.get(name, "")
                 if not runtime_env_policy.is_unset_env_value(name, value):
                     return value, name
+        return None
+
+    def first_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
+        """Return the first usable value of ``names`` and the variable that supplied it.
+
+        Tries ``_plain_env_value``, then the stripped contents of the file each name's `<NAME>_FILE` names, so an
+        earlier value never resolves a file path; a file's blank or placeholder contents count as unset too.
+        """
+        if (plain := self._plain_env_value(names)) is not None:
+            return plain
         for name in names:
             path = runtime_env_path(self, f"{name}_FILE")
             try:
@@ -766,16 +774,11 @@ def shell_execution_runtime_env_values(
 
 
 def _runtime_env_source_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
-    """Return one runtime env var as a lexical filesystem path without resolving symlinks.
-
-    A blank exported value counts as unset, as in ``RuntimePaths.first_env_value``, so it does not hide the `.env` one.
-    """
-    for layer in (runtime_paths.process_env, runtime_paths.env_file_values):
-        raw_value = layer.get(name, "")
-        if not runtime_env_policy.is_unset_env_value(name, raw_value):
-            path = Path(raw_value).expanduser()
-            return path if path.is_absolute() else runtime_paths.config_dir / path
-    return None
+    """Return one runtime env var, read as ``RuntimePaths._plain_env_value`` reads it, as a lexical filesystem path."""
+    if (plain := runtime_paths._plain_env_value((name,))) is None:
+        return None
+    path = Path(plain[0]).expanduser()
+    return path if path.is_absolute() else runtime_paths.config_dir / path
 
 
 def _sandbox_shell_execution_runtime_env_values(
