@@ -120,14 +120,14 @@ class DesktopBridgePolicy:
     shell_enabled: bool = False
 
     def __post_init__(self) -> None:
-        """Require explicit caller and agent allowlists plus at least one local capability."""
+        """Require explicit caller and agent allowlists plus apps, folders, or shell; browser control needs an app."""
         if not self.allowed_requester_ids:
             msg = "Desktop bridge requires at least one allowed requester Matrix ID."
             raise ValueError(msg)
         if not self.allowed_agent_names:
             msg = "Desktop bridge requires at least one allowed agent name."
             raise ValueError(msg)
-        if not (self.allowed_app_ids or self.allowed_file_roots or self.shell_enabled or self.browser_enabled):
+        if not (self.allowed_app_ids or self.allowed_file_roots or self.shell_enabled):
             msg = "Desktop bridge requires at least one local capability."
             raise ValueError(msg)
         if any(not value.strip() for value in self.allowed_requester_ids):
