@@ -118,6 +118,9 @@ serverEmoji:
   room: "#emoji:example.com"
 ```
 
+Quote an alias.
+An unquoted `#` starts a YAML comment, so the chart would publish nothing and raise no error.
+
 nginx then serves that well-known path even without MatrixRTC; route it from the Matrix server-name origin to this Service as described above.
 Without a room, custom emoji stay personal to each user.
 The chart rejects a room that is not an alias or a room ID, or that contains whitespace, quotes, backslashes, `$`, `<`, `>` or `&`.

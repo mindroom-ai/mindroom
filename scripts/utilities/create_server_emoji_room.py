@@ -4,6 +4,7 @@ Run from the repository with ``uv run python -m scripts.utilities.create_server_
 Supply an operator's access token in ``MATRIX_ACCESS_TOKEN``.
 The room is hidden from room lists and local to the homeserver, and it holds one empty emoji pack.
 Everyone may add emoji by default; ``--moderators-only`` limits adding, editing, and removing them to moderators.
+Members cannot post messages in the room, because every message would notify the whole server.
 The script prints the room ID and the ``io.mindroom.emoji`` key that the homeserver's
 ``/.well-known/matrix/client`` must serve for MindRoom Chat to find the room.
 """
@@ -61,6 +62,8 @@ def create_server_emoji_room(client: httpx.Client, *, name: str, alias: str, mod
     levels_path = f"/_matrix/client/v3/rooms/{quote(room_id, safe='')}/state/m.room.power_levels"
     levels = _json(client.get(levels_path))
     levels.setdefault("events", {})[EMOJI_PACK_EVENT] = 50 if moderators_only else 0
+    # Members join this hidden room by themselves and cannot mute it, so a message there would notify the whole server.
+    levels["events_default"] = max(levels.get("events_default", 0), 50)
     _json(client.put(levels_path, json=levels))
     server_name = user_id.partition(":")[2]
     return room_id, f"#{alias}:{server_name}"

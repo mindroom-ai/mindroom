@@ -10,7 +10,11 @@ import pytest
 
 from scripts.utilities.create_server_emoji_room import create_server_emoji_room, main
 
-SERVER_POWER_LEVELS = {"events": {"m.room.name": 50, "m.room.power_levels": 100}, "users": {"@op:example.com": 100}}
+SERVER_POWER_LEVELS = {
+    "events": {"m.room.name": 50, "m.room.power_levels": 100},
+    "events_default": 0,
+    "users": {"@op:example.com": 100},
+}
 
 
 class MatrixAPI:
@@ -18,6 +22,7 @@ class MatrixAPI:
 
     def __init__(self) -> None:
         self.created: dict[str, Any] = {}
+        self.server_levels: dict[str, Any] = SERVER_POWER_LEVELS
         self.power_levels: dict[str, Any] = {}
         self.authorization: str | None = None
         self.alias_taken = False
@@ -33,7 +38,7 @@ class MatrixAPI:
             return httpx.Response(200, json={"room_id": "!new:example.com"})
         if path.endswith("/rooms/!new:example.com/state/m.room.power_levels"):
             if request.method == "GET":
-                return httpx.Response(200, json=SERVER_POWER_LEVELS)
+                return httpx.Response(200, json=self.server_levels)
             if request.method == "PUT":
                 self.power_levels = json.loads(request.content)
                 return httpx.Response(200, json={"event_id": "$levels"})
@@ -48,8 +53,12 @@ class MatrixAPI:
 
 
 def server_levels_with_emoji_level(level: int) -> dict[str, Any]:
-    """Return the power levels the fake server holds, plus the level for adding emoji."""
-    return {**SERVER_POWER_LEVELS, "events": {**SERVER_POWER_LEVELS["events"], "im.ponies.room_emotes": level}}
+    """Return the power levels the fake server holds, plus the level for adding emoji and for posting."""
+    return {
+        **SERVER_POWER_LEVELS,
+        "events": {**SERVER_POWER_LEVELS["events"], "im.ponies.room_emotes": level},
+        "events_default": 50,
+    }
 
 
 def test_creates_a_hidden_local_room_with_an_empty_emoticon_pack() -> None:
@@ -73,12 +82,21 @@ def test_creates_a_hidden_local_room_with_an_empty_emoticon_pack() -> None:
     }
 
 
-def test_lets_everyone_add_emoji_and_keeps_the_other_power_levels() -> None:
-    """Only the emoji level is added to what the server set, so names and settings stay moderator-only."""
+def test_lets_everyone_add_emoji_but_only_moderators_post_and_keeps_the_other_power_levels() -> None:
+    """Only the emoji and message levels change, so members cannot post and names and settings stay moderator-only."""
     api = MatrixAPI()
     with api.client() as client:
         create_server_emoji_room(client, name="Example", alias="emoji", moderators_only=False)
     assert api.power_levels == server_levels_with_emoji_level(0)
+
+
+def test_keeps_a_message_level_that_is_already_higher_than_50() -> None:
+    """A server that already limits posting to admins is not loosened to moderators."""
+    api = MatrixAPI()
+    api.server_levels = {**SERVER_POWER_LEVELS, "events_default": 100}
+    with api.client() as client:
+        create_server_emoji_room(client, name="Example", alias="emoji", moderators_only=False)
+    assert api.power_levels["events_default"] == 100
 
 
 def test_moderators_only_requires_power_level_50() -> None:

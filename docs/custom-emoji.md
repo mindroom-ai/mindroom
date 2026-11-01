@@ -67,6 +67,7 @@ Add that key to the homeserver's `/.well-known/matrix/client` file:
 
 `room` takes the alias the script printed, or the room ID.
 With the `mindroom-client` Helm chart, set `serverEmoji.room` to the same value and the chart serves `/.well-known/matrix/client` with the key; see the [chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#server-custom-emoji).
+Quote an alias in the values file, as in `room: "#emoji:example.com"`, because an unquoted `#` starts a YAML comment and the chart then publishes nothing.
 Tuwunel's own `[global.well_known]` section has no setting for extra keys, so when Tuwunel answers that path, serve the file from your reverse proxy or the client chart instead.
 Nothing changes in `config.yaml`.
 Without the key, custom emoji stay personal to each user.
@@ -106,6 +107,20 @@ Opening a pack shows its emoji.
 Users who may change the pack can rename or delete them there.
 Users who may change power levels also get a **Permissions** button that opens the room's permissions.
 Simple Mode (**Settings → General → Interface**) hides the Emojis & Stickers page, so turn it off to manage the packs.
+
+## Moderate the room
+
+Members cannot post messages in the room.
+A message there would notify everyone on the server, and MindRoom Chat gives users no way to mute a room it hides.
+The script raises the room's `events_default` power level to at least `50` for this.
+If you create the room by hand, raise it too.
+
+- A kick does not last, because MindRoom Chat joins the room again by itself.
+  Ban someone to keep them out.
+- At the default power level `0`, any member may also create more packs, each up to about 64 KB that every member syncs.
+  A server with open registration should use `--moderators-only`.
+- A room made by hand needs the published alias as its canonical alias, because MindRoom Chat finds the joined room by it.
+- To replace the room, tombstone the old one or remove its canonical alias, then publish the new one.
 
 ## Limits
 
