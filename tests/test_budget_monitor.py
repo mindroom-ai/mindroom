@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -16,7 +17,8 @@ from mindroom.budgets import monitor as monitor_module
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model, budget_user_id
 from mindroom.budgets.pricing import model_prices, run_cost_usd
-from mindroom.budgets.spend import SpendSnapshot, _UnpricedModelUsage
+from mindroom.budgets.spend import SpendSnapshot, UnpricedModelUsage
+from mindroom.budgets.spend_store import load_spend, spend_store_path
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -63,14 +65,20 @@ def _paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
-def _snapshot(spend: Mapping[str, float], *, start: date = date(2026, 10, 1), unavailable: int = 0) -> SpendSnapshot:
+def _snapshot(
+    spend: Mapping[str, float],
+    *,
+    start: date = date(2026, 10, 1),
+    unavailable: int = 0,
+    generated_at: datetime = OCTOBER,
+) -> SpendSnapshot:
     end = date(start.year + (start.month == 12), start.month % 12 + 1, 1)
     return SpendSnapshot(
         period_start=start,
         period_end=end,
-        generated_at=OCTOBER,
+        generated_at=generated_at,
         spend_usd=dict(spend),
-        unpriced_models=(_UnpricedModelUsage(provider="Ollama", model="qwen3.8:27b", total_tokens=5),),
+        unpriced_models=(UnpricedModelUsage(provider="Ollama", model="qwen3.8:27b", total_tokens=5),),
         scanned_sources=2,
         unavailable_sources=unavailable,
     )
@@ -102,7 +110,7 @@ class _Scans:
         if self.error is not None:
             raise self.error
         start = now.date().replace(day=1)
-        return _snapshot(self.spend, start=start, unavailable=self.unavailable)
+        return _snapshot(self.spend, start=start, unavailable=self.unavailable, generated_at=now)
 
 
 def _monitor(
@@ -283,7 +291,7 @@ async def test_refreshes_are_debounced_with_one_trailing_scan(tmp_path: Path, mo
     await _until(lambda: scans.calls == 1)
 
     for _ in range(5):
-        await monitor.sync(_config())
+        monitor.response_finished(ALICE, None, OCTOBER)
     scans.release.set()
     await _until(lambda: scans.calls == 2)
     await _quiet()
@@ -301,7 +309,7 @@ async def test_scan_failure_keeps_previous_snapshot_and_reply_costs(
     scans.error = RuntimeError("database locked")
     monitor.response_finished(ALICE, 1.0, OCTOBER)
 
-    await monitor.sync(_config())
+    monitor.response_finished(BOB, None, OCTOBER)
     await _until(lambda: scans.calls == 2)
     await _quiet()
     monitor.response_finished(ALICE, 0.5, OCTOBER)
@@ -429,7 +437,7 @@ async def test_rescans_wait_for_the_minimum_interval(tmp_path: Path, monkeypatch
     )
     await monitor.sync(_config())
     await _until(lambda: scans.calls == 1)
-    await monitor.sync(_config())
+    monitor.response_finished(ALICE, None, OCTOBER)
     await _until(lambda: scans.calls == 2)
 
     # Scans start in a worker thread after a dispatch delay that varies, so allow some slack below the interval.
@@ -459,7 +467,7 @@ async def test_slow_scans_are_spaced_by_their_duration(tmp_path: Path, monkeypat
     )
     await monitor.sync(_config())
     await _until(lambda: scans.calls == 1)
-    await monitor.sync(_config())
+    monitor.response_finished(ALICE, None, OCTOBER)
     await _until(lambda: scans.calls == 2)
 
     # Five 0.1 s scan durations separate the two starts; allow slack for worker dispatch.
@@ -561,10 +569,12 @@ async def test_lower_spend_applies_even_while_some_stores_are_unread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Agents nobody has used yet have no store, so a price cut must still lower spend."""
-    monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0})
+    monitor, scans, current = await _started(tmp_path, monkeypatch, {ALICE: 12.0})
     scans.spend, scans.unavailable = {ALICE: 3.0}, 1
+    current[0] = _config()
+    current[0].models["astra"].pricing = ModelPricing(input=1, output=6)
 
-    await monitor.sync(_config())
+    await monitor.sync(current[0])
     await _until(lambda: monitor._spend_usd(ALICE) == 3.0)
     await monitor.stop()
 
@@ -642,7 +652,7 @@ async def test_a_rescan_replaces_the_costs_recorded_before_it_started_and_keeps_
     scans.release.clear()
     scans.spend = {ALICE: 6.5}
 
-    await monitor.sync(_config())
+    monitor.response_finished(BOB, None, OCTOBER)
     await _until(lambda: scans.calls == 2)
     monitor.response_finished(ALICE, 1.0, OCTOBER)
 
@@ -793,8 +803,189 @@ async def test_a_rescan_keeps_the_total_a_finished_reply_added(tmp_path: Path) -
     assert monitor._spend_usd(ALICE) == pytest.approx(8.0)
     first_scan = monitor.status().snapshot
 
-    await monitor.sync(config)
+    monitor.response_finished(ALICE, None, OCTOBER)
     await _until(lambda: monitor.status().snapshot is not first_scan)
 
     assert monitor._spend_usd(ALICE) == pytest.approx(8.0)
+    await monitor.stop()
+
+
+async def _restarted(
+    tmp_path: Path,
+    config: Config,
+    clock: _Clock,
+    **timing: float,
+) -> tuple[BudgetMonitor, list[Config]]:
+    """Return a fresh monitor over the storage an earlier, stopped monitor used, synced to ``config``."""
+    monitor, current = _monitor(tmp_path, config, clock, **timing)
+    await monitor.sync(config)
+    return monitor, current
+
+
+@pytest.mark.asyncio
+async def test_a_restart_within_the_reconciliation_interval_resumes_the_stored_spend_without_a_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock()
+    scans = _Scans(monkeypatch, {ALICE: 9.0, BOB: 2.0})
+    scans.unavailable = 1
+    before, _current = _monitor(tmp_path, _config(), clock)
+    await before.sync(_config())
+    await _until(lambda: before.status().snapshot is not None)
+    before.response_finished(ALICE, 1.5, OCTOBER)
+    before.response_finished(CAROL, 0.25, OCTOBER)
+    status = before.status()
+    spend = {user_id: before._spend_usd(user_id) for user_id in (ALICE, BOB, CAROL)}
+    await before.stop()
+
+    clock.now = OCTOBER + timedelta(hours=5)
+    restarted, _current = _monitor(tmp_path, _config(), clock, tick_seconds=0.01, reconcile_seconds=5 * 3600 + 1)
+
+    # The stored spend applies before the first sync, so caps hold from the first reply after a restart.
+    assert {user_id: restarted._spend_usd(user_id) for user_id in (ALICE, BOB, CAROL)} == spend
+    assert _decide(restarted, ALICE, "astra") == "luna"
+    assert restarted.status() == status
+    await restarted.sync(_config())
+    await _quiet()
+    assert scans.calls == 1
+    # The next reconciliation is due an interval after the stored scan started, not after the restart.
+    await _until(lambda: scans.calls == 2)
+    await restarted.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["stale", "last_month", "repriced", "requested", "budgets_were_off"])
+async def test_a_restart_scans_when_the_stored_scan_cannot_stand_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    clock = _Clock()
+    scans = _Scans(monkeypatch, {ALICE: 9.0})
+    before, current = _monitor(tmp_path, _config(), clock)
+    await before.sync(_config())
+    await _until(lambda: before.status().snapshot is not None)
+    config = _config()
+    if reason == "stale":
+        clock.now = OCTOBER + timedelta(hours=7)
+    elif reason == "last_month":
+        clock.now = datetime(2026, 11, 1, 0, 5, tzinfo=UTC)
+    elif reason == "repriced":
+        config.models["astra"].pricing = ModelPricing(input=1, output=6)
+    elif reason == "requested":
+        # The scan the request starts fails, so the request is still unserved when the runtime stops.
+        scans.error = RuntimeError("database locked")
+        before.response_finished(ALICE, None, OCTOBER)
+        await _until(lambda: scans.calls == 2)
+        await _quiet()
+        scans.error = None
+    else:
+        current[0] = _config().model_copy(update={"budgets": None})
+        await before.sync(current[0])
+    calls = scans.calls
+    await before.stop()
+
+    restarted, _current = await _restarted(tmp_path, config, clock)
+
+    await _until(lambda: scans.calls == calls + 1)
+    await restarted.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_config_reload_rescans_only_when_budgets_aliases_or_prices_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor, scans, current = await _started(tmp_path, monkeypatch, {ALICE: 9.0})
+
+    unrelated = _config()
+    unrelated.agents["code"] = AgentConfig(display_name="Code")
+    for config in (_config(), unrelated):
+        await monitor.sync(config)
+    await _quiet()
+    assert scans.calls == 1
+
+    repriced = _config()
+    repriced.models["luna"].pricing = ModelPricing(input=0.1, output=1)
+    realiased = repriced.model_copy(update={"authorization": AuthorizationConfig(aliases={BOB: [ALICE_BRIDGE]})})
+    recapped = realiased.model_copy(update={"budgets": _config(monthly_limit_usd=20).budgets})
+    for calls, config in enumerate((repriced, realiased, recapped), start=2):
+        current[0] = config
+        await monitor.sync(config)
+        await _until(lambda calls=calls: scans.calls == calls)
+
+    # Replies add nothing while budgets are off, so turning them back on recounts.
+    current[0] = recapped.model_copy(update={"budgets": None})
+    await monitor.sync(current[0])
+    await _quiet()
+    current[0] = recapped
+    await monitor.sync(recapped)
+    await _until(lambda: scans.calls == 5)
+    await _quiet()
+
+    assert scans.calls == 5
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_completed_scan_drops_the_stored_reply_costs_it_covers_and_keeps_later_ones(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock()
+    scans = _Scans(monkeypatch, {ALICE: 5.0})
+    before, _current = _monitor(tmp_path, _config(), clock)
+    await before.sync(_config())
+    await _until(lambda: before.status().snapshot is not None)
+    clock.now += timedelta(minutes=1)
+    before.response_finished(ALICE, 2.0, OCTOBER)
+    scans.release.clear()
+    scans.spend = {ALICE: 6.5}
+    clock.now += timedelta(minutes=1)
+    before.response_finished(BOB, None, OCTOBER)
+    await _until(lambda: scans.calls == 2)
+    clock.now += timedelta(minutes=1)
+    before.response_finished(ALICE, 1.0, OCTOBER)
+    scans.release.set()
+    await _until(lambda: before._spend_usd(ALICE) == 7.5)
+    await before.stop()
+
+    stored = load_spend(spend_store_path(_paths(tmp_path)))
+    assert stored.reply_costs == {ALICE: 1.0}
+    assert stored.scan_requested is False
+    restarted, _current = await _restarted(tmp_path, _config(), clock)
+    await _quiet()
+
+    assert restarted._spend_usd(ALICE) == 7.5
+    assert scans.calls == 2
+    await restarted.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store", ["missing", "corrupt", "other_schema"])
+async def test_an_unusable_spend_store_falls_back_to_a_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: str,
+) -> None:
+    path = spend_store_path(_paths(tmp_path))
+    path.parent.mkdir(parents=True)
+    if store == "corrupt":
+        path.write_bytes(b"not a database" * 100)
+    elif store == "other_schema":
+        with sqlite3.connect(path) as connection:
+            connection.execute("PRAGMA user_version = 7")
+    scans = _Scans(monkeypatch, {ALICE: 12.0})
+
+    with capture_logs() as logs:
+        monitor, _current = _monitor(tmp_path, _config())
+    await monitor.sync(_config())
+    await _until(lambda: monitor._spend_usd(ALICE) == 12.0)
+
+    assert scans.calls == 1
+    assert ("budget_spend_store_unreadable" in [entry["event"] for entry in logs]) is (store != "missing")
+    stored = load_spend(path)
+    assert stored.snapshot is not None
+    assert stored.snapshot.spend_usd == {ALICE: 12.0}
     await monitor.stop()

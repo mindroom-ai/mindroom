@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class _UnpricedModelUsage:
+class UnpricedModelUsage:
     """Month-to-date tokens of a model without configured prices."""
 
     provider: str
@@ -34,7 +34,7 @@ class SpendSnapshot:
     period_end: date
     generated_at: datetime
     spend_usd: Mapping[str, float]
-    unpriced_models: tuple[_UnpricedModelUsage, ...]
+    unpriced_models: tuple[UnpricedModelUsage, ...]
     scanned_sources: int
     unavailable_sources: int
 
@@ -76,7 +76,7 @@ def collect_monthly_spend(
         generated_at=now,
         spend_usd=dict(spend),
         unpriced_models=tuple(
-            _UnpricedModelUsage(provider=provider, model=model, total_tokens=tokens)
+            UnpricedModelUsage(provider=provider, model=model, total_tokens=tokens)
             for (provider, model), tokens in sorted(unpriced.items())
         ),
         scanned_sources=coverage.scanned_sources,

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.budgets.pricing import PricedModel, cost_usd, model_prices
-from mindroom.budgets.spend import SpendSnapshot, _UnpricedModelUsage, collect_monthly_spend, month_bounds
+from mindroom.budgets.spend import SpendSnapshot, UnpricedModelUsage, collect_monthly_spend, month_bounds
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -222,7 +222,7 @@ def test_spend_reports_unpriced_models_without_charging(tmp_path: Path, monkeypa
     snapshot = _spend(config, tmp_path)
 
     assert snapshot.spend_usd == {}
-    assert snapshot.unpriced_models == (_UnpricedModelUsage(provider=ollama, model="qwen3.8:27b", total_tokens=1000),)
+    assert snapshot.unpriced_models == (UnpricedModelUsage(provider=ollama, model="qwen3.8:27b", total_tokens=1000),)
 
 
 def test_spend_ignores_unattributed_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -442,7 +442,7 @@ def _spend_from_admin_report(
         generated_at=now,
         spend_usd=dict(spend),
         unpriced_models=tuple(
-            _UnpricedModelUsage(provider=provider, model=model, total_tokens=tokens)
+            UnpricedModelUsage(provider=provider, model=model, total_tokens=tokens)
             for (provider, model), tokens in sorted(unpriced.items())
         ),
         scanned_sources=coverage.scanned_sources,

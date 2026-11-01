@@ -6652,7 +6652,8 @@ Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
 A completed agent or team reply's cost counts as soon as the reply finishes, in chat and on the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/).
 A reply that is stopped, fails, or finishes after a tool approval counts once spend is recounted from recorded usage, which such a reply starts soon after it ends.
-Other usage, such as delegated agents, voice calls, and helper work, counts at the next recount: at startup, after a config change, when the month starts, and about every six hours.
+Other usage, such as delegated agents, voice calls, and helper work, counts at the next recount: about every six hours, when the month starts, and after a change to budgets, bridge aliases, or model prices.
+Counted spend survives restarts, so caps keep applying right after one.
 A reply that already started finishes on its model, so the reply that reaches the cap still uses its model and the user's next reply uses the fallback.
 
 ## Over-Budget Replies
@@ -21331,7 +21332,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `credentials/` - Credentials saved in the dashboard or by tools; keys from the environment are read at each start and not stored (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment))
 - `private_oauth/` - Per-user and per-agent connection credentials, such as OAuth tokens
 - `egress_broker/` - Agent Keys CA, worker token signing key, and request log (see [Resetting broker state](https://docs.mindroom.chat/deployment/egress-broker/#resetting-broker-state))
-- `budgets/` - Per-user caps set on the [Budgets](https://docs.mindroom.chat/budgets/#per-user-caps) page or through the Budget API
+- `budgets/` - Per-user caps set on the [Budgets](https://docs.mindroom.chat/budgets/#per-user-caps) page or through the Budget API, and counted month-to-date spend, which MindRoom recounts from recorded usage when it is missing
 - `logs/` - Application logs
 - `matrix_state.yaml` - The Matrix accounts and access tokens of MindRoom's agents, teams, router, and its internal `mindroom_user` account when configured, the rooms MindRoom manages, and the space room ID
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
