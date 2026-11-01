@@ -67,3 +67,17 @@ def test_archived_price_with_the_configured_amount_is_not_reused(monkeypatch: py
     script = _load_script(monkeypatch, prices)
 
     assert script.find_or_create_price("prod_1", "byok", _PLAN, "monthly") == "price_new_1"
+
+
+@pytest.mark.parametrize("secret_key", ["sk_live_placeholder", "rk_live_placeholder"])
+def test_live_key_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    secret_key: str,
+) -> None:
+    """The script writes only the test-mode price fields, so a live key would put live prices into them."""
+    with pytest.raises(SystemExit) as exit_info:
+        load_stripe_script(monkeypatch, "sync-stripe-prices", secret_key)
+
+    assert exit_info.value.code == 1
+    assert "docs/deployment/saas-platform.md" in capsys.readouterr().out

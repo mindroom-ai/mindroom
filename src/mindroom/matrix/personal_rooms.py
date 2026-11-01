@@ -72,7 +72,7 @@ _UNREADABLE_ROOM_ERRCODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
 
 
 async def is_onboarding_room_member(source_client: nio.AsyncClient, user_id: str, source_room_id: str) -> bool:
-    """Return whether a requester is still in the onboarding room that admits them, failing closed when unknown."""
+    """Return whether a requester is still in the onboarding room that admits them; raise when its members are unknown."""
     members = await get_room_members(source_client, source_room_id)
     if members is None:
         msg = "Personal-room onboarding membership unavailable"

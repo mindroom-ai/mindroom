@@ -65,11 +65,11 @@ from tests.ai_user_id_helpers import (
     _response_request,
     _runtime_paths,
     _set_gateway_method,
-    bind_runtime_paths,
     team_orchestrator,
 )
 from tests.bot_helpers import _hook_plugin, unique_room_send_responses
 from tests.conftest import (
+    bind_runtime_paths,
     install_model_providers,
     message_origin,
     publish_hook_plugin,
