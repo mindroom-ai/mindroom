@@ -1488,6 +1488,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `room_models` | Map of room key or Matrix room ID to model name, the authored model default for a room | [Models](https://docs.mindroom.chat/configuration/models/#room_model) (`!room_model`) |
 | `room_thread_summary_models` | Map of room key, Matrix room ID, or agent or team name to automatic thread summary model | [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](https://docs.mindroom.chat/rooms/#matrix-space) |
+| `server_emoji` | Room whose emoji packs every MindRoom Chat user on the homeserver can use | [Custom Emoji](https://docs.mindroom.chat/custom-emoji/#let-mindroom-create-the-room) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
 | `slack` | How Slack workspace members map to Matrix users | [Slack](https://docs.mindroom.chat/tools/slack/#slack-configuration) |
@@ -6358,6 +6359,35 @@ People on other homeservers cannot pick them, but MindRoom Chat shows them the p
 The room is an ordinary Matrix room, and its packs are ordinary [MSC2545](https://github.com/matrix-org/matrix-spec-proposals/pull/2545) image packs (`im.ponies.room_emotes` state events).
 A client that supports image packs can join the room and use them like the packs of any room.
 
+## Let MindRoom create the room
+
+When MindRoom runs against the homeserver, as in a Kubernetes deployment of the MindRoom runtime, the easiest path is to let MindRoom create and maintain the room, with no access token and no script.
+Turn it on in `config.yaml`:
+
+```yaml
+server_emoji:
+  enabled: true
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Create and maintain the emoji room |
+| `name` | string | `"Emoji"` | Name of the room and of its first emoji pack when MindRoom creates them; cannot be empty |
+| `moderators_only` | bool | `false` | Let only moderators add, rename, or remove emoji |
+
+MindRoom creates the room `#emoji:<server name>`, or `#emoji_<namespace>:<server name>` when `MINDROOM_NAMESPACE` is set, with the same settings as the script below.
+On every start it logs `server_emoji_room_ready` with the room's alias and ID.
+Publish that alias with the `io.mindroom.emoji` key as described in [Enable it](#enable-it); with the `mindroom-client` Helm chart, set `serverEmoji.room: "#emoji:example.com"`.
+
+On every start, and on a config reload that changes `server_emoji` or `room_defaults`, MindRoom sets who may add emoji from `moderators_only`, keeps members from posting, gives the users in `room_defaults.admins` administrator power in the room, and publishes the alias again if someone deleted it.
+Changing `name` later renames neither the room nor its pack; rename the pack in MindRoom Chat.
+Setting `enabled: false` leaves the room as it is.
+If the alias already names another room, MindRoom logs `server_emoji_room_alias_taken`, leaves that room alone, and creates no room.
+If you made that room with the script, keep publishing it and turn `server_emoji` off.
+Otherwise, delete the alias and restart MindRoom, which then creates the room.
+Do not publish a room you did not make: on a homeserver with open registration, anyone can create a room under a free alias.
+On a homeserver without MindRoom, create the room with the script.
+
 ## Enable it
 
 Create the room once, with an operator's access token, from the root of a MindRoom checkout:
@@ -6398,7 +6428,7 @@ Add that key to the homeserver's `/.well-known/matrix/client` file:
 With the `mindroom-client` Helm chart, set `serverEmoji.room` to the same value and the chart serves `/.well-known/matrix/client` with the key; see the [chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#server-custom-emoji).
 Quote the value in the values file, as in `room: "#emoji:example.com"`: unquoted, `#` starts a YAML comment and `!` a YAML tag, and the chart then publishes nothing.
 Tuwunel's own `[global.well_known]` section has no setting for extra keys, so when Tuwunel answers that path, serve the file from your reverse proxy or the client chart instead.
-Nothing changes in `config.yaml`.
+With the script, nothing changes in `config.yaml`.
 Without the key, custom emoji stay personal to each user.
 
 ## If the script stops early
@@ -6429,7 +6459,7 @@ The same level lets someone rename or remove emoji, because a pack is a single M
 
 A user who may not add still sees **+**.
 Their emoji goes to their own Personal Pack, and the form says so.
-To change the rule later, set **Manage Emojis & Stickers** in the room's permissions.
+To change the rule later, set **Manage Emojis & Stickers** in the room's permissions; for a room MindRoom maintains, set `server_emoji.moderators_only` instead.
 
 In MindRoom Chat, the **Server Emoji** section of **Settings → Emojis & Stickers** lists the server's packs.
 Opening a pack shows its emoji.
@@ -6448,7 +6478,7 @@ MindRoom Chat also mutes the room when it joins it, so a mention hidden in a pac
 - A kick does not last, because MindRoom Chat joins the room again by itself.
   Ban someone to keep them out.
 - At the default power level `0`, any member may also create more packs, each up to about 64 KB that every member syncs.
-  A server with open registration should use `--moderators-only`.
+  A server with open registration should use `--moderators-only`, or `server_emoji.moderators_only: true` for a room MindRoom maintains.
 - A room made by hand and published by alias needs that alias as its canonical alias and `m.federate: false` in its creation content: MindRoom Chat only trusts a local-only room carrying the alias, because another server can set any alias in its own rooms. Publish the room ID instead if the room is federated.
 - To replace the room, tombstone the old one or remove its canonical alias, then publish the new one.
 
@@ -17878,6 +17908,7 @@ Custom events default to 1000 ms.
   The hook can run more than once for the same occurrence, so side-effecting hooks should use `ctx.correlation_id`, which is stable per occurrence, as an idempotency key.
 - **Room membership**: both events exclude configured agents, the internal `mindroom_user`, and `bot_accounts`.
   `room:member_joined` fires only for live joins, not for members already present at startup or for profile changes; `room:member_left` fires when a joined user leaves on their own, not when they are kicked or banned.
+  Once MindRoom has created the [server emoji room](https://docs.mindroom.chat/custom-emoji/#let-mindroom-create-the-room), `room:member_joined` also fires when MindRoom Chat joins a user to it, even after `server_emoji` is turned off, so filter on `ctx.room_id` if a handler should only react to joins in certain rooms.
   `room:member_left` reports the `display_name` and `avatar_url` the user had while joined.
   Either event can be delivered more than once for the same join or leave after a restart, so handlers that create rooms, send invites, or write state must be idempotent.
 
@@ -21474,7 +21505,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `egress_broker/` - Agent Keys CA, worker token signing key, and request log (see [Resetting broker state](https://docs.mindroom.chat/deployment/egress-broker/#resetting-broker-state))
 - `budgets/` - Per-user caps set on the [Budgets](https://docs.mindroom.chat/budgets/#per-user-caps) page or through the Budget API
 - `logs/` - Application logs
-- `matrix_state.yaml` - The Matrix accounts and access tokens of MindRoom's agents, teams, router, and its internal `mindroom_user` account when configured, the rooms MindRoom manages, and the space room ID
+- `matrix_state.yaml` - The Matrix accounts and access tokens of MindRoom's agents, teams, router, and its internal `mindroom_user` account when configured, the rooms MindRoom manages, the space room ID, and the server emoji room ID
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 - `sync_continuity/` - Per-agent Matrix rooms still being joined and decrypted, kept across restarts
 

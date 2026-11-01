@@ -44,6 +44,7 @@ async def _rewrite_with_summary_model(
         working_session=working_session,
         summarizer=_summarizer(summary_model, summary_input_budget, session_id=working_session.session_id),
         runs=[run for run in working_session.runs or [] if run.run_id == "run-1"],
+        max_summary_tokens=None,
         before_persist=AsyncMock(),
         after_persist=AsyncMock(),
     )
