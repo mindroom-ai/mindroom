@@ -12,7 +12,7 @@ interface Subscription {
   account_id: string
   tier: string
   status: string
-  price_cents: number | null
+  price_cents: SubscriptionOut['price_cents']
   billing_cycle: SubscriptionOut['billing_cycle']
   current_period_end: string | null
   created_at: string

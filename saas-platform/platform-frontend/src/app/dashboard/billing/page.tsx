@@ -10,7 +10,7 @@ import { currentPlanTier, planState } from '@/lib/plan-state'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, Check, RefreshCw } from 'lucide-react'
 
-/** What the subscription pays per billing cycle, or its plan's monthly price before Stripe records one. */
+/** What the subscription pays per billing cycle, or its plan's monthly price without a recorded amount. */
 function formatPrice(subscription: Subscription | null, plan: PricingConfig['plans'][string] | undefined): string {
   if (subscription?.price_cents != null) return formatRecordedPrice(subscription.price_cents, subscription.billing_cycle)
   if (!plan) return '$0/month'
