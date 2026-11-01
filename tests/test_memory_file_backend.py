@@ -24,7 +24,7 @@ from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowled
 from mindroom.knowledge.read_protocol import DISTANCE_KEY, SearchHit
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.knowledge.vector_store import KnowledgeCollection, StoredRow
-from mindroom.llm.provider import ModelIdentity
+from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.memory import ConversationRef, MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -59,7 +59,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from mindroom.llm.provider import TokenCounter
     from tests.fakes.knowledge import RecordingRefreshScheduler
 
 
@@ -1654,6 +1653,31 @@ async def test_file_backend_entrypoint_cut_of_an_unchanged_file_is_stable(storag
     assert counted
     assert await _preloaded(lines, config, counter) == first
     assert len(calls) == counted
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_cut_never_counts_one_preload_twice(storage_path: Path, config: Config) -> None:
+    """Each pass of the cut drops at least one line, so a route without cached counts never counts one preload twice."""
+    config.memory.file.max_entrypoint_lines = 500
+    config.memory.file.max_entrypoint_tokens = 450
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    # Dense lines lead the file, so its average rate undercounts the preload that keeps them.
+    lines = ["y" * 100] * 5 + ["x" * 100] * 45
+    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    counted: list[str] = []
+
+    def estimate(text: str) -> int:
+        counted.append(text)
+        return text.count("y") + text.count("x") // 4
+
+    counter = TokenCounter(key="dense-head", estimate=estimate)
+    parts = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
+
+    preloads = [text for text in counted if text.startswith("y") and text != "\n".join(lines)]
+    assert len(preloads) == len(set(preloads))
+    assert "\n".join(lines[:4]) in parts.session_preamble
+    assert "\n".join(lines[:5]) not in parts.session_preamble
 
 
 @pytest.mark.asyncio

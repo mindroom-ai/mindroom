@@ -706,7 +706,7 @@ async def cap_entrypoint(
 
     A file whose estimate, an upper bound, fits the token cap needs no provider count; otherwise the provider counts
     the whole file, a file over the cap keeps that share of its characters, and the preload those lines make is counted
-    in turn, its character budget shrinking by any overshoot until it fits.
+    in turn, its character budget shrinking by any overshoot, and by at least one line, until it fits.
     """
     file_config = config.memory.file
     max_tokens = file_config.max_entrypoint_tokens
@@ -728,7 +728,8 @@ async def cap_entrypoint(
         tokens = await _tokens(counter, text)
         if tokens <= max_tokens or not kept:
             return replace(entrypoint, text=text, included_lines=len(kept))
-        budget = min(budget - 1, budget * max_tokens // tokens)
+        # Below the kept lines' own characters, each pass drops a line, so no preload is counted twice.
+        budget = min(sum(len(line) + 1 for line in kept) - 1, budget * max_tokens // tokens)
 
 
 def entrypoint_tokens(text: str, counter: TokenCounter) -> int:
