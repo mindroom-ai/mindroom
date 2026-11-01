@@ -14,7 +14,8 @@ import asyncio
 import hashlib
 import time
 import weakref
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ from starlette.background import BackgroundTask
 
 from mindroom.agent_run_context import prepend_knowledge_availability_notice
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
+from mindroom.ai_run_metadata import reply_cost_usd
 from mindroom.api import config_lifecycle
 from mindroom.api.open_access import open_access_rejection
 from mindroom.api.openai_request_parsing import (
@@ -53,6 +55,7 @@ from mindroom.api.openai_streaming_protocol import (
 )
 from mindroom.api.response_activity import track_openai_request
 from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.resolution import entity_timezone
 from mindroom.constants import AI_RUN_METADATA_KEY, RuntimePaths, runtime_env_flag
@@ -71,6 +74,7 @@ from mindroom.requester_identity import is_human_requester_id, resolve_human_req
 from mindroom.response_activity import ActiveResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.response_turn import (
     ResponseTurnContext,
+    TurnSinks,
     build_llm_request_log_context,
     stream_with_llm_request_log_context,
 )
@@ -82,7 +86,7 @@ from mindroom.teams.members import (
     build_team_spec,
     resolve_exact_team_members,
 )
-from mindroom.teams.runtime import MemberEvent, team_usage_runs
+from mindroom.teams.runtime import MemberEvent, team_usage, team_usage_runs
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import FailedReply
@@ -152,22 +156,43 @@ def _release_openai_completion_lock(completion_lock: asyncio.Lock) -> None:
         completion_lock.release()
 
 
-async def _finish_openai_completion(completion_lock: asyncio.Lock, budget_monitor: BudgetMonitor) -> None:
-    """Release the session lock and let budgets count the spend of the finished completion."""
+@dataclass
+class _CompletionCost:
+    """The USD cost of one completion's turn: zero when it used no priced model, None until known."""
+
+    usd: float | None = None
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+async def _finish_openai_completion(
+    completion_lock: asyncio.Lock,
+    budget_monitor: BudgetMonitor,
+    requester_id: str | None,
+    cost: _CompletionCost,
+) -> None:
+    """Release the session lock and add the finished completion's cost to its requester's spend."""
     _release_openai_completion_lock(completion_lock)
-    budget_monitor.response_finished()
+    budget_monitor.response_finished(requester_id, cost.usd, cost.started_at)
 
 
 def _attach_openai_completion_lock_release(
     response: JSONResponse | StreamingResponse,
     completion_lock: asyncio.Lock,
     budget_monitor: BudgetMonitor,
+    requester_id: str | None,
+    cost: _CompletionCost,
 ) -> JSONResponse | StreamingResponse:
     if not isinstance(response, (OpenAIJSONResponse, OpenAIStreamingResponse)):
         _release_openai_completion_lock(completion_lock)
         msg = f"OpenAI completion response must use a finalizer-safe response class, got {type(response).__name__}"
         raise TypeError(msg)
-    response.always_background = BackgroundTask(_finish_openai_completion, completion_lock, budget_monitor)
+    response.always_background = BackgroundTask(
+        _finish_openai_completion,
+        completion_lock,
+        budget_monitor,
+        requester_id,
+        cost,
+    )
     return response
 
 
@@ -279,6 +304,22 @@ def _usage_from_team_output(record: TeamRunRecord) -> _UsageInfo:
             total_tokens=total.total_tokens + usage.total_tokens,
         )
     return total
+
+
+def _team_cost_usd(record: TeamRunRecord | None, config: Config) -> float | None:
+    """Return what a team completion's runs cost, priced as a team reply's run metadata prices them.
+
+    The record a team run hands over holds all its usage, so only a run that handed none over has an unknown cost.
+    """
+    if record is None:
+        return None
+    cost = run_cost_usd(
+        team_usage(record),
+        model_provider=record.model_provider,
+        model_id=record.model,
+        prices=model_prices(config),
+    )
+    return 0.0 if cost is None else cost
 
 
 class _ChatCompletionResponse(BaseModel):
@@ -700,6 +741,7 @@ async def _chat_completions(
     knowledge_refresh_scheduler = runtime.knowledge_refresh_scheduler
     budget_monitor = runtime.budget_monitor
     budget = TurnBudget(monitor=budget_monitor, requester_id=execution_identity.requester_id)
+    cost = _CompletionCost()
     completion_lock = _openai_completion_lock(
         runtime_paths=runtime_paths,
         agent_name=agent_name,
@@ -731,6 +773,7 @@ async def _chat_completions(
                 team_models,
                 execution_identity=execution_identity,
                 refresh_scheduler=knowledge_refresh_scheduler,
+                cost=cost,
             )
         else:
             # Resolve knowledge base for this agent
@@ -761,15 +804,21 @@ async def _chat_completions(
                 refresh_scheduler=knowledge_refresh_scheduler,
             )
             if req.stream:
-                response = await _stream_completion(turn, config, runtime_paths)
+                response = await _stream_completion(turn, config, runtime_paths, cost)
             else:
                 with detached_tool_scope(execution_identity):
-                    response = await _non_stream_completion(turn, config, runtime_paths)
+                    response = await _non_stream_completion(turn, config, runtime_paths, cost)
     except BaseException:
         _release_openai_completion_lock(completion_lock)
         raise
 
-    return _attach_openai_completion_lock_release(response, completion_lock, budget_monitor)
+    return _attach_openai_completion_lock_release(
+        response,
+        completion_lock,
+        budget_monitor,
+        execution_identity.requester_id,
+        cost,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -781,10 +830,12 @@ async def _non_stream_completion(
     turn: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
+    cost: _CompletionCost,
 ) -> JSONResponse:
     """Handle non-streaming chat completion: the streamed turn, collected into one answer."""
     agent_name, session_id = turn.entity_label, turn.session_id
     result = await ai_response(replace(turn, show_tool_calls=False), runtime_paths, config)
+    cost.usd = reply_cost_usd(result.run_metadata, completed=result.completed is not None)
     failed = result.failed
 
     # A failed turn completes no attempt, also when it failed after part of its answer, which its text then holds. One
@@ -833,14 +884,21 @@ async def _stream_completion(
     turn: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
+    cost: _CompletionCost,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     agent_name, session_id = turn.entity_label, turn.session_id
+    run_metadata: dict[str, Any] = {}
     stream = cast(
         "AsyncGenerator[AIStreamChunk]",
         context_bound_async_stream(
             context_factory=lambda: detached_tool_scope(turn.execution_identity),
-            stream_factory=lambda: stream_agent_response(turn, runtime_paths, config),
+            stream_factory=lambda: stream_agent_response(
+                turn,
+                runtime_paths,
+                config,
+                sinks=TurnSinks(run_metadata_collector=run_metadata),
+            ),
         ),
     )
 
@@ -900,6 +958,7 @@ async def _stream_completion(
             stream_completed = not stream_failed
         finally:
             await stream.aclose()
+            cost.usd = reply_cost_usd(run_metadata, completed=stream_completed)
 
     response = OpenAIStreamingResponse(
         event_generator(),
@@ -1110,6 +1169,7 @@ async def _non_stream_team_completion(
     team_models: TeamTurnModelSelection,
     execution_identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    cost: _CompletionCost,
 ) -> JSONResponse:
     """Handle non-streaming team completion: the streamed team run, collected into its leader's answer."""
     turn = await _prepare_team_turn(
@@ -1142,6 +1202,8 @@ async def _non_stream_team_completion(
     except Exception:
         logger.exception("Team execution failed", team=team_name)
         return error_response(500, "Team execution failed", error_type="server_error")
+    finally:
+        cost.usd = _team_cost_usd(records.record, config)
     record = records.terminal(team_name)
     # The leader's answer, the text a streamed team completion sends; members' text reaches the client through it. A
     # failed team run raises above after it hands over its record, so this one's text is never a failure's.
@@ -1173,9 +1235,11 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     team_models: TeamTurnModelSelection,
     execution_identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    cost: _CompletionCost,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     stream: AsyncGenerator[TeamRunEvent] | None = None
+    records = TerminalRecord(TeamRunRecord)
 
     async def _cleanup() -> None:
         if stream is not None:
@@ -1230,12 +1294,14 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         tool_state = state.tool_state
         try:
             yield sse_chunk(state, {"role": "assistant"})
+            records.collect(first_event)
             text = _team_stream_text(first_event, tool_state)
             if text:
                 yield sse_chunk(state, {"content": text})
             failed = False
             try:
                 async for event in stream:
+                    records.collect(event)
                     text = _team_stream_text(event, tool_state)
                     if text:
                         yield sse_chunk(state, {"content": text})
@@ -1254,6 +1320,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
             stream_completed = not failed
         finally:
             await _cleanup()
+            cost.usd = _team_cost_usd(records.record, config)
 
     response = OpenAIStreamingResponse(
         _event_generator(),

@@ -152,6 +152,20 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
     return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
+def reply_cost_usd(content: Mapping[str, Any] | None, *, completed: bool) -> float | None:
+    """Return the USD cost a reply's AI run metadata reports, or None when the cost is unknown.
+
+    A completed reply publishes its run metadata, which leaves the cost out only when no priced model was used, so its
+    cost is zero then. Another ending, such as a stopped or failed run, can leave usage that no metadata reports.
+    """
+    ai_run_metadata = (content or {}).get(AI_RUN_METADATA_KEY)
+    cost = ai_run_metadata.get("cost") if isinstance(ai_run_metadata, dict) else None
+    usd = cost.get("usd") if isinstance(cost, dict) else None
+    if isinstance(usd, str):
+        return float(usd)
+    return 0.0 if completed else None
+
+
 def _reply_context_tokens(
     run: AnyRunRecord | None,
     prepared_history: PreparedHistoryState | None,
