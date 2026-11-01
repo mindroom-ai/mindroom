@@ -6,6 +6,10 @@ jest.mock('@/lib/api', () => ({
   apiCall: jest.fn(),
 }))
 
+jest.mock('@/lib/logger', () => ({
+  logger: { error: jest.fn() },
+}))
+
 describe('AdminDashboard', () => {
   const mockApiCall = apiCall as jest.Mock
 
@@ -94,6 +98,20 @@ describe('AdminDashboard', () => {
     })
 
     expect(card('System Health').getByText('Supabase: ✗ Error | Stripe: ✗ Error')).toHaveClass('text-red-600')
+  })
+
+  it('says the platform API is unreachable when its requests fail outright', async () => {
+    mockApiCall.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    render(<AdminDashboard />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Degraded')).toBeInTheDocument()
+    })
+
+    expect(card('System Health').getByText('Platform API unreachable')).toHaveClass('text-red-600')
+    expect(card('Total Accounts').getByText('—')).toBeInTheDocument()
+    expect(screen.getByText('Recent activity unavailable')).toBeInTheDocument()
   })
 
   it('renders recent activity when the metrics response includes it', async () => {

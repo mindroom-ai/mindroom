@@ -69,6 +69,7 @@ export default function AdminDashboard() {
     )
   }
 
+  const healthy = health?.status === 'ok'
   const statCards = [
     {
       title: 'Total Accounts',
@@ -92,10 +93,11 @@ export default function AdminDashboard() {
     },
     {
       title: 'System Health',
-      value: health?.status === 'ok' ? 'Operational' : 'Degraded',
+      value: healthy ? 'Operational' : 'Degraded',
       icon: Activity,
-      detail: health ? `Supabase: ${health.supabase ? '✓ Healthy' : '✗ Error'} | Stripe: ${health.stripe ? '✓ Healthy' : '✗ Error'}` : 'Checking...',
-      healthy: health?.status === 'ok',
+      // No health status after loading means the requests to the platform API failed outright.
+      detail: health ? `Supabase: ${health.supabase ? '✓ Healthy' : '✗ Error'} | Stripe: ${health.stripe ? '✓ Healthy' : '✗ Error'}` : 'Platform API unreachable',
+      healthy,
     },
   ]
   const recentInstances = metrics?.recent_instances ?? []
