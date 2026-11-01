@@ -847,20 +847,31 @@ class TestMemoryConfig:
         assert mem0_config["llm"]["config"]["openai_base_url"] == expected_url
         assert str(OpenAILLM(mem0_config["llm"]["config"]).client.base_url) == f"{expected_url}/"
 
-    def test_an_openai_memory_llm_keeps_its_configured_endpoint(self, tmp_path: Path) -> None:
-        """A memory LLM's own `openai_base_url` wins over `OPENAI_BASE_URL`."""
+    @pytest.mark.parametrize(
+        ("configured_url", "expected_url"),
+        [
+            pytest.param("http://memory-llm.local/v1", "http://memory-llm.local/v1", id="configured"),
+            pytest.param("", "http://runtime.local/v1", id="blank"),
+            pytest.param(None, "http://runtime.local/v1", id="null"),
+        ],
+    )
+    def test_an_openai_memory_llm_endpoint_of_its_own_wins_over_openai_base_url(
+        self,
+        tmp_path: Path,
+        configured_url: str | None,
+        expected_url: str,
+    ) -> None:
+        """A memory LLM's own `openai_base_url` wins, and a blank or null one falls back to `OPENAI_BASE_URL`."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-        runtime_paths = resolve_runtime_paths(
-            config_path=config_path,
-            process_env={"OPENAI_BASE_URL": "http://runtime.local/v1"},
-        )
-        llm = {"model": OPENAI_GPT_LUNA, "api_key": "key", "openai_base_url": "http://memory-llm.local/v1"}
+        (tmp_path / ".env").write_text("OPENAI_BASE_URL=http://runtime.local/v1\n", encoding="utf-8")
+        runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
+        llm = {"model": OPENAI_GPT_LUNA, "api_key": "key", "openai_base_url": configured_url}
         config = Config(memory={"llm": {"provider": "openai", "config": llm}}, router=RouterConfig(model="default"))
 
         llm_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)["llm"]["config"]
 
-        assert llm_config["openai_base_url"] == "http://memory-llm.local/v1"
+        assert llm_config["openai_base_url"] == expected_url
 
     def test_openrouter_only_memory_uses_openrouter_for_llm_and_embedder(
         self,

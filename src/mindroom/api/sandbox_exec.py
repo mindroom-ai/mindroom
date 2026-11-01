@@ -195,7 +195,7 @@ def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths)
     protected_names.update(
         name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")
     )
-    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
+    if constants.runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS") is not None:
         protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
     return frozenset(protected_names)
 

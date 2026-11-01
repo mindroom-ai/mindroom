@@ -217,8 +217,8 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
     llm_provider_config = {key: value for key, value in memory_llm.config.items() if key != "host"}
     if llm_provider == "ollama":
         llm_provider_config["ollama_base_url"] = mem0_ollama_host(config, runtime_paths)
-    elif llm_provider == "openai":
-        llm_provider_config.setdefault("openai_base_url", get_openai_base_url(runtime_paths))
+    elif llm_provider == "openai" and not llm_provider_config.get("openai_base_url"):
+        llm_provider_config["openai_base_url"] = get_openai_base_url(runtime_paths)
 
     if llm_provider in {"openai", "anthropic", "openrouter"} and not llm_provider_config.get("api_key"):
         api_key = get_api_key_for_provider(llm_provider, runtime_paths=runtime_paths)
