@@ -467,7 +467,7 @@ async def _rewrite_working_session_for_compaction(
     """Fold ``runs``, oldest first, into one appended summary row per chunk.
 
     Stops when the conversation changes or a chunk's summary exceeds ``max_summary_tokens``; with nothing stored yet,
-    an oversized summary fails the compaction.
+    either stop fails the compaction.
     """
     scope = owner_scope(persisted_session)
     summary_text: str | None = None
