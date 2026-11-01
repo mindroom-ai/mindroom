@@ -9632,3 +9632,15 @@ depends_on = [
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",
 ]
+
+[[modules]]
+path = "mindroom.config.contacts"
+depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
+
+[[modules]]
+path = "mindroom.contacts.store"
+depends_on = ["mindroom.constants"]
+
+[[modules]]
+path = "mindroom.contacts.parties"
+depends_on = ["mindroom.contacts.store", "mindroom.entity_resolution", "mindroom.matrix_identifiers"]

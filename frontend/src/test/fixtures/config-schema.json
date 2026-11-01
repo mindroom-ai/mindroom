@@ -87,6 +87,18 @@
           "default": null,
           "description": "Opt-in adaptive participation in existing multi-human threads across all rooms"
         },
+        "contacts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContactsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opt-in contacts: approved relationships with other personal agents and people"
+        },
         "mid_turn": {
           "anyOf": [
             {
@@ -1313,6 +1325,47 @@
         }
       },
       "title": "CompactionOverrideConfig",
+      "type": "object"
+    },
+    "ContactsConfig": {
+      "additionalProperties": false,
+      "description": "Contacts settings of one agent: the rules, default tools, and judge of every contact it has.",
+      "properties": {
+        "rules": {
+          "default": [],
+          "description": "Rules that apply to every contact of this agent, ahead of each owner's own rules",
+          "items": {
+            "type": "string"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "tools": {
+          "default": [],
+          "description": "Default tools offered in contact turns when the owner chose none for that contact",
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "tool"
+          }
+        },
+        "judge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgmentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Judgment backend that checks each message against the rules; unset runs no judge"
+        }
+      },
+      "title": "ContactsConfig",
       "type": "object"
     },
     "DebugConfig": {
