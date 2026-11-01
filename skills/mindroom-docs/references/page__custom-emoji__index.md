@@ -62,7 +62,7 @@ Add that key to the homeserver's `/.well-known/matrix/client` file:
 ```
 
 `room` takes the alias the script printed, or the room ID.
-With the `mindroom-client` Helm chart, set `serverEmoji.room` and the chart serves that file; see the [chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#server-custom-emoji).
+With the `mindroom-client` Helm chart, set `serverEmoji.room` to the same value and the chart serves `/.well-known/matrix/client` with the key; see the [chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#server-custom-emoji).
 Tuwunel's own `[global.well_known]` section has no setting for extra keys, so when Tuwunel answers that path, serve the file from your reverse proxy or the client chart instead.
 Nothing changes in `config.yaml`.
 Without the key, custom emoji stay personal to each user.
@@ -112,7 +112,7 @@ Simple Mode (**Settings → General → Interface**) hides the Emojis & Stickers
   Limit adding to moderators if that is too open.
 - A pack is one Matrix event, which has a size limit.
   When a pack is full, MindRoom Chat opens another pack in the same room with the same name.
-- Leaving the room does not opt a user out, because MindRoom Chat joins it again the next time it starts.
+- Leaving the room does not opt a user out, because MindRoom Chat joins it again.
 - Every account that runs MindRoom Chat becomes a member of the room, so its member list names all of them.
   Only MindRoom Chat hides the room, so other clients logged in to the same account list it like any other room.
 - Other Matrix clients do not join the room or add to its packs by themselves.
