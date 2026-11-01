@@ -1,17 +1,20 @@
-import { useState } from "react";
+import { type ComponentProps, useState } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { Dialog, DialogContent, DialogTitle } from "./dialog";
 
 /** A dialog opened from a plain button, as cards open their settings, with no DialogTrigger. */
-function CardWithDialog() {
+function CardWithDialog({
+  onCloseAutoFocus,
+}: Pick<ComponentProps<typeof DialogContent>, "onCloseAutoFocus">) {
   const [open, setOpen] = useState(false);
   return (
     <>
+      <input aria-label="Search" />
       <button onClick={() => setOpen(true)}>Configure</button>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
+        <DialogContent onCloseAutoFocus={onCloseAutoFocus}>
           <DialogTitle>Settings</DialogTitle>
           <button onClick={() => setOpen(false)}>Cancel</button>
         </DialogContent>
@@ -45,4 +48,26 @@ describe("DialogContent", () => {
       await waitFor(() => expect(opener).toHaveFocus());
     },
   );
+
+  it("leaves focus where the caller's own close handler put it", async () => {
+    render(
+      <CardWithDialog
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          screen.getByRole("textbox", { name: "Search" }).focus();
+        }}
+      />,
+    );
+    const opener = screen.getByRole("button", { name: "Configure" });
+    opener.focus();
+    fireEvent.click(opener);
+    await waitFor(() => expect(opener).not.toHaveFocus());
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Search" })).toHaveFocus(),
+    );
+    expect(opener).not.toHaveFocus();
+  });
 });
