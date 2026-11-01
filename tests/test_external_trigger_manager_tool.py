@@ -360,7 +360,12 @@ async def test_admin_cross_target_private_agent_rejects_current_dynamic_room(tmp
 
 
 @pytest.mark.asyncio
-async def test_non_admin_cannot_target_other_agent_or_room(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("target_agent", "target_room_id"), [("other", None), (None, "other-room")])
+async def test_non_admin_cannot_target_other_agent_or_room(
+    tmp_path: Path,
+    target_agent: str | None,
+    target_room_id: str | None,
+) -> None:
     """Non-admin callers can only create triggers for the current agent and room, and a refused room is never read."""
     tool = ExternalTriggerManagerTools()
     homeserver = event_serving_client("$other-thread:example.org", content={"msgtype": "m.text", "body": "root"})
@@ -370,8 +375,8 @@ async def test_non_admin_cannot_target_other_agent_or_room(tmp_path: Path) -> No
             await tool.create_trigger(
                 "campground",
                 public_key=_PUBLIC_KEY,
-                target_agent="other",
-                target_room_id="other-room",
+                target_agent=target_agent,
+                target_room_id=target_room_id,
                 target_thread_id="$other-thread:example.org",
             ),
         )
@@ -400,6 +405,25 @@ async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(tmp_pa
     assert payload["trigger"]["target"]["thread_id"] == "$root:example.org"
     assert [trigger["target"]["thread_id"] for trigger in listed["triggers"]] == ["$root:example.org"]
     homeserver.room_get_event.assert_awaited_with("!lobby:example.org", "$reply:example.org")
+
+
+@pytest.mark.asyncio
+async def test_create_trigger_refuses_a_reply_whose_thread_root_is_blank(tmp_path: Path) -> None:
+    """A reply naming a blank thread root is refused like a blank target_thread_id, and the store stays readable."""
+    tool = ExternalTriggerManagerTools()
+    context = replace(
+        _context(tmp_path),
+        relations=make_relation_lookup(client=thread_reply_client("$reply:example.org", " ")),
+    )
+    with tool_runtime_context(context):
+        payload = _payload(
+            await tool.create_trigger("blank-root", public_key=_PUBLIC_KEY, target_thread_id="$reply:example.org"),
+        )
+        listed = _payload(tool.list_triggers())
+
+    assert payload["status"] == "error"
+    assert "thread_id" in payload["message"]
+    assert listed == {**listed, "status": "ok", "triggers": []}
 
 
 @pytest.mark.asyncio

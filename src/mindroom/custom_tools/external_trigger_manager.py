@@ -96,7 +96,7 @@ class ExternalTriggerManagerTools(Toolkit):
             room_id=resolve_room_id(target.room_id, context.runtime_paths),
             thread_id=target.thread_id,
         )
-        return target.model_copy(update={"thread_id": thread_root})
+        return ExternalTriggerTarget.model_validate({**target.model_dump(), "thread_id": thread_root})
 
     @staticmethod
     def _record_payload(record: ExternalTriggerRecord) -> dict[str, object]:
