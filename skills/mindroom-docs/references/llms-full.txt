@@ -7448,7 +7448,7 @@ A contact needs an agent on at least one side and two different owners.
 Asking again for a pair that already has a pending or active contact returns that contact unchanged instead of creating another, and asking again with `rules` or `tools` is refused; change them with `update_contact`.
 After a decline, new requests for that pair are refused until the owner who declined removes the declined contact with `remove_contact`.
 Removing a contact makes its agents leave the contact room; the owners keep the room and its history.
-From then on its agents send nothing more into that room, not even from a turn that was already running.
+From then on its agents send nothing more into that room, not even from a turn that was already running, and no message there starts their turns.
 
 ## Configuration
 
@@ -16598,7 +16598,7 @@ Do not report or "fix" these; they are deliberate.
   A contact turn also keeps the agent's instructions, preloaded files, and memory recall, so the other side can try to extract them.
 - A contact's rules and judge are model judgments, not a security boundary; they reduce accidental disclosure, but a determined counterparty can still extract what the agent's context and contact tools expose.
 - A contact grants no Matrix access outside its contact room: a contact turn never offers approval-gated functions or Matrix room tools, its `matrix_message` writes only to the contact room and sends only a plain message to the owner's personal room's timeline or a new thread, and other tools that post into rooms refuse the contact room.
-  Once a contact is removed, no turn of its agents writes into its room, including a turn that started before the removal.
+  Once a contact is removed, no turn of its agents writes into its room, including a turn that started before the removal, and no message there starts one.
 - In a contact room, only the counterparty and the agent's owner start the agent's turns; a message from anyone else, administrators included, starts nothing.
 - Contact turns write no long-term memory and start no skill review, and their conversations are left out of the memory flush, the knowledge graph, and exploration leads, so text the other side wrote does not persist into the owner's normal turns.
 - `POST /api/slack/events` is public: it has no dashboard login, accepts a request only when it carries a valid signature from the Slack app's signing secret made within five minutes, and answers 404 while no Slack app is configured.

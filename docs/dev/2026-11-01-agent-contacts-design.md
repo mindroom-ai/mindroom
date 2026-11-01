@@ -70,7 +70,7 @@ Agent parties keep the room across restarts through cleanup exclusions read from
 The invited-rooms store was rejected for this, because it is not persisted for agents whose `accept_invites` is false.
 Contact rooms are also left out of the rooms an agent keeps for accepted invites, because an agent that accepts invites records the contact room's invite, which arrives before the contact is stored, and would otherwise rejoin a removed contact's room at its next start.
 Removing a contact makes its agents leave; the owners keep the room and its history.
-A removed contact's room takes no more messages from its agents, because a leave can fail and a running turn can still try to post there.
+A removed contact's room takes no more turns or messages from its agents, because a leave can fail and a running or queued turn can still try to post there.
 
 ### Contact turns run as the agent's owner
 
@@ -89,7 +89,8 @@ Ingress reads the contacts store only for personal agents with `contacts`, which
 
 ### Contact detection: once per turn, and from the store for tools
 
-A response asks the contacts store once, when it starts, whether its turn is a contact turn, and everything it shows and offers follows that answer: its progress, final reply, and error notices, its tools and instructions, and its memory.
+A response asks the contacts store once, when it starts, whether its room is or was this agent's contact room, and everything it shows and offers follows that answer: its progress, final reply, and error notices, its tools and instructions, and its memory.
+A response whose contact is already removed runs nothing, because ingress admitted it before the removal.
 Asking again at each seam was rejected, because a contact removed or a config reloaded while the turn runs would let a later check show the turn's private final reply in a room where the other owner still sits.
 Ingress, the memory flush, knowledge graph ingestion, and exploration ask the store themselves, and tools ask it at each call whether a room is or was this agent's contact room, so a turn keeps its restricted destinations after a removal and no turn writes into a removed contact's room.
 Carrying a flag from ingress was rejected, because tool calls from normal turns into a contact room and the agent's own sends there have no ingress facts, and two sources could disagree.

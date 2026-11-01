@@ -13,7 +13,7 @@ from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.resolution import authored_tool_entries
 from mindroom.contacts.parties import agent_party, party_label, personal_room_of
 from mindroom.contacts.policy import NO_CONTACT_RULES, effective_rules
-from mindroom.contacts.store import contact_of_room, contact_party_in_room, contact_room_ids
+from mindroom.contacts.store import contact_of_room, contact_room_ids
 from mindroom.hooks import EnrichmentItem
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.session_ids import session_in_room
@@ -27,22 +27,6 @@ if TYPE_CHECKING:
     from mindroom.contacts.store import ContactRecord, ContactSide, SideName
 
 
-def contact_turn(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    room_id: str,
-    agent_name: str,
-) -> tuple[ContactRecord, SideName] | None:
-    """Return the contact and side of this agent's turns in ``room_id``, or None when they are no contact turns.
-
-    A turn reads this once when it starts and stays what it found, so a removal while it runs changes nothing it shows.
-    Only an agent that can be a party reads the contacts store.
-    """
-    if agent_party(config, agent_name) is None:
-        return None
-    return contact_party_in_room(runtime_paths, room_id, agent_name)
-
-
 def contact_room(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -51,10 +35,11 @@ def contact_room(
 ) -> tuple[ContactRecord, SideName] | None:
     """Return the contact whose room ``room_id`` is or was and this agent's side, in any status, or None.
 
-    Tools read this to police every message into the room, and a removed contact's room takes no more messages.
-    Only a personal agent reads the contacts store, whether or not its contacts are still enabled.
+    A turn reads this once when it starts and stays a contact turn whatever happens to the contact while it runs, and
+    tools read it to police every message into the room; a removed contact's room takes no more turns or messages.
+    Only an agent that can be a party reads the contacts store.
     """
-    if config.personal_agent_instance(agent_name) is None:
+    if agent_party(config, agent_name) is None:
         return None
     return contact_of_room(runtime_paths, room_id, agent_name)
 
@@ -147,7 +132,7 @@ def leaves_to_other_agent(
     Each agent of a contact runs a message there as its own owner, so both would answer it; a message the other
     agent's owner wrote is that agent's to answer.
     """
-    found = contact_turn(config, runtime_paths, room_id, agent_name)
+    found = contact_room(config, runtime_paths, room_id, agent_name)
     if found is None:
         return False
     record, side = found

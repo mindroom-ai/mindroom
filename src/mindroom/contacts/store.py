@@ -174,13 +174,3 @@ def contact_of_room(
         if record.room_id == room_id and (side := record.agent_side(agent_name)) is not None:
             return record, side
     return None
-
-
-def contact_party_in_room(
-    runtime_paths: RuntimePaths,
-    room_id: str,
-    agent_name: str,
-) -> tuple[ContactRecord, SideName] | None:
-    """Return the active contact of this room and the side this agent is on, or None when the agent is no party of it."""
-    found = contact_of_room(runtime_paths, room_id, agent_name)
-    return found if found is not None and found[0].status == "active" else None

@@ -64,8 +64,9 @@ def _contact(
     *,
     requester: ContactParty = ALICE_AGENT,
     status: _ContactStatus = "active",
+    room_id: str | None = CONTACT_ROOM,
 ) -> None:
-    """Store contact ``c1`` between ``requester`` and Bob's agent, with its room."""
+    """Store contact ``c1`` between ``requester`` and Bob's agent, with its room unless it never had one."""
     record = ContactRecord(
         id="c1",
         status=status,
@@ -76,7 +77,7 @@ def _contact(
         target_side=ContactSide(),
         origin_room_id="!origin:localhost",
         origin_thread_id=None,
-        room_id=CONTACT_ROOM,
+        room_id=room_id,
         created_at=1.0,
     )
     update_contacts(paths, lambda book: book.contacts.append(record))
@@ -118,17 +119,28 @@ def test_a_person_counterparty_is_admitted_under_any_of_their_aliases(tmp_path: 
     assert _admission(config, paths, _agent(paths, "mind_alice")) == _ContactAdmission("c1", None)
 
 
-@pytest.mark.parametrize("status", ["pending", "declined", "removed"])
+@pytest.mark.parametrize("status", ["pending", "declined"])
 def test_no_contact_room_admits_nothing(tmp_path: Path, status: _ContactStatus) -> None:
-    """Another room, an agent that is no party, and a contact that is not active leave the event as it is."""
+    """Another room, an agent that is no party, and a contact that never had a room leave the event as it is."""
     config, paths = _setup(tmp_path)
     _contact(paths)
     assert contact_admission(config, paths, room_id=OTHER_ROOM, agent_name="mind_bob", sender_ids=[OWNER]) is None
     assert _admission(config, paths, OWNER, agent_name="mind_carol") is None
 
     other_config, other_paths = _setup(tmp_path / status)
-    _contact(other_paths, status=status)
+    _contact(other_paths, status=status, room_id=None)
     assert _admission(other_config, other_paths, OWNER) is None
+
+
+def test_a_removed_contacts_room_admits_nobody(tmp_path: Path) -> None:
+    """Once removed, a contact's room starts no turn of its agents, whoever writes there, their owners included."""
+    config, paths = _setup(tmp_path)
+    _contact(paths, status="removed")
+    refused = _ContactAdmission("c1", None)
+
+    for sender in (OWNER, CO_OWNER, _agent(paths, "mind_alice"), ADMIN):
+        assert _admission(config, paths, sender) == refused
+    assert _admission(config, paths, CO_OWNER, agent_name="mind_alice") == refused
 
 
 def _validator(config: Config, paths: RuntimePaths, agent_name: str = "mind_bob") -> IngressValidator:
@@ -304,20 +316,25 @@ async def test_the_agents_own_messages_in_its_contact_room_stay_dropped(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_after_removal_the_room_is_an_ordinary_room_again(tmp_path: Path) -> None:
-    """Once the contact is removed, its room changes nothing, and the other side's messages meet ordinary access."""
+async def test_a_message_in_a_removed_contacts_room_starts_nothing(tmp_path: Path) -> None:
+    """After a removal, or a leave that failed, nobody's message there starts a turn, not even the agent's owner's."""
     config, paths = _setup(tmp_path)
     _contact(paths, status="removed")
     validator = _validator(config, paths)
-    event = _event(_agent(paths, "mind_alice"), **_relay(paths, OWNER))
+    bob_agent = _agent(paths, "mind_bob")
+    events = [
+        _event(_agent(paths, "mind_alice"), **_relay(paths, OWNER)),
+        _event(OWNER),
+        _event(CO_OWNER, **{"m.mentions": {"user_ids": [bob_agent]}}),
+    ]
 
-    facts = validator.classify(event, room_id=CONTACT_ROOM)
-
-    assert facts == validator.classify(event, room_id=OTHER_ROOM)
-    assert (facts.run_requester_id, facts.contact_id) == (OWNER, None)
-    with capture_logs() as logs:
-        assert not await _precheck(validator, event, facts)
-    assert "contact_room_sender_refused" not in [log["event"] for log in logs]
+    for event in events:
+        facts = validator.classify(event, room_id=CONTACT_ROOM)
+        assert (facts.contact_id, facts.contact_refused) == ("c1", True)
+        with capture_logs() as logs:
+            assert not await _precheck(validator, event, facts)
+        assert [log["event"] for log in logs] == ["contact_room_sender_refused"]
+    assert validator.deps.turn_store.record_turn.await_count == len(events)
 
 
 def _later(sender: str, event_id: str, **content: object) -> ResolvedVisibleMessage:

@@ -14,7 +14,7 @@ from mindroom import ai
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, _contacts_path, update_contacts
-from mindroom.contacts.turns import contact_turn, contact_turn_instructions, contact_turn_tools
+from mindroom.contacts.turns import contact_room, contact_turn_instructions, contact_turn_tools
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_entity_id
@@ -43,6 +43,7 @@ from tests.conftest import (
     patch_response_runner_module,
     test_runtime_paths,
 )
+from tests.contacts.test_tools import _setup as setup_without_contacts
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_attempt_helpers import install_direct_response_admission
@@ -139,30 +140,38 @@ def _agent(paths: RuntimePaths, agent_name: str) -> str:
     return current_entity_id(agent_name, paths).full_id
 
 
-def test_a_contact_turn_is_a_turn_of_an_agent_party_in_its_active_contact_room(tmp_path: Path) -> None:
-    """Both agents of an active contact have contact turns in its room, and nobody has them anywhere else."""
+def test_a_contact_turn_is_a_turn_of_an_agent_party_in_a_room_that_is_or_was_its_contact_room(tmp_path: Path) -> None:
+    """Both agents of a contact have contact turns in its room, even once it is removed, and nowhere else."""
     config, paths = _setup(tmp_path)
     record = _contact(paths)
 
-    assert contact_turn(config, paths, CONTACT_ROOM, "mind_bob") == (record, "target")
-    assert contact_turn(config, paths, CONTACT_ROOM, "mind_alice") == (record, "requester")
-    assert contact_turn(config, paths, OTHER_ROOM, "mind_bob") is None
-    assert contact_turn(config, paths, CONTACT_ROOM, "mind_carol") is None
+    assert contact_room(config, paths, CONTACT_ROOM, "mind_bob") == (record, "target")
+    assert contact_room(config, paths, CONTACT_ROOM, "mind_alice") == (record, "requester")
+    assert contact_room(config, paths, OTHER_ROOM, "mind_bob") is None
+    assert contact_room(config, paths, CONTACT_ROOM, "mind_carol") is None
 
     removed_config, removed_paths = _setup(tmp_path / "removed")
-    _contact(removed_paths, _record(status="removed"))
-    assert contact_turn(removed_config, removed_paths, CONTACT_ROOM, "mind_bob") is None
+    removed = _contact(removed_paths, _record(status="removed"))
+    assert contact_room(removed_config, removed_paths, CONTACT_ROOM, "mind_bob") == (removed, "target")
 
 
-def test_only_an_agent_that_can_be_a_party_reads_the_contacts_store(tmp_path: Path) -> None:
-    """A corrupt store stops only the turns of agents with contacts, not the turns of every other agent."""
-    config, paths = _setup(tmp_path)
+def _corrupt_store(paths: RuntimePaths) -> None:
     _contacts_path(paths).parent.mkdir(parents=True, exist_ok=True)
     _contacts_path(paths).write_text("not json", encoding="utf-8")
 
-    assert contact_turn(config, paths, CONTACT_ROOM, "creator") is None
+
+def test_only_an_agent_that_can_be_a_party_reads_the_contacts_store(tmp_path: Path) -> None:
+    """A corrupt store stops only the turns and room tools of agents with contacts, not those of any other agent."""
+    config, paths = _setup(tmp_path)
+    _corrupt_store(paths)
+
+    assert contact_room(config, paths, CONTACT_ROOM, "creator") is None
     with pytest.raises(ValueError, match="Contacts file"):
-        contact_turn(config, paths, CONTACT_ROOM, "mind_bob")
+        contact_room(config, paths, CONTACT_ROOM, "mind_bob")
+    # A personal agent that never enabled contacts does not read it either.
+    without, without_paths = setup_without_contacts(tmp_path / "without", contacts=False)
+    _corrupt_store(without_paths)
+    assert contact_room(without, without_paths, CONTACT_ROOM, "mind_alice") is None
 
 
 def _tools(config: Config, side: ContactSide) -> tuple[str, ...]:
@@ -700,3 +709,29 @@ async def test_a_contact_turn_whose_contact_is_removed_mid_turn_still_shows_noth
     assert context.tool_names == ("calculator", "sleep", "matrix_message")
     bot.client.room_send.assert_not_awaited()
     bot.client.room_typing.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_in_a_removed_contacts_room_runs_nothing_and_shows_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contact removed after ingress admitted the message leaves its room quiet, and the model never runs."""
+    config, paths = _setup(tmp_path)
+    _contact(paths, _record(status="removed"))
+    model = ScriptedModel([answer("Private line for Bob.")])
+    install_model_providers(monkeypatch, {"default": model})
+    bot = _bot(config, paths)
+
+    turn = await _run(bot, CONTACT_ROOM)
+
+    [delivery] = turn.ended
+    assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
+    assert turn.contexts == []
+    assert model.requests == []
+    assert turn.on_defer == [None]
+    bot.client.room_send.assert_not_awaited()
+    bot.client.room_typing.assert_not_awaited()
+    reply = await bot._reply_runtime.store.replies.for_sources((EVENT_ID,))
+    assert reply is not None
+    assert reply.terminal

@@ -14,7 +14,6 @@ from mindroom.contacts.store import (
     ContactSide,
     _contacts_path,
     contact_of_room,
-    contact_party_in_room,
     read_contacts,
     update_contacts,
 )
@@ -113,19 +112,16 @@ def test_contact_files_reject_unknown_fields(paths: RuntimePaths) -> None:
         read_contacts(paths)
 
 
-def test_a_contact_keeps_its_room_once_removed_but_only_an_active_one_seats_its_agents(paths: RuntimePaths) -> None:
-    """A room belongs to its contact in any status, while only an active contact puts its agents in a contact room."""
+def test_a_contact_keeps_its_room_once_removed(paths: RuntimePaths) -> None:
+    """A room belongs to its contact in any status, and only to the agents that are its parties."""
     removed = _record("c1", status="removed", room_id="!removed:localhost")
     active = _record("c2", status="active", room_id="!room:localhost")
     update_contacts(paths, lambda book: book.contacts.extend([_record("c0"), removed, active]))
 
     assert contact_of_room(paths, "!removed:localhost", "mind_bob") == (removed, "target")
-    assert contact_party_in_room(paths, "!removed:localhost", "mind_bob") is None
     assert contact_of_room(paths, "!room:localhost", "mind_bob") == (active, "target")
-    assert contact_party_in_room(paths, "!room:localhost", "mind_bob") == (active, "target")
-    assert contact_party_in_room(paths, "!room:localhost", "mind_alice") == (active, "requester")
+    assert contact_of_room(paths, "!room:localhost", "mind_alice") == (active, "requester")
     assert contact_of_room(paths, "!room:localhost", "other") is None
-    assert contact_party_in_room(paths, "!room:localhost", "other") is None
     assert contact_of_room(paths, "!elsewhere:localhost", "mind_bob") is None
 
 

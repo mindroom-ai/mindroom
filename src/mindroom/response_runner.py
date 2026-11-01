@@ -308,6 +308,18 @@ class _PostLockRequestPreparationError(RuntimeError):
         super().__init__(message)
 
 
+def _runs_nothing(request: ResponseRequest) -> Suppression | None:
+    """Return why a turn ends unanswered without running: an empty prompt, or a room whose contact was removed.
+
+    A removed contact's room takes no more turns, even one admitted before the removal.
+    """
+    if not request.prompt.strip():
+        return Suppression.EMPTY_PROMPT
+    if request.contact is not None and request.contact[0].status != "active":
+        return Suppression.CONTACT_TURN
+    return None
+
+
 def _raise_if_process_shutdown() -> None:
     """Restore process cancellation when generation code consumed it."""
     if current_task_is_process_shutdown():
@@ -1250,8 +1262,12 @@ class ResponseRunner:
         response_kind: str,
         history_scope: HistoryScope | None = None,
         reply_entity_names: tuple[str, ...] = (),
+        suppression: Suppression = Suppression.EMPTY_PROMPT,
     ) -> SourceFate:
-        """Finalize one empty prompt through the canonical response lifecycle: its claimed reply ends showing nothing."""
+        """Finalize a turn that runs nothing through the canonical response lifecycle: its claimed reply shows nothing.
+
+        That is an empty prompt, or a turn in a removed contact's room.
+        """
         prepared = await self._begin_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -1262,7 +1278,7 @@ class ResponseRunner:
             return prepared
         await self._end_unanswered(
             prepared,
-            FinalDeliveryOutcome(ending=Suppressed(Suppression.EMPTY_PROMPT)),
+            FinalDeliveryOutcome(ending=Suppressed(suppression)),
             response_kind=response_kind,
             post_response_outcome=ResponseOutcome(),
         )
@@ -1419,13 +1435,14 @@ class ResponseRunner:
                 requester_user_id=execution_identity.requester_id,
             )
         )
-        if not request.prompt.strip():
+        if (suppression := _runs_nothing(request)) is not None:
             return await self._finalize_empty_prompt_locked(
                 request,
                 resolved_target=resolved_target,
                 response_kind="ai" if team is None else "team",
                 history_scope=history_scope,
                 reply_entity_names=member_names,
+                suppression=suppression,
             )
         admitted = await self._admit_locked_turn(
             request,

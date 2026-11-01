@@ -103,7 +103,8 @@ class ResponseRequest:
     on_reply_claimed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     # The contact and side of a contact turn, read once when the turn starts: everything the turn shows and offers
-    # follows it, so a contact removed while the turn runs still hides its final reply and its errors.
+    # follows it, so a contact removed while the turn runs still hides its final reply and its errors, and a turn
+    # whose contact was already removed runs nothing.
     contact: tuple[ContactRecord, SideName] | None = None
 
     def __post_init__(self) -> None:

@@ -17,7 +17,7 @@ from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import memory_backend
-from mindroom.contacts.turns import contact_turn
+from mindroom.contacts.turns import contact_room
 from mindroom.conversation_state_writer import session_started_on_creation
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -144,8 +144,8 @@ class LockedTurns:
         return client
 
     def with_contact(self, request: ResponseRequest) -> ResponseRequest:
-        """Return the request carrying the contact of this agent's turns in its room, read once as the turn starts."""
-        contact = contact_turn(self.deps.runtime.config, self.deps.runtime_paths, request.room_id, self.deps.agent_name)
+        """Return the request carrying the contact whose room its room is or was, read once as the turn starts."""
+        contact = contact_room(self.deps.runtime.config, self.deps.runtime_paths, request.room_id, self.deps.agent_name)
         return replace(request, contact=contact)
 
     def is_quiet(self, request: ResponseRequest) -> bool:
