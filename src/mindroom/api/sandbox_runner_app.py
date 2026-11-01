@@ -58,7 +58,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     computer = None
     if runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV):
         root = sandbox_exec.runner_dedicated_worker_root(runtime_paths)
-        if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths) or root is None:
+        if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
             msg = "Worker computer requires a dedicated worker."
             raise RuntimeError(msg)
         if os.name == "posix" and os.geteuid() == 0:
