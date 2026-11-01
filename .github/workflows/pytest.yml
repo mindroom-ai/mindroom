@@ -57,14 +57,14 @@ jobs:
         run: |
           # Ubuntu's AppArmor profile permits the installed Chrome sandbox.
           MINDROOM_TEST_BROWSER_EXECUTABLE="$(command -v google-chrome)" \
-            uv run pytest -m "not requires_matrix"
+            uv run pytest
 
       # Guards Python 3.14 regressions where synchronous tools could execute successfully and then be recorded as failed during cleanup,
       # and where sandboxed tools lost argument validation behind the output-file wrapper.
       - name: Check tool execution on Python 3.14
         if: matrix.python-version == '3.14'
         run: |
-          uv run pytest tests/test_tool_job_execution.py tests/test_tool_job_background_after.py tests/test_tool_hooks.py tests/test_tool_output_files.py -m "not requires_matrix"
+          uv run pytest tests/test_tool_job_execution.py tests/test_tool_job_background_after.py tests/test_tool_hooks.py tests/test_tool_output_files.py
 
       - name: Check for uncommitted changes
         run: |

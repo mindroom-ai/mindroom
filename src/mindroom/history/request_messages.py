@@ -30,10 +30,11 @@ class TurnMessages:
     """A new turn's input around its prompt.
 
     ``context`` holds the Matrix messages the scope has not stored yet, sent before the prompt and stored with the run.
-    ``transient`` holds turn context that is sent but no later turn replays (``add_to_agent_memory=False``): only a
-    paused run stores it, for its resume. It follows the prompt because the next turn replays the prompt where it sat,
-    so this request up to the prompt stays a prefix of the next one and provider prompt caches, or routing by a
-    conversation's opening messages, still match.
+    ``transient`` holds turn context (``add_to_agent_memory=False``), such as memory results, that follows the prompt
+    and is stored with the run where it was sent, unless the run stopped after a call. Later turns replay it there
+    outside a message limit, so each request extends the previous one whole: Codex's prompt cache reuses only a prompt
+    an earlier request sent whole, so a turn context left out of later requests would cap their cache hits at the first
+    message it followed.
     """
 
     prompt: Message
@@ -58,6 +59,8 @@ def scope_history_messages(
     ``runs`` are the session's runs in stored order. The two limits are the request's own, which a replay plan may
     narrow from the configured policy. The run limit applies before the message limit, which counts only messages that
     replay; a tool result whose call the message limit cut off is dropped, since it cannot replay without that call.
+    Turn context (``add_to_agent_memory=False``) replays where it was sent, except under a message limit, which counts
+    conversation only, so turn context neither takes a slot in its window nor opens it without its prompt.
     Each message is a copy marked ``from_history``, so a request never changes a stored run and is never stored again.
     Prompt messages never replay. Tool calls beyond ``max_tool_calls_from_history`` are left out, as is every media
     item except the newest viewed images.
@@ -69,7 +72,8 @@ def scope_history_messages(
         replayed = replayed[-num_history_runs:]
     selected = replayable_messages(replayed)
     if num_history_messages is not None:
-        newest = selected[-num_history_messages:] if num_history_messages > 0 else []
+        conversation = [message for message in selected if message.add_to_agent_memory]
+        newest = conversation[-num_history_messages:] if num_history_messages > 0 else []
         selected = list(dropwhile(lambda message: message.role == "tool", newest))
     history = [_history_copy(message) for message in selected]
     if max_tool_calls_from_history is not None:
@@ -178,12 +182,11 @@ def build_resume_request(
     """Return the request that resumes a paused run: its stored system messages, the summary, history, then the rest.
 
     ``paused`` holds the paused run's stored messages, which never include history copies. Its stored system messages
-    are reused, and the context the paused request sent without any history keeping it (``add_to_agent_memory=False``),
-    such as memory results, stays where it was. So when the summary and history replay as they did for the paused
-    request, this request repeats that one up to its last assistant turn: a signed reasoning block there stays valid
-    against an unchanged prefix, and the provider's prompt cache still matches. A queued-message notice the paused run
-    holds is left out: it told the reply that paused about a newer message, and the resume's own hooks decide again
-    whether one waits.
+    are reused, and the turn context the paused request sent (``add_to_agent_memory=False``), such as memory results,
+    stays where it was. So when the summary and history replay as they did for the paused request, this request repeats
+    that one up to its last assistant turn: a signed reasoning block there stays valid against an unchanged prefix, and
+    the provider's prompt cache still matches. A queued-message notice the paused run holds is left out: it told the
+    reply that paused about a newer message, and the resume's own hooks decide again whether one waits.
     """
     # LEGACY_COMPAT: Paused runs stored without the context their paused request sent.
     # Legacy format: a paused run whose stored messages, an Agno-layout ``run_data`` row the storage v2 conversion
