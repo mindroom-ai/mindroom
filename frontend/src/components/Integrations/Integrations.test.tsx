@@ -811,16 +811,14 @@ describe("Integrations", () => {
     await waitFor(() => {
       // Available Google cards
       expect(screen.getAllByText("Available").length).toBeGreaterThanOrEqual(2);
-      // Weather has no API key yet
-      expect(
-        within(
-          screen.getByText("Weather").closest(".h-full") as HTMLElement,
-        ).getByText("Needs setup"),
-      ).toBeInTheDocument();
 
       // Connected integration
       expect(screen.getByText("Connected")).toBeInTheDocument(); // Home Assistant
     });
+    // Weather has no API key yet
+    expect(
+      within(await findCard("Weather")).getByText("Needs setup"),
+    ).toBeInTheDocument();
   });
 
   it("offers a reset action when OAuth credentials are unreadable", async () => {

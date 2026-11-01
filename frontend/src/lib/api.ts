@@ -102,7 +102,7 @@ function stringField(
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-export function apiErrorMessageFromPayload(
+function apiErrorMessageFromPayload(
   payload: unknown,
   fallback: string,
 ): string {
