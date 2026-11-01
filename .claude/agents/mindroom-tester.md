@@ -547,7 +547,7 @@ Use one outstanding request per agent in an isolated room; start a fresh root me
 1. Choose an explicit timeout (for example, 120 seconds) and polling interval (for example, 2 seconds) before sending.
 2. Record a monotonic start time immediately before `matty send`, then capture the returned event ID; if needed, recover it from `matty messages --format json` using a unique request marker and the test user's sender ID.
 3. Poll the matching room or thread until the deadline, bounding each read by the remaining timeout.
-   Match the expected agent sender and the sent event through `m.relates_to.event_id` for a new `m.thread` root or `m.relates_to.m.in_reply_to.event_id` for a room reply.
+   Match the expected agent sender and the sent event through `m.relates_to.event_id` for a new `m.thread` root or `m.relates_to["io.mindroom.in_reply_to"].event_id` for a room-mode reply.
    Exclude unrelated messages and lifecycle notices such as `io.mindroom.compaction`.
    Record `first_response_s` when the first correlated response is observed, including a pending placeholder if present.
 4. Track the response event ID and apply subsequent `m.replace` events from the same sender whose `m.relates_to.event_id` targets it, reading replacement content from `m.new_content`.

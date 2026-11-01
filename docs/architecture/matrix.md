@@ -4,12 +4,19 @@ icon: lucide/message-square
 
 # Matrix Integration
 
-This page records the Matrix contracts that MindRoom's code does not make obvious: one identity invariant and the model-selection wire protocol that external clients implement.
+This page records the Matrix contracts that MindRoom's code does not make obvious: one identity invariant, the room-level reply relation, and the model-selection wire protocol that external clients implement.
 User-facing Matrix behavior is on [Matrix Integration](../matrix.md), event-journal decisions and homeserver behaviour are on [Matrix Event-Journal Contracts](matrix-event-journal-contracts.md), and invites and delivery epochs are on [Bot Runtime](bot-runtime.md#durable-dispatch-boundary).
 
 ## Identity Invariant
 
 Code must resolve an entity's Matrix ID through the persisted identity registry, keyed by configured alias, and never derive it from the requested localpart, because the actual account can differ (see [Agent Users](../matrix.md#agent-users)).
+
+## Room-Level Reply Relation
+
+A reply outside a thread, such as every reply in `thread_mode: room`, names its source as `m.relates_to: {"io.mindroom.in_reply_to": {"event_id": "<source>"}}` instead of `m.in_reply_to`, because clients render `m.in_reply_to` as a quote of the source above the answer.
+The link stays inside `m.relates_to` rather than in a top-level content key because every path that handles an event's relation already carries or drops that object whole: nio copies it into the cleartext of an encrypted event, and long-message previews and segments, attachment-backed content, queued edits, and the room-level relation strip in dispatch treat it as one unit.
+A top-level key would need its own handling in each of those paths, and the reply would stop counting as a relation, so it would become eligible as a thread root.
+Clients, bridges, and homeservers treat a relation with neither `rel_type` nor `m.in_reply_to` as no relation, so the reply shows as a plain message.
 
 ## Model Selection Protocol
 

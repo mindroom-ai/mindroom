@@ -16,6 +16,8 @@ from pygments.formatters.html import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
+from mindroom.matrix.event_info import UNQUOTED_REPLY_RELATION_KEY
+
 # Standard Matrix-safe HTML tags.
 _GENERAL_FORMATTED_BODY_TAGS = frozenset(
     {
@@ -616,8 +618,7 @@ def build_message_content(
             latest_thread_event_id=latest_thread_event_id,
         )
     elif reply_to_event_id:
-        # Plain reply without thread (shouldn't happen in this bot)
-        content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to_event_id}}
+        content["m.relates_to"] = {UNQUOTED_REPLY_RELATION_KEY: {"event_id": reply_to_event_id}}
 
     if extra_content:
         content.update(extra_content)
