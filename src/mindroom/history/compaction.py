@@ -627,6 +627,10 @@ async def compact_running_turn(
         metadata=fold.run.metadata,
     )
     transcript = _transcript([*basis.runs, folded_run]) if _compaction_hooks_registered() else ()
+    summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
+    if (error := _summary_budget_error(summary, max_summary_tokens)) is not None:
+        raise error
+    # Like a compaction before a reply, hooks hear only of a summary that is about to be stored.
     await _emit_compaction_hook(
         event_name=EVENT_COMPACTION_BEFORE,
         scope=scope,
@@ -634,9 +638,6 @@ async def compact_running_turn(
         session_id=session.session_id,
         token_count_before=before_tokens,
     )
-    summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
-    if (error := _summary_budget_error(summary, max_summary_tokens)) is not None:
-        raise error
 
     async def commit_and_report() -> CompactionOutcome:
         # The append runs in the database's lane behind the session's other writes, and leaves the turn's session

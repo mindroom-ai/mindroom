@@ -54,13 +54,16 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
   A checkpoint too large to leave room for its own run in the summary input is not used, so compaction still progresses.
 - A summary input that shrank after a failure keeps that size for the compaction's later chunks, because they would otherwise repeat the failure, and a slow model spends its whole timeout on each one; a chunk still grows to hold its first run whole.
 - A request without persisted replay (team members, workflow participants, scheduled tasks with `history_limit: 0`) compacts run-locally: its summary is an ordinary message of its own run and is stored with it.
-- Replay never drops a saved summary, so neither compaction stores one larger than the hard replay budget: before a reply, the budget beside that reply's static prompt; during one, the replay window minus the reserve and what the fold keeps (system prompt, tools, current prompt, transient messages), which the scope's next reply replays it beside.
-  A refused mid-turn fold leaves the request unchanged, as a failed one does, because using the summary only in memory would leave the turn's stored run beside raw runs the summary already covers.
+- Replay never drops a saved summary, so neither compaction stores one larger than the hard replay budget beside the reply's static prompt.
+  During a reply, what the fold keeps stands in for the static prompt of the scope's next reply, which is unknown when the fold commits: a next prompt much larger than the current one can still fail on the summary, and a current prompt that fills the replay window refuses every summary.
+  A refused fold leaves the request unchanged and stops compacting for the reply, as a failed one does.
+  Keeping the summary only in this request would store the turn's folded tool calls and results nowhere, and storing it with the run instead would replay it beside the raw runs it covers.
 
 ## Limitations
 
 A `compact_context` call running as a background tool job can request compaction while a later reply of the same scope compacts on an earlier request; that reply's clear drops the new request, which its compaction covers unless it fails.
 Stored history grows until the conversation is deleted.
+On a route whose model window exceeds its replay window, a refused fold can leave a request over the model's window when one tool batch outgrows that gap (tools with output files save outputs above 50 KiB by default to the workspace, so it takes several large parallel outputs or a tool without that support); the reply then fails with a provider error, where storing the summary would have answered it and failed the replies after it.
 Folded requests' usage lives in the run's metadata, so it is lost when the run never saves, as a crashed run's usage is.
 An approval resume loads a fresh session, which can replay turns stored after its run's mid-turn fold, so an edit or redaction of such a turn during the resume leaves the resuming run unfenced, because the run sorts before that turn, and its completion can store content derived from the cut turn.
 A run paused before that turn has the same race (`tests/test_summary_rows.py::test_a_pending_approval_before_the_cut_survives`); both need an edit or redaction of a recent turn while an approval of an older turn is resuming.
