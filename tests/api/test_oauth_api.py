@@ -6235,6 +6235,40 @@ def test_google_status_and_connect_on_unpaired_install_without_client(tmp_path: 
     )
 
 
+@pytest.mark.parametrize("slack_app_saved", [False, True], ids=["no-app", "app-saved"])
+def test_slack_status_and_connect_without_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slack_app_saved: bool,
+) -> None:
+    """Without a Slack OAuth client, the dashboard offers client setup and never asks Slack about the app."""
+    runtime_paths = _runtime_paths(tmp_path, {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"})
+    if slack_app_saved:
+        get_runtime_credentials_manager(runtime_paths).save_credentials(
+            "slack_app",
+            {"bot_token": "xoxb-test-token", "signing_secret": "signing-secret"},
+        )
+    monkeypatch.setattr(
+        "mindroom.slack.oauth.slack_http_client",
+        lambda: pytest.fail("no Slack request may be sent without an OAuth client"),
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+
+    with TestClient(api_app, base_url="http://localhost:8765") as client:
+        login_with_api_key(client)
+        status_response = client.get("/api/oauth/slack/status?agent_name=general")
+        connect_response = client.post("/api/oauth/slack/connect?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["has_client_config"] is False
+    assert status_response.json()["client_config_service"] == "slack_oauth_client"
+    assert status_response.json()["connected"] is False
+    assert connect_response.status_code == 503
+    assert connect_response.json()["detail"] == (
+        "Slack needs its OAuth client saved in the MindRoom dashboard before it can connect."
+    )
+
+
 def test_google_docs_status_reports_capabilities_with_service_account(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
