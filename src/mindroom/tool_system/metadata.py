@@ -465,18 +465,18 @@ def _tool_env_values(
     init_kwargs: dict[str, object],
     runtime_paths: RuntimePaths,
 ) -> dict[str, object]:
-    """Return the first non-blank declared variable of each unset field, from the process environment, then `.env`.
+    """Return the first usable declared variable of each unset field, read as ``RuntimePaths.first_env_value`` reads it.
 
     The lowest settings layer, read in the process that builds the toolkit: a worker has its own environment and
-    never the primary's `.env`. A blank value counts as unset, as the toolkits' own fallbacks treat it.
+    never the primary's `.env`.
     """
     values: dict[str, object] = {}
     for field in fields:
         current = init_kwargs.get(field.name)
         if current is not None and (not isinstance(current, str) or current.strip()):
             continue
-        if (value := runtime_paths.first_env_value(field.env)) is not None:
-            values[field.name] = value
+        if (found := runtime_paths.first_env_value(field.env)) is not None:
+            values[field.name] = found[0]
     return values
 
 

@@ -66,7 +66,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
+from tests.identity_helpers import fixture_entity_matrix_id
 from tests.matrix_state_helpers import save_matrix_state
 from tests.reply_span_helpers import final_in_span, seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
@@ -113,9 +113,7 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
             "MINDROOM_NAMESPACE": "",
         },
     )
-    bound = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound, runtime_paths)
-    return bound
+    return bind_runtime_paths(config, runtime_paths)
 
 
 def _store_without_sessions() -> MagicMock:

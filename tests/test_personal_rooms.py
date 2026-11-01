@@ -317,6 +317,7 @@ async def test_validated_replacement_source_completes_deferred_welcome(
             owner,
             lambda _: None,
             Mock(),
+            Mock(),
         )
         await lifecycle.member_event(
             nio.MatrixRoom(room_id, server.user_id),
@@ -332,6 +333,7 @@ async def test_validated_replacement_source_completes_deferred_welcome(
         restarted.runtime_paths,
         restarted,
         lambda _: PersonalRoomTarget(restarted, True),
+        Mock(),
         Mock(),
     )
     await router._reconcile()
@@ -653,6 +655,7 @@ async def test_a_pending_guest_removal_retry_does_not_delay_shutdown(
         service=owner,
         lookup_target=lambda _agent: None,
         config_reload=Mock(),
+        report_membership_change=Mock(),
     )
 
     await asyncio.wait_for(lifecycle.cancel_reconciliation(timeout_seconds=1), timeout=2)
@@ -674,6 +677,7 @@ async def test_the_room_lifecycle_removes_an_invited_person(tmp_path: Path, monk
         service=owner,
         lookup_target=lambda _agent: None,
         config_reload=Mock(),
+        report_membership_change=Mock(),
     )
     room = nio.MatrixRoom(room_id, server.user_id)
     room.add_member("@alice:localhost", None, None)
@@ -822,6 +826,49 @@ async def test_an_imported_room_with_unattested_people_names_them_and_removes_no
         "invite",
         "join",
     )
+
+
+@pytest.mark.asyncio
+async def test_an_imported_room_onboards_its_owner_as_soon_as_the_unattested_person_leaves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router warns once while the room stays unchanged, and the target seeing the departure retries it at once."""
+    server = MatrixServer()
+    router, target = bots(tmp_path, server, monkeypatch, welcome="")
+    room_id = await target.personal_rooms.ensure("@alice:localhost", "!lobby:localhost", server)
+    # An imported room its owner has not been invited to yet, holding someone its record does not list.
+    server.state[room_id] = [event for event in server.state[room_id] if event["state_key"] != "@alice:localhost"]
+    path = personal_room_record_path(target.runtime_paths, "helper", "@alice:localhost")
+    record = read_personal_room(path)
+    record.adoption = PersonalRoomAdoption(creator_user_id=server.user_id, agent_user_id=server.user_id)
+    write_personal_room(path, record)
+    server.set_member(room_id, "@eve:localhost", "join")
+    lifecycle = router._personal_room_lifecycle
+
+    with capture_logs() as logs:
+        for _ in range(2):
+            lifecycle.config_changed()
+            lifecycle.schedule_reconciliation()
+            assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert server.membership(room_id, "@alice:localhost") is None
+
+        server.set_member(room_id, "@eve:localhost", "leave")
+        left = _room_member_event(
+            event_id="$eve-left",
+            user_id="@eve:localhost",
+            membership="leave",
+            prev_membership="join",
+        )
+        await _dispatch_member(target, nio.MatrixRoom(room_id, target.agent_user.user_id), left)
+        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+
+    assert server.membership(room_id, "@alice:localhost") == "invite"
+    assert [
+        entry["log_level"] for entry in logs if entry["event"] == "Personal-room imported roster has unattested members"
+    ] == ["warning", "debug"]
+    assert lifecycle._reconciled
+    assert not server.kicks
 
 
 @pytest.mark.asyncio
@@ -2401,6 +2448,7 @@ async def test_owner_event_retires_initial_join_after_later_invite(
         owner,
         lambda _agent: None,
         Mock(),
+        Mock(),
     )
     server.set_member(room_id, "@alice:localhost", observed_membership)
     event = _room_member_event(membership=observed_membership, prev_membership=previous_membership)
@@ -2443,6 +2491,7 @@ async def test_owner_event_retirement_requires_recorded_room_and_user(
         owner,
         lambda _agent: None,
         Mock(),
+        Mock(),
     )
     leave = _room_member_event(membership="leave", prev_membership="invite")
     await lifecycle.member_event(nio.MatrixRoom("!other:localhost", server.user_id), leave)
@@ -2471,6 +2520,7 @@ async def test_unrecorded_owner_event_creates_no_lock_when_feature_disabled(
         owner.runtime_paths,
         owner,
         lambda _agent: None,
+        Mock(),
         Mock(),
     )
     await lifecycle.member_event(

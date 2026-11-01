@@ -419,7 +419,6 @@ class AgentReplyMembershipIndex:
                 room_id=room_id,
                 membership=event.membership,
                 transition=("grant" if event.membership == "join" else "revoke"),
-                authorization_source="joined_room",
             )
         return True
 
@@ -677,6 +676,16 @@ async def _build_current_room_memberships(
     return rooms
 
 
+def _query_error(exc: Exception) -> str:
+    """Name why a membership query raised without logging transport text, which can carry request URLs and tokens.
+
+    nio's own refusals, such as a member lookup that raced a membership change, carry fixed text and stay readable.
+    """
+    if isinstance(exc, nio.LocalProtocolError):
+        return f"{type(exc).__name__}: {exc}"
+    return type(exc).__name__
+
+
 async def _authoritative_joined_room_ids(client: nio.AsyncClient) -> frozenset[str] | None:
     """Return the control client's joined rooms or fail closed."""
     try:
@@ -687,7 +696,7 @@ async def _authoritative_joined_room_ids(client: nio.AsyncClient) -> frozenset[s
         logger.warning(
             "agent_reply_control_client_joined_rooms_failed",
             readiness="unready",
-            error=type(exc).__name__,
+            error=_query_error(exc),
         )
         return None
     if isinstance(response, nio.JoinedRoomsResponse):
@@ -717,7 +726,7 @@ async def _authoritative_room_members(
             room_key=room_key,
             room_id=room_id,
             readiness="unready",
-            error=type(exc).__name__,
+            error=_query_error(exc),
         )
         return None
     if not isinstance(response, nio.JoinedMembersResponse):

@@ -271,6 +271,8 @@ When `rootServiceWorkerCleanup.enabled` is true, the same ConfigMap must also pr
 
 - The chart does not create ingress, TLS, or a Matrix homeserver.
 - The container runs as the unprivileged nginx user with a read-only root filesystem, so `nginx.port` must stay at 1024 or higher unless you grant extra privileges through `securityContext` or lower `net.ipv4.ip_unprivileged_port_start`.
+- The chart-managed nginx ConfigMap also replaces the image's main `nginx.conf`: nginx logs only warnings and errors, and the config sets the `user` directive, which only a root master can apply, only when `podSecurityContext` and `securityContext` may run nginx as root.
+  With `nginx.existingConfigMap`, nginx keeps the image's main config.
 - Set `nginx.ipv6: false` on nodes without an IPv6 stack, where binding `[::]` makes nginx fail at startup.
 - Use `nodeSelector`, `affinity`, `tolerations`, and `topologySpreadConstraints` for cluster-specific scheduling policy.
 - Set `selectorLabels` when adopting an existing Deployment with an immutable selector.

@@ -139,6 +139,46 @@ Returns JSON {"value": <rendered>} so scalars survive fromJson.
 {{- end -}}
 
 {{/*
+The image's main nginx config, without what makes an unprivileged nginx log routine lines at every start and stop.
+Only a root master can switch workers to another user, and nginx warns about the user directive otherwise, so the
+directive stays only when neither security context makes the container run as a non-root user.
+The warn level keeps notices such as worker starts and graceful shutdowns out of the error log on stderr.
+*/}}
+{{- define "mindroom-client.mainNginxConf" -}}
+{{- $pod := default dict .Values.podSecurityContext -}}
+{{- $container := default dict .Values.securityContext -}}
+{{- $runAsUser := ternary $container.runAsUser $pod.runAsUser (hasKey $container "runAsUser") -}}
+{{- $runAsNonRoot := ternary $container.runAsNonRoot $pod.runAsNonRoot (hasKey $container "runAsNonRoot") -}}
+{{- if not (or $runAsUser $runAsNonRoot) -}}
+user nginx;
+{{ end -}}
+worker_processes auto;
+
+error_log /var/log/nginx/error.log warn;
+pid /run/nginx.pid;
+
+events {
+  worker_connections 1024;
+}
+
+http {
+  include /etc/nginx/mime.types;
+  default_type application/octet-stream;
+
+  log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                  '$status $body_bytes_sent "$http_referer" '
+                  '"$http_user_agent" "$http_x_forwarded_for"';
+
+  access_log /var/log/nginx/access.log main;
+
+  sendfile on;
+  keepalive_timeout 65;
+
+  include /etc/nginx/conf.d/*.conf;
+}
+{{- end -}}
+
+{{/*
 The nginx server config serving the client under basePath.
 The image entrypoint normally writes runtime-config.js into the app directory,
 which an unprivileged read-only container forbids, so the chart serves

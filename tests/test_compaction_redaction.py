@@ -132,7 +132,7 @@ def _legacy_session(run_ids: list[str], summary: str, seen_event_ids: list[str])
 def test_a_compacted_run_counts_as_seen_what_it_counted_while_loaded(storage: ConversationStore) -> None:
     """Compaction changes where seen ids come from, not which ids a run marks seen; redaction still matches all.
 
-    Compacted runs count as seen through their summary row, so session metadata keeps no copy to repair.
+    Compacted runs count as seen through their summary row, so session metadata keeps no copy.
     """
     run = _run("r1")
     assert run.metadata is not None
