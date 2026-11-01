@@ -6820,6 +6820,7 @@ depends_on = ["mindroom.knowledge.refresh_runner"]
 [[modules]]
 path = "mindroom.knowledge.refresh_runner"
 depends_on = [
+    "mindroom.knowledge.file_listing",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
     "mindroom.config.main",
