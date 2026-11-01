@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _USERNAME_PLACEHOLDER = "{username}"
-_PLACEHOLDER_PATTERN = re.compile(r"\{(user|username|user_display_name)\}")
+_PLACEHOLDER_PATTERN = re.compile(r"\{(user|username|user_display_name|user_first_name)\}")
 _MATRIX_LOCALPART_PATTERN = re.compile(r"[a-z0-9._=/-]+")
 _MAX_USERNAME_LENGTH = 40
 _MAX_DISPLAY_NAME_LENGTH = 100
@@ -62,9 +62,9 @@ class PersonalAgentTemplateConfig(BaseModel):
     )
     agent: AgentConfig = Field(
         description=(
-            "Agent fields shared by every user's agent; display_name, role, and instructions accept "
-            "{user}, {username}, and {user_display_name}, and the template key in delegate_to names each user's "
-            "own agent. Only the owner and administrators may use each agent "
+            "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, "
+            "{username}, {user_display_name}, and {user_first_name}, and the template key in delegate_to names "
+            "each user's own agent. Only the owner and administrators may use each agent "
             "unless access admits others, and the owner is always added to access.users and credential_managers"
         ),
     )
@@ -240,6 +240,12 @@ def personal_agent_display_name(user_id: str, display_name: str | None) -> str:
     return (cleaned or _localpart(user_id))[:_MAX_DISPLAY_NAME_LENGTH]
 
 
+def _first_name(entry: PersonalAgentRosterEntry) -> str:
+    """Return the `{user_first_name}` value: the display name's first word, or the localpart when it has none."""
+    words = entry.user_display_name.split(maxsplit=1)
+    return words[0] if words else _localpart(entry.user_id)
+
+
 def _render_placeholders(text: str, values: Mapping[str, str]) -> str:
     return _PLACEHOLDER_PATTERN.sub(lambda match: values[match.group(1)], text)
 
@@ -261,7 +267,12 @@ def personal_agent_data(template: Mapping[str, Any], entry: PersonalAgentRosterE
     if isinstance(overrides, dict):
         agent.update(deepcopy(overrides))
 
-    values = {"user": entry.user_id, "username": entry.username, "user_display_name": entry.user_display_name}
+    values = {
+        "user": entry.user_id,
+        "username": entry.username,
+        "user_display_name": entry.user_display_name,
+        "user_first_name": _first_name(entry),
+    }
     for field in ("display_name", "role"):
         if isinstance(agent.get(field), str):
             agent[field] = _render_placeholders(agent[field], values)
