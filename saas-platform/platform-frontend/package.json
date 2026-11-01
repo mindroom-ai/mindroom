@@ -27,8 +27,7 @@
     "@supabase/supabase-js": "^2.106.0",
     "@types/js-yaml": "^4.0.9",
     "lucide-react": "^1.16.0",
-    "nanoid": "^5.1.11",
-    "next": "^16.2.6",
+    "next": "^16.4.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "stripe": "^22.1.1"
