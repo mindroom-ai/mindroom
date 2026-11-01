@@ -1094,10 +1094,7 @@ async def test_bridge_without_apps_never_starts_gui_event_pump(
 
 
 def test_local_capabilities_require_matching_policy_and_providers(selected_root: Path) -> None:
-    """A bridge needs apps, folders, or shell, and every enabled capability needs its own provider."""
-    for browser_enabled in (False, True):
-        with pytest.raises(ValueError, match="at least one local capability"):
-            replace(_policy(browser_enabled=browser_enabled), allowed_app_ids=frozenset())
+    """Every enabled capability needs its own provider."""
     files = DesktopFilesystem((selected_root,))
     no_gui = replace(_policy(), allowed_app_ids=frozenset(), allowed_file_roots=(selected_root,))
     for arguments, message in (

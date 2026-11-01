@@ -100,7 +100,7 @@ class NativeDesktopConfig:
 
     @property
     def has_local_capability(self) -> bool:
-        """Whether apps, folders, or shell access are saved; browser control needs a saved app, so a browser is not enough."""
+        """Whether apps, folders, or shell access are allowed; browser control needs an allowed app, so a browser is not enough."""
         return bool(self.allowed_app_ids or self.files.roots or self.shell.enabled)
 
     @classmethod
