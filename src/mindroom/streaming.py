@@ -343,7 +343,7 @@ class _PreparedStreamingDelivery:
     display_text: str
     committed_state: _CommittedDeliveryState
     had_warmup_suffix: bool
-    # The stream's pending-character count when this delivery was prepared.
+    # The stream's pending-character count when this delivery's state was captured.
     chars_since_last_update: int
 
 

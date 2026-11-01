@@ -1778,33 +1778,19 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
-            update_interval=10.0,
-            interval_ramp_seconds=0.0,
-            update_char_threshold=1,
-            min_char_update_interval=0.35,
-            max_idle=10.0,
             show_tool_calls=False,
             **reply_hooks(),
         )
-        streaming.last_update = float("-inf")
+        streaming.event_id = "$stream_123"
 
         async def room_send(*args: object, **kwargs: object) -> nio.RoomSendResponse:
             _ = (args, kwargs)
             # A hidden tool's trace entry arrives, with no new text, while this edit is in flight.
             streaming.apply_tool_trace_snapshot([_call("search_web")])
-            mock_response = MagicMock()
-            mock_response.__class__ = nio.RoomSendResponse
-            mock_response.event_id = "$trace_only"
-            return mock_response
+            return nio.RoomSendResponse(event_id="$trace_only", room_id=streaming.room_id)
 
         mock_client.room_send.side_effect = room_send
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
-
-        with patch("mindroom.streaming.time.time", return_value=100.0):
-            streaming._update("Checking")
-            _queue_delivery_request(delivery_queue)
-            await _finish_delivery(delivery_queue, delivery_task)
+        await push_stream_chunk(streaming, "Checking", mock_client)
 
         assert mock_client.room_send.await_count == 1
         assert streaming.tool_trace == [_call("search_web")]
