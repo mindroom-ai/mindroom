@@ -518,8 +518,8 @@ describe("Knowledge", () => {
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
     expect(confirmSpy).not.toHaveBeenCalled();
 
-    fireEvent.change(screen.getByLabelText("Repository URL"), {
-      target: { value: "https://github.com/org/repo" },
+    fireEvent.change(screen.getByLabelText("Base Name"), {
+      target: { value: "docs_git" },
     });
 
     expect(confirmLeavingUnsavedDrafts()).toBe(false);
