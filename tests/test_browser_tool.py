@@ -3846,6 +3846,30 @@ async def test_headless_worker_runtime_hands_its_browser_to_each_fresh_toolkit(
 
 
 @pytest.mark.asyncio
+async def test_headless_worker_runtime_closes_its_browser_when_another_timeout_stops_a_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call stopped by a timeout other than its own limit, such as the runner's, leaves no browser behind."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    runtime = WorkerBrowserRuntime()
+    toolkit = BrowserTools(paths)
+    binding = toolkit.bind_worker_headless(tmp_path / "workspace", {})
+
+    async def stalled() -> None:
+        await toolkit.browser("start")
+        async with asyncio.timeout(0.01):
+            await asyncio.Event().wait()
+
+    with pytest.raises(TimeoutError):
+        await runtime.run(toolkit, (binding, ()), stalled)
+    assert len(adapters) == 1
+    assert not adapters[0].live_resources
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("runtime_kind", ["headless", "computer"])
 async def test_worker_runtimes_keep_their_browser_after_a_call_stops_at_its_time_limit(
     tmp_path: Path,
