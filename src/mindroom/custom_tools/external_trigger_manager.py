@@ -86,13 +86,13 @@ class ExternalTriggerManagerTools(Toolkit):
             agent=target_agent or context.agent_name,
             new_thread=new_thread,
         )
-        room_id = resolve_room_id(target.room_id, context.runtime_paths)
-        if not is_admin and room_id != context.room_id:
+        resolved_room_id = resolve_room_id(target.room_id, context.runtime_paths)
+        if not is_admin and resolved_room_id != context.room_id:
             msg = "Only external trigger admins can target a different room."
             raise ExternalTriggerStoreError(msg)
         if target.thread_id is None:
             return target
-        thread_root = await explicit_thread_root(context, room_id=room_id, thread_id=target.thread_id)
+        thread_root = await explicit_thread_root(context, room_id=resolved_room_id, thread_id=target.thread_id)
         return ExternalTriggerTarget.model_validate({**target.model_dump(), "thread_id": thread_root})
 
     @staticmethod

@@ -115,6 +115,14 @@ def _context(
     )
 
 
+def _record_rooms(tmp_path: Path) -> None:
+    """Record lobby and other-room as created, so their keys and aliases resolve to room IDs."""
+    state = MatrixState.load(_runtime_paths(tmp_path))
+    for key, name in (("lobby", "Lobby"), ("other-room", "Other")):
+        state.add_room(key, f"!{key}:example.org", f"#{key}:example.org", name)
+    save_matrix_state(state, _runtime_paths(tmp_path))
+
+
 def _payload(raw: str) -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(raw))
 
@@ -392,9 +400,7 @@ async def test_non_admin_cannot_target_other_agent_or_room(
 async def test_non_admin_can_name_the_current_room_by_key_alias_or_id(tmp_path: Path, target_room_id: str) -> None:
     """A non-admin naming the current room in any form it resolves from targets that room, not a different one."""
     tool = ExternalTriggerManagerTools()
-    state = MatrixState.load(_runtime_paths(tmp_path))
-    state.add_room("lobby", "!lobby:example.org", "#lobby:example.org", "Lobby")
-    save_matrix_state(state, _runtime_paths(tmp_path))
+    _record_rooms(tmp_path)
     with tool_runtime_context(_context(tmp_path, room_id="!lobby:example.org")):
         payload = _payload(
             await tool.create_trigger("lobby-trigger", public_key=_PUBLIC_KEY, target_room_id=target_room_id),
@@ -422,10 +428,7 @@ async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(
 ) -> None:
     """A reply event ID as target_thread_id is stored as its thread root, since Matrix rejects a reply as a thread root."""
     tool = ExternalTriggerManagerTools()
-    state = MatrixState.load(_runtime_paths(tmp_path))
-    state.add_room("lobby", "!lobby:example.org", "#lobby:example.org", "Lobby")
-    state.add_room("other-room", "!other-room:example.org", "#other-room:example.org", "Other")
-    save_matrix_state(state, _runtime_paths(tmp_path))
+    _record_rooms(tmp_path)
     homeserver = thread_reply_client("$reply:example.org", "$root:example.org")
     context = replace(
         _context(
