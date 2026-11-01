@@ -45,7 +45,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
 from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
@@ -188,7 +188,6 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         team_id = entity_ids(config, runtime_paths)["ops"]
         policy = _policy(config, runtime_paths, "ops", team_id)
@@ -231,7 +230,6 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
         policy = _policy(config, runtime_paths, "shared", ids["shared"])
@@ -283,7 +281,6 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
         policy = _policy(config, runtime_paths, "shared", ids["shared"])
@@ -616,7 +613,6 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         team_id = entity_ids(config, runtime_paths)["ops"]
         policy = _policy(config, runtime_paths, "ops", team_id)
@@ -1024,7 +1020,6 @@ class TestAgentResponseLogic:
             ),
             self.runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         room = create_mock_room("!room:localhost", ["calculator", "research"], config)
         thread_history = [
@@ -1064,7 +1059,6 @@ class TestAgentResponseLogic:
             ),
             self.runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
 
         should_respond = agent_response_should_respond(

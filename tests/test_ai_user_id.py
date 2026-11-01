@@ -106,9 +106,9 @@ from tests.ai_user_id_helpers import (
     _config_with_team,
     _metadata_config,
     _runtime_paths,
-    bind_runtime_paths,
 )
 from tests.conftest import (
+    bind_runtime_paths,
     install_model_providers,
     make_turn_context,
     make_visible_message,

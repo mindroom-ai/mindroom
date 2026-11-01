@@ -27,7 +27,7 @@ from tests.conftest import (
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
 from tests.reply_span_helpers import reply_span
 
 if TYPE_CHECKING:
@@ -165,7 +165,6 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path, sender_entity
         ),
         test_runtime_paths(tmp_path),
     )
-    persist_entity_accounts(config, runtime_paths_for(config))
     ids = entity_ids(config, runtime_paths_for(config))
 
     agent_user = AgentMatrixUser(
@@ -289,7 +288,6 @@ async def test_stop_emoji_from_agent_relaying_a_requester_without_access_is_igno
         ),
         orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
-    persist_entity_accounts(config, runtime_paths_for(config))
     agent_user = _stop_test_agent_user(config)
     bot = make_test_agent_bot(
         agent_user=agent_user,
@@ -328,7 +326,6 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
         ),
         orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
-    persist_entity_accounts(config, runtime_paths_for(config))
     agent_user = _stop_test_agent_user(config)
 
     bot = make_test_agent_bot(

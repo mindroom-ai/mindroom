@@ -49,7 +49,6 @@ from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
 )
 from tests.access_schema_support import with_current_room_member_access
-from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
     ignore_final_delivery_handoff,
     make_conversation_reader_mock,
@@ -57,7 +56,6 @@ from tests.conftest import (
     make_relation_lookup,
     request_envelope,
 )
-from tests.identity_helpers import persist_entity_accounts
 from tests.reply_turn_helpers import runner_for
 from tests.runtime_fakes import ready_runtime
 
@@ -72,13 +70,6 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T")
-
-
-def bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:
-    """Bind test runtime paths and persist managed account identities."""
-    bound = _bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound, runtime_paths)
-    return bound
 
 
 def _set_gateway_method(gateway: DeliveryGateway, name: str, value: T) -> T:
