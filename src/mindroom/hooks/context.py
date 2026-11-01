@@ -23,6 +23,7 @@ from .state import (
     chain_hook_room_state_queriers,
 )
 from .types import (
+    EVENT_CONTACT_BEFORE_SEND,
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
@@ -778,6 +779,42 @@ class ToolEnvironmentContext(HookContext):
         self.decline_reason = reason
 
 
+@dataclass(slots=True, kw_only=True)
+class ContactBeforeSendContext(HookContext):
+    """Context passed to contact:before_send hook callbacks, which decide whether a message may reach a contact.
+
+    A hook leaves the message alone, replaces it with ``rewrite()``, sends it back to the agent with ``revise()``,
+    or blocks it with ``deny()``.
+    """
+
+    event_name: str = EVENT_CONTACT_BEFORE_SEND
+    agent_name: str
+    room_id: str
+    thread_id: str | None
+    requester_id: str
+    contact_id: str
+    counterparty_id: str
+    counterparty_name: str
+    rules: str
+    text: str
+    verdict: Literal["send", "revise", "deny"] = "send"
+    feedback: str = ""
+
+    def rewrite(self, text: str) -> None:
+        """Send ``text`` instead of the agent's message; later hooks and the judge see the new text."""
+        self.text = text
+
+    def revise(self, feedback: str) -> None:
+        """Send nothing and give the agent ``feedback`` so it can write a new message."""
+        self.verdict = "revise"
+        self.feedback = feedback
+
+    def deny(self, reason: str) -> None:
+        """Send nothing and give the agent ``reason``."""
+        self.verdict = "deny"
+        self.feedback = reason
+
+
 def _check_env_name(name: str) -> None:
     if not name or any(char.isspace() or char in "=,\0" for char in name):
         msg = f"Invalid environment variable name: {name!r}"
@@ -793,7 +830,10 @@ def _requester_id_for_hook_send(context: HookContext, *, trigger_dispatch: bool)
         requester_id = context.created_by
     elif isinstance(context, ReactionReceivedContext | CustomEventContext):
         requester_id = context.sender_id
-    elif isinstance(context, ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext):
+    elif isinstance(
+        context,
+        ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext | ContactBeforeSendContext,
+    ):
         requester_id = context.requester_id
     else:
         requester_id = None

@@ -22,6 +22,7 @@ _EXPORTS = [
     "EVENT_COMPACTION_AFTER",
     "EVENT_COMPACTION_BEFORE",
     "EVENT_CONFIG_RELOADED",
+    "EVENT_CONTACT_BEFORE_SEND",
     "EVENT_MESSAGE_AFTER_RESPONSE",
     "EVENT_MESSAGE_BEFORE_RESPONSE",
     "EVENT_MESSAGE_CANCELLED",
@@ -50,6 +51,7 @@ _EXPORTS = [
     "CompactionHookContext",
     "ConfigField",
     "ConfigReloadedContext",
+    "ContactBeforeSendContext",
     "CurrentCall",
     "CustomEventContext",
     "Done",
@@ -157,6 +159,10 @@ _SIGNATURES = {
     ),
     "ConfigReloadedContext": (
         f"({_HOOK}, changed_entities, added_entities, removed_entities, plugin_changes, *, {_HOOK_HELPERS})"
+    ),
+    "ContactBeforeSendContext": (
+        f"({_TOOL_HOOK}, agent_name, room_id, thread_id, requester_id, contact_id, counterparty_id, "
+        "counterparty_name, rules, text, verdict, feedback)"
     ),
     "CurrentCall": "(*, call_id, toolkit, session_id, session_state, history_scope, runtime)",
     "CustomEventContext": (
