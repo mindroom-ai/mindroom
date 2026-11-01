@@ -7519,7 +7519,7 @@ A contact turn keeps the agent's identity, instructions, preloaded files, and me
 
 - It offers only the contact's tools plus `matrix_message`, and no skills, knowledge bases, or interactive questions.
 - It leaves out every function that would ask for approval, so a `tool_approval` rule that gates `matrix_message` leaves the agent unable to answer.
-- `matrix_message` can read and write the contact room, and send a plain message to the owner in their personal room when the agent serves that room; it cannot send attachments or collapsible sections into a contact room.
+- `matrix_message` can read and write the contact room, and send a plain message to the owner in their personal room, in its timeline or a new thread, when the agent serves that room; it cannot send attachments or collapsible sections into a contact room.
 - Other tools that post into rooms refuse the contact room.
 - It saves nothing to the agent's memory, starts no skill review, and its conversations are neither summarized into file memory nor added to the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/), so your agent's other conversations do not remember it.
 
@@ -7591,6 +7591,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `Error: in a contact conversation you can only write to this room or to your owner's personal room` | A contact turn tried another room |
 | `Error: in a contact conversation you can only send a plain message to your owner's personal room` | A contact turn tried to read, edit, react, or name a recipient in the owner's personal room |
 | `Error: in a contact conversation you cannot use idempotency_key in your owner's personal room` | A contact turn sent to the owner's personal room with `idempotency_key`; send the message without it |
+| `Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread` | A contact turn named an existing thread of the owner's personal room; send to the timeline or a new thread |
 | `Error: contact rooms accept text only` | Attachments and collapsible sections cannot go into a contact room |
 | `Not sent: The conversation already has <n> agent messages in a row; wait for a person to write.` | The agents reached `defaults.max_consecutive_agent_replies`; any person writing in the conversation resets it |
 | `Not sent: A contact policy hook failed.` | A `contact:before_send` hook raised or timed out; check the plugin's logs |

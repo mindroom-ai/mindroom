@@ -51,6 +51,9 @@ EVENT_ID = "$event:localhost"
 DESTINATION_ERROR = "Error: in a contact conversation you can only write to this room or to your owner's personal room"
 OWNER_ROOM_ERROR = "Error: in a contact conversation you can only send a plain message to your owner's personal room"
 OWNER_ROOM_KEY_ERROR = "Error: in a contact conversation you cannot use idempotency_key in your owner's personal room"
+OWNER_ROOM_THREAD_ERROR = (
+    "Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread"
+)
 TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
 NOT_AUTHORIZED = "Not authorized to access the target room."
 MENU = MatrixMessageExtra(title="Menu", content="Soup")
@@ -363,6 +366,33 @@ async def test_contact_turn_only_sends_plain_messages_to_the_owners_personal_roo
     assert payload["message"] == OWNER_ROOM_ERROR
     assert _sent(context) == []
     context.client.room_messages.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_contact_turn_reports_to_the_owner_only_in_the_timeline_or_a_new_thread(tmp_path: Path) -> None:
+    """Text the other side may have shaped never lands in an existing thread of the owner's private room."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    context = _context(config, paths)
+
+    refused = await _call(
+        context,
+        message="Bob asked about Friday.",
+        room_id=PERSONAL_ROOM,
+        thread_id="$owner:localhost",
+    )
+    timeline = await _call(context, message="Bob asked about Friday.", room_id=PERSONAL_ROOM, thread_id="room")
+    threaded = await _call(context, message="Bob asked about Saturday.", room_id=PERSONAL_ROOM, new_thread=True)
+
+    assert refused == {
+        "status": "error",
+        "tool": "matrix_message",
+        "room_id": PERSONAL_ROOM,
+        "message": OWNER_ROOM_THREAD_ERROR,
+    }
+    assert timeline["status"] == threaded["status"] == "ok"
+    assert [content["body"] for content in _sent(context)] == ["Bob asked about Friday.", "Bob asked about Saturday."]
+    assert all("m.relates_to" not in content for content in _sent(context))
 
 
 @pytest.mark.asyncio

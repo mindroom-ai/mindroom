@@ -44,6 +44,9 @@ _CONTACT_OWNER_ROOM_ERROR = (
 _CONTACT_OWNER_ROOM_KEY_ERROR = (
     "Error: in a contact conversation you cannot use idempotency_key in your owner's personal room"
 )
+_CONTACT_OWNER_ROOM_THREAD_ERROR = (
+    "Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread"
+)
 
 
 def _contact_turn_target_error(
@@ -52,11 +55,13 @@ def _contact_turn_target_error(
     *,
     action: str,
     recipient: str | None,
+    thread_id: str | None,
     idempotency_key: str | None,
 ) -> str | None:
     """Return why this turn may not act in ``room_id`` this way, or None when it may.
 
-    A contact turn acts only in its own room, apart from a plain message to its owner in their personal room with it.
+    A contact turn acts only in its own room, apart from a plain message to its owner in their personal room with it,
+    in that room's timeline or a new thread, never in one of the owner's own threads.
     Anything more there, such as naming a recipient, would start a normal turn with the owner's full authority.
     A keyed send there shares the owner's own keyed sends, so a matching key would deliver what the owner's turn
     prepared, such as a pending request to an agent, instead of the contact turn's message.
@@ -70,6 +75,8 @@ def _contact_turn_target_error(
         return _CONTACT_DESTINATION_ERROR
     if action != "send" or recipient is not None:
         return _CONTACT_OWNER_ROOM_ERROR
+    if thread_id not in {None, "room"}:
+        return _CONTACT_OWNER_ROOM_THREAD_ERROR
     return _CONTACT_OWNER_ROOM_KEY_ERROR if idempotency_key is not None else None
 
 
@@ -205,6 +212,7 @@ class MatrixMessageTools(Toolkit):
             resolved_room_id,
             action=action,
             recipient=recipient,
+            thread_id=thread_id,
             idempotency_key=idempotency_key,
         )
         if target_error is not None:
