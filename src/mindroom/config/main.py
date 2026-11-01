@@ -137,7 +137,7 @@ from mindroom.tool_system.worker_routing import unsupported_shared_only_integrat
 from mindroom.workspaces import control_plane_owns_private_templates, validate_workspace_template_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Callable, Collection
 
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.personal_agents import PersonalAgentRoster
@@ -616,10 +616,15 @@ class Config(BaseModel):
             msg = "calls.profiles references unknown Live agent model(s): " + ", ".join(invalid_live_models)
             raise ValueError(msg)
 
+        self._reject_call_agents_sharing_a_room(lambda room: room)
+        return self
+
+    def _reject_call_agents_sharing_a_room(self, room_key: Callable[[str], str]) -> None:
+        """Reject a room, compared by ``room_key``, that more than one call agent joins."""
         agents_by_room: dict[str, list[str]] = {}
         for agent_name in self.calls.agents:
             for room in self.agents[agent_name].rooms:
-                agents_by_room.setdefault(room, []).append(agent_name)
+                agents_by_room.setdefault(room_key(room), []).append(agent_name)
         conflicts = [
             f"{room} ({', '.join(sorted(agent_names))})"
             for room, agent_names in sorted(agents_by_room.items())
@@ -628,7 +633,6 @@ class Config(BaseModel):
         if conflicts:
             msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
             raise ValueError(msg)
-        return self
 
     @model_validator(mode="after")
     def validate_membership_access_room_references(self) -> Config:
@@ -1062,9 +1066,9 @@ class Config(BaseModel):
         tolerate_plugin_load_errors: bool,
     ) -> Config:
         config = cls.model_validate(data, context={"runtime_paths": runtime_paths})
-        from mindroom.entity_resolution import validate_call_agent_room_ownership  # noqa: PLC0415
+        from mindroom.entity_resolution import call_room_ownership_key  # noqa: PLC0415
 
-        validate_call_agent_room_ownership(config, runtime_paths)
+        config._reject_call_agents_sharing_a_room(lambda room: call_room_ownership_key(room, runtime_paths))
         # A sandbox runner runs tool calls, never a model, and its config snapshot carries no models.
         if not runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]):
             config._validate_model_references()
