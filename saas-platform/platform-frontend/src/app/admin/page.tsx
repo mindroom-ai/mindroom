@@ -117,7 +117,7 @@ export default function AdminDashboard() {
         <p className="text-gray-600 dark:text-gray-400 mt-2">System overview and key metrics</p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
         {statCards.map((stat) => (
           <Card key={stat.title} className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
