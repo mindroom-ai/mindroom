@@ -23,7 +23,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
-from httpx import HTTPError, HTTPStatusError, Request, Response
+from httpx import AsyncClient, ConnectError, HTTPError, HTTPStatusError, MockTransport, Request, Response
 from starlette.requests import Request as StarletteRequest
 
 from mindroom import constants
@@ -6290,6 +6290,52 @@ def test_slack_status_and_connect_without_client(
     assert connect_response.json()["detail"] == (
         "Slack needs its OAuth client saved in the MindRoom dashboard before it can connect."
     )
+
+
+@pytest.mark.parametrize(
+    ("slack_app_saved", "slack_reachable", "detail"),
+    [
+        (False, True, "The MindRoom Slack app is not configured"),
+        (True, True, "The MindRoom Slack app is not configured"),
+        (True, False, "Slack could not be reached; try again"),
+    ],
+    ids=["no-app", "token-rejected", "slack-unreachable"],
+)
+def test_slack_connect_names_what_blocks_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slack_app_saved: bool,
+    slack_reachable: bool,
+    detail: str,
+) -> None:
+    """With a Slack OAuth client saved, Connect names a missing or rejected Slack app, or an unreachable Slack."""
+    runtime_paths = _runtime_paths(tmp_path, {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"})
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("slack_oauth_client", {"client_id": "slack-client-id", "client_secret": "slack-secret"})
+    if slack_app_saved:
+        manager.save_credentials("slack_app", {"bot_token": "xoxb-test-token", "signing_secret": "signing-secret"})
+    slack_requests: list[str] = []
+
+    def answer_slack(request: Request) -> Response:
+        slack_requests.append(str(request.url))
+        if slack_reachable:
+            return Response(200, json={"ok": False, "error": "invalid_auth"})
+        message = "no route to slack.com"
+        raise ConnectError(message, request=request)
+
+    monkeypatch.setattr(
+        "mindroom.slack.oauth.slack_http_client",
+        lambda: AsyncClient(transport=MockTransport(answer_slack)),
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+
+    with TestClient(api_app, base_url="http://localhost:8765") as client:
+        login_with_api_key(client)
+        connect_response = client.post("/api/oauth/slack/connect?agent_name=general")
+
+    assert connect_response.status_code == 503
+    assert connect_response.json()["detail"] == detail
+    assert slack_requests == (["https://slack.com/api/auth.test"] if slack_app_saved else [])
 
 
 def test_google_docs_status_reports_capabilities_with_service_account(tmp_path: Path) -> None:
