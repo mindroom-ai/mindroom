@@ -309,13 +309,20 @@ async def update_contact(
 
 
 async def remove_contact(context: ToolRuntimeContext, agent_name: str, contact_id: str) -> ContactRecord:
-    """Remove a contact for either owner; its agents leave the contact room and stop keeping it across restarts."""
+    """Remove a contact for either owner, except that only the owner who declined a contact may remove it.
+
+    The contact's agents leave its room and stop keeping it across restarts.
+    """
     own = _own_party(context, agent_name)
 
     def remove(book: ContactBook) -> ContactRecord:
-        record, _ = _owned(book, contact_id, own.owner)
+        record, side = _owned(book, contact_id, own.owner)
         if record.status == "removed":
             msg = "The contact is already removed"
+            raise ValueError(msg)
+        # A declined contact blocks new requests until the owner who declined it removes it.
+        if record.status == "declined" and side != "target":
+            msg = f"Only {record.target.owner} may remove a declined contact"
             raise ValueError(msg)
         record.status = "removed"
         return record.model_copy(deep=True)

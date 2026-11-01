@@ -309,7 +309,7 @@ async def test_repeat_request_returns_existing_and_reposts_missing_notice(tmp_pa
 
 @pytest.mark.asyncio
 async def test_declined_pair_refused(tmp_path: Path) -> None:
-    """After the target owner declines, a new request waits until that owner removes the contact."""
+    """After the target owner declines, a new request waits until that owner, and only that owner, removes the contact."""
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     record = await _pending(config, paths, runtime)
@@ -319,6 +319,12 @@ async def test_declined_pair_refused(tmp_path: Path) -> None:
         await _request(config, paths, runtime)
     with pytest.raises(ValueError, match=rf"^{DECLINED}$"):
         await _request(config, paths, runtime, agent_name="mind_bob", requester_id=CO_OWNER, target="mind_alice")
+
+    with pytest.raises(ValueError, match=rf"^Only {CO_OWNER} may remove a declined contact$"):
+        await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", record.id)
+    assert [stored.status for stored in _stored(paths)] == ["declined"]
+    with pytest.raises(ValueError, match=rf"^{DECLINED}$"):
+        await _request(config, paths, runtime)
 
     await flow.remove_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
     again = await _pending(config, paths, runtime)

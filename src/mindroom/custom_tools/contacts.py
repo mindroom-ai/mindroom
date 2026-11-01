@@ -141,7 +141,10 @@ class ContactsTools(Toolkit):
         return f"Updated contact {record.id}."
 
     async def remove_contact(self, contact_id: str) -> str:
-        """Remove a contact, which either owner may do; the agents leave its room and the owners keep it and its history."""
+        """Remove a contact; the agents leave its room and the owners keep it and its history.
+
+        Either owner may remove a contact, but only the owner who declined a request may remove the declined contact.
+        """
         try:
             record = await flow.remove_contact(_require_context(), self.agent_name, contact_id)
         except ValueError as exc:
