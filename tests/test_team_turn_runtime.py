@@ -468,11 +468,11 @@ async def test_a_member_tool_addresses_the_team_history_scope(
 
 
 @pytest.mark.asyncio
-async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_in_no_run(
+async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_only_in_its_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Transient turn context is sent with the leader's request, and neither the team run nor a member run stores it."""
+    """Transient turn context is sent with the leader's request and stored where it was sent, in the team run only."""
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -497,7 +497,13 @@ async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_in_
     ]
     record, members = team.stored_runs()
     assert len(members) == 1
-    assert all(transient not in json.dumps(run.to_dict()) for run in [record, *members])
+    sent = [message for message in leader_request if message.role != "system"]
+    stored = [message for message in record.messages if message.role != "system"][: len(sent)]
+    assert [(message.content, message.add_to_agent_memory) for message in stored] == [
+        (message.content, message.add_to_agent_memory) for message in sent
+    ]
+    assert stored[-1].add_to_agent_memory is False
+    assert all(transient not in json.dumps(member.to_dict()) for member in members)
 
 
 @pytest.mark.asyncio
@@ -1230,15 +1236,14 @@ async def test_an_approval_resume_restores_the_leader_s_native_history_from_the_
 
 
 @pytest.mark.asyncio
-async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader_and_stores_it_in_neither(
+async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader_and_each_stores_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The member whose call was approved and the leader each read the trusted receipt after their decided results.
 
     The response runner binds the receipt around the resume; each run keeps it, as a user message, for the rest of
-    the run, and no finished run stores it. A member the resumed leader then hands a new task runs fresh and never
-    reads it.
+    the run, and stores it there. A member the resumed leader then hands a new task runs fresh and never reads it.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel(
@@ -1263,7 +1268,8 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
     assert receipt_roles("default") == [["user"], ["user"]]
     assert receipt_roles("writer-model") == [[]]
     record, members = team.stored_runs()
-    assert all(receipt not in json.dumps(run.to_dict()) for run in [record, *members])
+    stored = {run.agent_id: [message.content for message in run.messages].count(receipt) for run in members}
+    assert ([message.content for message in record.messages].count(receipt), stored) == (1, {"checker": 1, "writer": 0})
 
 
 @pytest.mark.asyncio
@@ -1273,8 +1279,8 @@ async def test_an_approval_resume_repeats_the_request_the_leader_and_the_member_
 ) -> None:
     """The leader and the member resume with the request each paused on, then the paused turn, its result, the receipt.
 
-    The leader's turn context, which no history keeps, comes back where the paused request sent it; each run's
-    receipt follows its decided result and stays there for the run's later requests.
+    The leader's turn context comes back where the paused request sent it; each run's receipt follows its decided result
+    and stays there for the run's later requests.
     """
     team = squad_turn(
         tmp_path,
