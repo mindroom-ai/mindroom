@@ -410,6 +410,7 @@ class AgentConfig(BaseModel):
     worker_tools: list[str] | None = Field(
         default=None,
         description="Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",
+        json_schema_extra=dashboard_hint(reference="tool"),
     )
     worker_scope: WorkerScope | None = Field(
         default=None,

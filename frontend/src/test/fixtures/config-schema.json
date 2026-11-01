@@ -437,7 +437,10 @@
           ],
           "default": null,
           "description": "Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",
-          "title": "Worker Tools"
+          "title": "Worker Tools",
+          "x-mindroom": {
+            "reference": "tool"
+          }
         },
         "worker_scope": {
           "anyOf": [
