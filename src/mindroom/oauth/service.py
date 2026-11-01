@@ -179,8 +179,7 @@ def consume_oauth_connect_token(
 
 def oauth_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvider | None = None) -> str:
     """Return the public MindRoom origin used for user-facing OAuth links."""
-    configured = configured_public_url(runtime_paths)
-    if configured:
+    if configured := configured_public_url(runtime_paths):
         return configured
 
     if provider is not None:
