@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.contacts.parties import party_matrix_ids
+from mindroom.contacts.parties import agent_party, party_matrix_ids
 from mindroom.contacts.store import contact_party_in_room
 from mindroom.requester_identity import resolve_human_requester_alias
 
@@ -37,7 +37,10 @@ def contact_admission(
     Every such turn runs as the agent's owner, but only the counterparty and the owner may start one.
     ``sender_ids`` are every identity the event speaks for: its sender, a relayed original sender, and an acting
     requester; any one of them that is the counterparty or the owner admits it.
+    Only an agent that can be a party reads the contacts store.
     """
+    if agent_party(config, agent_name) is None:
+        return None
     found = contact_party_in_room(runtime_paths, room_id, agent_name)
     if found is None:
         return None

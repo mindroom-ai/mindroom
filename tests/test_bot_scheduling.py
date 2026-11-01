@@ -1095,7 +1095,10 @@ class TestCommandHandling:
             make_test_turn(
                 room,
                 event,
-                facts=replace(bot._ingress_validator.classify(event), source_kind=SCHEDULED_SOURCE_KIND),
+                facts=replace(
+                    bot._ingress_validator.classify(event, room_id=room.room_id),
+                    source_kind=SCHEDULED_SOURCE_KIND,
+                ),
                 handled_turn=TurnRecord.create([event.event_id]),
             ),
         )
@@ -1153,7 +1156,7 @@ class TestCommandHandling:
             },
         )
 
-        facts = bot._ingress_validator.classify(event)
+        facts = bot._ingress_validator.classify(event, room_id=room.room_id)
         passed = await bot._turn_ingress._precheck_dispatch_event(room, event, facts)
 
         assert passed is True

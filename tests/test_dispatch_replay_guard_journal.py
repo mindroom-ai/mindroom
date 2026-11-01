@@ -152,7 +152,7 @@ async def _guard(
     return await has_newer_unresponded_journal_thread_event(
         room_id=ROOM,
         event=resolved_event,
-        requester_user_id=ALICE,
+        run_identity=(ALICE, None),
         thread_id=thread_id,
         may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
         pending_turns=pending_turns,  # type: ignore[arg-type]
@@ -198,7 +198,7 @@ async def test_history_and_journal_share_requester_turn_eligibility(
     )
     from_history = await has_newer_unresponded_in_thread(
         _older_turn(),
-        ALICE,
+        (ALICE, None),
         [visible],
         may_be_superseded_by_newer_requester_turn=True,
         classify=_classify,

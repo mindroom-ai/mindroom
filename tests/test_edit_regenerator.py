@@ -1135,6 +1135,33 @@ async def test_edit_from_non_owning_requester_is_ignored(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_an_edit_another_sender_made_for_the_requester_is_ignored(tmp_path: Path) -> None:
+    """Another sender's edit that runs for the requester, as in a contact room, never revises the requester's message."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    counterparty = "@counterparty:example.org"
+    event, event_info = _edit_event(sender=counterparty)
+
+    with capture_logs() as logs:
+        handed_off = await harness.regenerator.handle_message_edit(
+            harness.room,
+            event,
+            event_info,
+            make_ingress_facts(
+                event.sender,
+                source_kind=EDIT_SOURCE_KIND,
+                requester_user_id=USER_ID,
+                acting_requester_id=USER_ID,
+            ),
+        )
+    await asyncio.gather(*harness.regenerations)
+
+    assert handed_off is None
+    assert [log["reason"] for log in logs if log["event"] == "edit_not_regenerated"] == ["edited_by_another_sender"]
+    _assert_no_regeneration(harness)
+    harness.resolver.build_envelope.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_suppressed_regeneration_needs_no_caller_owned_backfill(tmp_path: Path) -> None:
     """TurnStore repairs during load, so suppression needs no regenerator backfill branch."""
     record = _turn_record()

@@ -142,6 +142,16 @@ class EditRegenerator:
             return None
         original_event_id = event_info.original_event_id
         requester_user_id = facts.lane_requester_id
+        # Another sender's edit that runs for the requester, as anyone's in a contact room does, is not the
+        # requester revising their own message, even when it names one.
+        if facts.acts_for_requester:
+            logger.info(
+                "edit_not_regenerated",
+                room_id=room.room_id,
+                source_event_id=original_event_id,
+                reason="edited_by_another_sender",
+            )
+            return None
 
         # Every decision below is taken from the record's own conversation target, never from the thread the
         # edit names.

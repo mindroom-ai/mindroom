@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 
 _USER_RELAY_SOURCE_KINDS: frozenset[str] = frozenset({TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND})
 
+# Who a turn runs as, plus the sender that stays its speaker when it wrote for that requester.
+type RunIdentity = tuple[str, str | None]
+
 
 @dataclass(frozen=True, slots=True)
 class IngressFacts:
@@ -63,6 +66,11 @@ class IngressFacts:
     def acts_for_requester(self) -> bool:
         """Return whether the turn runs for a requester other than the sender, so the sender stays its speaker."""
         return self.acting_requester_id is not None
+
+    @property
+    def run_identity(self) -> RunIdentity:
+        """Return who the turn runs as, plus its speaker when the sender wrote it for that requester."""
+        return self.run_requester_id, self.physical_sender if self.acts_for_requester else None
 
     @property
     def sender_is_managed(self) -> bool:

@@ -107,7 +107,7 @@ class IngressValidator:
         event: _InboundEvent,
         *,
         source_kind: str | None = None,
-        room_id: str | None = None,
+        room_id: str,
     ) -> IngressFacts:
         """Classify one inbound event's provenance once, before precheck.
 
@@ -123,7 +123,7 @@ class IngressValidator:
         source: object,
         *,
         source_kind: str | None = None,
-        room_id: str | None = None,
+        room_id: str,
     ) -> IngressFacts:
         """Classify provenance from a sender and a Matrix event source, live or stored in history."""
         source_dict = cast("dict[str, Any]", source) if isinstance(source, dict) else {}
@@ -154,9 +154,10 @@ class IngressValidator:
         )
         lane_requester_id = self._resolve_alias(promoted_requester or sender)
         acting_requester_id = self._acting_requester_id(sender_entity_name, trusted_content, content_source_kind)
+        # The agent's own messages never start a contact turn, so its replies written for the owner stay its echo.
         contact = (
             None
-            if room_id is None
+            if sender == self.deps.matrix_id.full_id
             else contact_admission(
                 self.deps.runtime.config,
                 self.deps.runtime_paths,

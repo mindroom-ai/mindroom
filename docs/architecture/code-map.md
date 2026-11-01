@@ -139,6 +139,7 @@ Matrix sync callback
 | `config/contacts.py` | Opt-in `contacts` agent settings (rules, default tools, judge) and the control tools a contact never offers |
 | `contacts/store.py` | The contact records and their primary-only store: cached reads, locked read-modify-write, the lookup of the active contact a room belongs to, and the contact rooms an agent keeps across restarts |
 | `contacts/parties.py` | Who can be a party of a contact (personal agents with `contacts`, and people by canonical Matrix ID), target resolution, the Matrix accounts that speak for a party, and a user's personal room |
+| `contacts/admission.py` | Who a turn of an agent party in its contact room runs as: its owner when the counterparty or the owner sent it, and nobody for anyone else |
 | `contacts/flow.py` | The contact operations behind the `contacts` tools: request (with the notice in the target owner's personal room), accept (creating the contact room, seating both parties, and starting the requesting agent's turn), decline, update, remove, and list, each checked against the requester's ownership |
 | `custom_tools/contacts.py` | `ContactsTools`: the toolkit injected for agents with `contacts`, with confirmation cards on requests, acceptances, and rule changes |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |

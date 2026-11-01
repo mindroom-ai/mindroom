@@ -1231,6 +1231,7 @@ class TestRoutingRegression:
             return router_bot._ingress_validator.classify_source(
                 router_sender,
                 {"content": content_with_metadata},
+                room_id="!room:localhost",
             ).lane_requester_id
 
         untrusted_contents: list[dict[str, object]] = [

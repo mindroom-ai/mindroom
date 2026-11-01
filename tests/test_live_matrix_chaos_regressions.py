@@ -127,7 +127,7 @@ async def _observe_guard_decision(
     if use_history:
         skipped = await has_newer_unresponded_in_thread(
             prepared,
-            event["sender"],
+            (event["sender"], None),
             [
                 ResolvedVisibleMessage(
                     newer["sender"],
@@ -149,7 +149,7 @@ async def _observe_guard_decision(
         skipped = await has_newer_unresponded_journal_thread_event(
             room_id=event["room_id"],
             event=prepared,
-            requester_user_id=event["sender"],
+            run_identity=(event["sender"], None),
             thread_id="$root",
             may_be_superseded_by_newer_requester_turn=True,
             pending_turns=principal,
@@ -1378,7 +1378,7 @@ async def test_supersession_forward_chain_requires_every_exact_link(tmp_path: Pa
     ).bind(agent="general", logger="mindroom.bot")
     assert await has_newer_unresponded_in_thread(
         PreparedIngress("@user:example", "$new", "new", case.events["$new"], server_timestamp=20),
-        "@user:example",
+        ("@user:example", None),
         [
             ResolvedVisibleMessage(
                 "@user:example",

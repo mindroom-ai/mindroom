@@ -24,6 +24,7 @@ from mindroom.constants import (
     TOOL_TRACE_CONTENT_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
 )
+from mindroom.contacts.store import contacts_path
 from mindroom.dispatch_handoff import dispatch_prompt_for_event
 from mindroom.dispatch_source import (
     EDIT_SOURCE_KIND,
@@ -105,15 +106,17 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     }
 
-    router_relay = validator.classify_source(ids["router"].full_id, {"content": content})
+    router_relay = validator.classify_source(ids["router"].full_id, {"content": content}, room_id="!room:localhost")
     assert router_relay.lane_requester_id == canonical_human
     # A router relay of a human's message reads only the context the relay names.
     assert router_relay.router_relay
     assert router_relay.original_sender_is_human
     assert router_relay.trusted_user_relay
-    assert validator.classify_source("@untrusted:localhost", {"content": content}).lane_requester_id == (
-        "@untrusted:localhost"
-    )
+    assert validator.classify_source(
+        "@untrusted:localhost",
+        {"content": content},
+        room_id="!room:localhost",
+    ).lane_requester_id == ("@untrusted:localhost")
     agent_id = ids["test_agent"]
     event = nio.RoomMessageText.from_dict(
         {
@@ -131,7 +134,7 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
     )
     room = nio.MatrixRoom("!room:localhost", agent_id.full_id)
 
-    facts = validator.classify(event)
+    facts = validator.classify(event, room_id=room.room_id)
     assert facts.lane_requester_id == canonical_human
     assert await validator.precheck_event(room, event, facts)
     # The router's visible transcript of human or bot-account audio is display-only history.
@@ -142,12 +145,15 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
             VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
         }
         assert is_router_voice_echo(
-            validator.classify_source(ids["router"].full_id, {"content": echo_content}),
+            validator.classify_source(ids["router"].full_id, {"content": echo_content}, room_id=room.room_id),
             echo_content,
         )
 
     for non_human_sender in non_human_senders:
-        assert validator.classify_source(non_human_sender, None).lane_requester_id == non_human_sender
+        assert (
+            validator.classify_source(non_human_sender, None, room_id=room.room_id).lane_requester_id
+            == non_human_sender
+        )
 
     self_echo = nio.RoomMessageText.from_dict(
         {
@@ -157,7 +163,7 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
             "content": {"msgtype": "m.text", "body": "self echo"},
         },
     )
-    assert not await validator.precheck_event(room, self_echo, validator.classify(self_echo))
+    assert not await validator.precheck_event(room, self_echo, validator.classify(self_echo, room_id=room.room_id))
 
     # A relayed or scheduled bot account stays the requester its access applies to; the internal account never does.
     for non_human_sender, expected_requester in (
@@ -169,6 +175,7 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
                 validator.classify_source(
                     agent_id.full_id,
                     {"content": {ORIGINAL_SENDER_KEY: non_human_sender, SOURCE_KIND_KEY: source_kind}},
+                    room_id=room.room_id,
                 ).lane_requester_id
                 == expected_requester
             )
@@ -176,6 +183,7 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
         router_relay = validator.classify_source(
             ids["router"].full_id,
             {"content": {ORIGINAL_SENDER_KEY: non_human_sender, SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND}},
+            room_id=room.room_id,
         )
         assert router_relay.router_relay is (non_human_sender == "@bridge_bot:localhost")
         assert not router_relay.original_sender_is_human
@@ -253,8 +261,8 @@ def test_only_a_managed_sender_supplies_hook_metadata(tmp_path: Path) -> None:
     validator, ids = _validator(tmp_path)
     hook_content = {HOOK_SOURCE_KEY: "automation/dreaming", HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2}
 
-    person = validator.classify(_text("@user:localhost", "hello", **hook_content))
-    entity = validator.classify(_text(ids["research"].full_id, "hello", **hook_content))
+    person = validator.classify(_text("@user:localhost", "hello", **hook_content), room_id="!room:localhost")
+    entity = validator.classify(_text(ids["research"].full_id, "hello", **hook_content), room_id="!room:localhost")
 
     assert (person.hook_source, person.message_received_depth) == (None, 0)
     assert (entity.hook_source, entity.message_received_depth) == ("automation/dreaming", 2)
@@ -268,6 +276,7 @@ def test_classification_keeps_the_four_identities_apart(tmp_path: Path) -> None:
 
     agent_reply = validator.classify(
         _text(research, "@general over to you", **{ACTING_REQUESTER_KEY: "@user:localhost"}),
+        room_id="!room:localhost",
     )
     assert (agent_reply.physical_sender, agent_reply.lane_requester_id, agent_reply.run_requester_id) == (
         research,
@@ -285,6 +294,7 @@ def test_classification_keeps_the_four_identities_apart(tmp_path: Path) -> None:
             "@general help",
             **{ORIGINAL_SENDER_KEY: "@user:localhost", SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND},
         ),
+        room_id="!room:localhost",
     )
     assert (human_relay.physical_sender, human_relay.run_requester_id) == (router, "@user:localhost")
     assert human_relay.router_relay
@@ -294,14 +304,16 @@ def test_classification_keeps_the_four_identities_apart(tmp_path: Path) -> None:
     assert human_relay.origin.speaker_id is None
 
 
-def test_a_room_that_is_no_contact_room_changes_no_identity(tmp_path: Path) -> None:
-    """Only an agent party's contact room changes who a turn runs as; every other room classifies as before."""
-    validator, ids = _validator(tmp_path)
-    for event in (
-        _text("@user:localhost", "hello"),
-        _text(ids["research"].full_id, "@general over to you", **{ACTING_REQUESTER_KEY: "@user:localhost"}),
-    ):
-        assert validator.classify(event, room_id="!room:localhost") == validator.classify(event)
+def test_an_agent_that_cannot_be_a_contact_party_never_reads_the_contacts_store(tmp_path: Path) -> None:
+    """Only a personal agent with contacts reads the store, so an unreadable store leaves every other agent's ingress."""
+    validator, _ids = _validator(tmp_path)
+    store = contacts_path(validator.deps.runtime_paths)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text("not json", encoding="utf-8")
+
+    facts = validator.classify(_text("@user:localhost", "hello"), room_id="!room:localhost")
+
+    assert (facts.run_requester_id, facts.contact_id, facts.contact_refused) == ("@user:localhost", None, False)
 
 
 def _entity_final_reply_with_tool_markers(validator: IngressValidator, sender: str) -> nio.RoomMessageFormatted:
@@ -404,24 +416,30 @@ def test_command_rule_per_source_kind(tmp_path: Path, case: str, expected: str) 
     }
     if case in automation_kinds:
         content: dict[str, object] = {SOURCE_KIND_KEY: automation_kinds[case], ORIGINAL_SENDER_KEY: human}
-        facts = validator.classify(_text(ids["router"].full_id, command_text, **content))
+        facts = validator.classify(_text(ids["router"].full_id, command_text, **content), room_id="!room:localhost")
     elif case in explicit_kinds:
         source_kind, command_text = explicit_kinds[case]
-        facts = validator.classify(_text(human, command_text), source_kind=source_kind)
+        facts = validator.classify(_text(human, command_text), source_kind=source_kind, room_id="!room:localhost")
     elif case == "agent-written message":
-        facts = validator.classify(_text(research, command_text, **{ACTING_REQUESTER_KEY: human}))
+        facts = validator.classify(
+            _text(research, command_text, **{ACTING_REQUESTER_KEY: human}),
+            room_id="!room:localhost",
+        )
     elif case == "sidecar text":
         # A long text sent as a file is text; its full text arrives with normalization.
-        facts = validator.classify(_sidecar_text(human))
+        facts = validator.classify(_sidecar_text(human), room_id="!room:localhost")
     elif case == "finished reply with tool markers":
         final_reply = _entity_final_reply_with_tool_markers(validator, research)
-        facts = validator.classify(final_reply)
+        facts = validator.classify(final_reply, room_id="!room:localhost")
         assert final_reply.body.startswith("🔧")
         command_text = dispatch_prompt_for_event(final_reply)
     elif case == "untrusted scheduled claim":
-        facts = validator.classify(_text(human, command_text, **{SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND}))
+        facts = validator.classify(
+            _text(human, command_text, **{SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND}),
+            room_id="!room:localhost",
+        )
     else:
-        facts = validator.classify(_text(human, command_text))
+        facts = validator.classify(_text(human, command_text), room_id="!room:localhost")
         source_count = 2 if case == "batch of two messages" else 1
 
     command = command_for(facts, command_text, source_count)
@@ -436,9 +454,14 @@ def test_transport_kind_outranks_content_and_the_router_acts_for_no_one(tmp_path
     validator, ids = _validator(tmp_path)
     content = {SOURCE_KIND_KEY: HOOK_SOURCE_KIND, ACTING_REQUESTER_KEY: "@user:localhost"}
 
-    image = validator.classify(_text(ids["research"].full_id, "chart", **content), source_kind=IMAGE_SOURCE_KIND)
+    image = validator.classify(
+        _text(ids["research"].full_id, "chart", **content),
+        source_kind=IMAGE_SOURCE_KIND,
+        room_id="!room:localhost",
+    )
     router = validator.classify(
         _text(ids["router"].full_id, "@general over to you", **{ACTING_REQUESTER_KEY: "@user:localhost"}),
+        room_id="!room:localhost",
     )
 
     assert image.source_kind == IMAGE_SOURCE_KIND

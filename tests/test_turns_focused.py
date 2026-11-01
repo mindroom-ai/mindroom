@@ -1815,7 +1815,7 @@ async def test_command_dispatch_keeps_the_alias_its_ingress_claimed(
         await harness.ingress._dispatch_command_control_input(
             room=room,
             dispatch_event=prepared,
-            facts=harness.ingress.deps.ingress.classify(prepared),
+            facts=harness.ingress.deps.ingress.classify(prepared, room_id=room.room_id),
             coalescing_thread_id=None,
             ticket=ticket,
         )
@@ -2345,7 +2345,11 @@ async def test_managed_follow_up_cannot_settle_human_source_queued_before_it(
             room,
             source_kind=MEDIA_SOURCE_KIND,
             active_follow_up=True,
-            facts=harness.ingress.deps.ingress.classify(managed_event, source_kind=MEDIA_SOURCE_KIND),
+            facts=harness.ingress.deps.ingress.classify(
+                managed_event,
+                source_kind=MEDIA_SOURCE_KIND,
+                room_id=room.room_id,
+            ),
         ),
     )
     reader = harness.ingress.deps.resolver.deps.conversation_reader
@@ -3356,7 +3360,7 @@ async def test_agent_reply_for_a_human_does_not_share_that_humans_follow_up_batc
         source_kind=MESSAGE_SOURCE_KIND,
         active_follow_up=True,
         payload_trusted=True,
-        facts=harness.ingress.deps.ingress.classify(agent_event),
+        facts=harness.ingress.deps.ingress.classify(agent_event, room_id=room.room_id),
     )
     assert agent_pending.facts.acts_for_requester
     pending_events = (
@@ -3913,7 +3917,12 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
     memberships.invalidate(config, reason="uncertain_sync_response")
     validator = harness.ingress.deps.ingress
     with pytest.raises(ReplyMembershipPendingError):
-        await validator.precheck_event(room, event, validator.classify(event), is_edit=kind == "edit")
+        await validator.precheck_event(
+            room,
+            event,
+            validator.classify(event, room_id=room.room_id),
+            is_edit=kind == "edit",
+        )
     dispatcher = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
@@ -3934,7 +3943,12 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
     assert await harness.turn_store.get_turn_record(event.event_id) is None
     assert harness.runner.requests == []
     await memberships.refresh(config, runtime_paths_for(config), client)
-    assert await validator.precheck_event(room, event, validator.classify(event), is_edit=kind == "edit")
+    assert await validator.precheck_event(
+        room,
+        event,
+        validator.classify(event, room_id=room.room_id),
+        is_edit=kind == "edit",
+    )
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
     await memberships.refresh(config, runtime_paths_for(config), client)
     room.remove_member(_SENDER)  # This bot's own sync sees the departure too.
@@ -3981,7 +3995,9 @@ async def test_first_message_after_joining_waits_for_the_router_to_apply_the_joi
         assert memberships.apply_member_event(config, room.room_id, join, control_user_id=router_id)
 
     # The check settles in the same callback once the router catches up, instead of failing it into a journal retry.
-    precheck = asyncio.create_task(validator.precheck_event(room, event, validator.classify(event)))
+    precheck = asyncio.create_task(
+        validator.precheck_event(room, event, validator.classify(event, room_id=room.room_id)),
+    )
     await asyncio.sleep(0)
     assert not precheck.done()
     router_applies_join("@someone_else:localhost")  # a publication that still lacks the sender
@@ -4012,7 +4028,9 @@ async def test_message_checked_during_a_membership_refresh_passes_when_the_refre
     memberships.invalidate(config, reason="uncertain_sync_response")
     validator = harness.ingress.deps.ingress
 
-    precheck = asyncio.create_task(validator.precheck_event(room, event, validator.classify(event)))
+    precheck = asyncio.create_task(
+        validator.precheck_event(room, event, validator.classify(event, room_id=room.room_id)),
+    )
     await asyncio.sleep(0)
     assert not precheck.done()
     await memberships.refresh(config, runtime_paths_for(config), client)
@@ -4036,13 +4054,13 @@ async def test_departed_sender_is_denied_once_this_agent_sees_the_leave(tmp_path
     validator = harness.ingress.deps.ingress
 
     with pytest.raises(ReplyMembershipPendingError):
-        await validator.precheck_event(room, event, validator.classify(event))
+        await validator.precheck_event(room, event, validator.classify(event, room_id=room.room_id))
     assert await harness.turn_store.get_turn_record(event.event_id) is None
     assert harness.runner.requests == []
 
     room.remove_member(_SENDER)  # this agent's sync delivers the leave
 
-    assert not await validator.precheck_event(room, event, validator.classify(event))
+    assert not await validator.precheck_event(room, event, validator.classify(event, room_id=room.room_id))
     assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id)
     assert harness.runner.requests == []
 

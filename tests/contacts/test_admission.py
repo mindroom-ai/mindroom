@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,10 +14,13 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.constants import ACTING_REQUESTER_KEY, ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
 from mindroom.contacts.admission import ContactAdmission, contact_admission
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
+from mindroom.dispatch_handoff import PreparedIngress
+from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import current_entity_id
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import TurnPolicy, TurnPolicyDeps
 from tests.conftest import test_runtime_paths
@@ -168,12 +172,12 @@ def _event(sender: str, **content: object) -> nio.RoomMessageText:
     )
 
 
-def _relay(paths: RuntimePaths, original_sender: str) -> dict[str, object]:
-    """Return the content `matrix_message` sends to Bob's agent for ``original_sender``, its turn's requester."""
-    bob = _agent(paths, "mind_bob")
+def _relay(paths: RuntimePaths, original_sender: str, recipient: str = "mind_bob") -> dict[str, object]:
+    """Return the content `matrix_message` sends to ``recipient`` for ``original_sender``, its turn's requester."""
+    recipient_id = _agent(paths, recipient)
     return {
-        "body": f"{bob} Are you free on Friday?",
-        "m.mentions": {"user_ids": [bob]},
+        "body": f"{recipient_id} Are you free on Friday?",
+        "m.mentions": {"user_ids": [recipient_id]},
         ORIGINAL_SENDER_KEY: original_sender,
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     }
@@ -205,8 +209,8 @@ async def test_a_counterparty_relay_runs_as_the_owner_and_keeps_its_speaker(tmp_
     assert origin.intent is TurnIntent.TRUSTED_INTERNAL_RELAY
     assert not origin.blocks_unmentioned_managed_sender
     assert await _precheck(validator, event, facts)
-    # The same message classified without its room runs as the other side's owner, whom Bob's agent refuses.
-    outside = validator.classify(event)
+    # The same message in any other room runs as the other side's owner, whom Bob's agent refuses.
+    outside = validator.classify(event, room_id=OTHER_ROOM)
     assert (outside.run_requester_id, outside.contact_id) == (OWNER, None)
     assert not await _precheck(validator, event, outside)
 
@@ -278,15 +282,23 @@ async def test_anyone_else_in_a_contact_room_starts_nothing(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_the_agents_own_messages_in_its_contact_room_stay_dropped(tmp_path: Path) -> None:
-    """An agent's own message in its contact room is its echo, never a refused sender."""
+    """An agent's own messages in its contact room are its echo, its replies written for its owner included."""
     config, paths = _setup(tmp_path)
     _contact(paths)
     validator = _validator(config, paths)
-    event = _event(_agent(paths, "mind_bob"), **{SKIP_MENTIONS_KEY: True})
+    bob_agent = _agent(paths, "mind_bob")
+    events = [
+        _event(bob_agent, **{SKIP_MENTIONS_KEY: True}),
+        # Every reply of a turn run as the owner names the owner it was written for.
+        _event(bob_agent, **{ACTING_REQUESTER_KEY: CO_OWNER}),
+    ]
 
-    with capture_logs() as logs:
-        assert not await _precheck(validator, event, validator.classify(event, room_id=CONTACT_ROOM))
-    assert logs == []
+    for event in events:
+        facts = validator.classify(event, room_id=CONTACT_ROOM)
+        assert (facts.lane_requester_id, facts.contact_id) == (bob_agent, None)
+        with capture_logs() as logs:
+            assert not await _precheck(validator, event, facts)
+        assert logs == []
     validator.deps.turn_store.record_turn.assert_not_awaited()
 
 
@@ -301,8 +313,57 @@ async def test_after_removal_the_room_is_an_ordinary_room_again(tmp_path: Path) 
 
     facts = validator.classify(event, room_id=CONTACT_ROOM)
 
-    assert facts == validator.classify(event)
+    assert facts == validator.classify(event, room_id=OTHER_ROOM)
     assert (facts.run_requester_id, facts.contact_id) == (OWNER, None)
     with capture_logs() as logs:
         assert not await _precheck(validator, event, facts)
     assert "contact_room_sender_refused" not in [log["event"] for log in logs]
+
+
+def _later(sender: str, event_id: str, **content: object) -> ResolvedVisibleMessage:
+    """Return a message the thread history shows after the turn under question."""
+    return ResolvedVisibleMessage(
+        sender=sender,
+        body="Friday works.",
+        timestamp=2_000,
+        event_id=event_id,
+        content={"msgtype": "m.text", "body": "Friday works.", **content},
+        thread_id=None,
+        latest_event_id=event_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_contact_turn_is_superseded_only_by_its_own_speaker(tmp_path: Path) -> None:
+    """Every sender in a contact room runs as the owner, yet only a newer message of the same speaker supersedes one."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    validator = _validator(config, paths)
+    alice_agent = _agent(paths, "mind_alice")
+    own_reply = _later(_agent(paths, "mind_bob"), "$own-reply", **{ACTING_REQUESTER_KEY: CO_OWNER})
+    own_relay = _later(_agent(paths, "mind_bob"), "$own-relay", **_relay(paths, CO_OWNER, recipient="mind_alice"))
+
+    async def superseded(turn_sender: str, later: list[ResolvedVisibleMessage]) -> bool:
+        turn = PreparedIngress(
+            sender=turn_sender,
+            event_id="$turn",
+            body="Are you free on Friday?",
+            source={"content": {"msgtype": "m.text", "body": "Are you free on Friday?"}},
+            server_timestamp=1_000,
+        )
+        facts = validator.classify(turn, room_id=CONTACT_ROOM)
+        return await has_newer_unresponded_in_thread(
+            turn,
+            facts.run_identity,
+            later,
+            may_be_superseded_by_newer_requester_turn=True,
+            classify=partial(validator.classify_source, room_id=CONTACT_ROOM),
+            is_handled=AsyncMock(return_value=frozenset()),
+            logger=get_logger(__name__),
+        )
+
+    others = [own_reply, own_relay, _later(CO_OWNER, "$bob"), _later(alice_agent, "$relay")]
+    assert not await superseded(OWNER, others)
+    assert await superseded(OWNER, [_later(OWNER, "$alice")])
+    assert not await superseded(CO_OWNER, [own_reply, _later(OWNER, "$alice"), _later(alice_agent, "$relay")])
+    assert await superseded(CO_OWNER, [_later(CO_OWNER, "$bob")])

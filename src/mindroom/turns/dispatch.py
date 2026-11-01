@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from mindroom.teams.spec import TeamMode
     from mindroom.turn_policy import DispatchPlan, TurnPolicy
     from mindroom.turn_store import TurnClaim, TurnStore
+    from mindroom.turns.facts import RunIdentity
     from mindroom.turns.interactive_selection import InteractiveSelections
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 
@@ -415,7 +416,7 @@ class TurnDispatcher:
             skips_turn = await has_newer_unresponded_journal_thread_event(
                 room_id=room.room_id,
                 event=event,
-                requester_user_id=requester_user_id,
+                run_identity=prepared.turn.facts.run_identity,
                 thread_id=thread_id,
                 may_be_superseded_by_newer_requester_turn=may_be_superseded,
                 pending_turns=self.deps.pending_turns,
@@ -435,7 +436,7 @@ class TurnDispatcher:
             skips_turn = await self._has_newer_unresponded_in_thread(
                 room.room_id,
                 event,
-                requester_user_id,
+                prepared.turn.facts.run_identity,
                 thread_history,
                 may_be_superseded_by_newer_requester_turn=may_be_superseded,
             )
@@ -585,15 +586,15 @@ class TurnDispatcher:
         self,
         room_id: str,
         event: PreparedIngress,
-        requester_user_id: str,
+        run_identity: RunIdentity,
         thread_history: Sequence[ResolvedVisibleMessage],
         *,
         may_be_superseded_by_newer_requester_turn: bool,
     ) -> bool:
-        """Return True when a newer unresponded message from the same requester exists."""
+        """Return True when a newer unresponded message of the same run identity exists."""
         return await has_newer_unresponded_in_thread(
             event,
-            requester_user_id,
+            run_identity,
             thread_history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
             classify=partial(self.deps.ingress.classify_source, room_id=room_id),

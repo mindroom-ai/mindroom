@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_store import TurnClaim
-    from mindroom.turns.facts import IngressFacts
+    from mindroom.turns.facts import IngressFacts, RunIdentity
     from mindroom.turns.interactive_selection import InteractiveSelectionDispatch
 
 
@@ -346,14 +346,13 @@ _SOURCE_KIND_PRIORITY: dict[str, int] = {
 }
 
 
-def pending_event_run_identity(pending_event: PendingEvent) -> tuple[str, str | None]:
+def pending_event_run_identity(pending_event: PendingEvent) -> RunIdentity:
     """Return who one queued event runs as, plus its author when an entity wrote it for that requester.
 
     A batch runs as one requester and takes its origin from its latest event, so a
     reply an entity wrote for a human never shares a batch with that human's messages.
     """
-    facts = pending_event.facts
-    return facts.run_requester_id, facts.physical_sender if facts.acts_for_requester else None
+    return pending_event.facts.run_identity
 
 
 def pending_event_addressing(pending_event: PendingEvent) -> bool | None:

@@ -1010,7 +1010,7 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
             await bot._turn_ingress._enqueue_for_dispatch(
                 streaming_event,
                 room,
-                facts=bot._ingress_validator.classify(streaming_event),
+                facts=bot._ingress_validator.classify(streaming_event, room_id=room.room_id),
                 ticket=ticket,
                 coalescing_key=CoalescingKey(
                     room.room_id,
@@ -1450,7 +1450,7 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
         await bot._turn_ingress._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=echo_event,
-            facts=bot._ingress_validator.classify(echo_event),
+            facts=bot._ingress_validator.classify(echo_event, room_id=room.room_id),
             ticket=ticket,
             coalescing_thread_id="$thread_root",
         )
@@ -1488,7 +1488,7 @@ async def test_forged_visible_voice_echo_marker_still_dispatches(mock_home_bot: 
         await bot._turn_ingress._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=forged_event,
-            facts=bot._ingress_validator.classify(forged_event),
+            facts=bot._ingress_validator.classify(forged_event, room_id=room.room_id),
             ticket=ticket,
             coalescing_thread_id="$thread_root",
         )
