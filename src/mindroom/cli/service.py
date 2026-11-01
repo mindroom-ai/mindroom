@@ -198,6 +198,8 @@ def _install_and_start_service(manager: ServiceManager, runtime_paths: RuntimePa
     """
     from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
 
+    # The service's environment adds nothing `_build_auth_settings` reads, so `.env` alone decides; as everywhere in
+    # this process, `${NAME}` references in it expand from this shell.
     dashboard_requires_credential(replace(runtime_paths, process_env={}))
     # Without a config there is no service to install, and no `.env` to save keys for.
     if runtime_paths.config_path.exists() and (shell_keys := _shell_service_keys(runtime_paths)):
