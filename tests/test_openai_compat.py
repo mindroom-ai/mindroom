@@ -4565,7 +4565,6 @@ class TestTeamCompletion:
             config=config,
             execution_identity=None,
         )
-        assert scope_context is not None
         team_execution = _prepared_team_execution_context(
             final_prompt="Previous team reply\n\nAnalyze this.",
             messages=[
@@ -4635,7 +4634,6 @@ class TestTeamCompletion:
             team_name="coord_team",
         )
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-        assert scope_context is not None
         built = openai_compat._build_team(
             "coord_team",
             config,
@@ -4681,7 +4679,6 @@ class TestTeamCompletion:
             team_name="super_team",
         )
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-        assert scope_context is not None
         built = openai_compat._build_team(
             "super_team",
             team_config,
@@ -4723,7 +4720,6 @@ class TestTeamCompletion:
             execution_identity=_team_identity("coord_team", runtime_paths),
             team_name="coord_team",
         )
-        assert scope_context is not None
         with (
             patch("mindroom.api.openai_compat.resolve_exact_team_members", return_value=members),
             patch("mindroom.api.openai_compat.build_team_spec", side_effect=RuntimeError("team build failed")),
@@ -4792,7 +4788,6 @@ class TestTeamCompletion:
                 execution_identity=_team_identity("team_with_kb", runtime_paths),
                 team_name="team_with_kb",
             )
-            assert scope_context is not None
             openai_compat._build_team(
                 "team_with_kb",
                 config,

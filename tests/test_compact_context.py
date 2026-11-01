@@ -137,15 +137,13 @@ def _load_scope_context(
     config: Config,
     execution_identity: ToolExecutionIdentity,
 ) -> ScopeSessionContext:
-    scope_context = load_scope_session(
+    return load_scope_session(
         scope=scope,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
     )
-    assert scope_context is not None
-    return scope_context
 
 
 @pytest.mark.asyncio
