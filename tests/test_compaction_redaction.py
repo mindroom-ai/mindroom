@@ -396,6 +396,20 @@ async def test_redaction_cleans_the_agent_runs_of_a_conversation_started_under_i
     assert [run.run_id for run in _stored(storage).runs] == ["old"]
 
 
+def test_rollback_forgets_seen_ids_of_the_removed_runs(storage: ConversationStore) -> None:
+    """Messages whose runs a cut removed become unseen, so thread history supplies them again."""
+    session = _seed(storage, ["r1", "r2", "r3"])
+    compact_runs(storage, session, ["r1"], "summary of r1")
+    compact_runs(storage, session, ["r2"], "summary of r1 and r2")
+
+    assert _redact(storage, session, "$r2")
+
+    stored = _stored(storage)
+    assert stored.runs == []
+    assert _summary(stored) == "summary of r1"
+    assert read_scope_seen_event_ids(storage, stored) == {"$r1"}
+
+
 def test_legacy_provenance_wins_over_a_later_folded_hit(
     open_legacy: Callable[[ConversationSession], ConversationStore],
 ) -> None:
