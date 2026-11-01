@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import os
+import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+import tiktoken
 
 import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
@@ -22,6 +24,7 @@ from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowled
 from mindroom.knowledge.read_protocol import DISTANCE_KEY, SearchHit
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.knowledge.vector_store import KnowledgeCollection, StoredRow
+from mindroom.llm.provider import ModelIdentity
 from mindroom.memory import ConversationRef, MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -35,7 +38,9 @@ from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
+from mindroom.token_counting import families
 from mindroom.token_counting.counts import count, count_exact
+from mindroom.token_counting.families import counter_for_model
 from mindroom.tool_system.runtime_context import current_execution_identity, detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -1594,6 +1599,41 @@ async def test_file_backend_entrypoint_within_the_token_cap_costs_no_count(
 
     assert calls == []
     assert len(kept) == min(line_count, 200)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("provider_token_counts")
+async def test_file_backend_entrypoint_fits_the_cap_before_the_vocabulary_loads(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first reply after a start, before o200k_base loads, still asks the provider whether the file fits.
+
+    A quarter token per character puts the file at 420 tokens, under the 500-token cap; the provider counts 840.
+    """
+    lines = _fact_lines(storage_path, config, 40)
+    config.memory.file.max_entrypoint_tokens = 500
+    release = threading.Event()
+    real_get_encoding = tiktoken.get_encoding
+
+    def slow_get_encoding(name: str) -> tiktoken.Encoding:
+        release.wait()
+        return real_get_encoding(name)
+
+    monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
+    monkeypatch.setattr(tiktoken, "get_encoding", slow_get_encoding)
+
+    async def endpoint(text: str) -> int:
+        return len(text) // 2
+
+    counter = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"), count=endpoint)
+    try:
+        kept = await _preloaded(lines, config, counter)
+    finally:
+        release.set()
+
+    assert await endpoint("\n".join(kept)) <= 500 < await endpoint("\n".join(lines))
 
 
 @pytest.mark.asyncio

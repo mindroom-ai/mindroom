@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import PortableReplayEstimator
 
-__all__ = ["counter_for_model", "load_o200k", "openai_model_counter"]
+__all__ = ["counter_for_model", "load_o200k", "openai_model_counter", "start_loading_o200k"]
 
 logger = get_logger(__name__)
 
@@ -72,6 +72,11 @@ def _load(name: str) -> tiktoken.Encoding:
 def load_o200k() -> tiktoken.Encoding:
     """Return the o200k_base encoder, loading it first; this blocks, and the first load may download its vocabulary."""
     return _load(_O200K)
+
+
+def start_loading_o200k() -> None:
+    """Start loading o200k_base in the background, so the first reply after a start counts with it."""
+    _loaded(_O200K)
 
 
 def _load_in_background(name: str) -> None:

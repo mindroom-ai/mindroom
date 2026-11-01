@@ -9,6 +9,7 @@ import stat
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
 from zoneinfo import ZoneInfo
@@ -712,7 +713,8 @@ async def cap_entrypoint(
     max_lines = file_config.max_entrypoint_lines
     # The characters of every line with its newline, as the line costs count them.
     budget = sum(len(line) + 1 for line in entrypoint.lines)
-    file_tokens = (await asyncio.to_thread(count, counter, entrypoint.file_text)).tokens
+    # Before the encoder loads, only the byte count bounds the file.
+    file_tokens = (await asyncio.to_thread(partial(count, counter, entrypoint.file_text, upper_bound=True))).tokens
     if file_tokens > max_tokens:
         file_tokens = await _tokens(counter, entrypoint.file_text)
     if file_tokens <= max_tokens:

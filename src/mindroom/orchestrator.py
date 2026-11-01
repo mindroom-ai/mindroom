@@ -83,6 +83,7 @@ from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
+from mindroom.token_counting.families import start_loading_o200k
 from mindroom.tool_system.plugins import (
     PluginGeneration,
     PluginReloadResult,
@@ -947,6 +948,7 @@ class _MultiAgentOrchestrator:
 
     async def start(self) -> None:
         """Start all agent bots from the config startup loaded and publish readiness state."""
+        start_loading_o200k()
         try:
             await self._start_runtime()
         except asyncio.CancelledError:
