@@ -18,6 +18,7 @@ from mindroom.config.main import Config, config_validation_issues
 from mindroom.config.models import DefaultsConfig, EmbedderConfig, ToolConfigEntry
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.config.voice import SpeechServiceConfig, VoiceSTTConfig
+from mindroom.constants import resolve_runtime_paths
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -299,3 +300,102 @@ def test_one_rule_reports_one_location_and_message_from_either_validator(tmp_pat
     assert config_validation_issues(raised.value) == [
         (("config",), "calls.agents configures multiple agents for room(s): voice (one, two)"),
     ]
+
+
+_OUTSIDE_ALIAS = "#ideas:example.org"
+_FILE_MEMORY_AGENT = {"display_name": "General", "rooms": ["lobby"], "memory_backend": "file"}
+_MODELS = {"default": {"provider": "openai", "id": "test-model"}}
+
+
+@pytest.mark.parametrize(
+    ("authored", "location"),
+    [
+        ({"agents": {"general": {"display_name": "General", "rooms": [_OUTSIDE_ALIAS]}}}, "agents.general.rooms"),
+        (
+            {
+                "agents": {"code": {"display_name": "Code", "rooms": ["lobby"]}},
+                "teams": {
+                    "ops": {"display_name": "Ops", "role": "Work", "agents": ["code"], "rooms": [_OUTSIDE_ALIAS]},
+                },
+            },
+            "teams.ops.rooms",
+        ),
+        (
+            {"agents": {"general": {**_FILE_MEMORY_AGENT, "room_thread_modes": {_OUTSIDE_ALIAS: "room"}}}},
+            "agents.general.room_thread_modes",
+        ),
+        (
+            {
+                "agents": {
+                    "general": {
+                        **_FILE_MEMORY_AGENT,
+                        "automations": [{"name": "prompt_curation", "room": _OUTSIDE_ALIAS}],
+                    },
+                },
+            },
+            "agents.general.automations.prompt_curation.room",
+        ),
+        (
+            {
+                "defaults": {"automations": [{"name": "prompt_curation", "room": _OUTSIDE_ALIAS}]},
+                "agents": {"general": _FILE_MEMORY_AGENT},
+            },
+            "defaults.automations.prompt_curation.room",
+        ),
+    ],
+    ids=["agent-rooms", "team-rooms", "room-thread-modes", "agent-automation", "default-automation"],
+)
+def test_an_alias_of_a_room_mindroom_does_not_manage_fails_naming_where(
+    tmp_path: Path,
+    authored: dict[str, object],
+    location: str,
+) -> None:
+    """An alias no room key owns resolves to no room at runtime, so loading the config names it and the `!` form."""
+    with pytest.raises(ValueError, match="room ID") as raised:
+        Config.validate_with_runtime({**authored, "models": _MODELS}, test_runtime_paths(tmp_path))
+
+    assert config_validation_issues(raised.value) == [
+        (
+            ("config",),
+            "Room aliases must belong to rooms MindRoom creates for a room key; "
+            f"list any other room by its ! room ID: {location} -> {_OUTSIDE_ALIAS}",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("namespace", "alias", "valid"),
+    [
+        ("", "#lobby:localhost", True),
+        ("team1", "#lobby_team1:localhost", True),
+        ("team1", "#lobby:localhost", False),
+        ("", "#lobby:example.org", False),
+    ],
+    ids=["plain", "namespaced", "namespace-missing", "other-server"],
+)
+def test_only_the_exact_alias_mindroom_creates_for_a_room_key_names_that_room(
+    tmp_path: Path,
+    namespace: str,
+    alias: str,
+    *,
+    valid: bool,
+) -> None:
+    """The full alias of a configured room key stays valid; the same localpart on another server or namespace does not."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_paths.config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env={**runtime_paths.process_env, "MINDROOM_NAMESPACE": namespace},
+    )
+    authored = {
+        "models": _MODELS,
+        "agents": {
+            "one": {"display_name": "One", "rooms": ["lobby"]},
+            "two": {"display_name": "Two", "rooms": [alias], "room_thread_modes": {alias: "room"}},
+        },
+    }
+    if valid:
+        assert Config.validate_with_runtime(authored, runtime_paths).agents["two"].rooms == [alias]
+    else:
+        with pytest.raises(ValueError, match=re.escape(f"agents.two.rooms -> {alias}")):
+            Config.validate_with_runtime(authored, runtime_paths)

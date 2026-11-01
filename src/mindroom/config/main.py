@@ -967,6 +967,48 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self
 
+    @model_validator(mode="after")
+    def validate_room_aliases_name_managed_rooms(self, info: ValidationInfo) -> Config:
+        """Reject any room alias but those MindRoom gives its room keys, the only aliases its runtime maps to room IDs."""
+        runtime_paths = _context_runtime_paths(info)
+        if runtime_paths is None:
+            return self
+        domain = self.get_domain(runtime_paths)
+        managed_aliases = {
+            f"#{managed_room_alias_localpart(room_key, runtime_paths=runtime_paths)}:{domain}"
+            for room_key in self.managed_room_keys()
+        }
+        references = [
+            *((f"agents.{name}.rooms", room) for name, agent in self.agents.items() for room in agent.rooms),
+            *((f"teams.{name}.rooms", room) for name, team in self.teams.items() for room in team.rooms),
+            *(
+                (f"agents.{name}.room_thread_modes", room)
+                for name, agent in self.agents.items()
+                for room in agent.room_thread_modes
+            ),
+            *(
+                (f"agents.{name}.automations.{automation.name}.room", automation.room)
+                for name, agent in self.agents.items()
+                for automation in agent.automations or ()
+            ),
+            *(
+                (f"defaults.automations.{automation.name}.room", automation.room)
+                for automation in self.defaults.automations
+            ),
+        ]
+        outside_aliases = sorted(
+            f"{location} -> {room}"
+            for location, room in references
+            if room is not None and room.startswith("#") and room not in managed_aliases
+        )
+        if outside_aliases:
+            msg = (
+                "Room aliases must belong to rooms MindRoom creates for a room key; "
+                "list any other room by its ! room ID: " + ", ".join(outside_aliases)
+            )
+            raise ValueError(msg)
+        return self
+
     def get_domain(self, runtime_paths: RuntimePaths) -> str:
         """Extract the Matrix domain for one explicit runtime context."""
         homeserver = runtime_matrix_homeserver(runtime_paths)
