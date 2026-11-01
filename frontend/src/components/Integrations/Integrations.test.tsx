@@ -1364,6 +1364,33 @@ describe("Integrations", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps the new scope's cards when the previous scope's load finishes last", async () => {
+    const sharedLoad = createDeferred();
+    mockOAuthLoadStatus.mockImplementation(
+      async (_id: string, scope: typeof sharedScope) => {
+        if (scope.agentName === null) await sharedLoad.promise;
+        return { status: "available" };
+      },
+    );
+    useConfigStore.setState(privateAgentState);
+
+    render(<Integrations />);
+
+    await waitFor(() =>
+      expect(mockOAuthLoadStatus).toHaveBeenCalledWith(
+        "google_drive",
+        sharedScope,
+      ),
+    );
+    await selectScope("Private Agent");
+    expect(await screen.findByText("Private Mail")).toBeInTheDocument();
+
+    await act(async () => sharedLoad.resolve());
+
+    expect(screen.getByText("Private Mail")).toBeInTheDocument();
+    expect(screen.queryByText("Weather")).not.toBeInTheDocument();
+  });
+
   it("hides shared-only integrations for isolating worker scopes", async () => {
     useConfigStore.setState(workerScopedAgentState);
 
