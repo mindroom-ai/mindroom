@@ -26,7 +26,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.browser.call_limit import HOST_CALL_TIMEOUT_SECONDS
+from mindroom.browser.call_limit import HOST_CALL_TIMEOUT_SECONDS, HostCallTimeLimitError
 from mindroom.browser.fetch_guard import continue_or_abort_browser_fetch, run_browser_tool_url_check
 from mindroom.browser.profile_locks import clear_stale_singleton_locks
 from mindroom.custom_tools.attachments import resolve_context_attachment_path
@@ -443,7 +443,7 @@ async def _host_call_within_time_limit[T](action: str, call: Awaitable[T]) -> T:
             f"Browser action={action} did not finish within {HOST_CALL_TIMEOUT_SECONDS:g} seconds and was "
             "stopped. If the page stays unresponsive, close its tab with action=close."
         )
-        raise TimeoutError(msg) from None
+        raise HostCallTimeLimitError(msg) from None
 
 
 async def _tab_title(page: Page) -> str | None:
@@ -1289,20 +1289,14 @@ class BrowserTools(Toolkit):
 
     async def _focus_tab(self, profile_name: str, target_id: str) -> dict[str, Any]:
         state = await self._ensure_profile(profile_name)
-        if target_id not in state.tabs or state.tabs[target_id].page.is_closed():
-            msg = f"tab not found: {target_id}"
-            raise ValueError(msg)
-        page = state.tabs[target_id].page
-        if self._worker_display is not None:
-            await page.bring_to_front()
-        state.active_target_id = target_id
+        _, tab = await self._resolve_tab(state, target_id)
         return {
             "action": "focus",
             "profile": profile_name,
             "status": "ok",
             "targetId": target_id,
-            "title": await page.title(),
-            "url": page.url,
+            "title": await tab.page.title(),
+            "url": tab.page.url,
         }
 
     async def _close_tab(self, profile_name: str, target_id: str | None) -> dict[str, Any]:
@@ -1887,6 +1881,10 @@ class BrowserTools(Toolkit):
     ) -> tuple[str, _BrowserTabState]:
         tab = state.tabs.get(target_id or state.active_target_id or "")
         if tab is None or tab.page.is_closed():
+            # A tab the caller named is the one it means to act on, so only a call naming none takes another tab.
+            if target_id is not None:
+                msg = f"tab not found: {target_id}"
+                raise ValueError(msg)
             tab = next((candidate for candidate in state.tabs.values() if not candidate.page.is_closed()), None)
         if tab is None:
             tab = state.tabs[self._register_tab(state, await state.context.new_page())]

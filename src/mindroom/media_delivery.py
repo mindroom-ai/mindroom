@@ -27,9 +27,10 @@ if TYPE_CHECKING:
 
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
-_MAX_PIXELS = 40_000_000
+# Untrusted images decode only in these formats, so Pillow never hands them to an external renderer such as Ghostscript.
+SUPPORTED_IMAGE_FORMATS = ("PNG", "JPEG", "GIF", "WEBP")
+MAX_DECODED_PIXELS = 40_000_000
 _MAX_EDGE = 2048
-_SUPPORTED_FORMATS = {"PNG", "JPEG", "GIF", "WEBP"}
 
 
 def media_error(message: str, *, metadata: dict[str, object]) -> ToolValue:
@@ -66,10 +67,13 @@ def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolValue:  # n
             warnings.simplefilter("error", PILImage.DecompressionBombWarning)
             with PILImage.open(io.BytesIO(data)) as source:
                 original_width, original_height = source.size
-                if source.format not in _SUPPORTED_FORMATS:
+                if source.format not in SUPPORTED_IMAGE_FORMATS:
                     return media_error("Viewing supports PNG, JPEG, GIF and WebP images.", metadata=metadata)
-                if original_width * original_height > _MAX_PIXELS:
-                    return media_error(f"Image exceeds the {_MAX_PIXELS}-pixel decoded limit.", metadata=metadata)
+                if original_width * original_height > MAX_DECODED_PIXELS:
+                    return media_error(
+                        f"Image exceeds the {MAX_DECODED_PIXELS}-pixel decoded limit.",
+                        metadata=metadata,
+                    )
                 animated = source.n_frames > 1 if source.format in {"GIF", "WEBP", "PNG"} else False
                 source.seek(0)
                 oriented = ImageOps.exif_transpose(source)
