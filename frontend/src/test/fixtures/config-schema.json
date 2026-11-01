@@ -881,7 +881,10 @@
             "type": "string"
           },
           "title": "Exclude Toolkits",
-          "type": "array"
+          "type": "array",
+          "x-mindroom": {
+            "reference": "tool"
+          }
         },
         "approval_wait_timeout": {
           "anyOf": [

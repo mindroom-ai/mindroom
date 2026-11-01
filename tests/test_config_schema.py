@@ -156,7 +156,7 @@ def test_every_field_that_lists_tools_offers_the_tool_picker() -> None:
     unhinted = {
         f"{model.__name__}.{name}"
         for model, name, field in _walk_fields()
-        if name.endswith("tools")
+        if name.endswith(("tools", "toolkits"))
         and field.annotation is not bool
         and cast("dict[str, dict[str, object]]", field.json_schema_extra or {}).get(HINT_KEY, {}).get("reference")
         != "tool"
