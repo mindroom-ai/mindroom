@@ -850,8 +850,8 @@ def test_status_names_the_redirect_uri_that_connect_sends(tmp_path: Path) -> Non
     provider = _fake_provider()
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
-        with TestClient(api_app) as client:
-            login_with_api_key(client)
+        # The request comes from another origin than `MINDROOM_PUBLIC_URL`, as a split-origin dashboard's does.
+        with TestClient(api_app, headers=_DASHBOARD_BEARER) as client:
             status = client.get(f"/api/oauth/{provider.id}/status?agent_name=general").json()
             auth_url = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general").json()["auth_url"]
 
