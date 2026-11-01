@@ -3664,6 +3664,94 @@ describe("configStore", () => {
       });
     });
 
+    it("drops the deleted agent's summary model and call entry so the deletion saves", async () => {
+      const agent = (id: string): Agent => ({
+        id,
+        display_name: id,
+        role: "Role",
+        tools: [],
+        skills: [],
+        instructions: [],
+        rooms: ["lobby"],
+      });
+      const config = {
+        agents: {
+          helper: { display_name: "helper", role: "Role", rooms: ["lobby"] },
+          scout: { display_name: "scout", role: "Role", rooms: ["lobby"] },
+        },
+        models: { default: { provider: "ollama", id: "test-model" } },
+        router: { model: "default" },
+        room_thread_summary_models: { helper: "default", lobby: "default" },
+        calls: { enabled: true, agents: { helper: "voice", scout: "voice" } },
+      };
+      useConfigStore.setState({
+        loadedConfig: config as unknown as Config,
+        config: config as unknown as Config,
+        agents: [agent("helper"), agent("scout")],
+      });
+      vi.mocked(fetch).mockResolvedValueOnce(
+        Response.json({ agent_policies: { scout: makeAgentPolicy("scout") } }),
+      );
+
+      useConfigStore.getState().deleteAgent("helper");
+      await waitFor(() => {
+        expect(useConfigStore.getState().agentPoliciesByAgent).toEqual({
+          scout: makeAgentPolicy("scout"),
+        });
+      });
+
+      const payload = await savedPayload();
+      expect(payload.room_thread_summary_models).toEqual({ lobby: "default" });
+      expect(payload.calls).toEqual({
+        enabled: true,
+        agents: { scout: "voice" },
+      });
+    });
+
+    it("keeps a summary model key that also names a room when deleting the agent", () => {
+      const config = {
+        agents: {
+          dev: { display_name: "Dev", role: "Role", rooms: [] },
+          coder: { display_name: "Coder", role: "Role", rooms: ["dev"] },
+        },
+        models: { default: { provider: "ollama", id: "test-model" } },
+        router: { model: "default" },
+        room_thread_summary_models: { dev: "default" },
+      };
+      useConfigStore.setState({
+        loadedConfig: config as unknown as Config,
+        config: config as unknown as Config,
+        agents: [
+          {
+            id: "dev",
+            display_name: "Dev",
+            role: "Role",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+          {
+            id: "coder",
+            display_name: "Coder",
+            role: "Role",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["dev"],
+          },
+        ],
+      });
+
+      useConfigStore.getState().deleteAgent("dev");
+
+      const state = useConfigStore.getState();
+      expect(
+        readConfigRoot(state.config!, "room_thread_summary_models"),
+      ).toEqual({ dev: "default" });
+      expect(state.dirtyRoots).not.toContain("room_thread_summary_models");
+    });
+
     it("refreshes agent policies when deleting an unrelated shared agent", async () => {
       useConfigStore.setState({
         config: {
@@ -3867,6 +3955,39 @@ describe("configStore", () => {
       expect(newTeam.id).toBe("new_team");
       expect(state.selectedTeamId).toBe("new_team");
       expect(state.isDirty).toBe(true);
+    });
+
+    it("drops the deleted team's summary model so the deletion saves", async () => {
+      const config = {
+        agents: {},
+        teams: {
+          crew: { display_name: "Crew", role: "Work", agents: [], rooms: [] },
+        },
+        models: { default: { provider: "ollama", id: "test-model" } },
+        router: { model: "default" },
+        room_thread_summary_models: { crew: "default", lobby: "default" },
+      };
+      useConfigStore.setState({
+        loadedConfig: config as unknown as Config,
+        config: config as unknown as Config,
+        agents: [],
+        teams: [
+          {
+            id: "crew",
+            display_name: "Crew",
+            role: "Work",
+            agents: [],
+            rooms: [],
+            mode: "coordinate",
+          },
+        ],
+      });
+
+      useConfigStore.getState().deleteTeam("crew");
+
+      const payload = await savedPayload();
+      expect(payload.teams).toEqual({});
+      expect(payload.room_thread_summary_models).toEqual({ lobby: "default" });
     });
 
     it("should delete team", () => {

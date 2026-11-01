@@ -24,7 +24,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY, resolve_runtime_paths
-from mindroom.entity_resolution import current_internal_sender_ids, resolve_room_scoped_model_override
+from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import Capabilities, RequestOverrides
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -645,18 +645,6 @@ class TestResolveThreadSummaryModelName:
         result = resolve_thread_summary_model_name(config, rp, "!external:example")
 
         assert result == "qwen"
-
-    def test_raw_room_id_override_requires_explicit_opt_in(self) -> None:
-        """Legacy room model overrides remain scoped to persisted room keys and aliases."""
-        rp = _mock_runtime_paths()
-
-        with (
-            patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id", return_value=None),
-            patch("mindroom.entity_resolution.matrix_state.matrix_state_for_runtime", return_value=MagicMock(rooms={})),
-        ):
-            result = resolve_room_scoped_model_override({"!external:example": "qwen"}, "!external:example", rp)
-
-        assert result is None
 
     def test_falls_back_to_default_model_without_global_summary_model(self) -> None:
         """The resolver should preserve the existing default-model fallback."""

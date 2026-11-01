@@ -205,8 +205,12 @@ class _OAuthProviderNotConfiguredError(OAuthProviderError):
     """Raised when a provider has no usable OAuth client configuration."""
 
 
-class OAuthCallbackRefusedError(OAuthProviderError):
-    """Raised when the authorization server refuses a client for MindRoom's new callback; the message is safe to show."""
+class OAuthUserFacingError(OAuthProviderError):
+    """Raised when a provider cannot connect for a reason the person can act on; the message is safe to show."""
+
+
+class OAuthCallbackRefusedError(OAuthUserFacingError):
+    """Raised when the authorization server refuses a client for MindRoom's new callback."""
 
 
 _TERMINAL_REFRESH_ERROR_CODES = frozenset({"bad_refresh_token", "invalid_grant", "invalid_refresh_token"})

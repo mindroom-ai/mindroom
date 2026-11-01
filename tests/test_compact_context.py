@@ -650,7 +650,6 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
 @pytest.mark.asyncio
 async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_missing(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Team-scoped compaction should reuse the room-aware team model resolver."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -666,7 +665,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -674,7 +673,6 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     identity = _execution_identity()
     tool = CompactContextTools(
@@ -707,7 +705,6 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
 @pytest.mark.asyncio
 async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model_missing(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Agent-scoped compaction should reuse the room-aware runtime model resolver."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -720,7 +717,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -728,7 +725,6 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     identity = _execution_identity()
     tool = CompactContextTools(
