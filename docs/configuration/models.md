@@ -254,7 +254,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key
 ```
 
-This works for all API key environment variables and for every variable a tool's settings read (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
+This works for every model provider key and every variable a tool's settings read (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
 The plain variable wins when the process environment or the `.env` beside `config.yaml` sets it, and a blank value or an unedited starter-template placeholder counts as unset, so an exported blank variable does not hide the `.env` value.
 
 ## OpenAI API Models

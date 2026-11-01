@@ -37,7 +37,7 @@ Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve
 ```
 
 - Each credential field is `{"env": "NAME"}`, `{"file": "path"}` (relative paths resolve from the config directory), `{"value": ...}`, or a plain literal.
-- If an env ref such as `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
+- An env ref such as `EXAMPLE_CLIENT_SECRET` also accepts its [`_FILE` variant](configuration/models.md#file-based-secrets).
 - If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential.
 - Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other value makes that tool fail to load.
 - A credential saved for the same service in the dashboard wins over its seed.

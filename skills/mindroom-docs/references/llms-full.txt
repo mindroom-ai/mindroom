@@ -2179,7 +2179,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key
 ```
 
-This works for all API key environment variables and for every variable a tool's settings read (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
+This works for every model provider key and every variable a tool's settings read (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
 The plain variable wins when the process environment or the `.env` beside `config.yaml` sets it, and a blank value or an unedited starter-template placeholder counts as unset, so an exported blank variable does not hide the `.env` value.
 
 ## OpenAI API Models
@@ -15514,7 +15514,7 @@ Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve
 ```
 
 - Each credential field is `{"env": "NAME"}`, `{"file": "path"}` (relative paths resolve from the config directory), `{"value": ...}`, or a plain literal.
-- If an env ref such as `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
+- An env ref such as `EXAMPLE_CLIENT_SECRET` also accepts its [`_FILE` variant](https://docs.mindroom.chat/configuration/models/#file-based-secrets).
 - If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential.
 - Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other value makes that tool fail to load.
 - A credential saved for the same service in the dashboard wins over its seed.

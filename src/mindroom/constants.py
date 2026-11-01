@@ -176,8 +176,9 @@ class RuntimePaths:
         """Return the first usable value of ``names`` and the variable that supplied it.
 
         Tries each name in the process env, then each in the `.env`, then the stripped contents of the file each
-        name's `<NAME>_FILE` names, so an earlier value never resolves a file path. A blank value or an unedited
-        starter-template placeholder counts as unset everywhere, so an exported one does not hide a `.env` value.
+        name's `<NAME>_FILE` names, so an earlier value never resolves a file path. A blank or unedited
+        starter-template placeholder value of a name counts as unset in all three, so an exported one does not hide
+        a `.env` value.
         """
         for layer in (self.process_env, self.env_file_values):
             for name in names:
