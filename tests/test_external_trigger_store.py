@@ -338,14 +338,14 @@ def test_store_rejects_unconfigured_target_room(tmp_path: Path) -> None:
     """Trigger target rooms must already be configured for the target entity."""
     store = ExternalTriggerStore(_runtime_paths(tmp_path))
 
-    with pytest.raises(ExternalTriggerStoreError, match="target room"):
+    with pytest.raises(ExternalTriggerStoreError, match="must already be configured for the target entity"):
         store.create_record(
             trigger_id="campground",
             owner_user_id=_OWNER,
             created_by_agent_name="watcher",
             created_in_room_id="!room:example.org",
             created_in_thread_id=None,
-            target=_target(room_id="other"),
+            target=_target(room_id="!other:example.org"),
             public_key=_PUBLIC_KEY,
             config=_config(),
         )
