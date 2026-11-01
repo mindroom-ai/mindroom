@@ -607,8 +607,8 @@ def mailbox_tool_result(
 ) -> str:
     """Run one operation, as `_graph_tool_result` does, for a call that may name another user's mailbox.
 
-    A malformed mailbox is refused before the operation runs; once the call names a valid one, every result,
-    errors included, repeats it as `field_name`.
+    A malformed mailbox is refused before the operation runs; once the call names a valid one, every result and
+    Graph error repeats it as `field_name`, while a connect prompt, which does not depend on the mailbox, does not.
     """
     try:
         mailbox_path(mailbox, field_name)

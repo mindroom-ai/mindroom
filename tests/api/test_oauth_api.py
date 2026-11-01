@@ -835,6 +835,30 @@ def test_connect_uses_stored_oauth_client_config(tmp_path: Path) -> None:
     assert params["client_id"] == ["stored-client-id"]
 
 
+def test_status_names_the_redirect_uri_that_connect_sends(tmp_path: Path) -> None:
+    """The dashboard hints the callback the provider receives, which follows `MINDROOM_PUBLIC_URL`."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            "MINDROOM_PUBLIC_URL": "https://mindroom.example.org/",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = _fake_provider()
+
+    with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            login_with_api_key(client)
+            status = client.get(f"/api/oauth/{provider.id}/status?agent_name=general").json()
+            auth_url = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general").json()["auth_url"]
+
+    assert status["default_redirect_uri"] == "https://mindroom.example.org/api/oauth/test_drive/callback"
+    assert parse_qs(urlparse(auth_url).query)["redirect_uri"] == [status["default_redirect_uri"]]
+
+
 def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,

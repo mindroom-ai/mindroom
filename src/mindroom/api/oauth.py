@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import (
-    allow_connections_session_for_oauth_callback,
+    allow_connections_session_for_oauth_flow,
     authenticate_user,
     dashboard_cors_origins,
     login_redirect_for_request,
@@ -135,6 +135,7 @@ class OAuthStatusResponse(BaseModel):
     tool_config_service: str | None = None
     client_config_service: str | None = None
     client_config_redirect_uri_supported: bool = False
+    default_redirect_uri: str
     connected: bool
     has_client_config: bool
     has_custom_client_config: bool = False
@@ -170,17 +171,16 @@ def _load_provider(
     return provider, snapshot.runtime_paths
 
 
-async def _require_oauth_browser_user(
-    request: Request,
-    *,
-    connect_target: OAuthConnectTarget | None = None,
-) -> RedirectResponse | None:
+async def _require_oauth_browser_user(request: Request, *, link: bool = False) -> RedirectResponse | None:
+    """Require a signed-in browser; `link` marks a validated connect or reset link the caller binds to its requester."""
     try:
-        if connect_target is None:
-            await verify_user(request, request.headers.get("authorization"))
-        else:
-            # The validated capability grants access to this flow, not administrator routes.
+        if link:
+            # The link grants access to this flow, not administrator routes. Its requester check lets a
+            # Connections session redeem it only as that requester.
+            allow_connections_session_for_oauth_flow(request)
             await authenticate_user(request, request.headers.get("authorization"))
+        else:
+            await verify_user(request, request.headers.get("authorization"))
     except HTTPException as exc:
         if exc.status_code == 401:
             login_redirect = login_redirect_for_request(request)
@@ -239,7 +239,7 @@ async def _client_config_resolution_for_request(
     if reject_remote_provisioned:
         detail = (
             "The provisioned OAuth client is available only when MindRoom is opened on localhost. "
-            "Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access."
+            "Set MINDROOM_PUBLIC_URL and configure a custom OAuth client for remote access."
         )
         raise HTTPException(status_code=503, detail=detail)
     return None
@@ -825,7 +825,7 @@ async def _authorize(
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     if connect_target is None or connect_target.binding.worker_scope != "shared":
-        login_redirect = await _require_oauth_browser_user(request, connect_target=connect_target)
+        login_redirect = await _require_oauth_browser_user(request, link=connect_target is not None)
         if login_redirect is not None:
             return login_redirect
     response = await _issue_authorization_url(
@@ -867,7 +867,7 @@ async def confirm_reset(
         provider, runtime_paths = _load_provider(request, provider_id)
         intent = _browser_reset_intent(provider, runtime_paths, reset_token)
         if intent.binding.worker_scope != "shared":
-            login_redirect = await _require_oauth_browser_user(request)
+            login_redirect = await _require_oauth_browser_user(request, link=True)
             if login_redirect is not None:
                 return login_redirect
         _verify_browser_reset_intent(
@@ -921,6 +921,8 @@ async def reset_and_authorize(
     intent = _browser_reset_intent(provider, runtime_paths, reset_token)
     shared_capability = intent.binding.worker_scope == "shared"
     if not shared_capability:
+        # `_verify_browser_reset_intent` then requires the signed-in user to be the link's requester.
+        allow_connections_session_for_oauth_flow(request)
         await verify_user(request, request.headers.get("authorization"))
     try:
         context = _verify_browser_reset_intent(
@@ -1132,7 +1134,7 @@ async def _handle_callback(provider_id: str, request: Request, notice: _OpenerNo
         # Finish under the identity that started the flow, even if the browser holds both a dashboard login
         # and a Connections session.
         if issuing_auth_source == AuthSource.MATRIX_OPENID:
-            allow_connections_session_for_oauth_callback(request)
+            allow_connections_session_for_oauth_flow(request)
         await verify_user(request, request.headers.get("authorization"))
     try:
         dashboard_flow = await _complete_oauth_callback(
@@ -1277,6 +1279,7 @@ async def connection_status(
         tool_config_service=provider.tool_config_service,
         client_config_service=client_config_service,
         client_config_redirect_uri_supported=client_config_redirect_uri_supported,
+        default_redirect_uri=provider.default_redirect_uri(runtime_paths),
         connected=connected,
         has_client_config=has_client_config,
         has_custom_client_config=(client_config_resolution is not None and client_config_resolution.custom),

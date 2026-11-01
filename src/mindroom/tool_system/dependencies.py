@@ -101,7 +101,6 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "google-genai": "google.genai",
     "google-maps-places": "google.maps",
     "google-search-results": "serpapi",
-    "psycopg-binary": "psycopg",
     "pyobjc-framework-applicationservices": "ApplicationServices",
     "pyobjc-framework-cocoa": "AppKit",
     "py-trello": "trello",

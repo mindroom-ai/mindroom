@@ -196,17 +196,24 @@ async def test_set_thread_summary_returns_helper_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_thread_summary_rejects_blank_room_id() -> None:
-    """Explicit blank room IDs should not silently fall back to the context room."""
+@pytest.mark.parametrize(
+    ("room_id", "message"),
+    [
+        ("   ", "room_id must be a non-empty string."),
+        ("Ops Room", "Unknown room 'Ops Room'; pass a room ID, alias, or configured room name."),
+    ],
+)
+async def test_set_thread_summary_rejects_blank_or_unknown_room_id(room_id: str, message: str) -> None:
+    """A blank room ID does not fall back to the context room, and an unknown room name is not an access denial."""
     tool = ThreadSummaryTools()
     context = _make_context()
 
     with tool_runtime_context(context):
-        payload = json.loads(await tool.set_thread_summary("done", room_id="   "))
+        payload = json.loads(await tool.set_thread_summary("done", room_id=room_id))
 
     assert payload["status"] == "error"
-    assert payload["room_id"] == "   "
-    assert payload["message"] == "room_id must be a non-empty string when provided."
+    assert payload["room_id"] == room_id
+    assert payload["message"] == message
 
 
 @pytest.mark.asyncio
