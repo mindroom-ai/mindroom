@@ -1448,6 +1448,7 @@
         "agent_settings",
         "create_agent",
         "update_agent",
+        "set_avatar",
         "delete_agent"
       ],
       "helper_text": null,

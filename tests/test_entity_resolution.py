@@ -150,6 +150,7 @@ def test_configured_call_agent_includes_authorized_ad_hoc_invited_room(tmp_path:
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent={"general": {"!agent-call:server"}},
+            personal_rooms_by_agent={},
         )
         == "general"
     )
@@ -168,6 +169,7 @@ def test_configured_call_agent_rejects_ambiguous_invited_room(tmp_path: Path) ->
                 "general": {"!agent-call:server"},
                 "other": {"!agent-call:server"},
             },
+            personal_rooms_by_agent={},
         )
 
 
@@ -185,6 +187,7 @@ def test_explicit_call_room_owner_overrides_ambiguous_invited_membership(tmp_pat
                 "general": {"!agent-call:server"},
                 "other": {"!agent-call:server"},
             },
+            personal_rooms_by_agent={},
         )
         == "general"
     )
@@ -200,6 +203,7 @@ def test_configured_call_agent_ignores_stale_invites_when_acceptance_is_disabled
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent={"general": {"!agent-call:server"}},
+            personal_rooms_by_agent={},
         )
         is None
     )
@@ -218,6 +222,7 @@ def test_configured_call_agent_uses_live_invited_room_state(tmp_path: Path) -> N
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent=invited_rooms_by_agent,
+            personal_rooms_by_agent={},
         )
         is None
     )
@@ -230,6 +235,7 @@ def test_configured_call_agent_uses_live_invited_room_state(tmp_path: Path) -> N
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent=invited_rooms_by_agent,
+            personal_rooms_by_agent={},
         )
         == "general"
     )

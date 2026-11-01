@@ -16,6 +16,6 @@ register_builtin_tool_metadata(
         icon_color="text-teal-500",
         config_fields=[],
         dependencies=[],
-        function_names=("agent_settings", "create_agent", "update_agent", "delete_agent"),
+        function_names=("agent_settings", "create_agent", "update_agent", "set_avatar", "delete_agent"),
     ),
 )

@@ -468,6 +468,42 @@ async def test_a_child_resumed_after_its_approval_reports_its_activity_as_progre
 
 
 @pytest.mark.asyncio
+async def test_a_childs_activity_keeps_a_long_key_whole_for_its_caller_to_mask(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child's report keeps a key longer than the shown output from its first line, so the caller can mask all of it."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = _leader_identity()
+    key = "-----BEGIN PRIVATE KEY-----\n" + "\n".join("A" * 64 for _ in range(50)) + "\n-----END PRIVATE KEY-----"
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    code = ScriptedModel([calls(tool_call("write_report", "same-call")), answer(key)])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    reports: list[str] = []
+
+    with registered_report_tool():
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        with tool_progress_reporter(reports.append):
+            await _approve_the_child_s_pending_call(config, paths, paused, "card-0")
+
+    assert reports[-1].endswith(key)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("before_the_pause", "after_the_call", "handed_over"),
     [

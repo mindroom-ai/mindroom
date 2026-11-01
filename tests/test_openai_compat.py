@@ -2937,18 +2937,17 @@ class TestAutoRouting:
     @pytest.mark.parametrize("stream", [False, True])
     def test_auto_no_fit_does_not_fall_back_to_first_agent(
         self,
-        app_client: TestClient,
         test_config: Config,
         monkeypatch: pytest.MonkeyPatch,
         stream: bool,
     ) -> None:
         """An accepted no-fit returns an error before invoking any response agent."""
         test_config.router.judgment = TypeSafeJudgmentConfig(provider="typesafe")
+        runtime_paths = _runtime_paths_for_config(
+            test_config,
+            {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true", "TYPESAFE_API_KEY": "synthetic"},
+        )
         posted = []
-        original_env_value = RuntimePaths.env_value
-
-        def env_value(paths: RuntimePaths, key: str, *args: object, **kwargs: object) -> str | None:
-            return "synthetic" if key == "TYPESAFE_API_KEY" else original_env_value(paths, key, *args, **kwargs)
 
         async def post(_self: JudgmentClient, body: bytes) -> bytes:
             payload = json.loads(body)
@@ -2971,9 +2970,11 @@ class TestAutoRouting:
                 },
             ).encode()
 
-        monkeypatch.setattr(RuntimePaths, "env_value", env_value)
         monkeypatch.setattr(JudgmentClient, "_post", post)
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as response_agent:
+        with (
+            _openai_client(test_config, runtime_paths) as app_client,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as response_agent,
+        ):
             response = app_client.post(
                 "/v1/chat/completions",
                 json={

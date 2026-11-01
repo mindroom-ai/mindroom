@@ -830,6 +830,26 @@ async def test_azure_takes_its_key_endpoint_and_version_from_the_runtime_env(tmp
 
 
 @pytest.mark.asyncio
+async def test_azure_blank_exports_do_not_hide_the_env_file_settings(tmp_path: Path, chat_wire: Wire) -> None:
+    """A blank exported ``AZURE_OPENAI_*`` variable is unset, so the ``.env`` value under it applies."""
+    (tmp_path / ".env").write_text(
+        "AZURE_OPENAI_API_KEY=sk-azure\n"
+        "AZURE_OPENAI_ENDPOINT=https://example-resource.openai.azure.com\n"
+        "AZURE_OPENAI_API_VERSION=2025-04-01-preview\n"
+        "AZURE_OPENAI_DEPLOYMENT=env-chat-deployment\n",
+        encoding="utf-8",
+    )
+    blank = dict.fromkeys(("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_VERSION", "AZURE_OPENAI_DEPLOYMENT"), "")
+
+    await _send(ModelConfig(provider="azure", id="config-chat-deployment"), _runtime_paths(tmp_path, **blank))
+
+    [request] = chat_wire.requests
+    assert request.url.host == "example-resource.openai.azure.com"
+    assert request.url.params["api-version"] == "2025-04-01-preview"
+    assert "/deployments/env-chat-deployment/" in request.url.path
+
+
+@pytest.mark.asyncio
 async def test_azure_reads_an_endpoint_file_and_only_azure_specific_variables(tmp_path: Path, chat_wire: Wire) -> None:
     """``AZURE_OPENAI_ENDPOINT_FILE`` and ``AZURE_OPENAI_DEPLOYMENT`` apply; the generic ``OPENAI_API_VERSION`` does not."""
     endpoint_file = tmp_path / "azure-endpoint.txt"
@@ -1018,7 +1038,7 @@ def test_a_wrongly_typed_client_setting_fails_config_validation_at_the_model(
         Config.model_validate(data)
 
     assert iter_config_validation_messages(exc_info.value) == [
-        ("models → default → extra_kwargs", f"Value error, {error}"),
+        ("models → default → extra_kwargs", error),
     ]
 
 

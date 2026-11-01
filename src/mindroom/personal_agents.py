@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
+from mindroom.config.main import config_validation_summary
 from mindroom.config.personal_agents import (
     CreatedAgentEntry,
     GeneratedAgentEdits,
@@ -30,6 +31,8 @@ from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import RESERVED_ENTITY_NAMES, runtime_matrix_homeserver
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
+from mindroom.managed_avatars import normalized_avatar_png
+from mindroom.matrix.avatar import set_user_avatar_from_png
 from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix.users import (
@@ -43,6 +46,8 @@ from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -71,7 +76,7 @@ def _refuse_unloadable(config: Config, runtime_paths: RuntimePaths, roster: Pers
         authored = config.authored_model_dump()
         config.validate_with_runtime(authored, runtime_paths, tolerate_plugin_load_errors=True, roster=roster)
     except ValueError as exc:  # Pydantic and runtime validation errors are both ValueErrors.
-        msg = f"The agent would not load with this change, so nothing was stored: {exc}"
+        msg = f"The agent would not load with this change, so nothing was stored: {config_validation_summary(exc)}"
         raise _GeneratedAgentError(msg) from exc
 
 
@@ -265,7 +270,7 @@ def _reserve_personal_agent(
             # An owner ID such as one with a space or a wildcard would make every later config load invalid.
             AgentConfig.model_validate(agent_data)
         except ValidationError as exc:
-            msg = f"{user_id} cannot own a personal agent: {exc}"
+            msg = f"{user_id} cannot own a personal agent: {config_validation_summary(exc)}"
             raise ValueError(msg) from exc
         if entry is not existing:
             _append_personal_agent_roster_entry(runtime_paths, entry)
@@ -401,6 +406,23 @@ def update_generated_agent(
             updated = updated.model_copy(update={"co_owners": co_owners})
             _refuse_owners(updated.owners, runtime_paths)
         _replace_roster_entry(runtime_paths, entry, updated, config)
+
+
+async def set_generated_agent_avatar(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    agent_name: str,
+    requester_id: str,
+    client: nio.AsyncClient,
+    image: bytes,
+) -> None:
+    """Set a generated agent's Matrix profile picture for one of its owners from an untrusted image."""
+    await run_blocking_until_complete(_owned_entry, config, runtime_paths, agent_name, requester_id)
+    png = await run_blocking_until_complete(normalized_avatar_png, image)
+    if not await set_user_avatar_from_png(client, png):
+        msg = f"The homeserver did not accept the new avatar of {agent_name}; try again later"
+        raise _GeneratedAgentError(msg)
 
 
 def delete_created_agent(config: Config, runtime_paths: RuntimePaths, *, agent_name: str, requester_id: str) -> None:

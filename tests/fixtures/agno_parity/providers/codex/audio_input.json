@@ -86,7 +86,9 @@
         }
       ],
       "instructions": "You are a helpful assistant.",
-      "reasoning": {},
+      "reasoning": {
+        "summary": "auto"
+      },
       "store": false
     },
     "headers": {

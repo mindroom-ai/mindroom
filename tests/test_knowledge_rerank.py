@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import google.oauth2.credentials
@@ -209,6 +210,17 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
     assert {body["model"] for body in bodies} == {"semantic-ranker-default@latest"}
     assert {body["query"] for body in bodies} == {"query"}
     assert credential_files == [str((tmp_path / "adc.json").resolve())]
+
+
+def test_vertex_ai_reranker_reads_the_project_as_vertex_models_read_it(tmp_path: Path) -> None:
+    """A blank exported ``GOOGLE_CLOUD_PROJECT`` is unset, so the ``.env`` project under it is the ranking project."""
+    (tmp_path / ".env").write_text("GOOGLE_CLOUD_PROJECT=env-project\n", encoding="utf-8")
+    runtime_paths = replace(test_runtime_paths(tmp_path), process_env={"GOOGLE_CLOUD_PROJECT": ""})
+
+    reranker = create_reranker(KnowledgeRerankerConfig(provider="vertex_ai", model="m"), runtime_paths)
+
+    assert isinstance(reranker, rerank_module._VertexAIReranker)
+    assert reranker.project == "env-project"
 
 
 @pytest.mark.asyncio

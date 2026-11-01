@@ -140,6 +140,8 @@ from mindroom.workspaces import control_plane_owns_private_templates, validate_w
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
 
+    from pydantic_core import ErrorDetails
+
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.personal_agents import PersonalAgentRoster
     from mindroom.tool_system.registry import ToolRegistry
@@ -214,20 +216,24 @@ CONFIG_LOAD_USER_ERROR_TYPES = (
 )
 
 
+def validation_issue_message(error: ErrorDetails) -> str:
+    """Return what a user reads for one Pydantic error: how to fix an unknown key, or the message a validator raised."""
+    if error["type"] == "extra_forbidden":
+        return f"Unknown key '{error['loc'][-1]}': remove it or correct its spelling"
+    # Pydantic writes a validator's raised message after this prefix.
+    return error["msg"].removeprefix("Value error, ")
+
+
 def config_validation_issues(
     exc: Exception,
 ) -> list[tuple[tuple[str | int, ...], str]]:
-    """Return the user-facing messages of one config validation exception, each with its config location."""
+    """Return the user-facing messages of one config validation exception, each with its config location.
+
+    An issue about the whole config is located at `config`.
+    """
     if isinstance(exc, ValidationError):
         return [
-            (
-                tuple(error["loc"]),
-                (
-                    f"Unknown key '{error['loc'][-1]}': remove it or correct its spelling"
-                    if error["type"] == "extra_forbidden"
-                    else error["msg"]
-                ),
-            )
+            (error["loc"] or ("config",), validation_issue_message(error))
             for error in exc.errors(include_context=False)
         ]
     if isinstance(exc, (ConfigRuntimeValidationError, ConfigIncludeError)):
@@ -246,6 +252,13 @@ def iter_config_validation_messages(
     return [
         (" → ".join(str(part) for part in location), message) for location, message in config_validation_issues(exc)
     ]
+
+
+def config_validation_summary(exc: Exception) -> str:
+    """Return a config validation error's issues on one line as ``<location>: <message>``, or another error's text."""
+    if not isinstance(exc, (ValidationError, ConfigRuntimeValidationError)):
+        return str(exc)
+    return "; ".join(f"{location}: {message}" for location, message in iter_config_validation_messages(exc))
 
 
 def format_invalid_config_message(
@@ -329,6 +342,8 @@ class Config(BaseModel):
     _approved_egress_enabled: bool = PrivateAttr(default=False)
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
     _personal_agent_instances: dict[str, PersonalAgentInstance] = PrivateAttr(default_factory=dict)
+    _personal_agent_call_templates: dict[str, str] = PrivateAttr(default_factory=dict)
+    _personal_agent_call_agents: dict[str, str] = PrivateAttr(default_factory=dict)
     _generated_agent_dumps: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
     _generated_agents: dict[str, GeneratedAgentInfo] = PrivateAttr(default_factory=dict)
     _personal_agents_added_agents_section: bool = PrivateAttr(default=False)
@@ -1020,7 +1035,9 @@ class Config(BaseModel):
                     tolerate_plugin_load_errors=tolerate_plugin_load_errors,
                 )
             except (ValidationError, ConfigRuntimeValidationError) as exc:
-                msg = f"personal_agents would generate an invalid agent for a new user: {exc}"
+                msg = (
+                    f"personal_agents would generate an invalid agent for a new user: {config_validation_summary(exc)}"
+                )
                 raise ConfigRuntimeValidationError(msg) from exc
         settings = config.personal_rooms
         instance = expansion.instances.get(settings.agent) if settings is not None else None
@@ -1032,6 +1049,8 @@ class Config(BaseModel):
             )
             raise ConfigRuntimeValidationError(msg)
         config._personal_agent_instances = expansion.instances
+        config._personal_agent_call_templates = expansion.call_templates
+        config._personal_agent_call_agents = expansion.call_agents
         # Pass two builds every generated agent from pass one, so a creator's own edits never change what it grants.
         generated_data, generated = expand_generated_agents(config, cast("dict[str, Any]", expansion.data), roster)
         if generated_data is not None:
@@ -1047,6 +1066,8 @@ class Config(BaseModel):
                 # Edits and created agents wait for a fix; the owners keep their agents and loading never breaks.
                 logger.warning("generated_agents_invalid", error=str(exc))
             config._personal_agent_instances = expansion.instances
+            config._personal_agent_call_templates = expansion.call_templates
+            config._personal_agent_call_agents = expansion.call_agents
         config._generated_agents = {name: info for name, info in generated.items() if name in config.agents}
         # authored_model_dump drops generated agents while they match these dumps.
         config._generated_agent_dumps = {
@@ -1101,6 +1122,14 @@ class Config(BaseModel):
                 # An edited personal agent stays, so saving it collides with its roster entry.
             if not agents and self._personal_agents_added_agents_section:
                 payload.pop("agents")
+        calls = payload.get("calls")
+        if self._personal_agent_call_templates and isinstance(calls, dict):
+            # Loading gave each generated agent its template's call profile; the saved config keeps the template key.
+            calls["agents"] = {
+                agent_name: profile
+                for agent_name, profile in calls.get("agents", {}).items()
+                if self._personal_agent_call_agents.get(agent_name) != profile
+            } | self._personal_agent_call_templates
         return payload
 
     def runtime_model_dump(self) -> dict[str, Any]:
