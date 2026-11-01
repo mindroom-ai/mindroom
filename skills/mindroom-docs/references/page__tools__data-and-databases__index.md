@@ -252,7 +252,7 @@ agents:
 | --- | --- |
 | `google_drive_list_files()` | Lists recently modified files. |
 | `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
-| `google_drive_read_file(file_id)` | Returns Google Workspace files as text, and plain-text files up to `max_read_size`; PDFs and Office files need a download and a reader for that format. |
+| `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`; PDFs, Office files, and Drawings need a download and a reader for that format. |
 | `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/` in the agent workspace, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
 | `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None)` | Uploads a local file; relative paths start at the agent workspace. |
 | `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing non-Workspace file. |
@@ -260,7 +260,7 @@ agents:
 | `google_drive_move_file(file_id, new_parent_id, name=None)` | Moves a file and optionally renames it. |
 | `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
 
-Non-Workspace files over `max_read_size` return an error suggesting `google_drive_download_file` instead.
+When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, a name containing `/`, or a size over `max_download_size`.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
 Uploads and content replacement read local files according to the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 To change the content of a native Google Doc, use [`google_docs`](#google_docs).

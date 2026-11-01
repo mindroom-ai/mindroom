@@ -115,17 +115,6 @@ def _unsafe_drive_filename_error(filename: object) -> str | None:
     return None
 
 
-def _download_metadata_error(metadata: dict[str, Any], max_download_size: float) -> str | None:
-    """Refuse a download whose filename is unsafe or whose Drive size exceeds the limit."""
-    unsafe_filename_error = _unsafe_drive_filename_error(metadata.get("name"))
-    if unsafe_filename_error:
-        return unsafe_filename_error
-    file_size = int(metadata.get("size", 0))
-    if file_size > max_download_size:
-        return f"File is {file_size} bytes, exceeds max_download_size ({max_download_size})."
-    return None
-
-
 def _download_target_path(workspace_root: Path, filename: str, extension: str) -> Path | None:
     target_path = workspace_root.absolute() / "google-drive-downloads" / filename
     if extension and not target_path.suffix:
@@ -330,20 +319,31 @@ class GoogleDriveTools(
             field_name="Google Drive local_path",
         )
 
-    def _downloadable(self, mime_type: str) -> bool:
-        """Return whether `download_file` saves this type without an explicit export format."""
-        return mime_type in self.DOWNLOAD_EXPORT_TYPES or not mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX)
+    def _download_refusal(self, metadata: dict[str, Any], export_format: str | None = None) -> str | None:
+        """Return the error `download_file` gives a file before any Drive request, or None when it would save it."""
+        unsafe_filename_error = _unsafe_drive_filename_error(metadata.get("name"))
+        if unsafe_filename_error:
+            return unsafe_filename_error
+        file_size = int(metadata.get("size", 0))
+        if file_size > self.max_download_size:
+            return f"File is {file_size} bytes, exceeds max_download_size ({self.max_download_size})."
+        mime_type = metadata.get("mimeType", "")
+        if (
+            not export_format
+            and mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX)
+            and mime_type not in self.DOWNLOAD_EXPORT_TYPES
+        ):
+            return f"Unsupported Workspace file type for download: {mime_type}"
+        return None
 
     def _download_advice(self, metadata: dict[str, Any]) -> str:
-        """Advise the download function after a refused read, while offered, only for a file `download_file` saves."""
-        if not self._downloadable(metadata.get("mimeType", "")) or _download_metadata_error(
-            metadata,
-            self.max_download_size,
-        ):
-            return " It cannot be downloaded either."
-        if "google_drive_download_file" in toolkit_function_names(self):
-            return " Use google_drive_download_file instead."
-        return ""
+        """After a refused read, name the download function while offered, or say why it would refuse the file too."""
+        if "google_drive_download_file" not in toolkit_function_names(self):
+            return ""
+        refusal = self._download_refusal(metadata)
+        if refusal:
+            return f" google_drive_download_file would refuse it too: {refusal}"
+        return " Use google_drive_download_file instead."
 
     @authenticate
     def _upload_file(
@@ -578,16 +578,14 @@ class GoogleDriveTools(
             metadata = self._get_file_metadata(file_id, "id,name,mimeType,size")
             mime_type = metadata.get("mimeType", "")
             filename = metadata.get("name")
-            metadata_error = _download_metadata_error(metadata, self.max_download_size)
-            if metadata_error:
-                return json.dumps({"error": metadata_error, "file": metadata})
+            refusal = self._download_refusal(metadata, export_format)
+            if refusal:
+                return json.dumps({"error": refusal, "file": metadata})
 
             target_mime, ext = self.DOWNLOAD_EXPORT_TYPES.get(mime_type, (None, ""))
             if export_format:
                 target_mime = export_format
                 ext = mimetypes.guess_extension(export_format) or ""
-            elif not self._downloadable(mime_type):
-                return json.dumps({"error": f"Unsupported Workspace file type for download: {mime_type}"})
 
             path = _download_target_path(self._workspace_root, cast("str", filename), ext)
             if path is None:
