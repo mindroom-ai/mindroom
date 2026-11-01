@@ -14,7 +14,10 @@ import {
   SiGoogletasks,
   SiHomeassistant,
 } from "react-icons/si";
-import { apiErrorMessageFromPayload, withAgentExecutionScope } from "@/lib/api";
+import {
+  apiErrorMessageFromResponse,
+  withAgentExecutionScope,
+} from "@/lib/api";
 import { watchOAuthCompletion } from "@/lib/oauthCompletion";
 import {
   IntegrationProvider,
@@ -32,9 +35,6 @@ function oauthCompletionOrigin(rawOrigin: unknown): string {
   }
   return window.location.origin;
 }
-
-const responseError = async (response: Response, fallback: string) =>
-  apiErrorMessageFromPayload(await response.json().catch(() => null), fallback);
 
 const unavailableStatus = (statusError: string): IntegrationStatus => ({
   status: "not_connected",
@@ -64,7 +64,10 @@ export function oauthIntegrationProvider(
     const response = await fetch(url(action, scope), { method: "POST" });
     if (!response.ok) {
       throw new Error(
-        await responseError(response, `Failed to ${action} ${displayName}`),
+        await apiErrorMessageFromResponse(
+          response,
+          `Failed to ${action} ${displayName}`,
+        ),
       );
     }
     return response;
@@ -102,7 +105,9 @@ export function oauthIntegrationProvider(
       try {
         const response = await fetch(url("status", scope));
         if (!response.ok) {
-          return unavailableStatus(await responseError(response, fallback));
+          return unavailableStatus(
+            await apiErrorMessageFromResponse(response, fallback),
+          );
         }
         const data = await response.json();
         const hasClientConfig = data.has_client_config === true;

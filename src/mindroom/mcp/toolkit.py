@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 from typing import TYPE_CHECKING
 
 from mindroom.mcp.config import resolved_mcp_tool_prefix
-from mindroom.mcp.errors import MCPToolUnavailableError
+from mindroom.mcp.errors import MCPToolCallError, MCPToolUnavailableError
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool
 from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
@@ -24,6 +25,14 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _ACTIVE_MCP_SERVER_MANAGER: MCPServerManager | None = None
+# How servers word a refusal of a call's arguments: the JSON-RPC invalid-params code, the MCP SDKs' "Input validation
+# error", and pydantic's "validation error for".
+_ARGUMENT_REJECTION = re.compile(r"-32602|validation error|invalid (?:arguments|params)", re.IGNORECASE)
+# The most of an input schema a failed call's error repeats, so a schema with long descriptions or enums cannot fill
+# the conversation.
+_MAX_SCHEMA_HINT_CHARACTERS = 4000
+# The most unlisted argument names a failed call's error names one by one.
+_MAX_UNLISTED_NAMES = 20
 
 
 def bind_mcp_server_manager(manager: MCPServerManager | None) -> None:
@@ -205,12 +214,42 @@ class MindRoomMCPToolkit(Toolkit):
     async def _oauth_call_tool(self, *, tool_name: str, arguments: dict[str, object] | None = None) -> ToolValue | str:
         return await self._call_tool_with_error_payload(tool_name, dict(arguments or {}))
 
+    def _argument_hint(self, error: MCPToolCallError, tool_name: str, arguments: Mapping[str, object]) -> str | None:
+        """Return what ``error`` gains about the call's arguments from the called tool's input schema, or None.
+
+        The schema is the one the call was sent against, which the error carries. A server's refusal of the arguments
+        gets the schema, which the model may not have loaded. So does any failure of a call that sent top-level names
+        the schema's ``properties`` do not list, which first names them, since a schema that admits other names lets
+        the server fail generically. The call itself was sent as the model made it. The schema is cut at
+        ``_MAX_SCHEMA_HINT_CHARACTERS``, saying so.
+        """
+        schema = error.input_schema
+        if schema is None:
+            return None
+        properties = schema.get("properties")
+        unknown = [name for name in arguments if name not in properties] if isinstance(properties, dict) else []
+        if not unknown and not _ARGUMENT_REJECTION.search(str(error)):
+            return None
+        note = ""
+        if unknown:
+            names = ", ".join(f"'{name}'" for name in unknown[:_MAX_UNLISTED_NAMES])
+            if len(unknown) > _MAX_UNLISTED_NAMES:
+                names = f"{names}, and {len(unknown) - _MAX_UNLISTED_NAMES} more"
+            note = f"Arguments not listed in the properties of the input schema of '{tool_name}': {names}.\n"
+        text = json.dumps(schema, ensure_ascii=False)
+        if len(text) > _MAX_SCHEMA_HINT_CHARACTERS:
+            text = f"{text[:_MAX_SCHEMA_HINT_CHARACTERS]}... [truncated, {len(text)} characters in all]"
+        return f"{note}Input schema of '{tool_name}': {text}"
+
     async def _call_tool_with_error_payload(
         self,
         tool_name: str,
         arguments: dict[str, object],
     ) -> ToolValue | str:
-        """Call one manager-owned tool and preserve structured reconnect/catalog errors."""
+        """Call one manager-owned tool and preserve structured reconnect/catalog errors.
+
+        A failed call's error ends with ``_argument_hint`` when it has one.
+        """
         if self.manager is None:
             msg = f"MCP server '{self.server_id}' is not connected"
             raise RuntimeError(msg)
@@ -234,6 +273,11 @@ class MindRoomMCPToolkit(Toolkit):
                     "available_tools": list(exc.available_tools),
                 },
             )
+        except MCPToolCallError as exc:
+            if (hint := self._argument_hint(exc, tool_name, arguments)) is None:
+                raise
+            msg = f"{exc}\n\n{hint}"
+            raise MCPToolCallError(self.server_id, msg) from exc
 
     def _build_function(self, tool: MCPDiscoveredTool) -> Callable[..., Awaitable[ToolValue | str]]:
         async def _call_tool(**kwargs: object) -> ToolValue | str:

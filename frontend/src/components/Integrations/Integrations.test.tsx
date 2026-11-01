@@ -38,6 +38,7 @@ const mockTools = [
     display_name: "Weather",
     description: "Get weather information",
     category: "information",
+    status: "requires_config",
     setup_type: "api_key",
     config_fields: [
       {
@@ -262,22 +263,9 @@ Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", {
   value: () => false,
 });
 
-vi.mock("@/hooks/useTools", () => ({
+vi.mock("@/hooks/useTools", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useTools")>()),
   useTools: mockUseTools,
-  mapToolToIntegration: (tool: any) => ({
-    id: tool.name,
-    name: tool.display_name,
-    description: tool.description,
-    category: tool.category,
-    status: tool.status,
-    setup_type: tool.setup_type,
-    config_fields: tool.config_fields,
-    helper_text: tool.helper_text,
-    docs_url: tool.docs_url,
-    oauth_fallback_fields: tool.oauth_fallback_fields,
-    manual_auth_configured: tool.manual_auth_configured,
-    environment_auth_configured: tool.environment_auth_configured,
-  }),
 }));
 
 const mockToast = vi.fn();
@@ -295,6 +283,7 @@ vi.mock("./EnhancedConfigDialog", () => ({
     service,
     docsUrl,
     helperText,
+    onSuccess,
   }: any) => {
     mockEnhancedConfigDialogProps({ configFields, service });
     return (
@@ -303,6 +292,7 @@ vi.mock("./EnhancedConfigDialog", () => ({
         <div>Service: {service}</div>
         <div>Docs: {docsUrl}</div>
         <div>Helper: {helperText}</div>
+        <button onClick={onSuccess}>Save configuration</button>
       </>
     );
   },
@@ -438,10 +428,42 @@ describe("Integrations", () => {
     helper_text: "Acme tool helper text.",
   });
 
-  it("orders built-in provider cards, then discovered providers, then tool cards", async () => {
+  it("loads every provider status at once and orders built-in provider cards, then discovered providers, then tool cards", async () => {
+    const pendingStatuses: Array<(status: unknown) => void> = [];
+    const requestedStatuses: string[] = [];
+    const pendingStatus = (providerId: string) => {
+      requestedStatuses.push(providerId);
+      return new Promise((resolve) => {
+        pendingStatuses.push(resolve);
+      });
+    };
+    mockOAuthLoadStatus.mockImplementation(pendingStatus);
+    mockHomeAssistantLoadStatus.mockImplementation(() =>
+      pendingStatus("homeassistant"),
+    );
     listTools([...mockTools, acmeDriveTool]);
 
     render(<Integrations />);
+
+    // Every status is requested before any answers.
+    await waitFor(() => {
+      expect(requestedStatuses).toEqual([
+        "google_calendar",
+        "google_cloud",
+        "google_docs",
+        "google_drive",
+        "google_gmail",
+        "google_sheets",
+        "google_tasks",
+        "homeassistant",
+        "acme_drive",
+      ]);
+    });
+    await act(async () => {
+      for (const resolve of pendingStatuses.reverse()) {
+        resolve({ status: "available" });
+      }
+    });
 
     const panel = await screen.findByRole("tabpanel");
     await waitFor(() => {
@@ -630,6 +652,38 @@ describe("Integrations", () => {
     },
   );
 
+  it("keeps cards mounted, and keyboard focus inside them, while statuses reload", async () => {
+    oauthStatus("acme_drive", {
+      status: "not_connected",
+      status_error: "Status service unavailable.",
+    });
+    listTools([acmeDriveTool]);
+
+    render(<Integrations />);
+
+    const privacyLink = within(await findCard("Google Drive")).getByRole(
+      "link",
+      { name: "Privacy policy" },
+    );
+    privacyLink.focus();
+    const retry = await within(await findCard("Acme Drive")).findByRole(
+      "button",
+      { name: "Retry status" },
+    );
+    fireEvent.click(retry);
+
+    await waitFor(() => {
+      expect(
+        mockOAuthLoadStatus.mock.calls.filter(([id]) => id === "acme_drive"),
+      ).toHaveLength(2);
+      expect(
+        screen.getByRole("button", { name: "Retry status" }),
+      ).not.toBeDisabled();
+    });
+    expect(screen.getByRole("button", { name: "Retry status" })).toBe(retry);
+    expect(privacyLink).toHaveFocus();
+  });
+
   it.each(providerCardSources)(
     "offers a $source card's reset and falls back to its tool's helper text",
     async ({ name, tool }) => {
@@ -755,12 +809,16 @@ describe("Integrations", () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      // Available integrations (the Google cards and Weather)
+      // Available Google cards
       expect(screen.getAllByText("Available").length).toBeGreaterThanOrEqual(2);
 
       // Connected integration
       expect(screen.getByText("Connected")).toBeInTheDocument(); // Home Assistant
     });
+    // Weather has no API key yet
+    expect(
+      within(await findCard("Weather")).getByText("Needs setup"),
+    ).toBeInTheDocument();
   });
 
   it("offers a reset action when OAuth credentials are unreadable", async () => {
@@ -1000,14 +1058,6 @@ describe("Integrations", () => {
     const field = [{ name: "region", label: "Region", type: "text" }];
     listTools([
       tool({
-        name: "configured_tool",
-        display_name: "Configured Tool",
-        description: "Saved settings",
-        setup_type: "none",
-        status: "connected",
-        config_fields: field,
-      }),
-      tool({
         name: "optional_tool",
         display_name: "Optional Tool",
         description: "Optional settings",
@@ -1024,13 +1074,6 @@ describe("Integrations", () => {
 
     render(<Integrations />);
 
-    const configured = await findCard("Configured Tool");
-    expect(
-      within(configured).getByRole("button", { name: "Settings" }),
-    ).toBeInTheDocument();
-    expect(
-      within(configured).getByRole("button", { name: "Reset" }),
-    ).toBeInTheDocument();
     const optional = await findCard("Optional Tool");
     expect(within(optional).getByText("Ready")).toBeInTheDocument();
     expect(
@@ -1088,16 +1131,25 @@ describe("Integrations", () => {
     expect(tabList).toHaveClass("flex-wrap", "h-auto", "overflow-visible");
   });
 
-  it("should show config dialog for tools with config fields", async () => {
+  it("refetches tools and closes a tool's config dialog after a save", async () => {
+    const refetch = vi.fn();
+    listTools(mockTools, { refetch });
+
     render(<Integrations />);
 
     const weatherCard = await findCard("Weather");
     fireEvent.click(
       within(weatherCard).getByRole("button", { name: "Configure" }),
     );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Save configuration" }),
+    );
 
     await waitFor(() => {
-      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
+      expect(
+        screen.queryByText("Enhanced Config Dialog"),
+      ).not.toBeInTheDocument();
+      expect(refetch).toHaveBeenCalledOnce();
     });
   });
 

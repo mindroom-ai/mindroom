@@ -16,7 +16,7 @@ from mindroom.constants import PROVIDER_ENV_KEYS, runtime_env_path
 from mindroom.credentials.manager import validate_service_name
 from mindroom.credentials.policy import is_oauth_token_service
 from mindroom.logging_config import get_logger
-from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV, is_unset_env_value
+from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -41,31 +41,9 @@ class _CredentialSeedDeclaration:
     seed: Mapping[str, Any]
 
 
-def _read_secret_from_env(name: str, runtime_paths: RuntimePaths) -> tuple[str, str] | None:
-    """Read a secret from NAME or NAME_FILE and return it with the variable that supplied it.
-
-    A usable `NAME` wins without touching `NAME_FILE`. Otherwise, if `NAME_FILE`
-    points to a readable file with usable contents, return its stripped contents.
-    Else return None. Blank values and unedited starter-template placeholders
-    count as unset in both places.
-    """
-    val = runtime_paths.env_value(name)
-    if val is not None and not is_unset_env_value(name, val):
-        return val, name
-    file_var = f"{name}_FILE"
-    file_path = runtime_env_path(runtime_paths, file_var)
-    if file_path is not None and file_path.exists():
-        try:
-            content = file_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return None
-        return None if is_unset_env_value(name, content) else (content, file_var)
-    return None
-
-
 def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
     """Read a secret from NAME or NAME_FILE; None when neither supplies a usable (non-blank, non-placeholder) value."""
-    secret = _read_secret_from_env(name, runtime_paths)
+    secret = runtime_paths.first_env_value((name,))
     return secret[0] if secret else None
 
 
@@ -264,16 +242,16 @@ def declared_credentials(runtime_paths: RuntimePaths) -> dict[str, DeclaredCrede
         declared[service] = DeclaredCredential(credentials, variable)
 
     for service, env_var in PROVIDER_ENV_KEYS.items():
-        secret = _read_secret_from_env(env_var, runtime_paths)
+        secret = runtime_paths.first_env_value((env_var,))
         if secret is not None:
             value, variable = secret
             declare(service, {"host": value} if service == "ollama" else {"api_key": value}, variable)
     adc_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
     if adc_path is not None:
         declare("google_vertex_adc", {"application_credentials_path": str(adc_path)}, "GOOGLE_APPLICATION_CREDENTIALS")
-    if (secret := _read_secret_from_env("GITHUB_TOKEN", runtime_paths)) is not None:
+    if (secret := runtime_paths.first_env_value(("GITHUB_TOKEN",))) is not None:
         declare("github_private", {"username": "x-access-token", "token": secret[0]}, secret[1])
-    if (secret := _read_secret_from_env("EMBEDDER_API_KEY", runtime_paths)) is not None:
+    if (secret := runtime_paths.first_env_value(("EMBEDDER_API_KEY",))) is not None:
         declare(EMBEDDER_CREDENTIAL_SERVICE, {"api_key": secret[0]}, secret[1])
     for service, credentials, variable in _declared_seed_credentials(runtime_paths):
         declare(service, credentials, variable)

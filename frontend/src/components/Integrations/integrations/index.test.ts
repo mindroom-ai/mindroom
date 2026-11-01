@@ -224,22 +224,28 @@ describe("Generic OAuth integration provider", () => {
     expect(popup.close).not.toHaveBeenCalled();
   });
 
-  it("fails closed when OAuth status fails", async () => {
-    fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 500,
-      json: async () => ({ detail: "server error" }),
-    });
+  it.each([
+    { body: { detail: "server error" }, error: "server error" },
+    { body: {}, error: "Failed to load Google Drive OAuth status." },
+  ])(
+    "fails closed when OAuth status fails with $body",
+    async ({ body, error }) => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => body,
+      });
 
-    const status = await drive.loadStatus();
+      const status = await drive.loadStatus();
 
-    expect(status).toMatchObject({
-      status: "not_connected",
-      status_error: "server error",
-      oauth_client_configured: false,
-      oauth_custom_client_configured: false,
-    });
-  });
+      expect(status).toMatchObject({
+        status: "not_connected",
+        status_error: error,
+        oauth_client_configured: false,
+        oauth_custom_client_configured: false,
+      });
+    },
+  );
 
   it("fails closed when OAuth status cannot be loaded", async () => {
     fetchMock.mockRejectedValueOnce(new Error("network error"));

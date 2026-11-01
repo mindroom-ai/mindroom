@@ -137,10 +137,12 @@ async def test_final_approval_links_the_delivered_attempt(
     ):
         async with resumed_approval(bot, continuation) as claimed:
             if recover:
+                request = _plain_request(target, source_event_id="$source")
                 await runner.approvals._execute_claimed_approval(
                     claimed,
-                    request=_plain_request(target, source_event_id="$source"),
+                    request=request,
                     target=target,
+                    identity=runner.locked.build_lifecycle(request, response_kind="ai").identity,
                 )
                 await dispatch_approval(runner.approvals, claimed, target=target)
             else:

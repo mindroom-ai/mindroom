@@ -23,6 +23,7 @@ import pytest
 from authlib.integrations.base_client.errors import OAuthError
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
+import mindroom.matrix.state as matrix_state_module
 import mindroom.mcp.manager as mcp_manager_module
 import mindroom.oauth.service as oauth_service_module
 from mindroom.agents import create_agent
@@ -2394,6 +2395,85 @@ async def test_oauth_mcp_shared_scope_keeps_accounts_separate_per_agent(
     assert _scoped_worker_keys(manager) == {
         ("shared", first_target.worker_key),
     }
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_bridge_gives_the_cached_input_schema_when_the_arguments_may_be_at_fault(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A refused call, or a failed one that sent names the schema does not list, ends with the cached schema.
+
+    A generic failure first names the unlisted arguments, and one whose names the schema lists stays as the server
+    wrote it. Every call reaches the server, the tools are listed only once, and nothing reads the Matrix state from
+    disk once the server has answered: the schema is the one the call was sent against.
+    """
+    _patch_manager(monkeypatch)
+    answered = False
+    read_state = matrix_state_module._matrix_state_cache_key
+    dispatch = _FakeClientSession.call_tool
+
+    def state_key_before_the_answer(state_file: Path) -> object:
+        assert not answered, "the error hint read the Matrix state"
+        return read_state(state_file)
+
+    async def answer(self: _FakeClientSession, *args: object, **kwargs: object) -> CallToolResult:
+        nonlocal answered
+        result = await dispatch(self, *args, **kwargs)
+        answered = True
+        return result
+
+    monkeypatch.setattr(matrix_state_module, "_matrix_state_cache_key", state_key_before_the_answer)
+    monkeypatch.setattr(_FakeClientSession, "call_tool", answer)
+    schema = {
+        "type": "object",
+        "properties": {"kind": {"type": "string", "enum": ["document", "collection"]}},
+        "required": ["kind"],
+        "additionalProperties": True,
+    }
+    _FakeClientSession.tool_list = [Tool(name="fetch", description="Fetch one item", input_schema=schema)]
+    refusal = 'MCP error -32602: Input validation error: Invalid arguments for tool fetch: expected one of "document"'
+    generic = "An unexpected error occurred. Please try again."
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text=text)], is_error=True)
+        for text in (refusal, generic, generic)
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    server_config = _oauth_mcp_config()
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": server_config}))
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=None,
+        server_config=server_config,
+        runtime_paths=runtime_paths,
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=worker_target,
+    )
+    call_tool = toolkit.functions["demo_call_tool"]
+    calls = [{"kind": "page"}, {"kind": "document", "limit": 5, "offset": 0}, {"kind": "document"}]
+    errors: list[str] = []
+    try:
+        for arguments in calls:
+            answered = False
+            with pytest.raises(MCPToolCallError) as failed:
+                await call_tool(tool_name="fetch", arguments=arguments)
+            errors.append(str(failed.value))
+    finally:
+        await manager.shutdown()
+
+    schema_text = f"Input schema of 'fetch': {json.dumps(schema)}"
+    assert errors == [
+        f"{refusal}\n\n{schema_text}",
+        f"{generic}\n\nArguments not listed in the properties of the input schema of 'fetch': 'limit', 'offset'.\n"
+        f"{schema_text}",
+        generic,
+    ]
+    assert _FakeClientSession.call_tool_arguments == calls
+    assert _FakeClientSession.listed_cursors == [None]
 
 
 @pytest.mark.asyncio
