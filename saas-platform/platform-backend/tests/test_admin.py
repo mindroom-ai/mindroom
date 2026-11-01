@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from backend.utils import paging
 from tests.fake_supabase import FakeSupabase
 
 
@@ -399,27 +400,42 @@ class TestAdminEndpoints:
         assert set(_auth_cache) == {"acc_other"}
         _auth_cache.clear()
 
-    def test_admin_list_resources(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
-        """Test admin listing resources."""
-        # Setup mock with query chaining for accounts
-        mock_query = MagicMock()
-        mock_query.select.return_value = mock_query
-        mock_query.range.return_value = mock_query
-        mock_query.execute.return_value = Mock(
-            data=[{"id": "1", "name": "Resource 1"}, {"id": "2", "name": "Resource 2"}], count=2
-        )
-        mock_supabase.table.return_value = mock_query
+    def test_admin_list_holds_every_row_newest_first(self, client: TestClient, mock_verify_admin: Mock):
+        """A list without a range holds every row past PostgREST's row limit, newest first, ties in id order."""
+        accounts = [{"id": f"acc_{day:02d}", "created_at": f"2026-10-{day:02d}T00:00:00Z"} for day in range(1, 13)]
+        accounts.append({"id": "acc_00", "created_at": "2026-10-12T00:00:00Z"})
+        db = FakeSupabase({"accounts": accounts[1::2] + accounts[::2]})
+        with patch("backend.routes.admin.ensure_supabase", return_value=db), patch.object(paging, "_PAGE_SIZE", 5):
+            response = client.get("/admin/accounts")
 
-        # Make request
-        response = client.get("/admin/accounts")
-
-        # Verify
         assert response.status_code == 200
-        data = response.json()
-        assert "data" in data
-        assert "total" in data
-        assert len(data["data"]) == 2
-        assert data["total"] == 2
+        newest_first = ["acc_00", *(f"acc_{day:02d}" for day in range(12, 0, -1))]
+        assert [row["id"] for row in response.json()["data"]] == newest_first
+        assert response.json()["total"] == 13
+
+    def test_admin_list_range_follows_the_requested_order(self, client: TestClient, mock_verify_admin: Mock):
+        """A ranged list holds the requested slice in the requested order, and total counts every row."""
+        logs = [{"id": f"log_{day}", "created_at": f"2026-10-0{day}T00:00:00Z"} for day in (4, 1, 5, 3, 2)]
+        db = FakeSupabase({"audit_logs": logs})
+        with patch("backend.routes.admin.ensure_supabase", return_value=db):
+            response = client.get("/admin/audit_logs?_sort=created_at&_order=ASC&_start=1&_end=3")
+
+        assert response.status_code == 200
+        assert [row["id"] for row in response.json()["data"]] == ["log_2", "log_3"]
+        assert response.json()["total"] == 5
+
+    def test_admin_list_failure_is_an_error_not_an_empty_list(self, mock_verify_admin: Mock):
+        """A failed listing answers with an error, so the admin never mistakes it for an empty table."""
+        from main import app  # noqa: PLC0415
+
+        db = FakeSupabase()
+        with (
+            patch("backend.routes.admin.ensure_supabase", return_value=db),
+            patch.object(db, "table", side_effect=RuntimeError("database unavailable")),
+        ):
+            response = TestClient(app, raise_server_exceptions=False).get("/admin/accounts")
+
+        assert response.status_code == 500
 
     def test_admin_get_single_resource(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test admin getting a single resource."""

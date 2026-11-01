@@ -23,6 +23,7 @@ class FakeResult:
     """Query result exposing ``data`` like the Supabase client."""
 
     data: Any
+    count: int | None = None
 
 
 @dataclass
@@ -35,15 +36,16 @@ class FakeQuery:
     columns: str = "*"
     payload: dict[str, Any] | None = None
     filters: list[tuple[str, str, Any]] = field(default_factory=list)
-    order_by: tuple[str, bool] | None = None
+    order_by: list[tuple[str, bool]] = field(default_factory=list)
+    count_rows: bool = False
     row_range: tuple[int, int] | None = None
     row_limit: int | None = None
     single_row: bool = False
     conflict_column: str | None = None
     negate_next: bool = False
 
-    def select(self, columns: str = "*", **_kwargs: Any) -> FakeQuery:  # noqa: ANN401
-        self.columns = columns
+    def select(self, columns: str = "*", *, count: str | None = None) -> FakeQuery:
+        self.columns, self.count_rows = columns, count == "exact"
         return self
 
     def update(self, payload: dict[str, Any]) -> FakeQuery:
@@ -82,7 +84,7 @@ class FakeQuery:
         return self._filter("is", column, None)
 
     def order(self, column: str, *, desc: bool = False) -> FakeQuery:
-        self.order_by = (column, desc)
+        self.order_by.append((column, desc))
         return self
 
     def range(self, start: int, end: int) -> FakeQuery:
@@ -135,9 +137,10 @@ class FakeQuery:
             for row in matched:
                 row.update(self.payload)
             return FakeResult([dict(row) for row in matched])
-        if self.order_by:
-            column, desc = self.order_by
-            matched.sort(key=lambda row: str(row.get(column) or ""), reverse=desc)
+        # Sorting by the last key first keeps earlier keys decisive, like ORDER BY a, b.
+        for column, desc in reversed(self.order_by):
+            matched.sort(key=lambda row, column=column: str(row.get(column) or ""), reverse=desc)
+        count = len(matched) if self.count_rows else None
         if self.row_range:
             matched = matched[self.row_range[0] : self.row_range[1] + 1]
         if self.row_limit is not None:
@@ -146,7 +149,7 @@ class FakeQuery:
         if self.single_row:
             assert len(projected) == 1, f"single() matched {len(projected)} rows in {self.table_name}"
             return FakeResult(projected[0])
-        return FakeResult(projected)
+        return FakeResult(projected, count)
 
 
 def _matches_filter(op: str, current: Any, value: Any) -> bool:  # noqa: ANN401

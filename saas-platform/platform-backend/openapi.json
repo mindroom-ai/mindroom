@@ -2522,7 +2522,7 @@
     },
     "/admin/{resource}": {
       "get": {
-        "description": "Generic list endpoint for React Admin.",
+        "description": "List a resource's rows, newest first unless ``_sort`` and ``_order`` say otherwise.\n\nRows with equal sort values follow ``id`` order, so ranges never skip or repeat a row.\n``_start`` and ``_end`` select rows ``_start`` to ``_end - 1``; without ``_end``, every row from ``_start`` on.\n``total`` counts every matching row.",
         "operationId": "admin_get_list_admin__resource__get",
         "parameters": [
           {
@@ -2539,15 +2539,9 @@
             "name": "_sort",
             "required": false,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": " Sort"
+              "default": "created_at",
+              "title": " Sort",
+              "type": "string"
             }
           },
           {
@@ -2555,15 +2549,13 @@
             "name": "_order",
             "required": false,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
+              "default": "DESC",
+              "enum": [
+                "ASC",
+                "DESC"
               ],
-              "title": " Order"
+              "title": " Order",
+              "type": "string"
             }
           },
           {
@@ -2581,9 +2573,15 @@
             "name": "_end",
             "required": false,
             "schema": {
-              "default": 10,
-              "title": " End",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": " End"
             }
           },
           {

@@ -1,7 +1,7 @@
 """Admin-only routes for platform management."""
 
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from backend.config import ENABLE_CLEANUP_SCHEDULER, INSTANCE_TEARDOWN_GRACE_DAYS, logger
 from backend.deps import (
@@ -29,7 +29,8 @@ from backend.models import (
 )
 from backend.services import instance_lifecycle, instances_data, provisioner_service
 from backend.utils.audit import create_audit_log
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from backend.utils.paging import select_all_pages
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -422,20 +423,39 @@ async def get_dashboard_metrics(
         }
 
 
-# === React Admin Data Provider ===
+# === Generic admin resources ===
+# Admin lists embed the account each row belongs to.
+_LIST_COLUMNS = {
+    "instances": "*, accounts(email, full_name)",
+    "subscriptions": "*, accounts(email, full_name)",
+    "audit_logs": "*, accounts(email)",
+}
+_SEARCH_FIELDS = {
+    "accounts": ["email", "full_name", "company_name"],
+    "instances": ["name", "subdomain"],
+    "audit_logs": ["action", "details"],
+    "subscriptions": ["tier", "status"],
+}
+
+
 @router.get("/admin/{resource}", response_model=AdminListResponse)
 @limiter.limit("60/minute")
-async def admin_get_list(  # noqa: C901
+async def admin_get_list(
     request: Request,  # noqa: ARG001
     resource: str,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
-    _sort: Annotated[str | None, Query()] = None,
-    _order: Annotated[str | None, Query()] = None,
-    _start: int = Query(0),  # noqa: FAST002
-    _end: int = Query(10),  # noqa: FAST002
-    q: Annotated[str | None, Query()] = None,
+    _sort: str = "created_at",
+    _order: Literal["ASC", "DESC"] = "DESC",
+    _start: int = 0,
+    _end: int | None = None,
+    q: str | None = None,
 ) -> dict[str, Any]:
-    """Generic list endpoint for React Admin."""
+    """List a resource's rows, newest first unless ``_sort`` and ``_order`` say otherwise.
+
+    Rows with equal sort values follow ``id`` order, so ranges never skip or repeat a row.
+    ``_start`` and ``_end`` select rows ``_start`` to ``_end - 1``; without ``_end``, every row from ``_start`` on.
+    ``total`` counts every matching row.
+    """
     if resource not in ALLOWED_RESOURCES:
         raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
@@ -447,39 +467,17 @@ async def admin_get_list(  # noqa: C901
         details={"query": q, "start": _start, "end": _end},
     )
 
-    try:
-        # Add joins for better data display in admin panel
-        if resource == "instances":
-            query = sb.table("instances").select("*, accounts(email, full_name)", count="exact")
-        elif resource == "subscriptions":
-            query = sb.table("subscriptions").select("*, accounts(email, full_name)", count="exact")
-        elif resource == "audit_logs":
-            query = sb.table("audit_logs").select("*, accounts(email)", count="exact")
-        else:
-            query = sb.table(resource).select("*", count="exact")
+    def build_query() -> Any:  # noqa: ANN401
+        query = sb.table(resource).select(_LIST_COLUMNS.get(resource, "*"), count="exact")
+        if q and resource in _SEARCH_FIELDS:
+            query = query.or_(",".join(f"{field}.ilike.%{q}%" for field in _SEARCH_FIELDS[resource]))
+        return query.order(_sort, desc=_order == "DESC").order("id")
 
-        if q:
-            search_fields = {
-                "accounts": ["email", "full_name", "company_name"],
-                "instances": ["name", "subdomain"],
-                "audit_logs": ["action", "details"],
-                "subscriptions": ["tier", "status"],
-            }
-            if resource in search_fields:
-                or_conditions = [f"{field}.ilike.%{q}%" for field in search_fields[resource]]
-                query = query.or_(",".join(or_conditions))
-
-        if _sort:
-            order_column = f"{_sort}.{_order.lower() if _order else 'asc'}"
-            query = query.order(order_column)
-
-        query = query.range(_start, _end - 1)
-        result = query.execute()
-    except Exception:
-        logger.exception("Error in get_list")
-        return {"data": [], "total": 0}
-    else:
-        return {"data": result.data, "total": result.count}
+    if _end is None:
+        rows = select_all_pages(build_query)
+        return {"data": rows[_start:], "total": len(rows)}
+    result = build_query().range(_start, _end - 1).execute()
+    return {"data": result.data, "total": result.count}
 
 
 @router.get("/admin/{resource}/{resource_id}", response_model=AdminGetOneResponse)

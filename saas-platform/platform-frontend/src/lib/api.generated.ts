@@ -273,7 +273,11 @@ export interface paths {
         };
         /**
          * Admin Get List
-         * @description Generic list endpoint for React Admin.
+         * @description List a resource's rows, newest first unless ``_sort`` and ``_order`` say otherwise.
+         *
+         *     Rows with equal sort values follow ``id`` order, so ranges never skip or repeat a row.
+         *     ``_start`` and ``_end`` select rows ``_start`` to ``_end - 1``; without ``_end``, every row from ``_start`` on.
+         *     ``total`` counts every matching row.
          */
         get: operations["admin_get_list_admin__resource__get"];
         put?: never;
@@ -2127,10 +2131,10 @@ export interface operations {
     admin_get_list_admin__resource__get: {
         parameters: {
             query?: {
-                _sort?: string | null;
-                _order?: string | null;
+                _sort?: string;
+                _order?: "ASC" | "DESC";
                 _start?: number;
-                _end?: number;
+                _end?: number | null;
                 q?: string | null;
             };
             header?: {
