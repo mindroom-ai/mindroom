@@ -6441,10 +6441,6 @@ expose = [
 from = ["mindroom.providers.credentials"]
 
 [[interfaces]]
-expose = ["valid_matrix_server_name"]
-from = ["mindroom.matrix.identity"]
-
-[[interfaces]]
 expose = [
     "ScheduledWorkflowOutcome",
     "execute_scheduled_workflow",
@@ -7027,12 +7023,6 @@ from = ["mindroom.hooks"]
 
 [[interfaces]]
 expose = [
-    "build_oauth_connect_instruction",
-]
-from = ["mindroom.oauth.service"]
-
-[[interfaces]]
-expose = [
     "OAuthCredentialConflictError",
     "OAuthCredentialContext",
     "OAuthCredentialUnreadableError",
@@ -7245,10 +7235,6 @@ depends_on = []
 [[interfaces]]
 expose = ["bind_script_tool_broker", "router", "serve_script_gateway_listener"]
 from = ["mindroom.api.script_gateway"]
-
-[[interfaces]]
-expose = ["MindRoomToolCallError", "MindRoomTools"]
-from = ["mindroom.script_sdk"]
 
 [[interfaces]]
 expose = ["ApprovalMatrixTransport"]
@@ -9199,10 +9185,6 @@ visibility = ["mindroom.orchestrator"]
 path = "mindroom.cli.local_model_config"
 depends_on = ["mindroom.atomic_file", "mindroom.cli.config", "mindroom.config.main", "mindroom.path_confinement"]
 visibility = ["mindroom.cli.config"]
-
-[[interfaces]]
-from = ["mindroom.custom_tools.google_service"]
-expose = ["GoogleCloudToolkit"]
 
 [[modules]]
 path = "mindroom.tool_jobs.settings"
