@@ -1031,7 +1031,7 @@ def test_google_drive_read_metadata_supports_shared_drive_files(tmp_path: Path) 
 
     result = json.loads(tool.read_file("shared-drive-folder-id"))
 
-    assert result["error"] == "Cannot read application/vnd.google-apps.folder as text."
+    assert result["error"] == "Cannot read application/vnd.google-apps.folder as text. It cannot be downloaded either."
     assert service.files_resource.get_kwargs == {
         "fileId": "shared-drive-folder-id",
         "fields": tool.READ_METADATA_FIELDS,
@@ -1171,19 +1171,27 @@ def test_google_drive_large_file_error_names_exposed_download_function(tmp_path:
     assert service.files_resource.get_media_kwargs is None
 
 
-def test_google_drive_read_error_names_enabled_download_function(
+@pytest.mark.parametrize(
+    ("mime_type", "downloadable"),
+    [("application/vnd.google-apps.drawing", True), ("application/vnd.google-apps.folder", False)],
+)
+def test_google_drive_read_refusal_advises_download_only_for_downloadable_workspace_types(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    mime_type: str,
+    *,
+    downloadable: bool,
 ) -> None:
+    """A refused Workspace file read names the download function only for a type that function exports."""
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {"name": "Untitled", "mimeType": mime_type}
 
-    result = json.loads(tool.read_file("shared-drive-folder-id"))
+    result = json.loads(tool.read_file("shared-drive-file-id"))
 
-    assert (
-        result["error"]
-        == "Cannot read application/vnd.google-apps.folder as text. Use google_drive_download_file instead."
-    )
+    advice = "Use google_drive_download_file instead." if downloadable else "It cannot be downloaded either."
+    assert result["error"] == f"Cannot read {mime_type} as text. {advice}"
     assert service.files_resource.get_media_kwargs is None
+    assert ("error" not in json.loads(tool.download_file("shared-drive-file-id"))) is downloadable
 
 
 def test_google_drive_download_media_supports_shared_drive_files(

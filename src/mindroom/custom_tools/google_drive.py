@@ -317,6 +317,10 @@ class GoogleDriveTools(
             field_name="Google Drive local_path",
         )
 
+    def _downloadable(self, mime_type: str) -> bool:
+        """Return whether `download_file` saves this type without an explicit export format."""
+        return mime_type in self.DOWNLOAD_EXPORT_TYPES or not mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX)
+
     def _download_guidance(self) -> str:
         """Name the download function, while this toolkit offers it, as the way past a read it refuses."""
         if "google_drive_download_file" in toolkit_function_names(self):
@@ -472,26 +476,25 @@ class GoogleDriveTools(
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
     def _text_read_refusal(self, mime_type: str, metadata: dict[str, Any]) -> str:
-        return json.dumps(
-            {
-                "error": f"Cannot read {mime_type} as text.{self._download_guidance()}",
-                "file": metadata,
-            },
-        )
+        guidance = self._download_guidance() if self._downloadable(mime_type) else " It cannot be downloaded either."
+        return json.dumps({"error": f"Cannot read {mime_type} as text.{guidance}", "file": metadata})
 
     # AGNO_COMPAT: Drive `read_file` refuses text by MIME type and names a download function that may not exist.
     # Reason: Agno 3.0.9 refuses every `application/octet-stream` file, including text MindRoom's own uploads
     # store that way, and ends errors with "Use download_file instead." although MindRoom exposes
-    # `google_drive_download_file` or disables it. This override decides text by content instead. It also
+    # `google_drive_download_file` or disables it, and although its `download_file` refuses folders and other
+    # Workspace types it cannot export. This override decides text by content instead. It also
     # refuses Office files, which Agno's MIME-based branch would extract without tables, grouped shapes, or
     # line breaks, or reject with an install hint when the extraction packages are missing.
     # Upstream issue: Tracking gap; no matching issue identified.
     # Upstream PR: None identified; https://github.com/agno-agi/agno/pull/10501 (open) covers only `.docx` tables.
     # Remove when: Agno's `read_file` decides text by content rather than MIME type, lets a toolkit name its
-    # download function, and extracts complete Office text with dependencies MindRoom ships or refuses it;
+    # download function, names it only for types `download_file` can save, and extracts complete Office text
+    # with dependencies MindRoom ships or refuses it;
     # keep MindRoom's function aliases.
     # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refuses_binary_content_and_names_enabled_download_function;
     # tests/test_google_drive_oauth_tool.py::test_google_drive_read_names_no_download_function_its_filters_leave_out;
+    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_downloadable_workspace_types;
     # tests/test_google_drive_oauth_tool.py::test_google_drive_read_returns_text_without_nul_bytes.
     @authenticate
     def read_file(self, file_id: str) -> str:
@@ -563,7 +566,7 @@ class GoogleDriveTools(
             if export_format:
                 target_mime = export_format
                 ext = mimetypes.guess_extension(export_format) or ""
-            elif target_mime is None and mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
+            elif not self._downloadable(mime_type):
                 return json.dumps({"error": f"Unsupported Workspace file type for download: {mime_type}"})
 
             path = _download_target_path(self._workspace_root, cast("str", filename), ext)
