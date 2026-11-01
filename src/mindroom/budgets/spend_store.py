@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from mindroom.budgets.caps import budget_caps_path
 from mindroom.budgets.pricing import model_prices
 from mindroom.budgets.spend import SpendSnapshot, UnpricedModelUsage
+from mindroom.constants import resolve_session_state_root
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -26,8 +27,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _SCHEMA_VERSION = 1
-# Writes are single small transactions, so a longer wait would only stall the event loop behind a stuck one.
-_BUSY_TIMEOUT_SECONDS = 1.0
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS scan (
     fingerprint TEXT NOT NULL,
@@ -60,11 +59,12 @@ def spend_store_path(runtime_paths: RuntimePaths) -> Path:
     return budget_caps_path(runtime_paths).parent / "spend.sqlite3"
 
 
-def spend_fingerprint(config: Config) -> str:
+def spend_fingerprint(config: Config, runtime_paths: RuntimePaths) -> str:
     """Return a digest of the settings that change what a scan counts, and of whether budgets are on.
 
-    Prices price usage; the agents choose which session stores a scan reads; and the agents, teams, bot accounts,
-    internal user, and bridge aliases decide whom an alias charges. Caps and the fallback model apply when spend is read.
+    Prices price usage; the session root and the agents choose which session stores a scan reads; and the agents, teams,
+    bot accounts, internal user, and bridge aliases decide whom an alias charges. Caps and the fallback model apply when
+    spend is read.
     """
     prices = [
         [provider, model_id, priced.pricing.model_dump(mode="json"), priced.input_includes_cache]
@@ -73,6 +73,7 @@ def spend_fingerprint(config: Config) -> str:
     payload = [
         config.budgets is not None,
         prices,
+        str(resolve_session_state_root(runtime_paths.storage_root, runtime_paths).expanduser().resolve()),
         sorted((name, agent.private is not None) for name, agent in config.agents.items()),
         sorted(config.teams),
         sorted(config.bot_accounts),
@@ -90,8 +91,8 @@ def _timestamp(moment: datetime) -> str:
 def connect_spend_store(path: Path) -> sqlite3.Connection:
     """Open the store at ``path``, creating it when missing, or raise ``sqlite3.DatabaseError`` for another schema."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    # One thread uses a connection at a time: the event loop its own, and each worker scan a fresh one.
-    connection = sqlite3.connect(path, timeout=_BUSY_TIMEOUT_SECONDS, check_same_thread=False)
+    # Only the monitor's one writer thread writes, so a lock held for long is stuck, and only delays a start.
+    connection = sqlite3.connect(path, timeout=1)
     try:
         _prepare(connection, path)
     except BaseException:
@@ -101,8 +102,9 @@ def connect_spend_store(path: Path) -> sqlite3.Connection:
 
 
 def _prepare(connection: sqlite3.Connection, path: Path) -> None:
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA synchronous = NORMAL")
+    # The storage root may be a network filesystem, where WAL is unsafe, and a stored reply cost must survive a reset.
+    connection.execute("PRAGMA journal_mode = DELETE")
+    connection.execute("PRAGMA synchronous = FULL")
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     if version == 0:
         connection.executescript(_SCHEMA)
@@ -112,8 +114,8 @@ def _prepare(connection: sqlite3.Connection, path: Path) -> None:
 
 
 def discard_spend_store(path: Path) -> None:
-    """Delete the store at ``path`` with its write-ahead log, so the next write starts a fresh one."""
-    for name in (path.name, f"{path.name}-wal", f"{path.name}-shm"):
+    """Delete the store at ``path`` with any rollback journal, which SQLite would otherwise replay into the next one."""
+    for name in (path.name, f"{path.name}-journal"):
         path.with_name(name).unlink(missing_ok=True)
 
 
@@ -149,14 +151,14 @@ def load_spend(path: Path) -> _StoredSpend:
         )
 
 
-def store_scan(path: Path, snapshot: SpendSnapshot, fingerprint: str) -> None:
+def store_scan(connection: sqlite3.Connection, snapshot: SpendSnapshot, fingerprint: str) -> None:
     """Replace the stored scan with ``snapshot``, and drop the reply costs and scan requests it covers.
 
     A scan's ``generated_at`` is the time it started, which is the ``now`` it dates usage by, and it covers everything
     recorded until then.
     """
     started_at = _timestamp(snapshot.generated_at)
-    with closing(connect_spend_store(path)) as connection, connection:
+    with connection:
         connection.execute("DELETE FROM scan")
         connection.execute(
             "INSERT INTO scan VALUES (?, ?, ?, ?, ?, ?)",

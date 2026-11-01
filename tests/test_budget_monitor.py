@@ -19,10 +19,17 @@ from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model, budget_user_id
 from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.budgets.spend import SpendSnapshot, UnpricedModelUsage
-from mindroom.budgets.spend_store import load_spend, spend_store_path, store_scan
-from mindroom.config.agent import AgentConfig
+from mindroom.budgets.spend_store import (
+    connect_spend_store,
+    load_spend,
+    spend_fingerprint,
+    spend_store_path,
+    store_scan,
+)
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord
@@ -947,6 +954,10 @@ async def test_a_completed_scan_drops_the_stored_reply_costs_it_covers_and_keeps
     before, _current = _monitor(tmp_path, _config(), clock)
     await before.sync(_config())
     await _until(lambda: before.status().snapshot is not None)
+    # The store writer is held, so the scan's write queues behind the reply writes before and while it ran.
+    writer_held = threading.Event()
+    add_reply_cost = monitor_module.add_reply_cost
+    monkeypatch.setattr(monitor_module, "add_reply_cost", lambda *args: writer_held.wait(5) and add_reply_cost(*args))
     clock.now += timedelta(minutes=1)
     before.response_finished(ALICE, 2.0, OCTOBER)
     scans.release.clear()
@@ -958,6 +969,7 @@ async def test_a_completed_scan_drops_the_stored_reply_costs_it_covers_and_keeps
     before.response_finished(ALICE, 1.0, OCTOBER)
     scans.release.set()
     await _until(lambda: before._spend_usd(ALICE) == 7.5)
+    writer_held.set()
     await before.stop()
 
     stored = load_spend(spend_store_path(_paths(tmp_path)))
@@ -988,9 +1000,10 @@ async def test_an_unusable_spend_store_falls_back_to_a_scan(
         with closing(sqlite3.connect(path)) as connection:
             connection.execute("PRAGMA user_version = 7")
     elif store == "unparsable":
-        store_scan(path, _snapshot({ALICE: 1.0}), "fingerprint")
-        with closing(sqlite3.connect(path)) as connection, connection:
-            connection.execute("UPDATE scan SET generated_at = 'yesterday'")
+        with closing(connect_spend_store(path)) as connection:
+            store_scan(connection, _snapshot({ALICE: 1.0}), "fingerprint")
+            with connection:
+                connection.execute("UPDATE scan SET generated_at = 'yesterday'")
     elif store == "locked":
         lock = sqlite3.connect(path, isolation_level=None)
         lock.execute("BEGIN EXCLUSIVE")
@@ -1007,8 +1020,81 @@ async def test_an_unusable_spend_store_falls_back_to_a_scan(
     assert path.exists() is (store == "locked")
     await monitor.sync(_config())
     await _until(lambda: monitor._spend_usd(ALICE) == 12.0)
+    await monitor.stop()
     assert scans.calls == 1
     stored = load_spend(path)
     assert stored.snapshot is not None
     assert stored.snapshot.spend_usd == {ALICE: 12.0}
-    await monitor.stop()
+
+
+def test_the_fingerprint_follows_what_a_scan_counts_not_how_the_config_is_written(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    config = _config(monthly_limit_usd=10)
+    config.agents = {"code": AgentConfig(display_name="Code"), "docs": AgentConfig(display_name="Docs")}
+    config.bot_accounts = [BRIDGE_BOT, "@otherbot:example.test"]
+    config.authorization = AuthorizationConfig(aliases={ALICE: [ALICE_BRIDGE, "@slack-alice:example.test"]})
+    fingerprint = spend_fingerprint(config, paths)
+    reordered = config.model_copy(
+        update={
+            "models": dict(reversed(config.models.items())),
+            "agents": dict(reversed(config.agents.items())),
+            "bot_accounts": list(reversed(config.bot_accounts)),
+            "authorization": AuthorizationConfig(aliases={ALICE: ["@slack-alice:example.test", ALICE_BRIDGE]}),
+            # Caps and the fallback model apply when spend is read.
+            "budgets": _config(monthly_limit_usd=20, fallback_model="local").budgets,
+        },
+    )
+    private = AgentConfig(display_name="Code", private=AgentPrivateConfig(per="user"))
+    team = TeamConfig(display_name="Engineering", role="Team", agents=["code"])
+    changes = [
+        config.model_copy(update={"agents": {**config.agents, "code": private}}),
+        config.model_copy(update={"teams": {"engineering": team}}),
+        config.model_copy(update={"mindroom_user": MindRoomUserConfig(username="internal")}),
+    ]
+    moved_sessions = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SESSION_STORAGE_PATH": str(tmp_path / "sessions")},
+    )
+
+    assert spend_fingerprint(reordered, paths) == fingerprint
+    assert all(spend_fingerprint(changed, paths) != fingerprint for changed in changes)
+    assert spend_fingerprint(config, moved_sessions) != fingerprint
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_scan", [False, True])
+async def test_a_lost_store_write_makes_the_next_start_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    during_scan: bool,
+) -> None:
+    """A restart must not resume spend that misses a reply, though the running total still counts it."""
+    clock = _Clock()
+    scans = _Scans(monkeypatch, {ALICE: 9.0})
+    before, _current = _monitor(tmp_path, _config(), clock)
+    await before.sync(_config())
+    await _until(lambda: before.status().snapshot is not None)
+    first_scan = before.status().snapshot
+    if during_scan:
+        # The scan running when the write is lost does not cover that reply, so it must not make the store resumable.
+        scans.release.clear()
+        before.response_finished(BOB, None, OCTOBER)
+        await _until(lambda: scans.calls == 2)
+    clock.now += timedelta(minutes=1)
+
+    def lose(*_args: object) -> None:
+        msg = "disk I/O error"
+        raise sqlite3.OperationalError(msg)
+
+    monkeypatch.setattr(monitor_module, "add_reply_cost", lose)
+    before.response_finished(ALICE, 2.0, OCTOBER)
+    scans.release.set()
+    await _until(lambda: before.status().snapshot is not first_scan or not during_scan)
+    assert before._spend_usd(ALICE) == 11.0
+    await before.stop()
+
+    restarted, _current = await _restarted(tmp_path, _config(), clock)
+
+    await _until(lambda: scans.calls == 3 if during_scan else scans.calls == 2)
+    await restarted.stop()

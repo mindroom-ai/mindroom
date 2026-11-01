@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
@@ -213,8 +214,11 @@ class BudgetMonitor:
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _loop: SupervisedLoop = field(init=False)
     _store_path: Path = field(init=False)
-    # The event loop's connection to the spend store, opened by its first write.
+    # One writer thread applies the store writes in the order they were queued, through a connection only it uses.
+    _writer: ThreadPoolExecutor | None = field(default=None, init=False)
     _store: sqlite3.Connection | None = field(default=None, init=False)
+    # When the latest write the store lost was recorded; the writer stores no scan that started before it.
+    _lost_at: datetime | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Load the per-user caps and the spend a previous run stored."""
@@ -247,7 +251,7 @@ class BudgetMonitor:
         reconciliation interval, and schedules the next reconciliation from its start; later calls rescan only when
         those settings changed.
         """
-        fingerprint = spend_fingerprint(config)
+        fingerprint = spend_fingerprint(config, self.runtime_paths)
         previous, self._synced_fingerprint = self._synced_fingerprint, fingerprint
         self._loop.start()
         if fingerprint == previous or (previous is None and self._resume_stored_scan(fingerprint)):
@@ -284,14 +288,15 @@ class BudgetMonitor:
             self._request_scan()
         elif cost_usd:
             self._costs_since_scan[user_id] = self._costs_since_scan.get(user_id, 0.0) + cost_usd
-            self._write(lambda store: add_reply_cost(store, user_id, cost_usd, now))
+            self._persist(now, lambda store: add_reply_cost(store, user_id, cost_usd, now))
 
     async def stop(self) -> None:
-        """Stop the refresh loop and close the store; the last snapshot stays readable."""
+        """Stop the refresh loop, and the store writer once it applied the writes queued so far."""
         await self._loop.stop()
-        if self._store is not None:
-            self._store.close()
-            self._store = None
+        writer, self._writer = self._writer, None
+        if writer is not None:
+            writer.submit(self._close_store)
+            await asyncio.to_thread(writer.shutdown)
 
     def _spend_usd(self, user_id: str) -> float:
         """Return a canonical requester's month-to-date spend, or zero until a scan of this month completed."""
@@ -374,16 +379,37 @@ class BudgetMonitor:
         """Wake the loop for a scan, and store the request until a scan that starts after it completes."""
         self._wake.set()
         now = self.clock()
-        self._write(lambda store: add_scan_request(store, now))
+        self._persist(now, lambda store: add_scan_request(store, now))
 
-    def _write(self, write: Callable[[sqlite3.Connection], None]) -> None:
-        """Apply one small write on the event loop; a failure leaves only that change out of what a restart resumes."""
+    def _persist(self, recorded_at: datetime, write: Callable[[sqlite3.Connection], None]) -> None:
+        """Queue one store write of something recorded at ``recorded_at``; the event loop never waits for the store."""
+        if self._writer is None:
+            self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="budget_spend_store")
+        self._writer.submit(self._apply, recorded_at, write)
+
+    def _apply(self, recorded_at: datetime, write: Callable[[sqlite3.Connection], None]) -> None:
+        """Apply one write on the writer thread, or delete the store, so no restart resumes spend that misses it."""
         try:
             if self._store is None:
                 self._store = connect_spend_store(self._store_path)
             write(self._store)
         except (sqlite3.Error, OSError):
             logger.warning("budget_spend_not_stored", path=str(self._store_path), exc_info=True)
+            self._lost_at = recorded_at
+            self._close_store()
+            with contextlib.suppress(OSError):
+                discard_spend_store(self._store_path)
+
+    def _store_scan(self, store: sqlite3.Connection, snapshot: SpendSnapshot, config: Config) -> None:
+        # A scan that started before a lost write does not cover it, so the store stays without a scan until one does.
+        if self._lost_at is None or self._lost_at <= snapshot.generated_at:
+            store_scan(store, snapshot, spend_fingerprint(config, self.runtime_paths))
+            self._lost_at = None
+
+    def _close_store(self) -> None:
+        if self._store is not None:
+            self._store.close()
+            self._store = None
 
     async def _run(self) -> None:
         last_scan_seconds = 0.0
@@ -433,13 +459,8 @@ class BudgetMonitor:
             return
         self._snapshot = snapshot
         self._costs_before_scan = {}
+        # Queued after every reply this scan covers, so storing it drops exactly those.
+        self._persist(snapshot.generated_at, lambda store: self._store_scan(store, snapshot, config))
 
     def _collect(self, config: Config, now: datetime) -> SpendSnapshot:
-        """Scan and store the scan in a worker thread, so neither holds the event loop."""
-        snapshot = collect_monthly_spend(config, self.runtime_paths, now, model_prices(config))
-        try:
-            store_scan(self._store_path, snapshot, spend_fingerprint(config))
-        except (sqlite3.Error, OSError):
-            # The store keeps the previous scan and every reply since it started, which a restart can still resume.
-            logger.warning("budget_scan_not_stored", path=str(self._store_path), exc_info=True)
-        return snapshot
+        return collect_monthly_spend(config, self.runtime_paths, now, model_prices(config))
