@@ -117,7 +117,7 @@ MindRoom Chat also mutes the room when it joins it, so a mention hidden in a pac
   Ban someone to keep them out.
 - At the default power level `0`, any member may also create more packs, each up to about 64 KB that every member syncs.
   A server with open registration should use `--moderators-only`.
-- A room made by hand needs the published alias as its canonical alias, because MindRoom Chat finds the joined room by it.
+- A room made by hand and published by alias needs that alias as its canonical alias and `m.federate: false` in its creation content: MindRoom Chat only trusts a local-only room carrying the alias, because another server can set any alias in its own rooms. Publish the room ID instead if the room is federated.
 - To replace the room, tombstone the old one or remove its canonical alias, then publish the new one.
 
 ## Limits
