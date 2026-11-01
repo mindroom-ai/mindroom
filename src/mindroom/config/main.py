@@ -116,7 +116,7 @@ from mindroom.constants import (
 from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN
 from mindroom.entity_resolution import (
     call_room_ownership_key,
-    names_recorded_room,
+    names_room,
     resolve_agent_thread_mode,
     router_agents_for_room,
 )
@@ -130,7 +130,6 @@ from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     is_managed_room_key,
-    managed_room_alias,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
@@ -975,16 +974,10 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_room_references_name_rooms(self, info: ValidationInfo) -> Config:
-        """Reject a room reference that the runtime cannot map to a room ID, which it does through MindRoom's record only.
-
-        A configured room key and the alias MindRoom gives it name a room before the room is created and recorded.
-        """
+        """Reject a room reference that the runtime cannot map to a room ID."""
         runtime_paths = _context_runtime_paths(info)
         if runtime_paths is None:
             return self
-        domain = self.get_domain(runtime_paths)
-        room_keys = self.managed_room_keys()
-        named_rooms = room_keys | {managed_room_alias(room_key, domain, runtime_paths) for room_key in room_keys}
         references = [
             *(("rooms", room) for room in self.rooms),
             *((f"agents.{name}.rooms", room) for name, agent in self.agents.items() for room in agent.rooms),
@@ -1002,7 +995,7 @@ class Config(BaseModel):
         unknown_rooms = sorted(
             f"{location} -> {room}"
             for location, room in references
-            if room is not None and room not in named_rooms and not names_recorded_room(room, runtime_paths)
+            if room is not None and not names_room(self, room, runtime_paths)
         )
         if unknown_rooms:
             msg = (

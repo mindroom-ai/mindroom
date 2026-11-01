@@ -9,9 +9,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
-from mindroom.matrix_identifiers import (
-    room_alias_identifier_candidates,
-)
+from mindroom.matrix_identifiers import managed_room_alias, room_alias_identifier_candidates
 from mindroom.requester_identity import INTERNAL_USER_ENTITY_NAME, mindroom_user_id, runtime_matrix_domain
 
 if TYPE_CHECKING:
@@ -40,9 +38,18 @@ def call_room_ownership_key(room_ref: str, runtime_paths: RuntimePaths) -> str:
     return room_alias_identifier_candidates(room_ref, runtime_paths)[-1]
 
 
-def names_recorded_room(room_ref: str, runtime_paths: RuntimePaths) -> bool:
-    """Return whether a reference is a room ID, or a room key or alias MindRoom's record maps to one."""
-    return matrix_state.resolve_room_id(room_ref, runtime_paths).startswith("!")
+def names_room(config: Config, room_ref: str, runtime_paths: RuntimePaths) -> bool:
+    """Return whether the runtime can map a configured room reference to a room ID, as it does through MindRoom's record.
+
+    A configured room key and the alias MindRoom gives it name a room before the room is created and recorded.
+    """
+    room_keys = config.managed_room_keys()
+    domain = runtime_matrix_domain(runtime_paths)
+    return (
+        room_ref in room_keys
+        or room_ref in {managed_room_alias(room_key, domain, runtime_paths) for room_key in room_keys}
+        or matrix_state.resolve_room_id(room_ref, runtime_paths).startswith("!")
+    )
 
 
 def configured_call_agent_name_for_room(
