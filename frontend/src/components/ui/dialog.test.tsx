@@ -4,39 +4,54 @@ import { describe, expect, it } from "vitest";
 
 import { Dialog, DialogContent, DialogTitle } from "./dialog";
 
-/** A dialog opened from a plain button, as cards open their settings, with no DialogTrigger. */
+/**
+ * A dialog opened from a plain button, as cards open their settings, with no
+ * DialogTrigger; most dashboard dialogs are also removed from the page on close.
+ */
 function CardWithDialog({
   onCloseAutoFocus,
-}: Pick<ComponentProps<typeof DialogContent>, "onCloseAutoFocus">) {
+  unmountOnClose = false,
+}: Pick<ComponentProps<typeof DialogContent>, "onCloseAutoFocus"> & {
+  unmountOnClose?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   return (
     <>
       <input aria-label="Search" />
       <button onClick={() => setOpen(true)}>Configure</button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onCloseAutoFocus={onCloseAutoFocus}>
-          <DialogTitle>Settings</DialogTitle>
-          <button onClick={() => setOpen(false)}>Cancel</button>
-        </DialogContent>
-      </Dialog>
+      {(open || !unmountOnClose) && (
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent onCloseAutoFocus={onCloseAutoFocus}>
+            <DialogTitle>Settings</DialogTitle>
+            <button onClick={() => setOpen(false)}>Cancel</button>
+          </DialogContent>
+        </Dialog>
+      )}
     </>
   );
 }
 
+const pressEscape = () =>
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+
 describe("DialogContent", () => {
   it.each([
-    [
-      "Escape",
-      () => fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" }),
-    ],
-    [
-      "Cancel",
-      () => fireEvent.click(screen.getByRole("button", { name: "Cancel" })),
-    ],
+    { how: "Escape closes it", unmountOnClose: false, close: pressEscape },
+    {
+      how: "Cancel closes it",
+      unmountOnClose: false,
+      close: () =>
+        fireEvent.click(screen.getByRole("button", { name: "Cancel" })),
+    },
+    {
+      how: "Escape closes it and the page removes it",
+      unmountOnClose: true,
+      close: pressEscape,
+    },
   ])(
-    "gives focus back to the button that opened it when %s closes it",
-    async (_, close) => {
-      render(<CardWithDialog />);
+    "gives focus back to the button that opened it when $how",
+    async ({ unmountOnClose, close }) => {
+      render(<CardWithDialog unmountOnClose={unmountOnClose} />);
       const opener = screen.getByRole("button", { name: "Configure" });
       opener.focus();
       fireEvent.click(opener);
@@ -63,7 +78,7 @@ describe("DialogContent", () => {
     fireEvent.click(opener);
     await waitFor(() => expect(opener).not.toHaveFocus());
 
-    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    pressEscape();
 
     await waitFor(() =>
       expect(screen.getByRole("textbox", { name: "Search" })).toHaveFocus(),
