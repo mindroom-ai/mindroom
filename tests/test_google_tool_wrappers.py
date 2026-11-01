@@ -2322,6 +2322,37 @@ def test_google_wrapper_applies_env_file_service_account_to_upstream_auth(
     assert tool._should_fallback_to_original_auth() is True
 
 
+@pytest.mark.usefixtures("forbid_stored_oauth_credential_loads")
+@pytest.mark.parametrize("tool_class", [GmailTools, GoogleDocsTools])
+def test_google_wrappers_read_the_service_account_from_env_file_under_a_blank_export(
+    tool_class: type[GmailTools | GoogleDocsTools],
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """A relative `.env` path resolves against the config directory, and a blank export does not hide it."""
+    runtime_paths = replace(
+        runtime_paths,
+        process_env={**runtime_paths.process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "", "GOOGLE_DELEGATED_USER": ""},
+        env_file_values={
+            **runtime_paths.env_file_values,
+            "GOOGLE_SERVICE_ACCOUNT_FILE": "google/sa.json",
+            "GOOGLE_DELEGATED_USER": "alice@example.com",
+        },
+    )
+
+    tool = tool_class(runtime_paths=runtime_paths, credentials_manager=CredentialsManager(tmp_path / "credentials"))
+
+    service_account_path = str(runtime_paths.config_dir / "google" / "sa.json")
+    if isinstance(tool, GmailTools):
+        assert (tool._get_service_account_path(), tool._get_delegated_user()) == (
+            service_account_path,
+            "alice@example.com",
+        )
+    else:
+        assert (tool.service_account_path, tool.delegated_user) == (service_account_path, "alice@example.com")
+    assert tool._should_fallback_to_original_auth() is True
+
+
 @pytest.mark.parametrize(
     ("toolkit_class", "auth_owner", "auth_name"),
     [

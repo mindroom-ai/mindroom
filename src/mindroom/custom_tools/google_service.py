@@ -215,9 +215,6 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
             self.functions[name] = self._oauth_entrypoint(function)
             setattr(self, name, self.functions[name])
 
-    def _should_fallback_to_original_auth(self) -> bool:
-        return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
-
     def _service_account_auth(self) -> Any:  # noqa: ANN401
         """Return Google credentials built from the configured service-account file."""
         from google.oauth2 import service_account  # noqa: PLC0415
