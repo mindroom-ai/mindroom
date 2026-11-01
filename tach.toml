@@ -5984,7 +5984,6 @@ depends_on = [
     "mindroom.failure_text",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
-    "mindroom.tool_system.tool_schema",
 ]
 
 [[modules]]

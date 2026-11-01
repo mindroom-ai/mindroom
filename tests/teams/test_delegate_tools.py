@@ -82,31 +82,17 @@ def test_each_of_two_paused_pieces_under_one_name_is_answered_by_its_own_member(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("mode", "arguments", "error"),
+    ("mode", "arguments"),
     [
-        (
-            TeamMode.COORDINATE,
-            {"member_id": "writer", "task": 5},
-            "1 validation error for delegate_functions.<locals>.delegate_task_to_member\n",
-        ),
-        (
-            TeamMode.COORDINATE,
-            {"member_id": "writer"},
-            "delegate_task_to_member() is missing required argument 'task'. "
-            "Accepted parameters: member_id (string, required), task (string, required).",
-        ),
-        (
-            TeamMode.COLLABORATE,
-            {"task": ["two", "tasks"]},
-            "1 validation error for delegate_functions.<locals>.delegate_task_to_members\n",
-        ),
+        (TeamMode.COORDINATE, {"member_id": "writer", "task": 5}),
+        (TeamMode.COORDINATE, {"member_id": "writer"}),
+        (TeamMode.COLLABORATE, {"task": ["two", "tasks"]}),
     ],
     ids=["mistyped", "missing", "collaborate-mistyped"],
 )
 async def test_a_delegation_with_arguments_its_definition_refuses_fails_and_runs_no_member(
     mode: TeamMode,
     arguments: dict[str, object],
-    error: str,
 ) -> None:
     """A delegation call whose arguments do not fit its signature fails with the validation error the model reads."""
     asked: list[str] = []
@@ -128,5 +114,5 @@ async def test_a_delegation_with_arguments_its_definition_refuses_fails_and_runs
 
     assert function.definition() == DELEGATION_TOOLS[mode]
     assert outcome.is_error
-    assert outcome.content.startswith(error)
+    assert outcome.content.startswith(f"1 validation error for delegate_functions.<locals>.{function.name}\n")
     assert asked == []

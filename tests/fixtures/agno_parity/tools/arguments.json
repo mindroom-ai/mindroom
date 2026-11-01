@@ -253,7 +253,7 @@
     "arguments": {
       "extra": 1
     },
-    "error_text": "probe_no_arguments() got unexpected argument 'extra'. Accepted parameters: none.",
+    "error_text": "1 validation error for probe_no_arguments\nextra\n  Unexpected keyword argument [type=unexpected_keyword_argument, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/unexpected_keyword_argument",
     "function": "probe_no_arguments",
     "raw_arguments": "{\"extra\": 1}"
   },
@@ -354,7 +354,7 @@
   },
   "scalars_empty_array": {
     "arguments": null,
-    "error_text": "probe_scalars() is missing required arguments 'count', 'ratio', 'enabled', 'label'. Accepted parameters: count (integer, required), ratio (number, required), enabled (boolean, required), label (string, required).",
+    "error_text": "4 validation errors for probe_scalars\ncount\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs(()), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument\nratio\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs(()), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument\nenabled\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs(()), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument\nlabel\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs(()), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument",
     "function": "probe_scalars",
     "raw_arguments": "[]"
   },
@@ -449,7 +449,7 @@
     "arguments": {
       "count": 1
     },
-    "error_text": "probe_scalars() is missing required arguments 'ratio', 'enabled', 'label'. Accepted parameters: count (integer, required), ratio (number, required), enabled (boolean, required), label (string, required).",
+    "error_text": "3 validation errors for probe_scalars\nratio\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs((), {'count': 1}), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument\nenabled\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs((), {'count': 1}), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument\nlabel\n  Missing required argument [type=missing_argument, input_value=ArgsKwargs((), {'count': 1}), input_type=ArgsKwargs]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/missing_argument",
     "function": "probe_scalars",
     "raw_arguments": "{\"count\": 1}"
   },
@@ -584,7 +584,7 @@
       "label": "x",
       "ratio": 1.0
     },
-    "error_text": "probe_scalars() got unexpected argument 'extra'. Accepted parameters: count (integer, required), ratio (number, required), enabled (boolean, required), label (string, required).",
+    "error_text": "1 validation error for probe_scalars\nextra\n  Unexpected keyword argument [type=unexpected_keyword_argument, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/unexpected_keyword_argument",
     "function": "probe_scalars",
     "raw_arguments": "{\"count\": 1, \"ratio\": 1.0, \"enabled\": true, \"label\": \"x\", \"extra\": 1}"
   },

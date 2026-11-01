@@ -4,7 +4,7 @@
 words none, null, true, and false, which otherwise read as values.
 ``execute_tool_call`` runs the entrypoint: framework parameters injected, synchronous bodies off the event loop under
 the completion-ownership helpers, generators drained, and a raised exception turned into the error text the model
-reads; a call refused for the argument names it sent fails with a short error that lists the function's parameters.
+reads.
 Middleware runs on the event loop around the leaf, outermost first, and may rewrite the arguments or answer the call
 itself.
 Whatever arguments reach the leaf, a value sent for a framework-injected parameter never replaces the injected object.
@@ -26,8 +26,6 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import ValidationError
-
 from mindroom.failure_text import failure_text
 from mindroom.oauth.providers import is_oauth_connection_required_result
 from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, read_tool_value
@@ -35,7 +33,6 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import tool_runtime_model_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
-from mindroom.tool_system.tool_schema import recorded_refusals
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -50,9 +47,6 @@ _DECODE_ERROR_TEXT = (
 )
 _NOT_AN_OBJECT_ERROR_TEXT = "Function arguments are not a valid JSON object.\n\n Please fix and retry."
 _LITERAL_WORDS: dict[str, bool | None] = {"none": None, "null": None, "true": True, "false": False}
-# Pydantic's error types for a keyword argument the signature does not take and for a parameter the call left out.
-_UNEXPECTED_ARGUMENT = "unexpected_keyword_argument"
-_MISSING_ARGUMENT = frozenset({"missing_argument", "missing_keyword_only_argument", "missing_positional_only_argument"})
 # Parameter schemas are a few nodes; a schema past these limits reads the literal words as values.
 _MAX_SCHEMA_NODES = 256
 _MAX_ALTERNATIVES = 64
@@ -390,93 +384,13 @@ def _link(step: ToolMiddleware, call: ToolCall, call_next: ToolNext) -> ToolNext
 async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], context: ToolCallContext) -> object:
     """Call the entrypoint with the framework's and the model's arguments; drain and close an iterator it returns.
 
-    What it returned or yielded comes back with an Agno ``ToolResult`` read as its ``ToolValue``. When the function's
-    own validation refuses the call's argument names, the call raises a ``TypeError`` whose text is
-    ``_argument_names_error``'s; any other refusal, such as one of a validated function the body called, stays
-    pydantic's own error.
+    What it returned or yielded comes back with an Agno ``ToolResult`` read as its ``ToolValue``.
     """
+    entrypoint = function.entrypoint
     # Arguments skip ``parse_tool_arguments`` when a paused call resumes from its stored arguments or middleware
     # rewrites them, so values for injected names are dropped here as well.
     # A media name the schema declares belongs to the model, so that value replaces the framework's.
     kwargs = {**framework_arguments(function, context), **model_arguments(arguments, function)}
-    with recorded_refusals() as refusals:
-        try:
-            return await _call_entrypoint(function.entrypoint, kwargs)
-        except ValidationError as error:
-            refused = next((validated for refusal, validated in refusals if refusal is error), None)
-            # The refusal is this call's when the function's entrypoint is, or wraps, the validated function that
-            # refused it; one that function's body let through keeps its text.
-            if refused is None or inspect.unwrap(function.entrypoint, stop=lambda f: f is refused) is not refused:
-                raise
-            if (text := _argument_names_error(function, error, refused)) is None:
-                raise
-            raise TypeError(text) from error
-
-
-def _argument_names_error(function: ToolFunction, error: ValidationError, refused: Callable[..., Any]) -> str | None:
-    """Return what the model reads for a call the validated ``refused`` refused for its names, or None for any other.
-
-    It names the function, the unexpected and the missing arguments, any other refusal as one sentence each, then
-    each parameter the schema offers with its type and whether it is required. Pydantic names a missing
-    positional-only parameter by its position, which is turned into its name, saying that a call by name cannot fill
-    it.
-    """
-    properties = function.parameters.get("properties")
-    properties = properties if isinstance(properties, dict) else {}
-    required = _items(function.parameters.get("required"))
-    positional = [
-        name
-        for name, parameter in inspect.signature(refused).parameters.items()
-        if parameter.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
-    ]
-    unexpected: list[str] = []
-    missing: list[str] = []
-    positional_only: list[str] = []
-    invalid: list[str] = []
-    for detail in error.errors(include_url=False, include_input=False):
-        location = detail["loc"]
-        if detail["type"] == _UNEXPECTED_ARGUMENT:
-            unexpected.append(str(location[0]))
-        elif detail["type"] in _MISSING_ARGUMENT and isinstance(location[0], int):
-            positional_only.append(positional[location[0]])
-        elif detail["type"] in _MISSING_ARGUMENT:
-            missing.append(str(location[0]))
-        else:
-            invalid.append(f"Invalid argument '{'.'.join(map(str, location))}': {detail['msg'].rstrip('.')}.")
-    unexpected = [f"'{name}'" for name in unexpected if name not in positional_only]
-    missing = [f"'{name}'" for name in missing]
-    missing += [f"'{name}' (positional-only, which a call by name cannot fill)" for name in positional_only]
-    if not unexpected and not missing:
-        return None
-    problems = [
-        f"{label}{'s' if len(names) > 1 else ''} {', '.join(names)}"
-        for label, names in (("got unexpected argument", unexpected), ("is missing required argument", missing))
-        if names
-    ]
-    accepted = ", ".join(
-        f"{name} ({_type_text(schema, function.parameters)}, {'required' if name in required else 'optional'})"
-        for name, schema in properties.items()
-    )
-    return " ".join(
-        [f"{function.name}() {' and '.join(problems)}.", *invalid, f"Accepted parameters: {accepted or 'none'}."],
-    )
-
-
-def _type_text(schema: object, root: Mapping[str, Any]) -> str:
-    """Return the JSON types a parameter schema admits, joined with "or", or "any" when it leaves the type open."""
-    try:
-        alternatives = _alternatives(schema, root, [_MAX_SCHEMA_NODES])
-    except _SchemaTooLargeError:
-        return "any"
-    admitted: set[str] = set()
-    for types, _choices in alternatives:
-        if types is None:
-            return "any"
-        admitted |= types
-    return " or ".join(sorted(admitted)) or "any"
-
-
-async def _call_entrypoint(entrypoint: Callable[..., Any], kwargs: dict[str, Any]) -> object:
     if inspect.iscoroutinefunction(entrypoint) or inspect.isasyncgenfunction(entrypoint):
         result = entrypoint(**kwargs)
     else:
