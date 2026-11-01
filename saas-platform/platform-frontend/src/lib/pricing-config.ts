@@ -1,4 +1,4 @@
-import type { PricingConfig } from '@/lib/api'
+import type { PricingConfig, Subscription } from '@/lib/api'
 
 // Type definitions for pricing plans
 export type PlanId = 'free' | 'byok' | 'hobby' | 'pro' | 'enterprise'
@@ -19,4 +19,10 @@ export function isDowngrade(currentTier: PlanId | null, candidate: string): bool
 /** Days of free trial a customer's first plan starts with, or 0 when trials are off. */
 export function trialDays(pricing: Pick<PricingConfig, 'trial'>): number {
   return pricing.trial.enabled ? pricing.trial.days : 0
+}
+
+/** A subscription's recorded Stripe price per billing cycle, such as `$96/year`, with cents only when it has them. */
+export function formatRecordedPrice(cents: number, billingCycle: Subscription['billing_cycle']): string {
+  const dollars = cents % 100 === 0 ? String(cents / 100) : (cents / 100).toFixed(2)
+  return `$${dollars}/${billingCycle === 'yearly' ? 'year' : 'month'}`
 }

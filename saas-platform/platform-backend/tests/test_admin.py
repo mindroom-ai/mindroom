@@ -480,18 +480,8 @@ class TestAdminEndpoints:
         data = response.json()
         assert "data" in data
 
-    def test_admin_dashboard_metrics(
-        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_admin_dashboard_metrics(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test admin dashboard metrics."""
-        from backend import pricing
-        from backend.routes import admin
-
-        pricing_config = pricing.load_pricing_config()
-        pricing_config["plans"]["byok"]["price_monthly"] = 3100
-        pricing_config["plans"]["pro"]["price_monthly"] = 9700
-        monkeypatch.setattr(admin, "PRICING_CONFIG_MODEL", pricing.PricingConfig(**pricing_config))
-
         # Setup mock queries for each specific table call
         # Mock accounts query
         accounts_mock = MagicMock()
@@ -514,7 +504,15 @@ class TestAdminEndpoints:
         subs_data_mock.select.return_value = subs_data_mock
         subs_data_mock.eq.return_value = subs_data_mock
         subs_data_mock.neq.return_value = subs_data_mock
-        subs_data_mock.execute.return_value = Mock(data=[{"tier": "byok"}, {"tier": "pro"}])
+        # MRR counts each subscription's recorded Stripe price per month, and nothing before a price is recorded.
+        subs_data_mock.execute.return_value = Mock(
+            data=[
+                {"tier": "byok", "billing_cycle": "monthly", "price_cents": 1000},
+                {"tier": "byok", "billing_cycle": "yearly", "price_cents": 9600},
+                {"tier": "hobby", "billing_cycle": "yearly", "price_cents": 19990},
+                {"tier": "pro", "billing_cycle": None, "price_cents": None},
+            ]
+        )
 
         # Instances for status counts
         instances_db = FakeSupabase({"instances": [{"status": "running"}, {"status": "stopped"}]})
@@ -559,10 +557,11 @@ class TestAdminEndpoints:
         assert "subscription_revenue" in data
         assert data["total_accounts"] == 100
         active_subs_mock.neq.assert_called_with("tier", "free")
+        subs_data_mock.select.assert_called_with("tier,billing_cycle,price_cents")
         subs_data_mock.neq.assert_called_with("tier", "free")
         assert data["active_subscriptions"] == 70
         assert data["total_instances"] == 2  # We have 2 instances total in the mock
-        assert data["subscription_revenue"] == 128.0
+        assert data["subscription_revenue"] == 35.0  # 10 + 8 + 16.66 (199.90 / 12), rounded to whole dollars
 
     def test_admin_resource_not_in_allowlist(self, client: TestClient, mock_verify_admin: Mock):
         """Test admin accessing resource not in allowlist."""

@@ -364,6 +364,7 @@ class TestWebhookEndpoints:
     ):
         """Common projection retains timestamp omission and event-specific fields."""
         subscription = self._create_subscription_data(tier="pro")
+        subscription["items"]["data"][0]["price"]["unit_amount"] = 20000
         subscription["items"]["data"][0]["current_period_start"] = period_timestamp
         subscription["items"]["data"][0]["current_period_end"] = period_timestamp
         subscription["trial_end"] = 0
@@ -392,6 +393,8 @@ class TestWebhookEndpoints:
             "stripe_subscription_id": "sub_test_123",
             "stripe_price_id": "price_pro_monthly",
             "tier": "pro",
+            "billing_cycle": "monthly",
+            "price_cents": 20000,
             "status": "active",
             "trial_ends_at": "1970-01-01T00:00:00+00:00",
         }
@@ -406,12 +409,20 @@ class TestWebhookEndpoints:
         assert {key: value for key, value in payload.items() if key != "updated_at"} == expected
 
     @pytest.mark.parametrize("event_kind", ["created", "updated"])
+    @pytest.mark.parametrize(
+        "metadata", [{"tier": "byok"}, {"tier": "byok", "billing_cycle": "annual"}], ids=["missing", "annual"]
+    )
     def test_subscription_requires_billing_cycle(
-        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock, event_kind: str
+        self,
+        client: TestClient,
+        mock_stripe_signature: Mock,
+        mock_supabase: MagicMock,
+        event_kind: str,
+        metadata: dict[str, str],
     ):
-        """Both events reject a price that has a tier but no billing cycle."""
+        """Both events reject a price that has a tier but no monthly or yearly billing cycle."""
         subscription = self._create_subscription_data()
-        subscription["items"]["data"][0]["price"]["metadata"] = {"tier": "byok"}
+        subscription["items"]["data"][0]["price"]["metadata"] = metadata
         mock_stripe_signature.return_value = self._create_stripe_event(
             f"customer.subscription.{event_kind}", subscription
         )
