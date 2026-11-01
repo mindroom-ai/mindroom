@@ -12,7 +12,7 @@ import secrets
 import time
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
@@ -205,6 +205,10 @@ class _OAuthProviderNotConfiguredError(OAuthProviderError):
     """Raised when a provider has no usable OAuth client configuration."""
 
 
+class OAuthCallbackRefusedError(OAuthProviderError):
+    """Raised when the authorization server refuses a client for MindRoom's new callback; the message is safe to show."""
+
+
 _TERMINAL_REFRESH_ERROR_CODES = frozenset({"bad_refresh_token", "invalid_grant", "invalid_refresh_token"})
 
 
@@ -305,6 +309,9 @@ class OAuthRuntimeEndpoints:
     token_endpoint_auth_method: _TokenEndpointAuthMethod | None = None
     # Discovered token endpoints are dialed through the server-fetch address guard; None keeps fixed endpoints unguarded.
     token_fetch_allow_private_networks: bool | None = None
+    # Registers a client for the current callback when the stored dynamic registration names another one. Only status
+    # and connect, which hand out the callback, run it; a token refresh never needs the callback.
+    register_moved_callback: Callable[[], Awaitable[None]] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -741,13 +748,15 @@ class OAuthProvider:
         self,
         runtime_paths: RuntimePaths,
     ) -> OAuthClientConfigResolution | None:
-        """Return stored client settings, after any lazy runtime bootstrap, which also replaces a moved registration."""
+        """Return stored client settings for handing out the callback, after any lazy bootstrap or moved-callback registration."""
         resolution = await asyncio.to_thread(self.client_config_resolution, runtime_paths)
         if self.runtime_bootstrapper is None or (
             resolution is not None and not self.dynamic_client_callback_moved(resolution, runtime_paths)
         ):
             return resolution
-        await self.runtime_endpoints(runtime_paths)
+        endpoints = await self.runtime_endpoints(runtime_paths)
+        if resolution is not None and endpoints.register_moved_callback is not None:
+            await endpoints.register_moved_callback()
         return await asyncio.to_thread(self.client_config_resolution, runtime_paths)
 
     def dynamic_client_callback_moved(
@@ -798,8 +807,12 @@ class OAuthProvider:
         runtime_paths: RuntimePaths,
         token_url: str,
     ) -> OAuthClientConfig:
-        """Return client settings, refusing a dynamic registration issued for a different token endpoint."""
-        resolution = await self.client_config_resolution_async(runtime_paths)
+        """Return the stored client settings for a token request, refusing a registration for another token endpoint.
+
+        The caller has resolved `runtime_endpoints`, which bootstraps a missing client; token requests never register a
+        client for a moved callback, so connections keep refreshing whatever the current callback is.
+        """
+        resolution = await asyncio.to_thread(self.client_config_resolution, runtime_paths)
         if resolution is None:
             raise self._missing_client_config_error()
         if resolution.dynamically_registered and resolution.registered_token_url != token_url:
@@ -1040,6 +1053,10 @@ class OAuthProvider:
         if stored_token_url != endpoints.token_url:
             raise OAuthTokenEndpointChangedError(stored_token_url, endpoints.token_url)
         client_config = await self._require_client_config_for_token_url(runtime_paths, endpoints.token_url)
+        issued_client_id = token_data.get("client_id")
+        if client_config.client_secret is None and isinstance(issued_client_id, str) and issued_client_id:
+            # A public client refreshes as the client that issued the token, which a new registration does not replace.
+            client_config = replace(client_config, client_id=issued_client_id)
         from authlib.integrations.httpx_client import AsyncOAuth2Client  # noqa: PLC0415
 
         async with AsyncOAuth2Client(
