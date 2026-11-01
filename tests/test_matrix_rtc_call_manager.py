@@ -5937,3 +5937,72 @@ def test_manager_ignores_personal_rooms_of_call_agents_outside_the_room(tmp_path
     record.write_text('{"user_id": "@bob:example.org", "field_from_a_newer_release": true}')
     manager = _manager(_client(), FakeBridge(), tmp_path, config)
     assert manager._is_configured_call_room(_room())
+
+
+def _two_call_agents(**helper: object) -> Config:
+    return Config(
+        models={},
+        agents={"helper": AgentConfig(display_name="Helper", **helper), "other": AgentConfig(display_name="Other")},
+        calls=CallsConfig(
+            enabled=True,
+            profiles={
+                "voice": RealtimeCallProfile(
+                    backend="realtime",
+                    model="gpt-realtime",
+                    credentials_service="openai",
+                    voice="marin",
+                ),
+            },
+            agents={"helper": "voice", "other": "voice"},
+        ),
+    )
+
+
+def _write_personal_room(tmp_path: Path, agent_name: str, user_id: str, room_id: str) -> None:
+    write_personal_room(
+        personal_room_record_path(test_runtime_paths(tmp_path), agent_name, user_id),
+        PersonalRoomRecord(
+            user_id=user_id,
+            alias=f"#personal_{agent_name}:example.org",
+            source_room_id="!lobby:example.org",
+            room_id=room_id,
+        ),
+    )
+
+
+def test_invited_call_agent_does_not_answer_in_a_present_agents_personal_room(tmp_path: Path) -> None:
+    """A personal room's own agent and an invited call agent leave the room to neither, as for two invited agents."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_helper", "helper", "pw")
+    state.add_account("agent_other", "other", "pw")
+    save_matrix_state(state, runtime_paths)
+    _write_personal_room(tmp_path, "other", "@alice:example.org", ROOM_ID)
+    manager = _manager(
+        _client(),
+        FakeBridge(),
+        tmp_path,
+        _two_call_agents(accept_invites=True),
+        invited_rooms_by_agent={"helper": {ROOM_ID}},
+    )
+    room = _room()
+    room.add_member("@other:localhost", "Other", None)
+    assert not manager._is_configured_call_room(room)
+
+
+def test_manager_keeps_its_configured_room_when_one_of_its_records_is_damaged(tmp_path: Path) -> None:
+    """A damaged personal-room record leaves out only its own room."""
+    record = personal_room_record_path(test_runtime_paths(tmp_path), "helper", "@bob:example.org")
+    record.parent.mkdir(parents=True)
+    record.write_text('{"user_id": "@bob:example.org", "field_from_a_newer_release": true}')
+    manager = _manager(_client(), FakeBridge(), tmp_path, _two_call_agents(rooms=[ROOM_ID]))
+    assert manager._is_configured_call_room(_room())
+
+
+def test_manager_sees_a_personal_room_written_after_its_last_check(tmp_path: Path) -> None:
+    """Writing a record makes its room a call room at the next check, whatever the directory's mtime resolution."""
+    _write_personal_room(tmp_path, "helper", "@alice:example.org", "!earlier:example.org")
+    manager = _manager(_client(), FakeBridge(), tmp_path, _two_call_agents())
+    assert not manager._is_configured_call_room(_room())
+    _write_personal_room(tmp_path, "helper", "@bob:example.org", ROOM_ID)
+    assert manager._is_configured_call_room(_room())

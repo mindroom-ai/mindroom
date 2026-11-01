@@ -33,7 +33,7 @@ from mindroom.entity_resolution import configured_call_agent_name_for_room, prep
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
-from mindroom.matrix.personal_room_store import retained_personal_rooms
+from mindroom.matrix.personal_room_store import personal_room_ids
 from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge, prewarm_call_audio_process
 from mindroom.matrix_rtc.call_backends import fetch_sfu_grant, resolve_livekit_service, resolve_voice_backend
@@ -804,15 +804,12 @@ class CallManager:
             self._replay_pending_keys(room_call, session)
             room_call.clear_reconcile_retry()
 
-    def _present_call_agents_personal_rooms(self, room: nio.MatrixRoom) -> dict[str, set[str]]:
-        """Return the personal rooms of this agent and of the call agents joined in ``room``, the only ones that can answer there.
-
-        Reading every call agent's records would cost one read per onboarded user on every call-room check.
-        """
+    def _present_call_agents_personal_rooms(self, room: nio.MatrixRoom) -> dict[str, frozenset[str]]:
+        """Return the personal rooms of this agent and of the call agents joined in ``room``, the only ones that can answer there."""
         names_by_user_id = prepared_entity_names_by_user_id(self._config, self._runtime_paths)
         present = {self._agent_name, *(names_by_user_id.get(user_id) for user_id in cached_joined_member_ids(room))}
         return {
-            agent_name: retained_personal_rooms(self._runtime_paths, agent_name)
+            agent_name: personal_room_ids(self._runtime_paths, agent_name)
             for agent_name in self._config.calls.agents
             if agent_name in present
         }
