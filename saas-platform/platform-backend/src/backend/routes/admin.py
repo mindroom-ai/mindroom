@@ -430,12 +430,6 @@ _LIST_COLUMNS = {
     "subscriptions": "*, accounts(email, full_name)",
     "audit_logs": "*, accounts(email)",
 }
-_SEARCH_FIELDS = {
-    "accounts": ["email", "full_name", "company_name"],
-    "instances": ["name", "subdomain"],
-    "audit_logs": ["action", "details"],
-    "subscriptions": ["tier", "status"],
-}
 
 
 @router.get("/admin/{resource}", response_model=AdminListResponse)
@@ -448,7 +442,6 @@ async def admin_get_list(
     _order: Literal["ASC", "DESC"] = "DESC",
     _start: int = 0,
     _end: int | None = None,
-    q: str | None = None,
 ) -> dict[str, Any]:
     """List a resource's rows, newest first unless ``_sort`` and ``_order`` say otherwise.
 
@@ -464,13 +457,11 @@ async def admin_get_list(
         account_id=admin["user_id"],
         action="list",
         resource_type=resource,
-        details={"query": q, "start": _start, "end": _end},
+        details={"start": _start, "end": _end},
     )
 
     def build_query() -> Any:  # noqa: ANN401
         query = sb.table(resource).select(_LIST_COLUMNS.get(resource, "*"), count="exact")
-        if q and resource in _SEARCH_FIELDS:
-            query = query.or_(",".join(f"{field}.ilike.%{q}%" for field in _SEARCH_FIELDS[resource]))
         return query.order(_sort, desc=_order == "DESC").order("id")
 
     if _end is None:

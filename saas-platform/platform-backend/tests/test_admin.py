@@ -408,10 +408,31 @@ class TestAdminEndpoints:
         with patch("backend.routes.admin.ensure_supabase", return_value=db), patch.object(paging, "_PAGE_SIZE", 5):
             response = client.get("/admin/accounts")
 
+            from_eleventh = client.get("/admin/accounts?_start=10")
+
         assert response.status_code == 200
         newest_first = ["acc_00", *(f"acc_{day:02d}" for day in range(12, 0, -1))]
         assert [row["id"] for row in response.json()["data"]] == newest_first
         assert response.json()["total"] == 13
+        assert [row["id"] for row in from_eleventh.json()["data"]] == newest_first[10:]
+        assert from_eleventh.json()["total"] == 13
+
+    def test_admin_subscription_and_instance_lists_show_the_account(self, client: TestClient, mock_verify_admin: Mock):
+        """Subscription and instance rows carry their account, which the admin pages show as the customer."""
+        db = FakeSupabase(
+            {
+                "accounts": [{"id": "acc_1", "email": "owner@example.com", "full_name": "Owner"}],
+                "subscriptions": [{"id": "sub_1", "account_id": "acc_1", "created_at": "2026-10-01T00:00:00Z"}],
+                "instances": [{"id": "inst_1", "account_id": "acc_1", "created_at": "2026-10-01T00:00:00Z"}],
+            }
+        )
+        with patch("backend.routes.admin.ensure_supabase", return_value=db):
+            listed = {resource: client.get(f"/admin/{resource}").json() for resource in ("subscriptions", "instances")}
+
+        assert {resource: body["data"][0]["accounts"]["email"] for resource, body in listed.items()} == {
+            "subscriptions": "owner@example.com",
+            "instances": "owner@example.com",
+        }
 
     def test_admin_list_range_follows_the_requested_order(self, client: TestClient, mock_verify_admin: Mock):
         """A ranged list holds the requested slice in the requested order, and total counts every row."""

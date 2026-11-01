@@ -2585,22 +2585,6 @@
             }
           },
           {
-            "in": "query",
-            "name": "q",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Q"
-            }
-          },
-          {
             "in": "header",
             "name": "authorization",
             "required": false,

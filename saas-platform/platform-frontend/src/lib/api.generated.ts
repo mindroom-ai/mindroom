@@ -2135,7 +2135,6 @@ export interface operations {
                 _order?: "ASC" | "DESC";
                 _start?: number;
                 _end?: number | null;
-                q?: string | null;
             };
             header?: {
                 authorization?: string;

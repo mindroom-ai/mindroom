@@ -1,7 +1,8 @@
 """In-memory stand-in for the subset of the Supabase query builder the backend uses.
 
 Rows are plain dicts per table. Filters compare values as strings, like PostgREST query parameters.
-Embedded many-to-one selects such as ``subscription:subscriptions(*)`` resolve through ``<table>_id`` columns.
+Embedded many-to-one selects such as ``subscription:subscriptions(*)`` or ``accounts(email)`` resolve through
+``<table>_id`` columns.
 RPC calls are recorded in ``rpc_calls``, return ``rpc_results[name]`` (default None), and leave the tables alone.
 Deleting an auth user through ``auth.admin`` records it and removes its ``accounts`` row, like the ON DELETE CASCADE.
 """
@@ -13,7 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-_EMBED = re.compile(r"(\w+):(\w+)\(([^)]*)\)")
+_EMBED = re.compile(r"(?:(\w+):)?(\w+)\(([^)]*)\)")
 # Embedded table -> foreign key column on the parent row.
 _FOREIGN_KEYS = {"subscriptions": "subscription_id", "accounts": "account_id"}
 
@@ -111,7 +112,7 @@ class FakeQuery:
         for alias, table, _columns in _EMBED.findall(self.columns):
             key = row.get(_FOREIGN_KEYS[table])
             match = next((r for r in self.db.tables.get(table, []) if str(r["id"]) == str(key)), None)
-            projected[alias] = dict(match) if match else None
+            projected[alias or table] = dict(match) if match else None
         return projected
 
     def execute(self) -> FakeResult:
