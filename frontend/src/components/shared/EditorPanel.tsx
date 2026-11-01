@@ -151,6 +151,7 @@ export function EditorPanel({
                 variant="ghost"
                 size="sm"
                 onClick={onBack}
+                aria-label="Back"
                 className="lg:hidden -ml-2 mr-1"
               >
                 <ArrowLeft className="h-4 w-4" />

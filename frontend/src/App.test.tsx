@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useConfigStore } from "@/store/configStore";
 
@@ -8,6 +8,55 @@ import App, { shouldShowBlockingDiagnosticOverlay } from "./App";
 vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
 }));
+
+vi.mock("@/components/Dashboard/Dashboard", () => ({
+  Dashboard: () => <p>Dashboard page</p>,
+}));
+
+vi.mock("@/components/Credentials/Credentials", () => ({
+  Credentials: () => <p>Credentials page</p>,
+}));
+
+// A page whose unsaved draft lives in its own state, as the Skills editor's does.
+vi.mock("@/components/Skills/Skills", async () => {
+  const { useState } = await import("react");
+  const { useUnsavedDraft } = await import("@/hooks/useUnsavedDraft");
+  return {
+    Skills: function Skills() {
+      const [draft, setDraft] = useState("");
+      useUnsavedDraft(draft !== "");
+      return (
+        <textarea
+          aria-label="Skill draft"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+      );
+    },
+  };
+});
+
+function mockBrowserStorageAndMedia() {
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: vi.fn(() => "system"),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+      clear: vi.fn(),
+    },
+  });
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn().mockReturnValue({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    }),
+  });
+}
 
 describe("shouldShowBlockingDiagnosticOverlay", () => {
   it("keeps access overlays blocking for auth failures", () => {
@@ -89,25 +138,7 @@ describe("App recovery mode", () => {
 
   beforeEach(() => {
     mockSaveRecoveryConfigSource.mockReset();
-    Object.defineProperty(window, "localStorage", {
-      configurable: true,
-      value: {
-        getItem: vi.fn(() => "system"),
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-        clear: vi.fn(),
-      },
-    });
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      value: vi.fn().mockReturnValue({
-        matches: false,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-      }),
-    });
+    mockBrowserStorageAndMedia();
     vi.mocked(useConfigStore).mockReturnValue({
       loadConfig: vi.fn(),
       config: null,
@@ -213,5 +244,98 @@ describe("App recovery mode", () => {
       screen.getByRole("heading", { name: "Access Required" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+});
+
+describe("App tab switching", () => {
+  beforeEach(() => {
+    mockBrowserStorageAndMedia();
+    vi.mocked(useConfigStore).mockReturnValue({
+      loadConfig: vi.fn(),
+      config: null,
+      recoveryConfigSource: null,
+      recoveryConfigSourceOriginal: null,
+      syncStatus: "synced",
+      diagnostics: [],
+      isLoading: false,
+      isDirty: false,
+      selectedAgentId: null,
+      selectedTeamId: null,
+      selectedRoomId: null,
+    } as never);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function typeSkillDraft() {
+    render(<App />);
+    fireEvent.click(screen.getByRole("link", { name: "Skills" }));
+    const draft = await screen.findByLabelText("Skill draft");
+    fireEvent.change(draft, { target: { value: "unsaved edit" } });
+  }
+
+  it("asks before leaving a tab with an unsaved draft, and Cancel keeps it", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await typeSkillDraft();
+
+    fireEvent.click(screen.getByRole("link", { name: "Credentials" }));
+
+    await waitFor(() =>
+      expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?"),
+    );
+    expect(screen.getByLabelText("Skill draft")).toHaveValue("unsaved edit");
+    expect(screen.queryByText("Credentials page")).not.toBeInTheDocument();
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("link", { name: "Credentials" }));
+
+    expect(await screen.findByText("Credentials page")).toBeInTheDocument();
+  });
+
+  it("asks before the browser back button leaves a tab with an unsaved draft", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<App />);
+    fireEvent.click(screen.getByRole("link", { name: "Dashboard" }));
+    await screen.findByText("Dashboard page");
+    fireEvent.click(screen.getByRole("link", { name: "Skills" }));
+    const draft = await screen.findByLabelText("Skill draft");
+    fireEvent.change(draft, { target: { value: "unsaved edit" } });
+
+    window.history.back();
+
+    await waitFor(() =>
+      expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?"),
+    );
+    expect(screen.getByLabelText("Skill draft")).toHaveValue("unsaved edit");
+    expect(screen.queryByText("Dashboard page")).not.toBeInTheDocument();
+  });
+
+  it("moves focus with Skip to content without a history entry the router cannot block", () => {
+    render(<App />);
+
+    // A browser follows a native fragment link with a history entry outside
+    // the router, and the router cannot hold back a back press into it.
+    const followed = fireEvent.click(
+      screen.getByRole("link", { name: "Skip to content" }),
+    );
+
+    expect(followed).toBe(false);
+    expect(document.activeElement).toBe(screen.getByRole("main"));
+  });
+
+  it("does not ask without an unsaved draft or when staying on the tab", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    await typeSkillDraft();
+
+    fireEvent.click(screen.getByRole("link", { name: "Skills" }));
+    fireEvent.change(screen.getByLabelText("Skill draft"), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByRole("link", { name: "Credentials" }));
+
+    expect(await screen.findByText("Credentials page")).toBeInTheDocument();
+    expect(confirmSpy).not.toHaveBeenCalled();
   });
 });
