@@ -199,6 +199,7 @@ Create, view, edit, and validate `config.yaml`.
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Create and edit ──────────────────────────────────────────────────────────────────────╮
 │ init              Create a starter config.yaml with a personal agent and model.        │
+│ new-agent         Create an agent's starter files from a built-in template.            │
 │ edit              Open config.yaml in your default editor.                             │
 │ use-local-model   Make a local model the default, keeping agents' explicit model       │
 │                   choices.                                                             │
@@ -266,6 +267,17 @@ Some presets need a local login or server before MindRoom can answer:
 ```bash
 llama-server -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M --host 127.0.0.1 --port 8080
 llama-server -hf unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL --host 127.0.0.1 --port 8080
+```
+
+### config new-agent
+
+Create an agent's starter files from a built-in template and print the block to add under `agents:` in `config.yaml`; existing files are never overwritten.
+`--template mind` seeds another copy of the `config init` starter's Mind in its own room, `--template hermes` seeds a personal assistant modeled on Hermes Agent, `--template coding` seeds a minimal coding agent, and `--template legal` and `--template finance` write templates that give each person a private legal or money helper.
+See [Agent Templates](https://docs.mindroom.chat/configuration/agent-templates/) for what each template contains.
+
+```bash
+mindroom config new-agent coder --template coding
+mindroom config new-agent counsel --template legal --path ./instance/config.yaml
 ```
 
 ### config show
