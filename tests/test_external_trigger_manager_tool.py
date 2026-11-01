@@ -12,16 +12,15 @@ import pytest
 
 from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.config.personal_agents import PersonalAgentRosterEntry
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.external_trigger_manager import ExternalTriggerManagerTools
 from mindroom.message_target import MessageTarget
-from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.test_generated_agents import OWNER, _created, _load, _personal, _with_template
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -222,40 +221,31 @@ def test_private_agent_create_trigger_accepts_current_dynamic_room(tmp_path: Pat
     }
 
 
-def test_personal_agent_create_trigger_accepts_current_personal_room(tmp_path: Path) -> None:
-    """A personal agent may bind a trigger to the personal room it is answering in."""
-    runtime_paths = _runtime_paths(tmp_path)
-    _append_personal_agent_roster_entry(
-        runtime_paths,
-        PersonalAgentRosterEntry(
-            template="mind",
-            user_id="@owner:example.org",
-            username="owner",
-            agent_name="mind_owner",
-            matrix_username=None,
-            user_display_name="Owner",
-            source_room_id="!lobby:example.org",
-        ),
-    )
-    config = Config.validate_with_runtime(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-            "rooms": {"lobby": {}},
-            "personal_agents": {"mind": {"agent": {"display_name": "Mind", "model": "default"}}},
-            "personal_rooms": {"agent": "mind", "onboarding_rooms": ["lobby"]},
-        },
-        runtime_paths,
-    )
+@pytest.mark.parametrize(
+    ("data", "roster", "agent_name"),
+    [
+        pytest.param(_with_template(), {"entries": [_personal()]}, "mind_alice", id="personal"),
+        pytest.param(None, {"created": [_created()]}, "creator_research", id="created"),
+    ],
+)
+def test_generated_agent_create_trigger_accepts_current_dynamic_room(
+    tmp_path: Path,
+    data: dict[str, Any] | None,
+    roster: dict[str, Any],
+    agent_name: str,
+) -> None:
+    """Personal and created agents may bind a trigger to the room they answer in, such as a personal room."""
+    config = _load(tmp_path, data, **roster)
     tool = ExternalTriggerManagerTools()
 
     with tool_runtime_context(
-        _context(tmp_path, room_id="!personal:example.org", config=config, agent_name="mind_owner"),
+        _context(tmp_path, requester_id=OWNER, room_id="!personal:localhost", config=config, agent_name=agent_name),
     ):
-        payload = _payload(tool.create_trigger("personal-campground", public_key=_PUBLIC_KEY))
+        payload = _payload(tool.create_trigger("dynamic-campground", public_key=_PUBLIC_KEY))
 
     assert payload["status"] == "ok", payload
-    assert payload["trigger"]["target"]["agent"] == "mind_owner"
-    assert payload["trigger"]["target"]["room_id"] == "!personal:example.org"
+    assert payload["trigger"]["target"]["agent"] == agent_name
+    assert payload["trigger"]["target"]["room_id"] == "!personal:localhost"
 
 
 def test_shared_agent_create_trigger_rejects_current_dynamic_room(tmp_path: Path) -> None:
