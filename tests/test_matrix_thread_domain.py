@@ -291,14 +291,14 @@ async def test_event_thread_membership_unknown_on_lookup_failure(failure: str) -
         )
 
     assert not known
-    assert {
-        "event": "Refusing a Matrix mutation whose thread membership is unknown",
-        "log_level": "warning",
-        "room_id": "!room:localhost",
-        "mutation": "send_event",
-        "target_event_id": None,
-        "error": "boom",
-    } in logs
+    [refusal] = [log for log in logs if log["event"] == "Refusing a Matrix mutation whose thread membership is unknown"]
+    assert refusal["log_level"] == "warning"
+    assert (refusal["room_id"], refusal["mutation"], refusal["target_event_id"]) == (
+        "!room:localhost",
+        "send_event",
+        None,
+    )
+    assert str(refusal["exc_info"]) == "boom"
 
 
 @pytest.mark.parametrize("failure", ["homeserver", "journal"])
@@ -314,14 +314,14 @@ async def test_redaction_thread_membership_unknown_on_lookup_failure(failure: st
         )
 
     assert not known
-    assert {
-        "event": "Refusing a Matrix mutation whose thread membership is unknown",
-        "log_level": "warning",
-        "room_id": "!room:localhost",
-        "mutation": "redact",
-        "target_event_id": "$thread-reply:localhost",
-        "error": "boom",
-    } in logs
+    [refusal] = [log for log in logs if log["event"] == "Refusing a Matrix mutation whose thread membership is unknown"]
+    assert refusal["log_level"] == "warning"
+    assert (refusal["room_id"], refusal["mutation"], refusal["target_event_id"]) == (
+        "!room:localhost",
+        "redact",
+        "$thread-reply:localhost",
+    )
+    assert str(refusal["exc_info"]) == "boom"
 
 
 @pytest.mark.asyncio

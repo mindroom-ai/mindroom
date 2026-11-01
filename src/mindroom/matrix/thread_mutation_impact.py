@@ -117,6 +117,6 @@ def _membership_known(
         room_id=room_id,
         mutation=mutation,
         target_event_id=target_event_id,
-        error=str(resolution.error),
+        exc_info=resolution.error,
     )
     return False
