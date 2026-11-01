@@ -922,7 +922,6 @@ async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_ow
     """The proof deadline returns while its still-live store reader stays owned."""
     inbox = _inbox()
     response_started = asyncio.Event()
-    proof_started = asyncio.Event()
     proof_cancelled = asyncio.Event()
     release_proof = asyncio.Event()
     proof_finished = asyncio.Event()
@@ -933,7 +932,6 @@ async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_ow
         await asyncio.Event().wait()
 
     async def cancellation_resistant_proof() -> bool:
-        proof_started.set()
         try:
             while not release_proof.is_set():
                 try:
