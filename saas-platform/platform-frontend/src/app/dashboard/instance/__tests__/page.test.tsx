@@ -10,10 +10,6 @@ import { cacheInstance, getCachedInstance, loadInstance } from '@/lib/instance-r
 
 jest.mock('@/hooks/useAuth', () => ({ useAuth: jest.fn() }))
 jest.mock('@/hooks/useSubscription', () => ({ useSubscription: jest.fn() }))
-jest.mock('@/lib/supabase/client', () => {
-  const client = {}
-  return { createClient: () => client }
-})
 
 jest.mock('@/lib/api', () => ({
   listInstances: jest.fn(),

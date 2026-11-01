@@ -58,7 +58,7 @@ export default function SubscriptionsPage() {
     <div>
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Subscriptions</h1>
-        <p className="text-gray-600 dark:text-gray-400 mt-2">Manage customer subscriptions and billing</p>
+        <p className="text-gray-600 dark:text-gray-400 mt-2">View customer subscriptions and billing</p>
       </div>
 
       <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
