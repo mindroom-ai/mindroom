@@ -143,7 +143,7 @@ async def _observe_guard_decision(
             may_be_superseded_by_newer_requester_turn=True,
             classify=lambda sender, _source: make_ingress_facts(sender),
             is_handled=is_handled,
-            for_another_participant=AsyncMock(return_value=False),
+            for_another_participant=lambda _source: False,
             logger=logger,
         )
     else:
@@ -156,7 +156,7 @@ async def _observe_guard_decision(
             pending_turns=principal,
             classify=lambda sender, _source: make_ingress_facts(sender),
             is_handled=is_handled,
-            for_another_participant=AsyncMock(return_value=False),
+            for_another_participant=lambda _source: False,
             logger=logger,
         )
     assert skipped
@@ -1395,7 +1395,7 @@ async def test_supersession_forward_chain_requires_every_exact_link(tmp_path: Pa
         may_be_superseded_by_newer_requester_turn=True,
         classify=lambda sender, _source: make_ingress_facts(sender),
         is_handled=AsyncMock(return_value=frozenset()),
-        for_another_participant=AsyncMock(return_value=False),
+        for_another_participant=lambda _source: False,
         logger=cast("structlog.stdlib.BoundLogger", logger),
     )
     await JournalDispatcher(

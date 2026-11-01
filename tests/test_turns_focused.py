@@ -121,7 +121,7 @@ from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy
-from mindroom.turn_record import PreparedVoiceSource, TurnRecord
+from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import (
     ClaimContended,
     ClaimRefused,
@@ -1061,7 +1061,6 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("voice", [False, True])
 @pytest.mark.parametrize("history_degraded", [False, True])
 @pytest.mark.parametrize(("newer_mentions", "answered"), [("research", True), ("general", False)])
 async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_turn(
@@ -1070,52 +1069,33 @@ async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_tur
     newer_mentions: str,
     answered: bool,
     history_degraded: bool,
-    voice: bool,
 ) -> None:
     """A newer requester message for another agent does not supersede the older turn.
 
     This agent ignores that message and records no turn for it, so after a
     restart nothing would ever answer the older message it supersedes. The
     thread history and, when that read may have missed messages, the journal's
-    pending events must agree. A voice message names whom it is for only in
-    the transcript this agent prepared it with, never in its audio event.
+    pending events must agree.
     """
-    thread = {"rel_type": "m.thread", "event_id": _THREAD_ROOT}
-    mentions = {"user_ids": [_entity_user_id(config, newer_mentions)]}
-    newer_content: dict[str, Any] = (
-        {"msgtype": "m.audio", "body": "voice-message.ogg", "url": "mxc://localhost/voice", "m.relates_to": thread}
-        if voice
-        else {"msgtype": "m.text", "body": "newer message", "m.mentions": mentions, "m.relates_to": thread}
+    newer = _text_event(
+        "newer message from the same requester",
+        event_id="$newer:localhost",
+        thread_id=_THREAD_ROOT,
+        origin_server_ts=2_000_000,
     )
-    newer = nio.Event.parse_event(
-        {
-            "content": newer_content,
-            "event_id": "$newer:localhost",
-            "sender": _SENDER,
-            "origin_server_ts": 2_000_000,
-            "room_id": _ROOM_ID,
-            "type": "m.room.message",
-        },
-    )
+    newer.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, newer_mentions)]}
     visible_newer = make_visible_message(
         sender=_SENDER,
-        body=newer_content["body"],
+        body=newer.body,
         event_id=newer.event_id,
         timestamp=newer.server_timestamp,
-        content=newer_content,
+        content=newer.source["content"],
     )
     harness = _build_harness(
         config,
         tmp_path,
         thread_history=thread_history_result([] if history_degraded else [visible_newer], is_full_history=True),
     )
-    if voice:
-        transcript = {"msgtype": "m.text", "body": "newer message", "m.mentions": mentions, "m.relates_to": thread}
-        await harness.turn_store.record_prepared_voice(
-            _ROOM_ID,
-            newer.event_id,
-            PreparedVoiceSource.from_content("newer message", transcript, thread_id=_THREAD_ROOT),
-        )
     if history_degraded:
         # A read that must still refetch a revision cannot prove that no newer message exists.
         reader = harness.ingress.deps.resolver.deps.conversation_reader
@@ -1127,7 +1107,7 @@ async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_tur
             next_cursor=None,
         )
         await harness.journal_principal.admit(
-            _inbound_event(_ROOM_ID, newer, EventKind.MEDIA if voice else EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _inbound_event(_ROOM_ID, newer, EventKind.MESSAGE, EventClass.ACTIONABLE),
         )
     room = _room_with_members(config, "general", "research")
     event = _text_event("older message for general", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
