@@ -115,6 +115,14 @@ def _context(
     )
 
 
+def _record_rooms(tmp_path: Path) -> None:
+    """Record lobby and other-room as created, so their keys and aliases resolve to room IDs."""
+    state = MatrixState.load(_runtime_paths(tmp_path))
+    for key, name in (("lobby", "Lobby"), ("other-room", "Other")):
+        state.add_room(key, f"!{key}:example.org", f"#{key}:example.org", name)
+    save_matrix_state(state, _runtime_paths(tmp_path))
+
+
 def _payload(raw: str) -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(raw))
 
@@ -361,7 +369,16 @@ async def test_admin_cross_target_private_agent_rejects_current_dynamic_room(tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("target_agent", "target_room_id"), [("other", None), (None, "other-room")])
+@pytest.mark.parametrize(
+    ("target_agent", "target_room_id"),
+    [
+        ("other", None),
+        (None, "other-room"),
+        (None, "#other-room:example.org"),
+        (None, "!other-room:example.org"),
+        (None, "#elsewhere:example.org"),
+    ],
+)
 async def test_non_admin_cannot_target_other_agent_or_room(
     tmp_path: Path,
     target_agent: str | None,
@@ -369,8 +386,12 @@ async def test_non_admin_cannot_target_other_agent_or_room(
 ) -> None:
     """Non-admin callers can only create triggers for the current agent and room, and a refused room is never read."""
     tool = ExternalTriggerManagerTools()
+    _record_rooms(tmp_path)
     homeserver = event_serving_client("$other-thread:example.org", content={"msgtype": "m.text", "body": "root"})
-    context = replace(_context(tmp_path), relations=make_relation_lookup(client=homeserver))
+    context = replace(
+        _context(tmp_path, room_id="!lobby:example.org"),
+        relations=make_relation_lookup(client=homeserver),
+    )
     with tool_runtime_context(context):
         payload = _payload(
             await tool.create_trigger(
@@ -388,24 +409,65 @@ async def test_non_admin_cannot_target_other_agent_or_room(
 
 
 @pytest.mark.asyncio
-async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(tmp_path: Path) -> None:
+@pytest.mark.parametrize("target_room_id", ["lobby", "#lobby:example.org", "!lobby:example.org"])
+async def test_non_admin_can_name_the_current_room_by_key_alias_or_id(tmp_path: Path, target_room_id: str) -> None:
+    """A non-admin naming the current room in any form it resolves from targets that room, not a different one."""
+    tool = ExternalTriggerManagerTools()
+    _record_rooms(tmp_path)
+    with tool_runtime_context(_context(tmp_path, room_id="!lobby:example.org")):
+        payload = _payload(
+            await tool.create_trigger("lobby-trigger", public_key=_PUBLIC_KEY, target_room_id=target_room_id),
+        )
+
+    assert payload["status"] == "ok", payload
+    assert payload["trigger"]["target"]["room_id"] == target_room_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requester_id", "target_agent", "target_room_id", "matrix_room_id"),
+    [
+        ("@owner:example.org", None, "lobby", "!lobby:example.org"),
+        ("@admin:example.org", "other", "other-room", "!other-room:example.org"),
+    ],
+    ids=["current-room", "admin-other-room"],
+)
+async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(
+    tmp_path: Path,
+    requester_id: str,
+    target_agent: str | None,
+    target_room_id: str,
+    matrix_room_id: str,
+) -> None:
     """A reply event ID as target_thread_id is stored as its thread root, since Matrix rejects a reply as a thread root."""
     tool = ExternalTriggerManagerTools()
-    state = MatrixState.load(_runtime_paths(tmp_path))
-    state.add_room("lobby", "!lobby:example.org", "#lobby:example.org", "Lobby")
-    save_matrix_state(state, _runtime_paths(tmp_path))
+    _record_rooms(tmp_path)
     homeserver = thread_reply_client("$reply:example.org", "$root:example.org")
-    context = replace(_context(tmp_path), relations=make_relation_lookup(client=homeserver))
+    context = replace(
+        _context(
+            tmp_path,
+            requester_id=requester_id,
+            room_id="!lobby:example.org",
+            config=_config(admin_users=["@admin:example.org"]),
+        ),
+        relations=make_relation_lookup(client=homeserver),
+    )
     with tool_runtime_context(context):
         payload = _payload(
-            await tool.create_trigger("replies", public_key=_PUBLIC_KEY, target_thread_id="$reply:example.org"),
+            await tool.create_trigger(
+                "replies",
+                public_key=_PUBLIC_KEY,
+                target_agent=target_agent,
+                target_room_id=target_room_id,
+                target_thread_id="$reply:example.org",
+            ),
         )
         listed = _payload(tool.list_triggers())
 
-    assert payload["status"] == "ok"
+    assert payload["status"] == "ok", payload
     assert payload["trigger"]["target"]["thread_id"] == "$root:example.org"
     assert [trigger["target"]["thread_id"] for trigger in listed["triggers"]] == ["$root:example.org"]
-    homeserver.room_get_event.assert_awaited_with("!lobby:example.org", "$reply:example.org")
+    homeserver.room_get_event.assert_awaited_with(matrix_room_id, "$reply:example.org")
 
 
 @pytest.mark.asyncio
