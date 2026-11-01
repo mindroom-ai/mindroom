@@ -73,10 +73,7 @@ class AgentReplyMembershipSync:
         admission: IngestionRecordAdmission,
         timeline_provenance: nio.TimelineEventProvenance | None,
     ) -> None:
-        """Fence uncertainty and reported control departures before admission, revoking the calls they deny.
-
-        A router join instead lets the next due check rebuild without an earlier failure's backoff.
-        """
+        """Fence uncertainty and reported control departures before admission, revoking the calls they deny."""
         if admission.disposition is IngestionRecordDisposition.HISTORY_LOSS:
             self.invalidate(config, reason="uncertain_sync_response")
             return
@@ -97,24 +94,17 @@ class AgentReplyMembershipSync:
             room_id = admission.room_id
             reason = "control_client_departed"
         else:
-            if admission.membership == "join":
-                # The router's join is what can make a grant room it could not query queryable again.
-                self._reset_refresh_backoff()
             return
         if self._memberships.mark_room_unready(config, runtime_paths, room_id, reason=reason):
             self._grants_lost()
-
-    def _reset_refresh_backoff(self) -> None:
-        """Let the next due check rebuild without waiting out an earlier failure's backoff."""
-        self._refresh_attempt = 0
-        self._refresh_retry_at = 0.0
 
     def _grants_lost(self) -> None:
         """Rebuild at the next due check without an earlier backoff, and end every bot's denied calls without waiting.
 
         This never starts a call.
         """
-        self._reset_refresh_backoff()
+        self._refresh_attempt = 0
+        self._refresh_retry_at = 0.0
         for bot in self._bots():
             bot.schedule_reply_authorized_call_revocation()
 
@@ -132,7 +122,8 @@ class AgentReplyMembershipSync:
             return
         await refresh()
         if not self._memberships.needs_refresh(config):
-            self._reset_refresh_backoff()
+            self._refresh_attempt = 0
+            self._refresh_retry_at = 0.0
             return
         self._refresh_attempt += 1
         backoff_seconds = min(
