@@ -4042,6 +4042,14 @@ def test_dashboard_url_on_the_public_host_fails_startup(tmp_path: Path, public_u
         auth._build_auth_settings(_runtime_paths(tmp_path, process_env=env))
 
 
+def test_retired_base_url_fails_startup(tmp_path: Path) -> None:
+    """A deployment that still sets `MINDROOM_BASE_URL` is told to set `MINDROOM_PUBLIC_URL` instead."""
+    with pytest.raises(ValueError, match="MINDROOM_BASE_URL was removed; set MINDROOM_PUBLIC_URL"):
+        auth._build_auth_settings(
+            _runtime_paths(tmp_path, process_env={"MINDROOM_BASE_URL": "https://mindroom.example.org"}),
+        )
+
+
 def test_invalid_dashboard_url_fails_startup(tmp_path: Path) -> None:
     """A dashboard URL that is not an HTTPS origin, or HTTP on a local address, is a setup error."""
     with pytest.raises(ValueError, match="Browser origin must be explicit HTTPS"):

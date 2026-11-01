@@ -449,7 +449,7 @@ export function Integrations() {
         label: "Redirect URI",
         type: "text",
         required: false,
-        placeholder: `${window.location.origin}/api/oauth/${integration.id}/callback`,
+        placeholder: integration.oauth_default_redirect_uri,
         description: "Optional provider-specific redirect URI",
       });
     }

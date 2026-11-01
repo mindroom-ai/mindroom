@@ -855,6 +855,8 @@ describe("Integrations", () => {
       oauth_client_configured: false,
       oauth_client_config_service: "google_drive_oauth_client",
       oauth_client_redirect_uri_supported: true,
+      oauth_default_redirect_uri:
+        "https://mindroom.example.org/api/oauth/google_drive/callback",
     });
 
     render(<Integrations />);
@@ -871,7 +873,8 @@ describe("Integrations", () => {
           expect.objectContaining({ name: "client_secret", required: true }),
           expect.objectContaining({
             name: "redirect_uri",
-            placeholder: `${window.location.origin}/api/oauth/google_drive/callback`,
+            placeholder:
+              "https://mindroom.example.org/api/oauth/google_drive/callback",
           }),
         ],
       });
