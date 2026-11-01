@@ -169,7 +169,7 @@ async def count_exact(counter: TokenCounter, text: str) -> TokenCount:
             streak = counter.key in _state.failing
             _state.failing.add(counter.key)
         log = logger.debug if streak else logger.warning
-        log("Token count failed", key=counter.key, fallback_kind=local.kind, error=str(error))
+        log("Token count failed", key=counter.key, fallback_kind=local.kind, error=repr(error))
         return local
     with _state.lock:
         _state.failing.discard(counter.key)

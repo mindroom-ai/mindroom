@@ -259,6 +259,7 @@ def test_slow_count_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     with capture_logs() as logs:
         assert asyncio.run(count_exact(counter, "x" * 8)) == TokenCount(2, "estimated")
     assert [log["event"] for log in logs] == ["Token count failed"]
+    assert "TimeoutError" in logs[0]["error"], "a timeout, whose message is empty, is named in the log"
 
 
 @pytest.mark.usefixtures("provider_token_counts")
