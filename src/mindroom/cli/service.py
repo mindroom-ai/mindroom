@@ -173,8 +173,7 @@ def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | N
         try:
             result = _install_and_start_service(manager, runtime_paths)
         except ValueError as exc:
-            # Dashboard settings the service cannot start with, or keys that cannot be saved to `.env`, stop the
-            # installation before anything is installed.
+            # Raised before anything is installed, so there is nothing to uninstall.
             _err_console.print(f"[bold red]Error:[/bold red] {exc}")
         else:
             if result.success:

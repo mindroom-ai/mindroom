@@ -55,8 +55,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+def _runtime_paths(tmp_path: Path, **process_env: str) -> RuntimePaths:
+    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=process_env)
 
 
 @pytest.fixture(autouse=True)
@@ -267,6 +267,13 @@ class _MovableAuthorizationServerDiscoveryClient(_FakeDiscoveryClient):
         )
 
 
+def _serve_movable_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve discovery from `_MovableAuthorizationServerDiscoveryClient` with registration on and no posts yet."""
+    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
+    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+
+
 class _UnexpectedTokenClient:
     def __init__(self, **_kwargs: object) -> None:
         pytest.fail("no token request may be sent after the token endpoint changed")
@@ -424,11 +431,7 @@ async def test_mcp_oauth_discovery_skips_optional_invalid_json_metadata(
 @pytest.mark.asyncio
 async def test_mcp_oauth_metadata_cache_includes_runtime_discovery_policy(tmp_path: Path) -> None:
     """Metadata cached under permissive discovery settings must not bypass stricter runtime checks."""
-    permissive_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={"MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY": "true"},
-    )
+    permissive_paths = _runtime_paths(tmp_path, MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY="true")
     strict_paths = _runtime_paths(tmp_path)
     server_config = MCPServerConfig(
         transport="streamable-http",
@@ -616,6 +619,17 @@ async def test_oauth_provider_still_requires_confidential_client_secret(tmp_path
         await provider.require_client_config_async(runtime_paths)
 
 
+# A dynamic registration stored before MindRoom recorded the token endpoint it belongs to.
+_LEGACY_REGISTRATION = {
+    "client_id": "legacy-client-id",
+    "redirect_uri": "http://localhost:8765/api/oauth/mcp_demo/callback",
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "http://localhost:8765/api/oauth/mcp_demo/callback",
+    "_source": "oauth_dynamic_client_registration",
+    "_oauth_provider": "mcp_demo",
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+}
+
+
 async def _authorized_client_id(provider: OAuthProvider, runtime_paths: RuntimePaths) -> str:
     _DISCOVERY_CACHE.clear()
     auth_url = await oauth_authorization_url(
@@ -640,9 +654,7 @@ async def test_mcp_oauth_reregisters_dynamic_client_when_token_endpoint_moves(
 ) -> None:
     """A registration issued by one authorization server is never presented to another one."""
     runtime_paths = _runtime_paths(tmp_path)
-    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+    _serve_movable_discovery(monkeypatch)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
 
     assert await _authorized_client_id(provider, runtime_paths) == "client-of-auth.example.test"
@@ -690,14 +702,12 @@ async def test_mcp_oauth_reregisters_dynamic_client_when_the_callback_changes(
     callback: str,
 ) -> None:
     """Status and connect register again once the callback moves, as they do when the token endpoint moves."""
-    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+    _serve_movable_discovery(monkeypatch)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     local_resolution = await provider.client_config_resolution_async(_runtime_paths(tmp_path))
     assert local_resolution is not None
     assert local_resolution.config.redirect_uri == "http://localhost:8765/api/oauth/mcp_demo/callback"
-    moved_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    moved_paths = _runtime_paths(tmp_path, **env)
     redirect_uri = f"{callback}/api/oauth/mcp_demo/callback"
 
     with capture_logs() as logs:
@@ -737,14 +747,8 @@ async def test_mcp_oauth_keeps_an_operator_client_whose_callback_differs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A client the operator saved keeps its own callback and is never replaced by a registration."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.org"},
-    )
-    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example.org")
+    _serve_movable_discovery(monkeypatch)
     operator_client = {"client_id": "operator-client-id", "redirect_uri": "https://proxy.example.org/mcp/callback"}
     get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", operator_client)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
@@ -766,9 +770,7 @@ async def test_mcp_oauth_rejects_dynamic_registration_after_move_to_server_witho
 ) -> None:
     """A stale registration is refused when the new authorization server cannot issue a replacement."""
     runtime_paths = _runtime_paths(tmp_path)
-    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+    _serve_movable_discovery(monkeypatch)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     assert await _authorized_client_id(provider, runtime_paths) == "client-of-auth.example.test"
     monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", False)
@@ -789,9 +791,7 @@ async def test_mcp_oauth_refuses_bound_dynamic_client_after_move_with_registrati
 ) -> None:
     """Disabling registration never lets a client registered at one server be sent to another."""
     runtime_paths = _runtime_paths(tmp_path)
-    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
+    _serve_movable_discovery(monkeypatch)
     monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _UnexpectedTokenClient)
     assert (
         await _authorized_client_id(mcp_oauth_provider("demo", _auto_oauth_mcp_server_config()), runtime_paths)
@@ -825,18 +825,8 @@ async def test_mcp_oauth_binds_legacy_dynamic_registration_to_current_token_endp
 ) -> None:
     """A registration stored before endpoint recording keeps its client and is bound on first use."""
     runtime_paths = _runtime_paths(tmp_path)
-    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
-    legacy_registration = {
-        "client_id": "legacy-client-id",
-        "redirect_uri": "http://localhost:8765/api/oauth/mcp_demo/callback",
-        OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "http://localhost:8765/api/oauth/mcp_demo/callback",
-        "_source": "oauth_dynamic_client_registration",
-        "_oauth_provider": "mcp_demo",
-        RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
-    }
-    get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", legacy_registration)
+    _serve_movable_discovery(monkeypatch)
+    get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", _LEGACY_REGISTRATION)
     provider = mcp_oauth_provider(
         "demo",
         _auto_oauth_mcp_server_config(dynamic_client_registration=dynamic_client_registration),
@@ -846,7 +836,7 @@ async def test_mcp_oauth_binds_legacy_dynamic_registration_to_current_token_endp
 
     assert _MovableAuthorizationServerDiscoveryClient.posts == []
     assert _stored_mcp_client(runtime_paths) == {
-        **legacy_registration,
+        **_LEGACY_REGISTRATION,
         OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY: "https://auth.example.test/token",
     }
 
@@ -857,25 +847,9 @@ async def test_mcp_oauth_replaces_legacy_dynamic_registration_whose_callback_mov
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A registration stored before endpoint recording is replaced at once, not bound, when its callback moved."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.org"},
-    )
-    monkeypatch.setattr("mindroom.oauth.discovery.httpx.AsyncClient", _MovableAuthorizationServerDiscoveryClient)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "supports_registration", True)
-    monkeypatch.setattr(_MovableAuthorizationServerDiscoveryClient, "posts", [])
-    get_runtime_credentials_manager(runtime_paths).save_credentials(
-        "mcp_demo_oauth_client",
-        {
-            "client_id": "legacy-client-id",
-            "redirect_uri": "http://localhost:8765/api/oauth/mcp_demo/callback",
-            OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "http://localhost:8765/api/oauth/mcp_demo/callback",
-            "_source": "oauth_dynamic_client_registration",
-            "_oauth_provider": "mcp_demo",
-            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
-        },
-    )
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example.org")
+    _serve_movable_discovery(monkeypatch)
+    get_runtime_credentials_manager(runtime_paths).save_credentials("mcp_demo_oauth_client", _LEGACY_REGISTRATION)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
 
     resolution = await provider.client_config_resolution_async(runtime_paths)
