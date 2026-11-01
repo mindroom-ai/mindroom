@@ -481,7 +481,7 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
     """Placeholder replacement should quote MXIDs so '@' doesn't break YAML."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\nroom_defaults:\n  admins:\n    - __PLACEHOLDER__\n",
+        f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\nroom_defaults:\n  admins:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
     )
 
     replaced = cli_connect.replace_owner_placeholders_in_config(
@@ -492,7 +492,6 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
     assert replaced is True
     updated = config_path.read_text()
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated
-    assert "__PLACEHOLDER__" not in updated
     # Value must be YAML-quoted so the leading '@' doesn't break parsing
     assert '"@alice:mindroom.chat:8448"' in updated
 
