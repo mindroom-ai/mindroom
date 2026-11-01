@@ -405,12 +405,10 @@ class TurnDispatcher:
             prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
             and prepared.handled_turn.sources_all_from_requester(requester_user_id)
             # While another run still waits in the queue, whether another
-            # requester's follow-ups, an entity's reply written for this
-            # requester, or this requester's message for another participant, a
-            # newer message from this requester may only be answered after it, so
-            # letting it absorb this turn would answer out of receipt order or not at all.
-            # The guards below read a text message's mentions themselves, but a
-            # voice message's come from its transcript, which thread history lacks.
+            # requester's follow-ups or an entity's reply written for this
+            # requester, a newer message from this requester may only be answered
+            # after it, so letting it absorb this turn would answer out of receipt
+            # order or not at all.
             and not prepared.turn.queues_other_run(requester_user_id)
         )
         thread_history = prepared.dispatch.context.thread_history
@@ -608,10 +606,20 @@ class TurnDispatcher:
             logger=self.deps.logger,
         )
 
-    def _for_another_participant(self, room: nio.MatrixRoom, source: Mapping[str, object]) -> bool:
-        """Return whether a message mentions only other agents or people, so this agent ignores it."""
+    async def _for_another_participant(
+        self,
+        room: nio.MatrixRoom,
+        event_id: str,
+        source: Mapping[str, object],
+    ) -> bool:
+        """Return whether a message mentions only other agents or people, so this agent ignores it.
+
+        A voice message is addressed by the transcript it was prepared with, not by its audio event.
+        """
+        prepared_voice = await self.deps.turn_store.prepared_voice_for_source(event_id)
+        content = prepared_voice.to_content() if prepared_voice is not None else source.get("content")
         mentions = mentions_another_participant(
-            dict(source),
+            {"content": content},
             self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,

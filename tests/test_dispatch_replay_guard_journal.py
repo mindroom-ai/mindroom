@@ -70,7 +70,7 @@ def _classify(
     )
 
 
-def _for_bob(source: Mapping[str, object]) -> bool:
+async def _for_bob(_event_id: str, source: Mapping[str, object]) -> bool:
     """Stand in for the agent's mention check: a message that opens with ``@bob`` is for Bob alone."""
     content = source.get("content")
     return isinstance(content, dict) and str(content.get("body", "")).startswith("@bob")

@@ -5336,7 +5336,7 @@ async def test_replay_guard_does_not_supersede_non_interactive_origin_turns() ->
         may_be_superseded_by_newer_requester_turn=False,
         classify=lambda sender, _source: make_ingress_facts(sender, sender_entity_name="general"),
         is_handled=AsyncMock(return_value=frozenset()),
-        for_another_participant=lambda _source: False,
+        for_another_participant=AsyncMock(return_value=False),
         logger=MagicMock(),
     )
 
@@ -5383,7 +5383,7 @@ async def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> 
             sender_entity_name="router",
         ),
         is_handled=AsyncMock(return_value=frozenset()),
-        for_another_participant=lambda _source: False,
+        for_another_participant=AsyncMock(return_value=False),
         logger=MagicMock(),
     )
 
@@ -5430,7 +5430,7 @@ async def test_full_history_replay_guard_counts_non_router_visible_echo_marker()
             sender_entity_name="helper",
         ),
         is_handled=AsyncMock(return_value=frozenset()),
-        for_another_participant=lambda _source: False,
+        for_another_participant=AsyncMock(return_value=False),
         logger=MagicMock(),
     )
 

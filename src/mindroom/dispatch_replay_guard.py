@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 type _Classify = Callable[[str, Mapping[str, object]], IngressFacts]
 # Which of these events already have a terminal outcome, answered or redacted in the turn's room.
 type _HandledLookup = Callable[[Collection[str]], Awaitable[frozenset[str]]]
-# Whether a stored message mentions only other agents or people, so this agent ignores it.
-type _ForAnotherParticipant = Callable[[Mapping[str, object]], bool]
+# Whether a stored message, by its event ID and source, mentions only other agents or people, so this agent ignores it.
+type _ForAnotherParticipant = Callable[[str, Mapping[str, object]], Awaitable[bool]]
 
 
 async def has_newer_unresponded_in_thread(
@@ -48,7 +48,7 @@ async def has_newer_unresponded_in_thread(
     ]
     handled = await is_handled([message.event_id for message in newer]) if newer else frozenset()
     for message in newer:
-        if not _is_unresponded_requester_event(
+        if not await _is_unresponded_requester_event(
             message,
             source={"content": message.content},
             body=message.body,
@@ -67,7 +67,7 @@ async def has_newer_unresponded_in_thread(
     return False
 
 
-def _is_unresponded_requester_event(
+async def _is_unresponded_requester_event(
     event: JournalEvent | ResolvedVisibleMessage,
     *,
     source: Mapping[str, object],
@@ -97,7 +97,7 @@ def _is_unresponded_requester_event(
     content = source.get("content")
     if is_router_voice_echo(facts, content) or facts.lane_requester_id != requester_user_id:
         return False
-    if event.event_id in handled or for_another_participant(source):
+    if event.event_id in handled or await for_another_participant(event.event_id, source):
         return False
     if not isinstance(body, str):
         return True
@@ -150,7 +150,7 @@ async def has_newer_unresponded_journal_thread_event(
     for candidate in candidates:
         content = candidate.source.get("content")
         body = cast("Mapping[str, object]", content).get("body") if isinstance(content, Mapping) else None
-        if _is_unresponded_requester_event(
+        if await _is_unresponded_requester_event(
             candidate,
             source=candidate.source,
             body=body,
