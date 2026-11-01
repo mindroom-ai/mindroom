@@ -143,7 +143,7 @@ function retryAfterMs(response: Response): number {
 }
 
 function isAbortError(error: unknown): boolean {
-  return isPlainObject(error) && error.name === "AbortError";
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 export async function fetchUsage(

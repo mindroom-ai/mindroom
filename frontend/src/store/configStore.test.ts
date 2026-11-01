@@ -330,7 +330,7 @@ describe("configStore", () => {
         router: { model: "default" },
       };
       await loadFixture(config);
-      const reload = deferred<unknown>();
+      const reload = deferred<Response>();
       (global.fetch as any).mockReturnValueOnce(reload.promise);
       (global.fetch as any).mockResolvedValueOnce(
         Response.json({ agent_policies: {} }),
@@ -981,23 +981,7 @@ describe("configStore", () => {
     });
 
     it("ignores stale successful load results after a newer 422 failure", async () => {
-      const pendingConfigResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{
-          agents: Record<
-            string,
-            {
-              display_name: string;
-              role: string;
-              tools: string[];
-              skills: string[];
-              instructions: string[];
-              rooms: string[];
-            }
-          >;
-          models: { default: { provider: string; id: string } };
-        }>;
-      }>();
+      const pendingConfigResponse = deferred<Response>();
 
       (global.fetch as any)
         .mockReturnValueOnce(pendingConfigResponse.promise)
@@ -1085,10 +1069,7 @@ describe("configStore", () => {
     });
 
     it("invalidates in-flight policy refreshes when load returns 422", async () => {
-      const pendingPolicyResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ agent_policies: AgentPoliciesByAgent }>;
-      }>();
+      const pendingPolicyResponse = deferred<Response>();
 
       useConfigStore.setState({
         config: {
@@ -1218,10 +1199,7 @@ describe("configStore", () => {
           model: "default",
         },
       } satisfies Config;
-      const pendingRawSourceResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ source: string }>;
-      }>();
+      const pendingRawSourceResponse = deferred<Response>();
 
       useConfigStore.setState({
         loadedConfig: existingConfig,
@@ -1296,10 +1274,7 @@ describe("configStore", () => {
     });
 
     it("preserves newer recovery edits when a retry load returns 422", async () => {
-      const pendingRawSourceResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ source: string }>;
-      }>();
+      const pendingRawSourceResponse = deferred<Response>();
 
       useConfigStore.setState({
         diagnostics: [
@@ -1544,10 +1519,7 @@ describe("configStore", () => {
     });
 
     it("preserves newer recovery edits when an older recovery save finishes later", async () => {
-      const pendingSaveResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ success: boolean }>;
-      }>();
+      const pendingSaveResponse = deferred<Response>();
 
       useConfigStore.setState({
         diagnostics: [
@@ -1775,10 +1747,7 @@ describe("configStore", () => {
     });
 
     it("invalidates the current preview while a refresh is in flight", async () => {
-      const pendingResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ agent_policies: AgentPoliciesByAgent }>;
-      }>();
+      const pendingResponse = deferred<Response>();
 
       (global.fetch as any).mockReturnValueOnce(pendingResponse.promise);
 
@@ -2127,10 +2096,7 @@ describe("configStore", () => {
     });
 
     it("ignores stale successful save results after a newer validation failure", async () => {
-      const pendingSaveResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ success: true }>;
-      }>();
+      const pendingSaveResponse = deferred<Response>();
       const config: Config = {
         models: {
           default: { provider: "test", id: "test-model" },
@@ -2244,10 +2210,7 @@ describe("configStore", () => {
     });
 
     it("preserves newer draft edits when an older save finishes later", async () => {
-      const pendingSaveResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ success: true }>;
-      }>();
+      const pendingSaveResponse = deferred<Response>();
       const config: Config = {
         models: {
           default: { provider: "test", id: "test-model" },
@@ -2317,10 +2280,7 @@ describe("configStore", () => {
     });
 
     it("retains unrelated validation diagnostics when a stale save is superseded by newer edits", async () => {
-      const pendingSaveResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ success: true }>;
-      }>();
+      const pendingSaveResponse = deferred<Response>();
       const config: Config = {
         agents: {
           helper: {
@@ -2431,10 +2391,7 @@ describe("configStore", () => {
     });
 
     it("preserves newer voice edits when an older save finishes later", async () => {
-      const pendingSaveResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ success: true }>;
-      }>();
+      const pendingSaveResponse = deferred<Response>();
       const config: Config = {
         models: {
           default: { provider: "test", id: "test-model" },
@@ -2509,10 +2466,7 @@ describe("configStore", () => {
     });
 
     it("ignores successful load results while a dirty draft save is still in flight", async () => {
-      const pendingSaveResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ success: true }>;
-      }>();
+      const pendingSaveResponse = deferred<Response>();
       const loadedConfig: Config = {
         models: {
           default: { provider: "test", id: "old-model" },
@@ -3417,10 +3371,7 @@ describe("configStore", () => {
     });
 
     it("drops stale policy immediately when a policy-affecting edit triggers refresh", async () => {
-      const pendingResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ agent_policies: AgentPoliciesByAgent }>;
-      }>();
+      const pendingResponse = deferred<Response>();
 
       (global.fetch as any).mockReturnValueOnce(pendingResponse.promise);
 
@@ -4346,10 +4297,7 @@ describe("configStore", () => {
     });
 
     it("should ignore unchanged room updates while a save is in progress", async () => {
-      const pendingSaveResponse = deferred<{
-        ok: boolean;
-        json: () => Promise<{ success: true }>;
-      }>();
+      const pendingSaveResponse = deferred<Response>();
       const mockConfig = {
         agents: {
           agent1: {
