@@ -1574,6 +1574,30 @@ async def test_file_backend_entrypoint_fills_the_token_cap_as_the_provider_count
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("provider_token_counts")
+@pytest.mark.parametrize("line_count", [5, 300], ids=["within-both-caps", "over-the-line-cap"])
+async def test_file_backend_entrypoint_within_the_token_cap_costs_no_count(
+    storage_path: Path,
+    config: Config,
+    line_count: int,
+) -> None:
+    """The estimate, an upper bound, already shows the file fits the token cap, so no reply waits for a count."""
+    lines = _fact_lines(storage_path, config, line_count)
+    config.memory.file.max_entrypoint_lines = 200
+    config.memory.file.max_entrypoint_tokens = 50_000
+    calls: list[str] = []
+
+    async def endpoint(text: str) -> int:
+        calls.append(text)
+        return len(text) // 4
+
+    kept = await _preloaded(lines, config, fake_token_counter(count=endpoint))
+
+    assert calls == []
+    assert len(kept) == min(line_count, 200)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("provider_token_counts")
 async def test_file_backend_entrypoint_cut_of_an_unchanged_file_is_stable(storage_path: Path, config: Config) -> None:
     """Later replies read the provider's counts of an unchanged file and its preload, and keep the same cut."""
     lines = _fact_lines(storage_path, config, 40)

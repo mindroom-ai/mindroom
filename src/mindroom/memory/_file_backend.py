@@ -703,18 +703,25 @@ async def cap_entrypoint(
 ) -> MemoryEntrypointContext:
     """Cut the preload to both caps, as the model the preload goes to counts it.
 
-    The provider counts the whole file; a file over the token cap keeps that share of its characters, and the preload
-    those lines make is counted in turn, its character budget shrinking by any overshoot until it fits.
+    A file whose estimate, an upper bound, fits the token cap needs no provider count; otherwise the provider counts
+    the whole file, a file over the cap keeps that share of its characters, and the preload those lines make is counted
+    in turn, its character budget shrinking by any overshoot until it fits.
     """
     file_config = config.memory.file
     max_tokens = file_config.max_entrypoint_tokens
-    file_tokens = await _tokens(counter, entrypoint.file_text)
+    max_lines = file_config.max_entrypoint_lines
     # The characters of every line with its newline, as the line costs count them.
     budget = sum(len(line) + 1 for line in entrypoint.lines)
+    file_tokens = (await asyncio.to_thread(count, counter, entrypoint.file_text)).tokens
     if file_tokens > max_tokens:
-        budget = budget * max_tokens // file_tokens
+        file_tokens = await _tokens(counter, entrypoint.file_text)
+    if file_tokens <= max_tokens:
+        # Any lines of a file within the token cap fit it too.
+        kept = _lines_within(entrypoint.lines, max_lines, budget)
+        return replace(entrypoint, text=_entrypoint_text(kept), included_lines=len(kept))
+    budget = budget * max_tokens // file_tokens
     while True:
-        kept = _lines_within(entrypoint.lines, file_config.max_entrypoint_lines, budget)
+        kept = _lines_within(entrypoint.lines, max_lines, budget)
         text = _entrypoint_text(kept)
         tokens = await _tokens(counter, text)
         if tokens <= max_tokens or not kept:
@@ -722,13 +729,17 @@ async def cap_entrypoint(
         budget = min(budget - 1, budget * max_tokens // tokens)
 
 
+def entrypoint_tokens(text: str, counter: TokenCounter) -> int:
+    """Return the tokens of the MEMORY.md ``text`` as the preload counts the file: exact once a reply has counted it."""
+    return count(counter, _entrypoint_text(text.splitlines())).tokens
+
+
 def entrypoint_withholds_lines(text: str, config: Config, counter: TokenCounter) -> bool:
     """Return whether the MEMORY.md preload would leave out any line of ``text``, its size counted with ``counter``."""
-    lines = text.splitlines()
     file_config = config.memory.file
     return (
-        len(lines) > file_config.max_entrypoint_lines
-        or count(counter, _entrypoint_text(lines)).tokens > file_config.max_entrypoint_tokens
+        len(text.splitlines()) > file_config.max_entrypoint_lines
+        or entrypoint_tokens(text, counter) > file_config.max_entrypoint_tokens
     )
 
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.ai_run_metadata import recorded_non_prompt_tokens
+from mindroom.constants import HISTORY_ANCHOR_RUN_METADATA_KEY
 from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
     ConversationChangedError,
@@ -61,6 +61,7 @@ from mindroom.history.types import (
 from mindroom.llm.messages import is_own_model_message
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import message_context_tokens
+from mindroom.native_compaction import checkpoint_items
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.timing import timed
@@ -212,18 +213,14 @@ async def prepare_scope_history(
         history_settings=resolved_inputs.history_settings,
         counter=counter,
     )
-    # A native checkpoint response is billed for the transcript it replaced, so native routes keep the estimate.
-    reported_history_tokens = (
-        await _reported_or_measured_history(
-            session=session,
-            visible_runs=visible_runs,
-            resolved_inputs=resolved_inputs,
-            config=config,
-            model=model,
-            non_prompt_tokens=non_prompt_tokens,
-        )
-        if native_route is None
-        else None
+    reported_history_tokens = await _reported_or_measured_history(
+        session=session,
+        visible_runs=visible_runs,
+        resolved_inputs=resolved_inputs,
+        config=config,
+        model=model,
+        non_prompt_tokens=non_prompt_tokens,
+        native_route=native_route,
     )
     # Large provider projections spend seconds in tokenizers that release the GIL.
     estimated_history_tokens = await asyncio.to_thread(estimate_history_tokens, native_route=native_route)
@@ -335,11 +332,13 @@ async def _reported_or_measured_history(
     config: Config,
     model: ModelProvider,
     non_prompt_tokens: int,
+    native_route: str | None,
 ) -> int | None:
     """Return the history size the provider reported for the scope's latest request, if it still describes the history.
 
     Without one, the provider counts the scope's prompt-visible history instead, and the reply waits for that count, so
-    its estimate of the history reads exact counts.
+    its estimate of the history reads exact counts; a native route keeps its estimate, whose checkpoint no provider
+    counts as text.
     """
     reported = (
         await asyncio.to_thread(
@@ -351,12 +350,13 @@ async def _reported_or_measured_history(
                 config=config,
                 model=model,
                 non_prompt_tokens=non_prompt_tokens,
+                native_route=native_route,
             ),
         )
         if visible_runs
         else None
     )
-    if reported is None:
+    if reported is None and native_route is None:
         counter = model.token_counter
         texts = await asyncio.to_thread(
             partial(
@@ -378,6 +378,7 @@ def _reported_history_tokens(
     config: Config,
     model: ModelProvider,
     non_prompt_tokens: int,
+    native_route: str | None,
 ) -> int | None:
     """Size history from the request the provider reported for the scope's latest answer, or None when stale.
 
@@ -391,19 +392,24 @@ def _reported_history_tokens(
         not resolved_inputs.history_settings.replays_whole_history
         # Another model counts with another tokenizer.
         or (latest_run.model, latest_run.model_provider) != (model.identity.id, model.identity.provider)
-        # Without what that request's system prompt and tools came to, as this route counts them, its history cannot be
-        # told apart.
-        or (recorded_tokens := recorded_non_prompt_tokens(latest_run.metadata, model.token_counter.key)) is None
     ):
+        return None
+    recorded = HistoryAnchor.from_metadata((latest_run.metadata or {}).get(HISTORY_ANCHOR_RUN_METADATA_KEY))
+    # Without what that request's system prompt and tools came to, as this route counts them, its history cannot be told
+    # apart; and a request on another native route, or none, replayed history another way.
+    if recorded is None or (recorded.counter_key, recorded.native_route) != (model.token_counter.key, native_route):
         return None
     messages = latest_run.messages
     anchor = next(
         (index for index in range(len(messages) - 1, -1, -1) if is_own_model_message(messages[index])),
         None,
     )
-    # History replay drops or bounds media that request carried in full.
-    if anchor is None or any(
-        message.images or message.audio or message.videos or message.files for message in messages
+    # History replay drops or bounds media that request carried in full, and a response that created a native
+    # checkpoint is billed for the transcript the checkpoint replaced.
+    if (
+        anchor is None
+        or any(message.images or message.audio or message.videos or message.files for message in messages)
+        or checkpoint_items(messages[anchor], native_route)
     ):
         return None
     answer = messages[anchor]
@@ -418,7 +424,7 @@ def _reported_history_tokens(
     # Sized as the next request replays them: as history, whose earlier reasoning a model may render.
     replayed = [replace(message, from_history=True) for message in messages[anchor:]]
     newer_tokens = estimate_request_messages_tokens(replayed, counter=model.token_counter)
-    return reported + newer_tokens - min(recorded_tokens, non_prompt_tokens)
+    return reported + newer_tokens - min(recorded.non_prompt_tokens, non_prompt_tokens)
 
 
 def reported_context_tokens(message: Message, *, model: ModelProvider, config: Config, model_name: str) -> int | None:
@@ -782,8 +788,8 @@ def finalize_history_preparation(
         prepared_context_tokens=prepared_context_tokens,
         # Authored replay limits keep older history out of every request, and a native checkpoint stands in for it.
         history_anchor=(
-            HistoryAnchor(prepared_scope_history.non_prompt_tokens, counter.key)
-            if history_settings.replays_whole_history and native_history_route(native_history) is None
+            HistoryAnchor(prepared_scope_history.non_prompt_tokens, counter.key, native_history_route(native_history))
+            if history_settings.replays_whole_history
             else None
         ),
         native_history=native_history,

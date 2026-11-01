@@ -1785,13 +1785,26 @@ def _native(threshold: int) -> NativeCompactionReplay:
     return NativeCompactionReplay(route=_NATIVE_ROUTE, threshold=threshold)
 
 
+class _CheckpointingEveryResponse(ToolLoopModel):
+    """A tool loop on a native route whose provider compacts on every request."""
+
+    def respond(self, number: int, request: ModelRequest) -> Message:
+        message = super().respond(number, request)
+        record_native_checkpoint(
+            message,
+            [{"type": "compaction", "id": f"cmp{number}", "encrypted_content": "c"}],
+            request.native_compaction,
+        )
+        return message
+
+
 @pytest.mark.asyncio
-async def test_native_request_under_the_limit_never_text_compacts(
+async def test_a_checkpoint_response_billed_for_the_replaced_transcript_never_text_compacts(
     tmp_path: Path,
     summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path, context_window=1_000_000)
-    model = ToolLoopModel(
+    model = _CheckpointingEveryResponse(
         tool_rounds=4,
         usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=999_900 * number)),
     )
@@ -1800,6 +1813,21 @@ async def test_native_request_under_the_limit_never_text_compacts(
 
     assert summary_calls.inputs == []
     assert model.requests[-1].request.native_compaction == _native(500_000)
+
+
+@pytest.mark.asyncio
+async def test_a_native_request_sizes_the_next_one_by_its_reported_size(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+) -> None:
+    """A native response that created no checkpoint is billed for what it sent, which the estimate overcounts."""
+    config, paths = _config(tmp_path)
+    model = ToolLoopModel(tool_rounds=5, usage=lambda _number: MessageMetrics(tokens=TokenCounts(input_tokens=100)))
+
+    await _run(_Agent(model, config, paths, native_compaction=_native(2000)), "Do the task")
+
+    assert summary_calls.inputs == []
+    assert model.requests[-1].request.native_compaction == _native(2000)
 
 
 @pytest.mark.asyncio

@@ -14,12 +14,13 @@ from mindroom import execution_preparation
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
-from mindroom.ai_run_metadata import build_prepared_history_metadata_content, recorded_non_prompt_tokens
+from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    HISTORY_ANCHOR_RUN_METADATA_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -564,15 +565,15 @@ def test_a_scheduled_limit_leaves_no_anchor_for_the_next_reply(limit: int) -> No
         replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=500, add_history_to_context=True),
         replays_persisted_history=True,
         prepared_context_tokens=1_500,
-        history_anchor=HistoryAnchor(1_000, "fake"),
+        history_anchor=HistoryAnchor(1_000, "fake", None),
         native_history=None,
     )
-    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(prepared), "fake") == 1_000
+    assert HISTORY_ANCHOR_RUN_METADATA_KEY in build_prepared_history_metadata_content(prepared)
 
     capped = _prepared_history_with_scheduled_limit(prepared, limit)
 
     # The run records no system prompt and tools, so the next reply sizes its history by estimate.
-    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(capped), "fake") is None
+    assert HISTORY_ANCHOR_RUN_METADATA_KEY not in build_prepared_history_metadata_content(capped)
 
 
 def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:

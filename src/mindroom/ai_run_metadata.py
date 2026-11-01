@@ -149,20 +149,8 @@ def build_prepared_history_metadata_content(prepared_history: PreparedHistorySta
     replay_plan = prepared_history.replay_plan
     # A request that replays part of the history, however the plan was cut, reports the size of that part alone.
     if anchor is not None and replay_plan is not None and replay_plan.mode == "configured":
-        content[HISTORY_ANCHOR_RUN_METADATA_KEY] = {
-            "non_prompt_tokens": anchor.non_prompt_tokens,
-            "counter": anchor.counter_key,
-        }
+        content[HISTORY_ANCHOR_RUN_METADATA_KEY] = anchor.metadata()
     return content
-
-
-def recorded_non_prompt_tokens(run_metadata: Mapping[str, Any] | None, counter_key: str) -> int | None:
-    """Return the system prompt and tools tokens a run's requests were sized with, if it recorded them by ``counter_key``."""
-    anchor = (run_metadata or {}).get(HISTORY_ANCHOR_RUN_METADATA_KEY)
-    if not isinstance(anchor, dict) or anchor.get("counter") != counter_key:
-        return None
-    tokens = anchor.get("non_prompt_tokens")
-    return tokens if isinstance(tokens, int) else None
 
 
 def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -> dict[str, Any] | None:

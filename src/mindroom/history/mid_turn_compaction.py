@@ -429,20 +429,9 @@ def _request_tokens(
 ) -> int:
     """Size the next request from the latest response this loop received, else by estimate.
 
-    A native response that created a checkpoint is billed for the transcript it replaced, so native routes always
-    estimate their projected request.
+    A native response that created a checkpoint is billed for the transcript it replaced, so after one a native route
+    estimates its projected request.
     """
-    if policy.native_route is not None:
-        projected = native_replay_messages(messages, policy.native_route)
-        return (
-            estimate_request_messages_tokens(messages, counter=policy.counter, native_route=policy.native_route)
-            # Thinking before the latest checkpoint is part of that checkpoint, not of the request.
-            + _thinking_tokens(
-                [message for message in projected if not checkpoint_items(message, policy.native_route)],
-                policy.counter,
-            )
-            + _tool_tokens(tools, projected, policy.deferred_tool_names, policy.counter)
-        )
     anchor = next(
         (
             index
@@ -451,7 +440,7 @@ def _request_tokens(
         ),
         None,
     )
-    if anchor is not None:
+    if anchor is not None and not checkpoint_items(messages[anchor], policy.native_route):
         reported = reported_context_tokens(
             messages[anchor],
             model=compaction.model,
@@ -465,6 +454,17 @@ def _request_tokens(
                 + estimate_request_messages_tokens(newer, counter=policy.counter)
                 + _thinking_tokens(newer, policy.counter)
             )
+    if policy.native_route is not None:
+        projected = native_replay_messages(messages, policy.native_route)
+        return (
+            estimate_request_messages_tokens(messages, counter=policy.counter, native_route=policy.native_route)
+            # Thinking before the latest checkpoint is part of that checkpoint, not of the request.
+            + _thinking_tokens(
+                [message for message in projected if not checkpoint_items(message, policy.native_route)],
+                policy.counter,
+            )
+            + _tool_tokens(tools, projected, policy.deferred_tool_names, policy.counter)
+        )
     return _estimated_request_tokens(policy, messages, tools)
 
 

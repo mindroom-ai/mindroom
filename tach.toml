@@ -2960,6 +2960,7 @@ visibility = [
     "mindroom.providers.anthropic.legacy_stored_turns",
     "mindroom.history.replay",
     "mindroom.history.native",
+    "mindroom.history.runtime",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.compaction",
     "mindroom.providers.openai",
@@ -3143,7 +3144,8 @@ visibility = [
 [[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
-    "mindroom.ai_run_metadata",
+    "mindroom.native_compaction",
+    "mindroom.constants",
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.types",
     "mindroom.history.compaction",
@@ -7101,6 +7103,7 @@ expose = [
     "build_memory_prompt_parts",
     "conversation_entrypoint_preamble",
     "delete_agent_memory",
+    "entrypoint_tokens",
     "entrypoint_withholds_lines",
     "get_agent_memory",
     "list_all_agent_memories",

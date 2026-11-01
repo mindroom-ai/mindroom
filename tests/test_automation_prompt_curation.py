@@ -169,7 +169,7 @@ def test_memory_past_the_preload_line_cap_asks_for_a_cut_under_the_token_trigger
     assert (plan.upper_tokens, plan.floor_tokens) == (1163, 1098)
     prompt = _curation_prompt(config, plan)
     assert (
-        "total 1292 tokens (limit 10000), and MEMORY.md has 17 lines and 1286 tokens (preload limits 16 lines" in prompt
+        "total 1292 tokens (limit 10000), and MEMORY.md has 17 lines and 1285 tokens (preload limits 16 lines" in prompt
     )
     assert "If MEMORY.md is over either preload limit" in prompt
 
@@ -186,7 +186,7 @@ def test_memory_past_the_preload_token_cap_asks_for_a_cut_under_the_token_trigge
     assert plan is not None
     assert plan.measured_tokens == 1292
     prompt = _curation_prompt(config, plan)
-    assert "MEMORY.md has 17 lines and 1286 tokens (preload limits 200 lines and 1000 tokens;" in prompt
+    assert "MEMORY.md has 17 lines and 1285 tokens (preload limits 200 lines and 1000 tokens;" in prompt
     assert "If MEMORY.md is over either preload limit, take lines out of it first" in prompt
 
 
@@ -207,6 +207,21 @@ def test_memory_the_preload_shows_whole_asks_for_no_cut(tmp_path: Path) -> None:
     assert _plan_curation(config, root, "mind", automation, counter) is None
 
 
+def test_the_prompt_shows_memory_on_the_basis_the_preload_judges_it(tmp_path: Path) -> None:
+    """MEMORY.md's tokens in the prompt are the provider's count a reply made, the count the preload caps by."""
+    config, automation, root = _setup(tmp_path)
+
+    async def half_the_estimate(text: str) -> int:
+        return len(text) // 8
+
+    counter = fake_token_counter(count=half_the_estimate)
+    asyncio.run(count_exact(counter, MEMORY.strip()))
+    plan = _plan_curation(config, root, "mind", automation, counter)
+
+    assert plan is not None
+    assert f"MEMORY.md has 17 lines and {len(MEMORY.strip()) // 8} tokens" in _curation_prompt(config, plan)
+
+
 def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) -> None:
     """The visible prompt names every file, the band, the per-file cap, committing first, and the re-check."""
     plan, config, _root = _plan(tmp_path)
@@ -214,7 +229,7 @@ def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) ->
     prompt = _curation_prompt(config, plan)
 
     assert (
-        "total 1292 tokens (limit 1000), and MEMORY.md has 17 lines and 1286 tokens (preload limits 200 lines" in prompt
+        "total 1292 tokens (limit 1000), and MEMORY.md has 17 lines and 1285 tokens (preload limits 200 lines" in prompt
     )
     assert "MEMORY.md (1286 tokens), SOUL.md (4 tokens), USER.md (2 tokens)" in prompt
     assert "at most 1163 tokens in total, but not below 1098" in prompt

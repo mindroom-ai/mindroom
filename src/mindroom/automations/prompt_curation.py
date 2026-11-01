@@ -22,7 +22,7 @@ from mindroom.automations.steps import Ask, AutomationContext, Done, workspace_c
 from mindroom.config.automations import MAX_FILE_SHRINK, PromptCurationAutomation
 from mindroom.config.resolution import entity_model_name
 from mindroom.logging_config import get_logger
-from mindroom.memory import entrypoint_withholds_lines, read_scope_memory_files
+from mindroom.memory import entrypoint_tokens, entrypoint_withholds_lines, read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.providers.registry import model_token_counter
 from mindroom.token_counting.counts import count, estimated
@@ -53,8 +53,10 @@ class _CurationPlan:
     # Every memory/ topic file the scan read at fire time, so verify can tell detail moved from detail deleted.
     memory_tokens: int
     curated: Mapping[str, int]
-    # MEMORY.md lines at fire time; the preload withholds lines beyond either memory.file.max_entrypoint_* cap.
+    # MEMORY.md lines and tokens at fire time, the tokens as the preload counts them; the preload withholds lines beyond
+    # either memory.file.max_entrypoint_* cap.
     memory_lines: int
+    entrypoint_tokens: int
     max_entrypoint_lines: int
     max_entrypoint_tokens: int
     upper_tokens: int
@@ -136,6 +138,7 @@ def _plan_curation(
         memory_tokens=_memory_dir_tokens(root, curated_payloads, measure),
         curated=curated,
         memory_lines=memory_lines,
+        entrypoint_tokens=entrypoint_tokens(memory_text, counter),
         max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
         max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
         upper_tokens=round(measured * (1 - settings.min_reduction)),
@@ -151,7 +154,7 @@ def _curation_prompt(config: Config, plan: _CurationPlan) -> str:
         measured_tokens=plan.measured_tokens,
         trigger_tokens=plan.settings.trigger_tokens,
         memory_lines=plan.memory_lines,
-        entrypoint_tokens=plan.curated.get(_ENTRYPOINT, 0),
+        entrypoint_tokens=plan.entrypoint_tokens,
         max_entrypoint_lines=plan.max_entrypoint_lines,
         max_entrypoint_tokens=plan.max_entrypoint_tokens,
         file_sizes=", ".join(f"{path} ({tokens} tokens)" for path, tokens in plan.curated.items()),

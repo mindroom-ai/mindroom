@@ -14,9 +14,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.ai_run_metadata import build_prepared_history_metadata_content, recorded_non_prompt_tokens
+from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.config.resolution import entity_model_name
+from mindroom.constants import HISTORY_ANCHOR_RUN_METADATA_KEY
 from mindroom.execution_preparation import prepare_agent_execution_context, prepare_bound_team_run_context
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_tokens
@@ -1917,7 +1918,7 @@ def _reported_run(
         PreparedHistoryState(
             replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=600, add_history_to_context=True),
             prepared_context_tokens=1_000,
-            history_anchor=None if non_prompt_tokens is None else HistoryAnchor(non_prompt_tokens, counter_key),
+            history_anchor=None if non_prompt_tokens is None else HistoryAnchor(non_prompt_tokens, counter_key, None),
             native_history=None,
         ),
     )
@@ -2167,7 +2168,7 @@ async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_pat
     assert state.replay_plan.mode != "limited"
     assert state.replay_plan.estimated_tokens == reported
     # The run records the system prompt and tools it was sized with, which the next reply's anchor takes off.
-    assert state.history_anchor == HistoryAnchor(400, "overcounts")
+    assert state.history_anchor == HistoryAnchor(400, "overcounts", None)
 
 
 @pytest.mark.asyncio
@@ -2198,7 +2199,7 @@ async def test_a_request_with_trimmed_history_leaves_no_anchor_for_the_next_repl
     assert state.replay_plan is not None
     assert (state.replay_plan.mode, state.replay_plan.num_history_runs) != ("configured", None)
     # The run records no system prompt and tools, so the next reply sizes its history by estimate.
-    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(state), "overcounts") is None
+    assert HISTORY_ANCHOR_RUN_METADATA_KEY not in build_prepared_history_metadata_content(state)
 
 
 @pytest.mark.asyncio
@@ -2220,11 +2221,8 @@ async def test_the_replay_plan_trims_by_the_reported_size_over_the_final_budget(
 
 
 @pytest.mark.asyncio
-async def test_a_request_on_a_native_route_leaves_no_anchor_for_the_next_reply(tmp_path: Path) -> None:
-    """A native checkpoint stands in for older history, so the size the provider reports covers only what followed it.
-
-    A later turn on the same model without native compaction, such as a scheduled task, replays the whole history.
-    """
+async def test_a_request_on_a_native_route_records_its_route_with_its_anchor(tmp_path: Path) -> None:
+    """A native request replays history through its route, so only a later reply on that route reads its size."""
     prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 1_000})
     native = NativeHistory(
         native_compaction=NativeCompactionReplay(route="checkpoints", threshold=None),
@@ -2235,7 +2233,7 @@ async def test_a_request_on_a_native_route_leaves_no_anchor_for_the_next_reply(t
 
     assert state.replay_plan is not None
     assert state.replay_plan.mode == "configured"
-    assert state.history_anchor is None
+    assert state.history_anchor == HistoryAnchor(400, "fake", "checkpoints")
 
 
 @pytest.mark.asyncio
