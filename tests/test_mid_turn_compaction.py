@@ -201,8 +201,8 @@ def _turn(prompt: Sequence[Message] | str) -> TurnMessages:
     """Split a run's input as a reply does: transient context, the prompt (its last other message), context."""
     messages = [Message(role="user", content=prompt)] if isinstance(prompt, str) else list(prompt)
     transient = tuple(message for message in messages if not message.add_to_agent_memory)
-    stored = [message for message in messages if message.add_to_agent_memory]
-    return TurnMessages(prompt=stored[-1], context=tuple(stored[:-1]), transient=transient)
+    conversation = [message for message in messages if message.add_to_agent_memory]
+    return TurnMessages(prompt=conversation[-1], context=tuple(conversation[:-1]), transient=transient)
 
 
 async def _run(
