@@ -920,6 +920,17 @@ class TestCredentialsAPI:
         assert "OAuth client config credentials cannot be copied" in response.json()["detail"]
         assert manager.load_credentials("copied_service") is None
 
+    def test_regular_service_rejects_copy_into_oauth_client_config_service(self, client: TestClient) -> None:
+        """A copy must not write unvalidated fields into an OAuth client config service."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        manager.save_credentials("weather", {"api_key": "weather-key", "_source": "ui"})
+
+        response = client.post("/api/credentials/google_drive_oauth_client/copy-from/weather")
+
+        assert response.status_code == 400
+        assert "OAuth client config credentials cannot be copied" in response.json()["detail"]
+        assert manager.load_credentials("google_drive_oauth_client") is None
+
     def test_orphaned_oauth_client_config_service_redacts_and_rejects_copy(
         self,
         client: TestClient,
@@ -1916,6 +1927,8 @@ class TestCredentialsAPI:
         mock_credentials_manager: MagicMock,
     ) -> None:
         """Test deleting credentials."""
+        mock_credentials_manager.load_credentials.return_value = None
+
         response = client.delete("/api/credentials/email")
 
         assert response.status_code == 200
@@ -1925,6 +1938,50 @@ class TestCredentialsAPI:
         }
 
         mock_credentials_manager.delete_credentials.assert_called_once_with("email")
+
+    def test_delete_credentials_supplied_by_the_environment_names_the_variable(self, client: TestClient) -> None:
+        """Deleting a credential the environment supplies says which variable to remove instead of reporting it gone."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        main.initialize_api_app(
+            client.app,
+            constants.resolve_primary_runtime_paths(
+                config_path=runtime_paths.config_path,
+                storage_path=runtime_paths.storage_root,
+                process_env={**runtime_paths.process_env, "OPENAI_API_KEY": "sk-env-dummy"},
+            ),
+        )
+        bind_test_embedded_runtime(client.app)
+        publish_api_config(client.app, _config_with_worker_scope(None))
+
+        response = client.delete("/api/credentials/openai")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "success",
+            "message": (
+                "Credentials for openai now come from the OPENAI_API_KEY environment variable; "
+                "to remove them, edit it in the environment or .env and restart MindRoom."
+            ),
+        }
+        assert "openai" in client.get("/api/credentials/list").json()
+
+    def test_delete_agent_credentials_reports_granted_shared_credentials_that_still_apply(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Deleting from an agent's view says when the agent still reads a granted shared credential."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        manager.save_credentials("openai", {"api_key": "sk-shared-dummy", "_source": "ui"})
+        publish_api_config(client.app, _config_with_worker_scope("shared", worker_grantable_credentials=["openai"]))
+
+        response = client.delete("/api/credentials/openai?agent_name=general")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "success",
+            "message": "Credentials for openai now come from the shared credentials granted to this agent.",
+        }
+        assert manager.load_credentials("openai") == {"api_key": "sk-shared-dummy", "_source": "ui"}
 
     def test_list_services(
         self,
