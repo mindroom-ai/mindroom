@@ -296,13 +296,7 @@ def test_builtin_tool_manifest_imports_every_registration_module_once() -> None:
         for alias in node.names
     ]
     assert sorted(manifest) == _builtin_registration_modules()
-    assert "__all__" not in {
-        target.id
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        for target in node.targets
-        if isinstance(target, ast.Name)
-    }
+    assert "__all__" not in {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
 
 
 def test_tach_does_not_expose_catalog_private_registry_helpers() -> None:

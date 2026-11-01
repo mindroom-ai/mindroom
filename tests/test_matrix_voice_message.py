@@ -182,11 +182,24 @@ async def test_matrix_voice_message_rejects_unauthorized_room(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_matrix_voice_message_reports_an_unknown_room_name(tmp_path: Path) -> None:
+    """A room name that resolves to no room ID or alias is unknown, not an access denial."""
+    with tool_runtime_context(_context(tmp_path)):
+        result = await MatrixVoiceMessageTools(api_key="sk-test").matrix_voice_message("hello", room_id="Ops Room")
+
+    payload = _payload(result)
+    assert payload["status"] == "error"
+    assert payload["message"] == "Unknown room 'Ops Room'; pass a room ID, alias, or configured room name."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("room_id", [None, "  "])
 async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread(
     tmp_path: Path,
     speech: _SpeechMocks,
+    room_id: str | None,
 ) -> None:
-    """Successful calls should synthesize speech and send it to the active Matrix thread."""
+    """Successful calls with an omitted or blank room should synthesize speech and send it to the active thread."""
     context = _context(tmp_path, thread_id="$thread-root")
 
     with tool_runtime_context(context):
@@ -194,7 +207,7 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
             api_key="sk-test",
             model="tts-test",
             voice="nova",
-        ).matrix_voice_message("Read this aloud", caption="Voice reply")
+        ).matrix_voice_message("Read this aloud", room_id=room_id, caption="Voice reply")
 
     speech.openai.assert_called_once_with(api_key="sk-test")
     speech.openai.return_value.audio.speech.create.assert_called_once_with(

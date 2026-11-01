@@ -15,7 +15,7 @@ from mindroom.credentials.environment import get_secret_from_env
 from mindroom.custom_tools.attachment_helpers import (
     explicit_thread_root,
     resolve_context_thread_id,
-    resolve_optional_room_id,
+    resolve_requested_room_id,
     room_access_allowed,
 )
 from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOperationResult, MatrixMessageOperations
@@ -266,7 +266,10 @@ class MatrixVoiceMessageTools(Toolkit):
                 message="Voice messages from gpt-realtime models and non-opus formats need ffmpeg and ffprobe on the backend host.",
             )
 
-        resolved_room_id = resolve_optional_room_id(context, room_id)
+        # A blank room_id means the current room, as omitting it does.
+        resolved_room_id, room_error = resolve_requested_room_id(context, (room_id or "").strip() or None)
+        if room_error is not None or resolved_room_id is None:
+            return self._payload("error", message=room_error)
         if not await room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",
