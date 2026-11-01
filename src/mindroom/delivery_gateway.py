@@ -599,22 +599,6 @@ class DeliveryGateway:
         if not isinstance(result, nio.RoomSendResponse):
             self.deps.logger.warning("Judgment reaction failed", kind=kind, room_id=room_id, event_id=event_id)
 
-    async def _drop_placeholder_after_failed_delivery(
-        self,
-        *,
-        tool_trace: list[ToolTraceEntry] | None,
-        extra_content: dict[str, Any] | None,
-    ) -> FinalDeliveryOutcome:
-        """End a stream whose final delivery failed while it showed only its placeholder; the placeholder goes."""
-        handle = self._live_span()
-        if handle is not None:
-            await self.end_reply_span(handle, suppress_decision(handle))
-        return FinalDeliveryOutcome(
-            ending=Failed(FailureCause.DELIVERY_FAILED),
-            tool_trace=tuple(tool_trace or ()),
-            extra_content=extra_content,
-        )
-
     async def _acknowledged_delivery(
         self,
         turn_id: str,
@@ -2329,12 +2313,6 @@ class DeliveryGateway:
                     ),
                 )
 
-            if stream_outcome.visible_body_state == "placeholder_only" and stream_outcome.failed:
-                return await self._drop_placeholder_after_failed_delivery(
-                    tool_trace=request.tool_trace,
-                    extra_content=request.extra_content,
-                )
-
             if (
                 stream_outcome.visible_body_state == "none"
                 and not stream_outcome.failed
@@ -2354,7 +2332,13 @@ class DeliveryGateway:
                     )
 
             if stream_outcome.failed and stream_outcome.visible_body_state != "visible_body":
-                shown = request.initial_delivery_kind == "edited" and streamed_event_id is not None
+                placeholder_only = stream_outcome.visible_body_state == "placeholder_only"
+                if placeholder_only and (handle := self._live_span()) is not None:
+                    # The final delivery failed while the stream showed only its placeholder: the placeholder goes.
+                    await self.end_reply_span(handle, suppress_decision(handle))
+                shown = (
+                    not placeholder_only and request.initial_delivery_kind == "edited" and streamed_event_id is not None
+                )
                 return FinalDeliveryOutcome(
                     ending=Failed(FailureCause.DELIVERY_FAILED),
                     event_id=streamed_event_id if shown else None,

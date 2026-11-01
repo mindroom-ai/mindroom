@@ -90,7 +90,7 @@ from tests.conftest import (
 )
 from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
-from tests.reply_span_helpers import final_in_resume_span, final_in_span, reply_span
+from tests.reply_span_helpers import end_span_as_locked_turn, final_in_resume_span, final_in_span, reply_span
 from tests.test_turn_store import _in_room, _redact, _store
 
 if TYPE_CHECKING:
@@ -681,7 +681,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """A turn that wrote no answer, as one whose tool calls are hidden can, says so where its placeholder stood."""
         gateway = _gateway(tmp_path, alice)
-        client = self._redactable_client(gateway)
         send = AsyncMock(side_effect=delivered_matrix_side_effect("$note"))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -692,7 +691,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 end_failed_span=True,
             )
 
-        client.room_redact.assert_not_awaited()
+        gateway.deps.runtime.client.room_redact.assert_not_awaited()
         assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
         assert outcome.final_visible_event_id == "$placeholder"
         content = send.await_args.args[2]
@@ -732,7 +731,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """A regeneration that wrote nothing leaves the earlier answer shown, and the outcome names it."""
         gateway = _gateway(tmp_path, alice)
-        client = self._redactable_client(gateway)
         send = AsyncMock(side_effect=delivered_matrix_side_effect("$sent"))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -747,7 +745,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
         assert outcome.final_visible_event_id == "$prior_answer"
         send.assert_not_awaited()
-        client.room_redact.assert_not_awaited()
+        gateway.deps.runtime.client.room_redact.assert_not_awaited()
         reply = await alice.replies.for_event("$prior_answer")
         assert reply is not None
         assert reply.state is rl.ReplyState.COMPLETED
@@ -788,22 +786,13 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                         existing_event_is_placeholder=True,
                     ),
                 )
-                if not failed:
-                    # The span's exit ends the failure, as the locked turn's does.
-                    assert not handle.exited
-                    noted = await gateway.end_interrupted_span(
-                        handle,
-                        target,
-                        ending=outcome.ending,
-                        delivery_started=True,
-                    )
-                    assert noted is not None
-                    outcome = noted
+                outcome = await end_span_as_locked_turn(gateway, handle, target, outcome)
 
         reply = await alice.replies.for_sources(("$cause",))
         assert reply is not None
         if failed:
             assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED)
+            assert outcome.final_visible_event_id is None
             assert reply.state is rl.ReplyState.GONE
             send.assert_not_awaited()
             return
@@ -850,14 +839,13 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                         existing_event_is_placeholder=False,
                     ),
                 )
-                noted = await gateway.end_interrupted_span(handle, target, ending=outcome.ending, delivery_started=True)
+                outcome = await end_span_as_locked_turn(gateway, handle, target, outcome)
 
         reply = await alice.replies.for_event("$prior_answer")
         assert reply is not None
         assert reply.state is rl.ReplyState.FAILED
-        assert noted is not None
-        assert noted.ending == Failed(FailureCause.NOTHING_TO_SHOW)
-        assert noted.final_visible_event_id == "$prior_answer"
+        assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
+        assert outcome.final_visible_event_id == "$prior_answer"
         assert send.await_args.args[2]["m.new_content"]["body"] == note_segment(NoteKind.NOTHING_TO_SHOW).text
 
     @pytest.mark.parametrize("generated_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])

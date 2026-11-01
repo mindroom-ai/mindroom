@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway, FinalDeliveryRequest
     from mindroom.event_journal import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
+    from mindroom.message_target import MessageTarget
     from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_runner import ResponseRunner
 
@@ -194,10 +195,20 @@ async def final_in_span(
         runtime=runtime,
     ) as handle:
         outcome = await gateway.deliver_final(request)
-        if not end_failed_span or handle.exited or not isinstance(outcome.ending, Failed):
-            return outcome
-        noted = await gateway.end_interrupted_span(handle, request.target, ending=outcome.ending, delivery_started=True)
-        return outcome if noted is None else noted
+        return await end_span_as_locked_turn(gateway, handle, request.target, outcome) if end_failed_span else outcome
+
+
+async def end_span_as_locked_turn(
+    gateway: DeliveryGateway,
+    handle: SpanHandle,
+    target: MessageTarget,
+    outcome: FinalDeliveryOutcome,
+) -> FinalDeliveryOutcome:
+    """End a span a failed outcome left running, as the locked turn's exit does; return the noted outcome."""
+    if handle.exited or not isinstance(outcome.ending, Failed):
+        return outcome
+    noted = await gateway.end_interrupted_span(handle, target, ending=outcome.ending, delivery_started=True)
+    return outcome if noted is None else noted
 
 
 async def final_in_resume_span(
