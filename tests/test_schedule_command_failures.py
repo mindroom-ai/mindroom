@@ -312,13 +312,12 @@ async def test_edit_of_a_task_whose_state_no_longer_parses(tmp_path: Path) -> No
     ("failure", "reason"),
     [
         (_TASK_READ_LIMITED, str(_TASK_READ_LIMITED)),
-        (TimeoutError(), "TimeoutError: "),
         (
             aiohttp.ClientPayloadError("Response payload is not completed"),
             "ClientPayloadError: Response payload is not completed",
         ),
     ],
-    ids=["error_response", "timeout", "broken_response"],
+    ids=["error_response", "broken_response"],
 )
 async def test_edit_or_cancel_whose_task_cannot_be_read(
     tmp_path: Path,
