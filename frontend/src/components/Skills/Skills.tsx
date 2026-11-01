@@ -86,11 +86,10 @@ export function Skills() {
   useEffect(() => {
     let isActive = true;
 
-    if (!selectedName) {
-      setDraftContent("");
-      setOriginalContent("");
-      return;
-    }
+    // The previous skill's draft goes at once, so it never shows or saves under another skill.
+    setDraftContent("");
+    setOriginalContent("");
+    if (!selectedName) return;
 
     setLoadingDetail(true);
     getSkill(selectedName)

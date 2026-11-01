@@ -541,7 +541,9 @@ export function Schedules() {
                 variant="outline"
                 size="sm"
                 // Reloading replaces the selected schedule's draft.
-                onClick={() => confirmDiscard() && void load(true)}
+                onClick={() => {
+                  if (confirmDiscard()) void load(true);
+                }}
                 disabled={isRefreshing || isLoading}
               >
                 {isRefreshing ? (

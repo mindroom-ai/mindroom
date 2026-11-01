@@ -167,12 +167,14 @@ describe("Schedules", () => {
 
     it("asks before selecting another schedule drops the edits", async () => {
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-      const description = await editQuietTask();
+      await editQuietTask();
 
       fireEvent.click(screen.getByText("Visible status check"));
 
       expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
-      expect(description).toHaveValue("Unsaved description");
+      expect(screen.getByLabelText("Description")).toHaveValue(
+        "Unsaved description",
+      );
 
       confirmSpy.mockReturnValue(true);
       fireEvent.click(screen.getByText("Visible status check"));
@@ -203,18 +205,20 @@ describe("Schedules", () => {
 
     it("does not ask when the selected schedule is selected again", async () => {
       const confirmSpy = vi.spyOn(window, "confirm");
-      const description = await editQuietTask();
+      await editQuietTask();
 
       fireEvent.click(screen.getByText("Quiet inbox check"));
 
       expect(confirmSpy).not.toHaveBeenCalled();
-      expect(description).toHaveValue("Unsaved description");
+      expect(screen.getByLabelText("Description")).toHaveValue(
+        "Unsaved description",
+      );
     });
 
     it("asks before the back button or a swipe back drops the edits", async () => {
       window.innerWidth = 400;
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-      const description = await editQuietTask();
+      await editQuietTask();
 
       fireEvent.click(screen.getByRole("button", { name: "Back" }));
       fireEvent.touchStart(document, {
@@ -225,23 +229,27 @@ describe("Schedules", () => {
       });
 
       expect(confirmSpy).toHaveBeenCalledTimes(2);
-      expect(description).toHaveValue("Unsaved description");
+      expect(screen.getByLabelText("Description")).toHaveValue(
+        "Unsaved description",
+      );
     });
 
     it("asks before a refresh drops the edits", async () => {
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-      const description = await editQuietTask();
+      await editQuietTask();
 
       fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
 
       expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
       expect(global.fetch).toHaveBeenCalledTimes(1);
-      expect(description).toHaveValue("Unsaved description");
+      expect(screen.getByLabelText("Description")).toHaveValue(
+        "Unsaved description",
+      );
     });
 
     it("asks before a room filter that hides the schedule drops the edits", async () => {
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-      const description = await editQuietTask();
+      await editQuietTask();
 
       fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
       fireEvent.click(
@@ -255,7 +263,9 @@ describe("Schedules", () => {
       );
 
       expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
-      expect(description).toHaveValue("Unsaved description");
+      expect(screen.getByLabelText("Description")).toHaveValue(
+        "Unsaved description",
+      );
       expect(screen.getByText("Room: #ops:example.org")).toBeInTheDocument();
     });
   });

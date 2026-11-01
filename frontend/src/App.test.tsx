@@ -274,19 +274,18 @@ describe("App tab switching", () => {
     fireEvent.click(screen.getByRole("link", { name: "Skills" }));
     const draft = await screen.findByLabelText("Skill draft");
     fireEvent.change(draft, { target: { value: "unsaved edit" } });
-    return draft;
   }
 
   it("asks before leaving a tab with an unsaved draft, and Cancel keeps it", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-    const draft = await typeSkillDraft();
+    await typeSkillDraft();
 
     fireEvent.click(screen.getByRole("link", { name: "Credentials" }));
 
     await waitFor(() =>
       expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?"),
     );
-    expect(draft).toHaveValue("unsaved edit");
+    expect(screen.getByLabelText("Skill draft")).toHaveValue("unsaved edit");
     expect(screen.queryByText("Credentials page")).not.toBeInTheDocument();
 
     confirmSpy.mockReturnValue(true);
@@ -309,7 +308,7 @@ describe("App tab switching", () => {
     await waitFor(() =>
       expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?"),
     );
-    expect(draft).toHaveValue("unsaved edit");
+    expect(screen.getByLabelText("Skill draft")).toHaveValue("unsaved edit");
     expect(screen.queryByText("Dashboard page")).not.toBeInTheDocument();
   });
 

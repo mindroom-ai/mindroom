@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Skills } from "./Skills";
+import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
 import {
   createSkill,
   getSkill,
@@ -56,9 +57,10 @@ async function editAlpha() {
   render(<Skills />);
   fireEvent.click(await screen.findByText("alpha"));
   const editor = await screen.findByLabelText("Skill content");
-  await waitFor(() => expect(editor).toHaveValue("alpha content"));
+  await waitFor(() =>
+    expect(screen.getByLabelText("Skill content")).toHaveValue("alpha content"),
+  );
   fireEvent.change(editor, { target: { value: "unsaved edit" } });
-  return editor;
 }
 
 describe("Skills unsaved edits", () => {
@@ -81,7 +83,7 @@ describe("Skills unsaved edits", () => {
 
   it("asks before creating a skill, and Cancel creates nothing", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-    const editor = await editAlpha();
+    await editAlpha();
 
     fireEvent.click(screen.getByTestId("create-button"));
     fireEvent.change(screen.getByPlaceholderText("Skill name..."), {
@@ -91,7 +93,11 @@ describe("Skills unsaved edits", () => {
 
     expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
     expect(createSkill).not.toHaveBeenCalled();
-    expect(editor).toHaveValue("unsaved edit");
+    expect(screen.getByLabelText("Skill content")).toHaveValue("unsaved edit");
+    // The form stays open with the name once the create is declined.
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText("Skill name...")).toBeEnabled(),
+    );
     expect(screen.getByPlaceholderText("Skill name...")).toHaveValue("gamma");
   });
 
@@ -112,12 +118,12 @@ describe("Skills unsaved edits", () => {
 
   it("asks before the back button drops the edits", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-    const editor = await editAlpha();
+    await editAlpha();
 
     fireEvent.click(screen.getByRole("button", { name: "Back to skills" }));
 
     expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
-    expect(editor).toHaveValue("unsaved edit");
+    expect(screen.getByLabelText("Skill content")).toHaveValue("unsaved edit");
 
     confirmSpy.mockReturnValue(true);
     fireEvent.click(screen.getByRole("button", { name: "Back to skills" }));
@@ -130,7 +136,7 @@ describe("Skills unsaved edits", () => {
   it("asks before a swipe back drops the edits", async () => {
     window.innerWidth = 400;
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-    const editor = await editAlpha();
+    await editAlpha();
 
     fireEvent.touchStart(document, {
       touches: [{ clientX: 10, clientY: 100 }],
@@ -140,28 +146,53 @@ describe("Skills unsaved edits", () => {
     });
 
     expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
-    expect(editor).toHaveValue("unsaved edit");
+    expect(screen.getByLabelText("Skill content")).toHaveValue("unsaved edit");
   });
 
   it("asks before selecting another skill drops the edits", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-    const editor = await editAlpha();
+    await editAlpha();
 
     fireEvent.click(screen.getByText("beta"));
 
     expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
-    expect(editor).toHaveValue("unsaved edit");
+    expect(screen.getByLabelText("Skill content")).toHaveValue("unsaved edit");
     expect(getSkill).not.toHaveBeenCalledWith("beta");
+  });
+
+  it("drops a discarded draft at once, even when the next skill fails to load", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let failBeta: (error: Error) => void = () => {};
+    vi.mocked(getSkill).mockImplementation((name) =>
+      name === "beta"
+        ? new Promise((_resolve, reject) => {
+            failBeta = reject;
+          })
+        : Promise.resolve({ ...SKILLS[0], content: "alpha content" }),
+    );
+    await editAlpha();
+
+    fireEvent.click(screen.getByText("beta"));
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+
+    // While beta loads, the discarded draft no longer counts as unsaved.
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+
+    failBeta(new Error("unreadable"));
+    const editor = await screen.findByLabelText("Skill content");
+    expect(editor).toHaveValue("");
+    expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
   });
 
   it("does not ask when the selected skill is selected again", async () => {
     const confirmSpy = vi.spyOn(window, "confirm");
-    const editor = await editAlpha();
+    await editAlpha();
 
     fireEvent.click(screen.getAllByText("alpha")[0]);
 
     expect(confirmSpy).not.toHaveBeenCalled();
-    expect(editor).toHaveValue("unsaved edit");
+    expect(screen.getByLabelText("Skill content")).toHaveValue("unsaved edit");
   });
 
   it("does not ask when nothing is unsaved", async () => {
