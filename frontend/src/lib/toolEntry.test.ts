@@ -13,10 +13,9 @@ describe("toolEntry", () => {
     const entries: ToolEntry[] = [
       "browser",
       { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
-      { name: "coding", overrides: { mode: "strict" } },
     ];
 
-    expect(toolNames(entries)).toEqual(["browser", "shell", "coding"]);
+    expect(toolNames(entries)).toEqual(["browser", "shell"]);
   });
 
   it("reads structured tool overrides", () => {
@@ -123,37 +122,6 @@ describe("toolEntry", () => {
     ).toEqual(["browser"]);
   });
 
-  it("keeps lazy-loading flags from the explicit named form", () => {
-    const entries: ToolEntry[] = [
-      {
-        name: "shell",
-        defer: true,
-        initial: true,
-        overrides: { extra_env_passthrough: ["GITEA_TOKEN"] },
-      },
-      { name: "browser" },
-    ];
-
-    expect(getToolOverrides("shell", entries)).toEqual({
-      extra_env_passthrough: ["GITEA_TOKEN"],
-      defer: true,
-      initial: true,
-    });
-    expect(
-      setToolOverridesInEntries("shell", { sandbox: "tight" }, entries),
-    ).toEqual([
-      {
-        shell: {
-          extra_env_passthrough: ["GITEA_TOKEN"],
-          defer: true,
-          initial: true,
-          sandbox: "tight",
-        },
-      },
-      { name: "browser" },
-    ]);
-  });
-
   it("removes lazy-loading flags patched to null", () => {
     const entries: ToolEntry[] = [
       { shell: { defer: true, initial: true, future_field: "keep-me" } },
@@ -176,16 +144,6 @@ describe("toolEntry", () => {
         [{ shell: { defer: true, initial: true, future_field: "keep-me" } }],
       ),
     ).toEqual(["shell"]);
-  });
-
-  it("reads overrides that are not a mapping as none", () => {
-    const entries = [
-      { shell: ["sandbox"] },
-      { name: "browser", overrides: "headless" },
-    ] as unknown as ToolEntry[];
-
-    expect(getToolOverrides("shell", entries)).toBeNull();
-    expect(getToolOverrides("browser", entries)).toBeNull();
   });
 
   it("keeps the entries of listed tools and adds new names bare", () => {

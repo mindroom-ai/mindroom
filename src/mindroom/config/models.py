@@ -138,6 +138,7 @@ class BackgroundToolJobsConfig(BaseModel):
     exclude_toolkits: list[str] = Field(
         default_factory=list,
         description="Registered toolkit names that keep their own waiting behavior; requires restart.",
+        json_schema_extra=dashboard_hint(reference="tool"),
     )
     approval_wait_timeout: float | None = Field(
         default=300,

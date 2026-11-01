@@ -38,7 +38,7 @@ An administrator registers one app in Microsoft Entra for the MindRoom installat
 `User.Read.All`, which `microsoft_people` requests, likewise always needs administrator consent before anyone can connect the people directory.
 
 For a local installation, the redirect URIs are `http://localhost:8765/api/oauth/<provider ID>/callback`, such as `http://localhost:8765/api/oauth/microsoft_files/callback`.
-A hosted installation must set `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, from which MindRoom derives each redirect URI, and the URIs registered on the app must match exactly.
+A hosted installation must set `MINDROOM_PUBLIC_URL`, from which MindRoom derives each redirect URI, and the URIs registered on the app must match exactly.
 Do not add application permissions; the tools only use delegated permissions, which act as the signed-in user.
 
 Store the client ID and secret in the `microsoft_oauth_client` credential service through the dashboard credentials page.

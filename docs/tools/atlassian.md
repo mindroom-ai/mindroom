@@ -53,7 +53,7 @@ An administrator creates one Atlassian OAuth 2.0 (3LO) app for the MindRoom inst
 5. Under **Settings**, copy the client ID and secret.
 
 For a local installation, the callback URL is `http://localhost:8765/api/oauth/atlassian/callback`.
-A hosted installation must set `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, from which MindRoom derives the callback URL, and the URL registered on the app must match exactly.
+A hosted installation must set `MINDROOM_PUBLIC_URL`, from which MindRoom derives the callback URL, and the URL registered on the app must match exactly.
 MindRoom always uses this callback and ignores any `redirect_uri` stored with the app credentials.
 
 Store the client ID and secret in the `atlassian_oauth_client` credential service through the dashboard credentials page.

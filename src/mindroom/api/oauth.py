@@ -135,6 +135,7 @@ class OAuthStatusResponse(BaseModel):
     tool_config_service: str | None = None
     client_config_service: str | None = None
     client_config_redirect_uri_supported: bool = False
+    default_redirect_uri: str
     connected: bool
     has_client_config: bool
     has_custom_client_config: bool = False
@@ -238,7 +239,7 @@ async def _client_config_resolution_for_request(
     if reject_remote_provisioned:
         detail = (
             "The provisioned OAuth client is available only when MindRoom is opened on localhost. "
-            "Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access."
+            "Set MINDROOM_PUBLIC_URL and configure a custom OAuth client for remote access."
         )
         raise HTTPException(status_code=503, detail=detail)
     return None
@@ -1288,6 +1289,7 @@ async def connection_status(
         tool_config_service=provider.tool_config_service,
         client_config_service=client_config_service,
         client_config_redirect_uri_supported=client_config_redirect_uri_supported,
+        default_redirect_uri=provider.default_redirect_uri(runtime_paths),
         connected=connected,
         has_client_config=has_client_config,
         has_custom_client_config=(client_config_resolution is not None and client_config_resolution.custom),

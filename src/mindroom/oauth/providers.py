@@ -32,7 +32,7 @@ from mindroom.credentials.policy import (
     is_oauth_token_service,
 )
 from mindroom.logging_config import get_logger
-from mindroom.origins import local_api_origin
+from mindroom.origins import configured_public_url, local_api_origin
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 # Silences the OAuth clients, which are imported where a client is built because they pull in requests and joserfc.
@@ -830,13 +830,8 @@ class OAuthProvider:
         return endpoints.token_endpoint_auth_method or self.token_endpoint_auth_method
 
     def default_redirect_uri(self, runtime_paths: RuntimePaths) -> str:
-        """Return the local default redirect URI for this provider."""
-        configured_origin = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or runtime_paths.env_value(
-            "MINDROOM_BASE_URL",
-        )
-        if configured_origin:
-            return f"{configured_origin.rstrip('/')}{self.redirect_path}"
-        return f"{local_api_origin(runtime_paths)}{self.redirect_path}"
+        """Return this provider's callback on `MINDROOM_PUBLIC_URL`, or on MindRoom's local origin when it is unset."""
+        return f"{configured_public_url(runtime_paths) or local_api_origin(runtime_paths)}{self.redirect_path}"
 
     def issue_pkce_code_verifier(self) -> str | None:
         """Return a new PKCE verifier when this provider requires PKCE."""

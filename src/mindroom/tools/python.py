@@ -116,7 +116,7 @@ def python_tools() -> type[PythonTools]:
             )
 
         def uv_pip_install_package(self, package_name: str) -> str:
-            """Backward-compatible alias for the shared installer path."""
+            """Install a package into the current interpreter environment, as pip_install_package does."""
             return self.pip_install_package(package_name)
 
     return MindRoomPythonTools

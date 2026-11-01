@@ -51,7 +51,7 @@ class ThreadSummaryTools(Toolkit):
                 "error",
                 action="set",
                 room_id=room_id,
-                message="room_id must be a non-empty string when provided.",
+                message=room_error,
             )
         assert resolved_room_id is not None
 
