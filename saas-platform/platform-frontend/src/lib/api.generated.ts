@@ -273,7 +273,9 @@ export interface paths {
         };
         /**
          * Admin Get List
-         * @description Generic list endpoint for React Admin.
+         * @description List a resource's rows, newest first.
+         *
+         *     Without ``limit``, every row; with it, the ``limit`` newest rows. ``total`` counts every row.
          */
         get: operations["admin_get_list_admin__resource__get"];
         put?: never;
@@ -2127,11 +2129,7 @@ export interface operations {
     admin_get_list_admin__resource__get: {
         parameters: {
             query?: {
-                _sort?: string | null;
-                _order?: string | null;
-                _start?: number;
-                _end?: number;
-                q?: string | null;
+                limit?: number | null;
             };
             header?: {
                 authorization?: string;
