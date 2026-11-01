@@ -140,8 +140,7 @@ A contact turn keeps the agent's identity, instructions, preloaded files, and me
 - It leaves out every function that would ask for approval, so a `tool_approval` rule that gates `matrix_message` leaves the agent unable to answer.
 - `matrix_message` can read and write the contact room, and send a plain message to the owner in their personal room when the agent serves that room; it cannot send attachments or collapsible sections into a contact room.
 - Other tools that post into rooms refuse the contact room.
-- It saves nothing to the agent's memory, starts no skill review, and its conversations are not summarized into file memory, so your agent's other conversations do not remember it.
-  An agent with [`knowledge_graph`](knowledge-graph.md) still adds facts from contact conversations to its graph.
+- It saves nothing to the agent's memory, starts no skill review, and its conversations are neither summarized into file memory nor added to the [knowledge graph](knowledge-graph.md), so your agent's other conversations do not remember it.
 
 A contact gives the other side no access to your other rooms.
 Even your own messages in a contact room start contact turns, so use your personal room for anything that needs your agent's full tools.

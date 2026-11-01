@@ -229,7 +229,6 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   The one-time merge of the team memory copies earlier releases kept there refuses a member store holding a link when it starts, but not a link swapped in while Chroma opens it.
   Chroma also bundles its own SQLite 3.46, so a journal planted beside that store makes the primary delete the file the journal names when Chroma next opens it.
   Only code in the Kubernetes `static_runner` sidecar can write below `agents/`, and team memory itself lives in `team_memory/`, which no worker mounts.
-- Contact turns write no long-term memory, but an agent with `knowledge_graph` still extracts facts from its contact conversations into its graph, so text the other side wrote can reach the owner's normal turns through graph search.
 
 ## Intentional behaviors
 
@@ -310,7 +309,7 @@ Do not report or "fix" these; they are deliberate.
 - A contact's rules and judge are model judgments, not a security boundary; they reduce accidental disclosure, but a determined counterparty can still extract what the agent's context and contact tools expose.
 - A contact grants no Matrix access outside its contact room: a contact turn never offers approval-gated functions or Matrix room tools, its `matrix_message` writes only to the contact room and sends only a plain message to the owner's personal room, and other tools that post into rooms refuse the contact room.
 - In a contact room, only the counterparty and the agent's owner start the agent's turns; a message from anyone else, administrators included, starts nothing.
-- Contact turns write no long-term memory, start no skill review, and are not flushed into file memory, so text the other side wrote does not persist into the owner's normal turns through memory.
+- Contact turns write no long-term memory and start no skill review, and their conversations are left out of the memory flush, the knowledge graph, and exploration leads, so text the other side wrote does not persist into the owner's normal turns.
 - `POST /api/slack/events` is public: it has no dashboard login, accepts a request only when it carries a valid signature from the Slack app's signing secret made within five minutes, and answers 404 while no Slack app is configured.
 - A Slack message wakes a project agent as the MindRoom account that its author's confirmed Slack email maps to through `slack.email_domain` and `slack.matrix_user_id_template`, still subject to the agent's `access`, so whoever can set that email on a full member account of the workspace can act as that MindRoom account; guests, bots, other workspaces, and emails that map to one of MindRoom's own accounts or to a configured `bot_accounts` entry never map.
   Slack text is delivered as a fenced block that is never parsed for Matrix mentions, so it cannot wake other agents.

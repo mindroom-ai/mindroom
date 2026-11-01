@@ -16,9 +16,12 @@ from mindroom.contacts.policy import NO_CONTACT_RULES, effective_rules
 from mindroom.contacts.store import contact_party_in_room, read_contacts
 from mindroom.hooks import EnrichmentItem
 from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.session_ids import session_in_room
 from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.contacts.store import ContactRecord, ContactSide, SideName
@@ -39,18 +42,20 @@ def contact_turn(
     return contact_party_in_room(runtime_paths, room_id, agent_name)
 
 
-def contact_conversation_rooms(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> frozenset[str]:
-    """Return every room that is or was a contact room of this agent, whose conversations the other side drove.
+def contact_session_check(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> Callable[[str], bool]:
+    """Return a check of whether a session ID names a conversation in a room that is or was a contact room of this agent.
 
+    The other side drove those conversations, so memory, the knowledge graph, and exploration leave them out.
     Only an agent that can be a party reads the contacts store.
     """
     if agent_party(config, agent_name) is None:
-        return frozenset()
-    return frozenset(
+        return lambda _session_id: False
+    rooms = frozenset(
         record.room_id
         for record in read_contacts(runtime_paths).contacts
         if record.room_id is not None and record.agent_side(agent_name) is not None
     )
+    return lambda session_id: any(session_in_room(session_id, room_id) for room_id in rooms)
 
 
 def _refused_tool(name: str) -> bool:

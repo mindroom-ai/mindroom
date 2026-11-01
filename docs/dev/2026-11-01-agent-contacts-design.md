@@ -87,7 +87,7 @@ Ingress reads the contacts store only for personal agents with `contacts`, which
 
 ### Contact detection by store recompute
 
-Every seam that behaves differently for contacts (ingress, the response runner, delivery, answer suppression, `matrix_message`, and the memory flush) asks the contacts store whether this agent's turns in this room are contact turns.
+Every seam that behaves differently for contacts (ingress, the response runner, delivery, answer suppression, `matrix_message`, the memory flush, knowledge graph ingestion, and exploration) asks the contacts store whether this agent's turns in this room are contact turns.
 Carrying a flag from ingress was rejected, because tool calls from normal turns into a contact room and the agent's own sends there have no ingress facts, and two sources could disagree.
 The store read is cached by modification time, so the repeated checks stay cheap.
 A config reload in the middle of a turn can change the answer between checks, which is accepted for now.
@@ -123,10 +123,9 @@ Reusing the authored-subagent persona was rejected, because a persona replaces t
 
 ### Contact turns stay out of memory
 
-Contact turns write no long-term memory, start no skill review, and their conversations are left out of the memory auto-flush.
+Contact turns write no long-term memory, start no skill review, and their conversations are left out of the memory auto-flush, knowledge graph ingestion, and the tool calls exploration follows.
 The other side drives these turns, so text it wrote must not persist into the owner's normal turns, and a skill review would post notices that bypass the policy.
-Rooms that were contact rooms stay excluded from the flush after the contact ends, as long as the agent keeps `contacts` configured.
-The knowledge graph still ingests contact conversations; this is listed as a known gap in `docs/architecture/security-posture.md`.
+Rooms that were contact rooms stay excluded after the contact ends, as long as the agent keeps `contacts` configured.
 
 ### Rules and tools per contact
 
@@ -216,7 +215,7 @@ Its fields (`rules`, `tools`, and `judge`, the same object as `participation.jud
 ### Code placement
 
 New behavior lives in `src/mindroom/contacts/` with a docstring-only `__init__.py`: the store, party resolution, admission, contact-turn decisions, the policy pipeline with the judge question, and the operations behind the tools, including request notices and contact-room creation.
-Ingress classification, the response runner, answer suppression, delivery, the hook registry, the memory flush, and `matrix_message` get small seams that call into it.
+Ingress classification, the response runner, answer suppression, delivery, the hook registry, the memory flush, knowledge graph ingestion, exploration, and `matrix_message` get small seams that call into it.
 `orchestrator.py` does not change, and `bot.py` only passes the agent name to the ingress validator, because the tools reach other agents' clients through the orchestrator runtime the tool context already carries.
 
 ### Testing

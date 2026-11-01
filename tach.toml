@@ -9449,6 +9449,7 @@ visibility = [
 path = "mindroom.knowledge_graph.ingestion"
 depends_on = [
     "mindroom.automations.threads",
+    "mindroom.contacts.turns",
     "mindroom.entity_resolution",
     "mindroom.history.session_runs",
     "mindroom.knowledge_graph.episodes",
@@ -9495,6 +9496,7 @@ depends_on = [
     "mindroom.automations.steps",
     "mindroom.automations.threads",
     "mindroom.config.automations",
+    "mindroom.contacts.turns",
     "mindroom.history.session_runs",
     "mindroom.knowledge_graph.episodes",
     "mindroom.knowledge_graph.ingestion",
