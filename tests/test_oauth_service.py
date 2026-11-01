@@ -42,6 +42,7 @@ from mindroom.oauth.credential_lifecycle import (
     refresh_oauth_credentials_with_result,
 )
 from mindroom.oauth.credential_store import OAuthCredentialTransaction, _oauth_credential_database_path
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import (
     OAuthClientConfig,
     OAuthProvider,
@@ -50,7 +51,11 @@ from mindroom.oauth.providers import (
     OAuthTokenResult,
     oauth_connection_required_payload,
 )
-from mindroom.oauth.service import OAUTH_RESET_REQUIRED_REASON, oauth_connection_required
+from mindroom.oauth.service import (
+    OAUTH_RESET_REQUIRED_REASON,
+    oauth_connection_required,
+    oauth_provider_service_account_configured,
+)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import (
     DelayedTokenEndpointOutcome,
@@ -230,6 +235,25 @@ def _load(context: OAuthCredentialContext) -> dict[str, Any] | None:
 
 def _connection_generation(context: OAuthCredentialContext) -> str:
     return credential_lifecycle.load_oauth_credentials_snapshot_sync(context).connection_generation
+
+
+@pytest.mark.parametrize(
+    ("env_file", "configured"),
+    [
+        pytest.param("GOOGLE_SERVICE_ACCOUNT_FILE=google/sa.json\n", True, id="env-file"),
+        pytest.param("", False, id="none"),
+    ],
+)
+def test_a_blank_exported_service_account_file_does_not_hide_the_env_file_path(
+    tmp_path: Path,
+    env_file: str,
+    configured: bool,
+) -> None:
+    """A blank export, as a compose passthrough of an unset variable produces, counts as unset."""
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path, process_env={"GOOGLE_SERVICE_ACCOUNT_FILE": ""})
+
+    assert oauth_provider_service_account_configured(google_oauth_provider("google_drive"), runtime_paths) is configured
 
 
 def test_reset_required_guidance_uses_authenticated_dashboard_for_shared_scope(tmp_path: Path) -> None:

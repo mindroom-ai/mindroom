@@ -159,6 +159,15 @@ def test_endpoints_use_the_configured_tenant(tmp_path: Path) -> None:
     assert endpoints.token_url == "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token"
 
 
+def test_a_blank_exported_tenant_does_not_hide_the_env_file_tenant(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("MICROSOFT_TENANT_ID=contoso.onmicrosoft.com\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path, MICROSOFT_TENANT_ID="")
+
+    endpoints = asyncio.run(microsoft_oauth_provider("microsoft_files").runtime_endpoints(runtime_paths))
+
+    assert endpoints.token_url == "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token"
+
+
 @pytest.mark.parametrize("tenant", ["contoso.com/oauth2", "evil.example?x=1", "-leading", "a b", "x" * 300])
 def test_a_tenant_that_is_not_an_id_or_domain_is_refused(tmp_path: Path, tenant: str) -> None:
     runtime_paths = _runtime_paths(tmp_path, MICROSOFT_TENANT_ID=tenant)

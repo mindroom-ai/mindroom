@@ -120,7 +120,8 @@ def _endpoint(tenant: str, kind: str) -> str:
 
 def _microsoft_tenant(runtime_paths: RuntimePaths) -> str:
     """Return the Microsoft Entra tenant that sign-in and token requests use."""
-    tenant = (runtime_paths.env_value(_TENANT_ENV) or _DEFAULT_TENANT).strip()
+    configured = runtime_paths.plain_env_value((_TENANT_ENV,))
+    tenant = (_DEFAULT_TENANT if configured is None else configured[0]).strip()
     if not _TENANT.fullmatch(tenant):
         msg = f"{_TENANT_ENV} must be a tenant ID, a verified domain, organizations, common, or consumers."
         raise OAuthProviderError(msg)

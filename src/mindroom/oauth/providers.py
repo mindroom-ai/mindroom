@@ -375,11 +375,8 @@ def _split_csv(value: str | None) -> tuple[str, ...]:
 
 
 def _runtime_env_value(runtime_paths: RuntimePaths, names: tuple[str, ...]) -> str | None:
-    for name in names:
-        value = runtime_paths.env_value(name)
-        if value:
-            return value.strip()
-    return None
+    plain = runtime_paths.plain_env_value(names)
+    return None if plain is None else plain[0]
 
 
 def _decode_jwt_claims_unverified(token: str) -> dict[str, Any]:
