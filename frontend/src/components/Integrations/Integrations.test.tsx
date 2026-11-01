@@ -429,12 +429,12 @@ describe("Integrations", () => {
   });
 
   it("loads every provider status at once and orders built-in provider cards, then discovered providers, then tool cards", async () => {
-    const pendingStatuses: Array<() => void> = [];
+    const pendingStatuses: Array<(status: unknown) => void> = [];
     const requestedStatuses: string[] = [];
     const pendingStatus = (providerId: string) => {
       requestedStatuses.push(providerId);
       return new Promise((resolve) => {
-        pendingStatuses.push(() => resolve({ status: "available" }));
+        pendingStatuses.push(resolve);
       });
     };
     mockOAuthLoadStatus.mockImplementation(pendingStatus);
@@ -461,7 +461,7 @@ describe("Integrations", () => {
     });
     await act(async () => {
       for (const resolve of pendingStatuses.reverse()) {
-        resolve();
+        resolve({ status: "available" });
       }
     });
 

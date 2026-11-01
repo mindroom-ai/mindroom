@@ -102,10 +102,12 @@ function stringField(
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-function apiErrorMessageFromPayload(
-  payload: unknown,
+/** The error message of a failed response, or `fallback` when its body has none. */
+export async function apiErrorMessageFromResponse(
+  response: Response,
   fallback: string,
-): string {
+): Promise<string> {
+  const payload: unknown = await response.json().catch(() => null);
   if (payload == null || typeof payload !== "object") {
     return fallback;
   }
@@ -126,17 +128,6 @@ function apiErrorMessageFromPayload(
     stringField(detailRecord, "error") ??
     stringField(detailRecord, "detail") ??
     fallback
-  );
-}
-
-/** The error message of a failed response, or `fallback` when its body has none. */
-export async function apiErrorMessageFromResponse(
-  response: Response,
-  fallback: string,
-): Promise<string> {
-  return apiErrorMessageFromPayload(
-    await response.json().catch(() => null),
-    fallback,
   );
 }
 
