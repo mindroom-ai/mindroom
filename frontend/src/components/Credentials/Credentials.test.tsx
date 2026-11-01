@@ -788,28 +788,27 @@ describe("Credentials", () => {
     });
   });
 
-  it("continues loading services when one status request fails", async () => {
-    (global.fetch as any)
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ["good_service", "zbad_service"],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "good_service",
-          has_credentials: true,
-          key_names: ["token"],
-        }),
-      })
-      .mockRejectedValueOnce(new Error("Status endpoint failed"))
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "good_service",
-          credentials: { token: "abc" },
-        }),
-      });
+  /** good_service, other_service, and zbad_service, whose status request fails while `statusFails()` says so. */
+  const serveOneFailingStatus = (statusFails: () => boolean) =>
+    (global.fetch as any).mockImplementation(async (input: string) => {
+      const path = String(input);
+      const [, , , service, suffix] = path.split("/");
+      if (path === "/api/credentials/zbad_service/status" && statusFails()) {
+        throw new Error("Status endpoint failed");
+      }
+      const body =
+        path === "/api/credentials/list"
+          ? ["good_service", "other_service", "zbad_service"]
+          : suffix === "status"
+            ? { service, has_credentials: true, key_names: ["token"] }
+            : { service, credentials: { token: `${service}-value` } };
+      return { ok: true, json: async () => body };
+    });
+  const PARTIAL_WARNING =
+    "Some service statuses could not be loaded. You can still edit credentials.";
+
+  it("continues loading services when one status request fails, and keeps its warning", async () => {
+    serveOneFailingStatus(() => true);
 
     renderOpen();
 
@@ -817,56 +816,78 @@ describe("Credentials", () => {
       '{"api_key":"..."}',
     ) as HTMLTextAreaElement;
     await waitFor(() => {
-      expect(editor.value).toContain('"token": "abc"');
+      expect(editor.value).toContain('"token": "good_service-value"');
     });
-    expect(
-      screen.getByRole("button", { name: /^good_service/ }),
-    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /^zbad_service/ }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "Some service statuses could not be loaded. You can still edit credentials.",
-      ),
-    ).toBeInTheDocument();
+    expect(screen.getByText(PARTIAL_WARNING)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^other_service/ }));
+
+    await waitFor(() => {
+      expect(editor.value).toContain('"token": "other_service-value"');
+    });
+    expect(screen.getByText(PARTIAL_WARNING)).toBeInTheDocument();
+  });
+
+  it("drops the partial-status warning once every status loads on Refresh", async () => {
+    let statusFails = true;
+    serveOneFailingStatus(() => statusFails);
+
+    renderOpen();
+
+    await screen.findByText(PARTIAL_WARNING);
+    statusFails = false;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText(PARTIAL_WARNING)).not.toBeInTheDocument();
+    });
   });
 
   it("keeps the list error when the list fails to reload on Refresh", async () => {
     let refreshed = false;
     (global.fetch as any).mockImplementation(async (input: string) => {
       const path = String(input);
+      const [, , , service, suffix] = path.split("/");
       if (path === "/api/credentials/list" && refreshed) {
         throw new Error("Service list unavailable");
       }
       const body =
         path === "/api/credentials/list"
-          ? ["github_private"]
-          : path.endsWith("/status")
-            ? {
-                service: "github_private",
-                has_credentials: true,
-                key_names: ["token"],
-              }
-            : { service: "github_private", credentials: { token: "t" } };
+          ? ["service_a", "service_b"]
+          : suffix === "status"
+            ? { service, has_credentials: true, key_names: ["token"] }
+            : { service, credentials: { token: `${service}-value` } };
       return { ok: true, json: async () => body };
     });
 
     renderOpen();
 
-    await screen.findByText("Active: github_private");
+    await screen.findByText("Active: service_a");
     await waitFor(() => {
-      expect(readsOf("/api/credentials/github_private")).toBe(1);
+      expect(readsOf("/api/credentials/service_a")).toBe(1);
     });
     refreshed = true;
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
 
     await waitFor(() => {
-      expect(readsOf("/api/credentials/github_private")).toBe(2);
+      expect(readsOf("/api/credentials/service_a")).toBe(2);
     });
     expect(
       await screen.findByText("Service list unavailable"),
     ).toBeInTheDocument();
+
+    // The stale list stays usable, and working with it keeps the list's error.
+    fireEvent.click(screen.getByRole("button", { name: /^service_b/ }));
+    const editor = screen.getByPlaceholderText(
+      '{"api_key":"..."}',
+    ) as HTMLTextAreaElement;
+    await waitFor(() => {
+      expect(editor.value).toContain('"token": "service_b-value"');
+    });
+    expect(screen.getByText("Service list unavailable")).toBeInTheDocument();
   });
 
   it("reloads only the list on Refresh when there is no service", async () => {
