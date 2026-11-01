@@ -308,8 +308,7 @@ def validate_authored_tool_entry_overrides(
         full_path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)
         if not field.authored_override:
             reason = (
-                "authored overrides are not allowed for password fields; "
-                "save the secret on the dashboard's Tools page or in the environment variable the tool's docs name."
+                "authored overrides are not allowed for password fields; save the secret on the dashboard's Tools page."
                 if field.type == "password"
                 else "authored overrides are not allowed for this field."
             )

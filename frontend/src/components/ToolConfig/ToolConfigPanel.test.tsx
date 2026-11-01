@@ -381,15 +381,7 @@ describe("ToolConfigPanel", () => {
         target={{ kind: "agent", agentId: "openclaw", lazyLoading: true }}
         toolName="discord"
         toolDisplayName="Discord"
-        configFields={[
-          {
-            name: "channel",
-            label: "Channel",
-            type: "text",
-            required: true,
-            description: "Discord channel",
-          },
-        ]}
+        configFields={[{ name: "channel", label: "Channel", type: "text" }]}
       />,
     );
 

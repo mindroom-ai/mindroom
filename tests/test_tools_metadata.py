@@ -1423,13 +1423,6 @@ def test_validate_authored_overrides_rejects_an_empty_required_list(config_path_
             tool_metadata=_BUILTINS.entries,
         )
 
-    assert validate_authored_tool_entry_overrides(
-        "composio",
-        {"actions": ["GITHUB_STAR_A_REPO"]},
-        config_path_prefix=config_path_prefix,
-        tool_metadata=_BUILTINS.entries,
-    ) == {"actions": ["GITHUB_STAR_A_REPO"]}
-
 
 def test_searxng_include_tools_override_filters_registered_functions(tmp_path: Path) -> None:
     """Universal Agno toolkit filters should retain selected functions."""

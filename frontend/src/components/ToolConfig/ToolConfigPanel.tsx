@@ -46,16 +46,6 @@ function resolveFields(
   return fields.filter((field) => field.authored_override !== false);
 }
 
-function coerceDisplayValue(field: ToolFieldSchema, value: unknown): string {
-  if (value == null) return "";
-  if (field.type === "boolean") return value ? "true" : "false";
-  if (field.type === "string[]") {
-    if (Array.isArray(value)) return value.join(", ");
-    return String(value);
-  }
-  return String(value);
-}
-
 function coerceEditValue(
   field: ToolFieldSchema,
   value: unknown,
@@ -351,11 +341,9 @@ export function ToolConfigPanel({
           <Input
             id={fieldId}
             type={
-              field.type === "number"
-                ? "number"
-                : field.type === "url"
-                  ? "url"
-                  : "text"
+              field.type === "number" || field.type === "url"
+                ? field.type
+                : "text"
             }
             value={text}
             placeholder={field.placeholder ?? field.label}
@@ -376,7 +364,7 @@ export function ToolConfigPanel({
         ) : (
           <div className="text-xs text-muted-foreground italic">
             {defaultValue != null
-              ? `Default: ${coerceDisplayValue(field, defaultValue)}`
+              ? `Default: ${String(defaultValue)}`
               : "No default"}
           </div>
         )}
