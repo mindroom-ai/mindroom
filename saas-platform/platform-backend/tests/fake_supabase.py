@@ -6,6 +6,7 @@ Embedded many-to-one selects such as ``subscription:subscriptions(*)`` or ``acco
 RPC calls are recorded in ``rpc_calls``, return ``rpc_results[name]`` (default None), and leave the tables alone.
 Deleting an auth user through ``auth.admin`` records it and removes its ``accounts`` row, like the ON DELETE CASCADE.
 A counted select whose range starts past the matching rows fails, like PostgREST's 416 (PGRST103).
+``max_rows`` caps the rows one select returns, like PostgREST's ``db-max-rows``.
 """
 
 from __future__ import annotations
@@ -151,6 +152,8 @@ class FakeQuery:
             matched = matched[self.row_range[0] : self.row_range[1] + 1]
         if self.row_limit is not None:
             matched = matched[: self.row_limit]
+        if self.db.max_rows is not None:
+            matched = matched[: self.db.max_rows]
         projected = [self._project(row) for row in matched]
         if self.single_row:
             assert len(projected) == 1, f"single() matched {len(projected)} rows in {self.table_name}"
@@ -209,6 +212,7 @@ class FakeSupabase:
     tables: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     rpc_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     rpc_results: dict[str, Any] = field(default_factory=dict)
+    max_rows: int | None = None
     auth: FakeAuth = field(init=False)
 
     def __post_init__(self) -> None:

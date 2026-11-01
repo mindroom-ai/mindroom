@@ -438,37 +438,27 @@ async def admin_get_list(
     request: Request,  # noqa: ARG001
     resource: str,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
-    _sort: str = "created_at",
-    _order: Literal["ASC", "DESC"] = "DESC",
-    _start: int = 0,
     _end: int | None = None,
 ) -> dict[str, Any]:
-    """List a resource's rows, newest first unless ``_sort`` and ``_order`` say otherwise.
+    """List a resource's rows, newest first, with ties in ``id`` order so pages never skip or repeat a row.
 
-    Rows with equal sort values follow ``id`` order, so ranges never skip or repeat a row.
-    ``_start`` and ``_end`` select rows ``_start`` to ``_end - 1``; without ``_end``, every row from ``_start`` on.
-    ``total`` counts every matching row.
+    Without ``_end``, every row; with it, the ``_end`` newest rows. ``total`` counts every row.
     """
     if resource not in ALLOWED_RESOURCES:
         raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
-    audit_log_entry(
-        account_id=admin["user_id"],
-        action="list",
-        resource_type=resource,
-        details={"start": _start, "end": _end},
-    )
+    audit_log_entry(account_id=admin["user_id"], action="list", resource_type=resource, details={"end": _end})
 
     def build_query(count: Literal["exact"] | None = None) -> Any:  # noqa: ANN401
         query = sb.table(resource).select(_LIST_COLUMNS.get(resource, "*"), count=count)
-        return query.order(_sort, desc=_order == "DESC").order("id")
+        return query.order("created_at", desc=True).order("id")
 
     if _end is None:
         # No count here: with one, PostgREST refuses the final empty page if a row was deleted meanwhile.
         rows = select_all_pages(build_query)
-        return {"data": rows[_start:], "total": len(rows)}
-    result = build_query("exact").range(_start, _end - 1).execute()
+        return {"data": rows, "total": len(rows)}
+    result = build_query("exact").limit(_end).execute()
     return {"data": result.data, "total": result.count}
 
 

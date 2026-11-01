@@ -273,11 +273,9 @@ export interface paths {
         };
         /**
          * Admin Get List
-         * @description List a resource's rows, newest first unless ``_sort`` and ``_order`` say otherwise.
+         * @description List a resource's rows, newest first, with ties in ``id`` order so pages never skip or repeat a row.
          *
-         *     Rows with equal sort values follow ``id`` order, so ranges never skip or repeat a row.
-         *     ``_start`` and ``_end`` select rows ``_start`` to ``_end - 1``; without ``_end``, every row from ``_start`` on.
-         *     ``total`` counts every matching row.
+         *     Without ``_end``, every row; with it, the ``_end`` newest rows. ``total`` counts every row.
          */
         get: operations["admin_get_list_admin__resource__get"];
         put?: never;
@@ -2131,9 +2129,6 @@ export interface operations {
     admin_get_list_admin__resource__get: {
         parameters: {
             query?: {
-                _sort?: string;
-                _order?: "ASC" | "DESC";
-                _start?: number;
                 _end?: number | null;
             };
             header?: {

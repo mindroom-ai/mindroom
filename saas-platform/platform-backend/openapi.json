@@ -2522,7 +2522,7 @@
     },
     "/admin/{resource}": {
       "get": {
-        "description": "List a resource's rows, newest first unless ``_sort`` and ``_order`` say otherwise.\n\nRows with equal sort values follow ``id`` order, so ranges never skip or repeat a row.\n``_start`` and ``_end`` select rows ``_start`` to ``_end - 1``; without ``_end``, every row from ``_start`` on.\n``total`` counts every matching row.",
+        "description": "List a resource's rows, newest first, with ties in ``id`` order so pages never skip or repeat a row.\n\nWithout ``_end``, every row; with it, the ``_end`` newest rows. ``total`` counts every row.",
         "operationId": "admin_get_list_admin__resource__get",
         "parameters": [
           {
@@ -2532,40 +2532,6 @@
             "schema": {
               "title": "Resource",
               "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "_sort",
-            "required": false,
-            "schema": {
-              "default": "created_at",
-              "title": " Sort",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "_order",
-            "required": false,
-            "schema": {
-              "default": "DESC",
-              "enum": [
-                "ASC",
-                "DESC"
-              ],
-              "title": " Order",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "_start",
-            "required": false,
-            "schema": {
-              "default": 0,
-              "title": " Start",
-              "type": "integer"
             }
           },
           {

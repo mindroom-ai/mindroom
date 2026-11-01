@@ -7,7 +7,6 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from backend.utils import paging
 from tests.fake_supabase import FakeQuery, FakeResult, FakeSupabase
 
 
@@ -28,6 +27,13 @@ class TestAdminEndpoints:
             sb = MagicMock()
             mock.return_value = sb
             yield sb
+
+    @pytest.fixture
+    def fake_db(self):
+        """In-memory Supabase tables behind the admin routes."""
+        db = FakeSupabase()
+        with patch("backend.routes.admin.ensure_supabase", return_value=db):
+            yield db
 
     @pytest.fixture
     def mock_verify_admin(self):
@@ -400,84 +406,78 @@ class TestAdminEndpoints:
         assert set(_auth_cache) == {"acc_other"}
         _auth_cache.clear()
 
-    def test_admin_list_holds_every_row_newest_first(self, client: TestClient, mock_verify_admin: Mock):
-        """A list without a range holds every row past PostgREST's row limit, newest first, ties in id order."""
+    def test_admin_list_holds_every_row_newest_first(
+        self, client: TestClient, fake_db: FakeSupabase, mock_verify_admin: Mock
+    ):
+        """A list without ``_end`` holds every row past PostgREST's row limit, newest first, ties in id order."""
         accounts = [{"id": f"acc_{day:02d}", "created_at": f"2026-10-{day:02d}T00:00:00Z"} for day in range(1, 13)]
         accounts.append({"id": "acc_00", "created_at": "2026-10-12T00:00:00Z"})
-        db = FakeSupabase({"accounts": accounts[1::2] + accounts[::2]})
-        with patch("backend.routes.admin.ensure_supabase", return_value=db), patch.object(paging, "_PAGE_SIZE", 5):
-            response = client.get("/admin/accounts")
-
-            from_eleventh = client.get("/admin/accounts?_start=10")
+        fake_db.tables["accounts"] = accounts[1::2] + accounts[::2]
+        fake_db.max_rows = 5
+        response = client.get("/admin/accounts")
 
         assert response.status_code == 200
         newest_first = ["acc_00", *(f"acc_{day:02d}" for day in range(12, 0, -1))]
         assert [row["id"] for row in response.json()["data"]] == newest_first
         assert response.json()["total"] == 13
-        assert [row["id"] for row in from_eleventh.json()["data"]] == newest_first[10:]
-        assert from_eleventh.json()["total"] == 13
 
-    def test_admin_subscription_and_instance_lists_show_the_account(self, client: TestClient, mock_verify_admin: Mock):
+    def test_admin_list_survives_a_row_deleted_while_it_pages(
+        self, client: TestClient, fake_db: FakeSupabase, mock_verify_admin: Mock
+    ):
+        """A row deleted between two pages of a full listing does not fail the listing."""
+        fake_db.tables["accounts"] = [
+            {"id": f"acc_{day}", "created_at": f"2026-10-0{day}T00:00:00Z"} for day in (1, 2, 3)
+        ]
+        fake_db.max_rows = 2
+        serve = FakeQuery.execute
+
+        def serve_then_delete_after_the_last_page_of_rows(query: FakeQuery) -> FakeResult:
+            result = serve(query)
+            if query.row_range and query.row_range[0] == 2:
+                fake_db.tables["accounts"] = fake_db.tables["accounts"][1:]
+            return result
+
+        with patch.object(FakeQuery, "execute", serve_then_delete_after_the_last_page_of_rows):
+            response = client.get("/admin/accounts")
+
+        assert response.status_code == 200
+        assert [row["id"] for row in response.json()["data"]] == ["acc_3", "acc_2", "acc_1"]
+
+    def test_admin_list_end_holds_the_newest_rows_and_counts_every_row(
+        self, client: TestClient, fake_db: FakeSupabase, mock_verify_admin: Mock
+    ):
+        """A list with ``_end`` holds that many of the newest rows, and total counts every row."""
+        fake_db.tables["audit_logs"] = [
+            {"id": f"log_{day}", "created_at": f"2026-10-0{day}T00:00:00Z"} for day in (4, 1, 5, 3, 2)
+        ]
+        response = client.get("/admin/audit_logs?_end=2")
+
+        assert response.status_code == 200
+        assert [row["id"] for row in response.json()["data"]] == ["log_5", "log_4"]
+        assert response.json()["total"] == 5
+
+    def test_admin_subscription_and_instance_lists_show_the_account(
+        self, client: TestClient, fake_db: FakeSupabase, mock_verify_admin: Mock
+    ):
         """Subscription and instance rows carry their account, which the admin pages show as the customer."""
-        db = FakeSupabase(
-            {
-                "accounts": [{"id": "acc_1", "email": "owner@example.com", "full_name": "Owner"}],
-                "subscriptions": [{"id": "sub_1", "account_id": "acc_1", "created_at": "2026-10-01T00:00:00Z"}],
-                "instances": [{"id": "inst_1", "account_id": "acc_1", "created_at": "2026-10-01T00:00:00Z"}],
-            }
-        )
-        with patch("backend.routes.admin.ensure_supabase", return_value=db):
-            listed = {resource: client.get(f"/admin/{resource}").json() for resource in ("subscriptions", "instances")}
+        fake_db.tables |= {
+            "accounts": [{"id": "acc_1", "email": "owner@example.com", "full_name": "Owner"}],
+            "subscriptions": [{"id": "sub_1", "account_id": "acc_1", "created_at": "2026-10-01T00:00:00Z"}],
+            "instances": [{"id": "inst_1", "account_id": "acc_1", "created_at": "2026-10-01T00:00:00Z"}],
+        }
+        listed = {resource: client.get(f"/admin/{resource}").json() for resource in ("subscriptions", "instances")}
 
         assert {resource: body["data"][0]["accounts"]["email"] for resource, body in listed.items()} == {
             "subscriptions": "owner@example.com",
             "instances": "owner@example.com",
         }
 
-    def test_admin_list_survives_a_row_deleted_while_it_pages(self, client: TestClient, mock_verify_admin: Mock):
-        """A row deleted between two pages of a full listing does not fail the listing."""
-        db = FakeSupabase(
-            {"accounts": [{"id": f"acc_{day}", "created_at": f"2026-10-0{day}T00:00:00Z"} for day in (1, 2, 3)]}
-        )
-        serve = FakeQuery.execute
-
-        def serve_then_delete_after_the_last_full_page(query: FakeQuery) -> FakeResult:
-            result = serve(query)
-            if query.row_range == (2, 3):
-                db.tables["accounts"] = db.tables["accounts"][1:]
-            return result
-
-        with (
-            patch("backend.routes.admin.ensure_supabase", return_value=db),
-            patch.object(paging, "_PAGE_SIZE", 2),
-            patch.object(FakeQuery, "execute", serve_then_delete_after_the_last_full_page),
-        ):
-            response = client.get("/admin/accounts")
-
-        assert response.status_code == 200
-        assert [row["id"] for row in response.json()["data"]] == ["acc_3", "acc_2", "acc_1"]
-
-    def test_admin_list_range_follows_the_requested_order(self, client: TestClient, mock_verify_admin: Mock):
-        """A ranged list holds the requested slice in the requested order, and total counts every row."""
-        logs = [{"id": f"log_{day}", "created_at": f"2026-10-0{day}T00:00:00Z"} for day in (4, 1, 5, 3, 2)]
-        db = FakeSupabase({"audit_logs": logs})
-        with patch("backend.routes.admin.ensure_supabase", return_value=db):
-            response = client.get("/admin/audit_logs?_sort=created_at&_order=ASC&_start=1&_end=3")
-
-        assert response.status_code == 200
-        assert [row["id"] for row in response.json()["data"]] == ["log_2", "log_3"]
-        assert response.json()["total"] == 5
-
-    def test_admin_list_failure_is_an_error_not_an_empty_list(self, mock_verify_admin: Mock):
+    def test_admin_list_failure_is_an_error_not_an_empty_list(self, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """A failed listing answers 500, not a 200 with no rows."""
         from main import app  # noqa: PLC0415
 
-        db = FakeSupabase()
-        with (
-            patch("backend.routes.admin.ensure_supabase", return_value=db),
-            patch.object(db, "table", side_effect=RuntimeError("database unavailable")),
-        ):
-            response = TestClient(app, raise_server_exceptions=False).get("/admin/accounts")
+        mock_supabase.table.side_effect = RuntimeError("database unavailable")
+        response = TestClient(app, raise_server_exceptions=False).get("/admin/accounts")
 
         assert response.status_code == 500
 
