@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from nio import AuthenticatedToDeviceEvent
 
 from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
+from mindroom.desktop.command_journal import desktop_journal_path
 from mindroom.desktop.filesystem import DesktopFilesystem
 from mindroom.desktop.native_config import require_supported_local_access
 from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
@@ -216,7 +217,7 @@ async def _build_bridge(
         browser_provider=browser,
         filesystem=filesystem,
         shell=shell,
-        journal_path=runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
+        journal_path=desktop_journal_path(runtime_paths.storage_root),
         legacy_journal_path=runtime_paths.storage_root / "desktop_bridge" / "command_journal.json",
     )
     resources.callback(bridge.close)

@@ -21,6 +21,7 @@ import mindroom.cli.desktop as desktop_cli
 from mindroom.cli.desktop import desktop_app
 from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
 from mindroom.desktop.bridge_session import DesktopBridgeSessionDeps, DesktopWorkerStoppedError
+from mindroom.desktop.command_journal import DesktopCommandJournal, controller_journal_key, desktop_journal_path
 from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.desktop.native_config import (
     NativeBrowserConfig,
@@ -396,6 +397,67 @@ def test_desktop_setup_repairs_malformed_or_exposed_config(
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize(("journal_device_id", "accepted"), [("CLOUD", True), ("OTHER", False)])
+@pytest.mark.usefixtures("cli_runtime")
+def test_desktop_setup_pairs_only_the_controller_the_bridge_journal_is_bound_to(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    journal_device_id: str,
+    *,
+    accepted: bool,
+) -> None:
+    """Setup refuses, before pairing, a controller that the existing command journal would reject at run time."""
+    save_desktop_session(
+        tmp_path / "desktop_bridge" / "matrix_session.json",
+        DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
+    )
+    DesktopCommandJournal.load(
+        desktop_journal_path(tmp_path),
+        controller_key=controller_journal_key(
+            PinnedMatrixDevice("@computer:example.org", journal_device_id, "cloud-fingerprint"),
+        ),
+    ).close()
+    pair = MagicMock()
+    monkeypatch.setattr(desktop_cli, "desktop_pair", pair)
+
+    result = runner.invoke(desktop_app, _SETUP_ARGS)
+
+    assert result.exit_code == (0 if accepted else 1), result.output
+    assert pair.called is accepted
+    assert ("different controller" in result.output) is not accepted
+    assert native_config_path(tmp_path).exists() is accepted
+
+
+@pytest.mark.parametrize(("browser_enabled", "hint_shown"), [(False, True), (True, False)])
+@pytest.mark.usefixtures("cli_runtime")
+def test_desktop_setup_suggests_choosing_access_only_when_none_is_saved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    browser_enabled: bool,
+    hint_shown: bool,
+) -> None:
+    """Saved browser access already lets the bridge start, so setup does not ask for more access."""
+    save_desktop_session(
+        tmp_path / "desktop_bridge" / "matrix_session.json",
+        DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
+    )
+    saved = replace(
+        _run_config(roots=()),
+        revision=0,
+        controller=PinnedMatrixDevice("@computer:example.org", "CLOUD", "cloud-fingerprint"),
+        browser=NativeBrowserConfig(enabled=browser_enabled),
+    )
+    save_native_config(native_config_path(tmp_path), saved, expected_revision=0)
+    monkeypatch.setattr(desktop_cli, "desktop_pair", MagicMock())
+
+    result = runner.invoke(desktop_app, _SETUP_ARGS)
+
+    assert result.exit_code == 0, result.output
+    assert load_native_config(native_config_path(tmp_path)).browser.enabled is browser_enabled
+    assert ("open Computer access" in result.output) is hint_shown
+
+
 @pytest.mark.parametrize(
     ("saved_homeserver", "saved_user_id"),
     [
@@ -491,6 +553,30 @@ def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, 
     assert result.exit_code == 0, result.output
     ensure_dependencies.assert_called_once_with(SimpleNamespace(storage_root=tmp_path))
     assert bridge.await_args.kwargs["http_headers"] == {"X-Access-Client": "test-secret"}
+
+
+@pytest.mark.parametrize("browser_enabled", [False, True])
+def test_desktop_run_starts_with_saved_browser_access_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    browser_enabled: bool,
+) -> None:
+    """Saved browser access is enough to start a run; with nothing saved, the run says what to choose."""
+    save_native_config(
+        native_config_path(tmp_path),
+        replace(_run_config(roots=()), revision=0, browser=NativeBrowserConfig(enabled=browser_enabled)),
+        expected_revision=0,
+    )
+    bridge = AsyncMock()
+    _stub_run_command(monkeypatch, tmp_path)
+    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
+
+    result = runner.invoke(desktop_app, ["run"])
+
+    assert result.exit_code == (0 if browser_enabled else 1), result.output
+    assert bridge.await_count == int(browser_enabled)
+    assert ("Choose and save apps, folders, or shell access" in result.output) is not browser_enabled
 
 
 def test_desktop_run_restores_saved_cloudflare_access_mode(

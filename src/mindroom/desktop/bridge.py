@@ -16,7 +16,7 @@ from mindroom.desktop.accessibility import (
     AccessibilityActionOutcomeUnknownError,
     AccessibilityError,
 )
-from mindroom.desktop.command_journal import DesktopCommandJournal
+from mindroom.desktop.command_journal import DesktopCommandJournal, controller_journal_key
 from mindroom.desktop.command_parameters import (
     reject_unexpected_parameters,
     required_object_parameter,
@@ -207,13 +207,7 @@ class DesktopBridge:
         self._observations = DesktopObservations(clock=self.monotonic_clock)
         self._journal = DesktopCommandJournal.load(
             self.journal_path,
-            controller_key=json.dumps(
-                [
-                    self.policy.controller.user_id,
-                    self.policy.controller.device_id,
-                    self.policy.controller.ed25519,
-                ],
-            ),
+            controller_key=controller_journal_key(self.policy.controller),
             legacy_path=self.legacy_journal_path,
         )
         if self.policy.control_lease_expires_at_ms is None:

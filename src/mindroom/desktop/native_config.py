@@ -98,6 +98,11 @@ class NativeDesktopConfig:
     files: NativeFilesConfig = field(default_factory=NativeFilesConfig)
     shell: NativeShellConfig = field(default_factory=NativeShellConfig)
 
+    @property
+    def has_local_capability(self) -> bool:
+        """Whether any app, folder, shell, or browser access is saved, without which a run cannot start."""
+        return bool(self.allowed_app_ids or self.files.roots or self.shell.enabled or self.browser.enabled)
+
     @classmethod
     def from_payload(cls, raw: object, *, validate_browser_paths: bool = True) -> NativeDesktopConfig:
         """Parse a strict version-one configuration without checking saved root availability."""
