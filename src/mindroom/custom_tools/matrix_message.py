@@ -157,7 +157,7 @@ class MatrixMessageTools(Toolkit):
                 parsed_extras = parse_message_extra_sections(message_extras)
             except ValueError as exc:
                 return self._payload("error", message=str(exc))
-        resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
+        resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
         if not await room_access_allowed(context, resolved_room_id):

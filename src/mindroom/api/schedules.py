@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime  # noqa: TC003 - Pydantic resolves postponed annotations at runtime.
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
-import nio
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.matrix.state import get_room_alias_from_id, resolve_room_aliases, resolve_room_id
+from mindroom.matrix.client_room_admin import resolve_room_reference
+from mindroom.matrix.state import get_room_alias_from_id, resolve_room_id
 from mindroom.matrix.users import create_agent_http_client
 from mindroom.scheduling.errors import (
     ScheduledTaskNotFoundError,
@@ -32,6 +32,9 @@ from mindroom.scheduling.tasks import (
     scheduled_task_read_sort_key,
     scheduled_task_timezone,
 )
+
+if TYPE_CHECKING:
+    import nio
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 
@@ -109,22 +112,18 @@ async def _room_ids(
     """
     room_ids: list[str] = []
     unresolved_rooms: list[UnreadableScheduleRoom] = []
-    for room_ref in resolve_room_aliases(room_refs, runtime_paths=runtime_paths):
-        if room_ref.startswith("!"):
-            room_ids.append(room_ref)
-        elif room_ref.startswith("#"):
-            # Only aliases of rooms MindRoom created resolve locally; any other room's alias resolves through Matrix.
-            response = await client.room_resolve_alias(room_ref)
-            if isinstance(response, nio.RoomResolveAliasResponse):
-                room_ids.append(response.room_id)
-            else:
-                unresolved_rooms.append(
-                    UnreadableScheduleRoom(
-                        room_id=room_ref,
-                        room_alias=room_ref,
-                        error=f"Unable to resolve room alias: {response}",
-                    ),
-                )
+    for room_ref in room_refs:
+        resolved = await resolve_room_reference(client, room_ref, runtime_paths)
+        if isinstance(resolved, str):
+            room_ids.append(resolved)
+        elif resolved is not None:
+            unresolved_rooms.append(
+                UnreadableScheduleRoom(
+                    room_id=room_ref,
+                    room_alias=room_ref,
+                    error=f"Unable to resolve room alias: {resolved}",
+                ),
+            )
     # Two references can name one room, such as its room key and its full alias.
     return list(dict.fromkeys(room_ids)), unresolved_rooms
 
