@@ -47,7 +47,8 @@ Every token limit, including `context_window`, the compaction thresholds, and `m
 OpenAI models with a known tokenizer, such as GPT-4o, count exactly on OpenAI's own endpoints, Codex, and OpenRouter, and on Azure when the deployment is named after the model.
 Other models use an estimate that is deliberately high, by up to about three quarters for Claude and two thirds for Gemini, so limits act early rather than late.
 Conversation history is sized from the request size the provider reported for the previous reply; without one, such as under a history limit, after another model answered, or once native compaction has condensed part of it, it uses the estimate.
-Estimates need the `o200k_base` vocabulary, and older OpenAI models such as GPT-4 on OpenAI's own routes need `cl100k_base`; each downloads on first use, so without network access set `TIKTOKEN_CACHE_DIR` to a directory that already holds them, or the log shows `o200k_base did not load` and estimates fall back to a quarter token per character.
+Estimates need the `o200k_base` vocabulary, and older OpenAI models such as GPT-4 on OpenAI's own routes need `cl100k_base`; each downloads on first use, so without network access set `TIKTOKEN_CACHE_DIR` to a directory that already holds them, or the log shows `o200k_base did not load` and estimates fall back to a quarter token per character, while the `MEMORY.md` preload and compaction input count UTF-8 bytes, which preloads about a third as much.
+To fill that directory, run MindRoom once with network access and `TIKTOKEN_CACHE_DIR` set, then copy the directory; tiktoken names each cached file after its download URL, so a vocabulary file downloaded by hand is not found.
 No reply waits for a token count.
 
 ## Agent Compaction Settings

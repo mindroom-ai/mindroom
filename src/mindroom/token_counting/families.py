@@ -90,8 +90,8 @@ def _load_in_background(name: str) -> None:
         encoder.retry_at = time.monotonic() + _RETRY_SECONDS
         encoder.started = False
         logger.warning(
-            f"{name} did not load; token estimates use a quarter token per character, and compaction input its bytes, "
-            "until a retry in five minutes loads it",
+            f"{name} did not load; token estimates use a quarter token per character, and compaction input and the "
+            "MEMORY.md preload their bytes, until a retry in five minutes loads it",
             exc_info=True,
         )
 

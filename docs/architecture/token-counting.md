@@ -60,3 +60,4 @@ Provider tokens per o200k_base token on those samples:
 - The margins come from six samples; a future tokenizer that counts more than its family margin times o200k_base undercounts until the margin is measured again.
 - OpenAI models tiktoken does not map, such as the GPT-6 family, estimate with o200k_base at margin 1.0, which GPT-6 Astra's input-token endpoint matched exactly in the live run above.
 - Without a usable reported size, such as under a replay limit, after another model answered, or once a native checkpoint exists, history is sized by its estimate, so a Claude or Gemini conversation can compact early.
+- An approval resume and a team member's run have no prepared history size, so the mid-turn hook sizes their first request by estimate, and a Claude or Gemini conversation can compact there early; anchoring on the paused run's own response would need to tell it apart from other models' and members' assistant messages in the request.
