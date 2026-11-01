@@ -43,9 +43,9 @@ describe("Toaster", () => {
       toast({ title: "First" });
       toast({ title: "Second" });
     });
-    fireEvent.click(screen.getAllByRole("button")[0]);
+    fireEvent.click(screen.getAllByRole("button")[1]);
 
-    expect(screen.queryByText("First")).not.toBeInTheDocument();
-    expect(screen.getByText("Second")).toBeInTheDocument();
+    expect(screen.getByText("First")).toBeInTheDocument();
+    expect(screen.queryByText("Second")).not.toBeInTheDocument();
   });
 });

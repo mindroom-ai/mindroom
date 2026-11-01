@@ -164,6 +164,7 @@ export function Credentials() {
     const requestId = latestCredentialsRequestRef.current + 1;
     latestCredentialsRequestRef.current = requestId;
     setIsLoadingCredentials(true);
+    setError(null);
     try {
       const data = await fetchJSON<CredentialGetResponse>(
         API_ENDPOINTS.credentials.get(service),
@@ -238,7 +239,6 @@ export function Credentials() {
       ) {
         return;
       }
-      setError(null);
       setSelectedService(service);
     },
     [hasUnsavedChanges, selectedService],

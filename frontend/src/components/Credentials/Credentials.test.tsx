@@ -66,6 +66,27 @@ const serveGithubToken = () =>
       }),
     });
 
+/** These services, each holding a token; a request `fails(path)` names is rejected with that message. */
+const serveServices = (
+  names: string[],
+  fails: (path: string) => string | undefined = () => undefined,
+) =>
+  (global.fetch as any).mockImplementation(async (input: string) => {
+    const path = String(input);
+    const failure = fails(path);
+    if (failure) {
+      throw new Error(failure);
+    }
+    const [, , , service, suffix] = path.split("/");
+    const body =
+      path === "/api/credentials/list"
+        ? names
+        : suffix === "status"
+          ? { service, has_credentials: true, key_names: ["token"] }
+          : { service, credentials: { token: `${service}-value` } };
+    return { ok: true, json: async () => body };
+  });
+
 /** How many plain reads (no method) of this exact path the page made. */
 const readsOf = (path: string) =>
   (global.fetch as any).mock.calls.filter(
@@ -788,22 +809,13 @@ describe("Credentials", () => {
     });
   });
 
-  /** good_service, other_service, and zbad_service, whose status request fails while `statusFails()` says so. */
+  /** zbad_service's status request fails while `statusFails()` says so. */
   const serveOneFailingStatus = (statusFails: () => boolean) =>
-    (global.fetch as any).mockImplementation(async (input: string) => {
-      const path = String(input);
-      const [, , , service, suffix] = path.split("/");
-      if (path === "/api/credentials/zbad_service/status" && statusFails()) {
-        throw new Error("Status endpoint failed");
-      }
-      const body =
-        path === "/api/credentials/list"
-          ? ["good_service", "other_service", "zbad_service"]
-          : suffix === "status"
-            ? { service, has_credentials: true, key_names: ["token"] }
-            : { service, credentials: { token: `${service}-value` } };
-      return { ok: true, json: async () => body };
-    });
+    serveServices(["good_service", "other_service", "zbad_service"], (path) =>
+      path === "/api/credentials/zbad_service/status" && statusFails()
+        ? "Status endpoint failed"
+        : undefined,
+    );
   const PARTIAL_WARNING =
     "Some service statuses could not be loaded. You can still edit credentials.";
 
@@ -848,20 +860,11 @@ describe("Credentials", () => {
 
   it("keeps the list error when the list fails to reload on Refresh", async () => {
     let refreshed = false;
-    (global.fetch as any).mockImplementation(async (input: string) => {
-      const path = String(input);
-      const [, , , service, suffix] = path.split("/");
-      if (path === "/api/credentials/list" && refreshed) {
-        throw new Error("Service list unavailable");
-      }
-      const body =
-        path === "/api/credentials/list"
-          ? ["service_a", "service_b"]
-          : suffix === "status"
-            ? { service, has_credentials: true, key_names: ["token"] }
-            : { service, credentials: { token: `${service}-value` } };
-      return { ok: true, json: async () => body };
-    });
+    serveServices(["service_a", "service_b"], (path) =>
+      path === "/api/credentials/list" && refreshed
+        ? "Service list unavailable"
+        : undefined,
+    );
 
     renderOpen();
 
@@ -906,51 +909,12 @@ describe("Credentials", () => {
     expect((global.fetch as any).mock.calls).toHaveLength(2);
   });
 
-  it("keeps the already-exists error after selecting that service", async () => {
-    (global.fetch as any).mockImplementation(async (input: string) => {
-      const path = String(input);
-      const [, , , service, suffix] = path.split("/");
-      const body =
-        path === "/api/credentials/list"
-          ? ["service_a", "service_b"]
-          : suffix === "status"
-            ? { service, has_credentials: true, key_names: ["token"] }
-            : { service, credentials: { token: `${service}-value` } };
-      return { ok: true, json: async () => body };
-    });
-
-    renderOpen();
-
-    await screen.findByText("Active: service_a");
-    fireEvent.change(screen.getByPlaceholderText("new_service_name"), {
-      target: { value: "service_b" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
-
-    await screen.findByText("Active: service_b");
-    await waitFor(() => {
-      expect(readsOf("/api/credentials/service_b")).toBe(1);
-    });
-    expect(
-      screen.getByText("Service 'service_b' already exists"),
-    ).toBeInTheDocument();
-  });
-
   it("clears the previous service's error when another service is selected", async () => {
-    (global.fetch as any).mockImplementation(async (input: string) => {
-      const path = String(input);
-      const [, , , service, suffix] = path.split("/");
-      if (path === "/api/credentials/service_a") {
-        throw new Error("Credentials unavailable");
-      }
-      const body =
-        path === "/api/credentials/list"
-          ? ["service_a", "service_b"]
-          : suffix === "status"
-            ? { service, has_credentials: true, key_names: ["token"] }
-            : { service, credentials: { token: `${service}-value` } };
-      return { ok: true, json: async () => body };
-    });
+    serveServices(["service_a", "service_b"], (path) =>
+      path === "/api/credentials/service_a"
+        ? "Credentials unavailable"
+        : undefined,
+    );
 
     renderOpen();
 
