@@ -686,7 +686,7 @@ async def _authoritative_joined_room_ids(client: nio.AsyncClient) -> frozenset[s
         logger.warning(
             "agent_reply_control_client_joined_rooms_failed",
             readiness="unready",
-            error=type(exc).__name__,
+            error=f"{type(exc).__name__}: {exc}",
         )
         return None
     if isinstance(response, nio.JoinedRoomsResponse):
@@ -716,7 +716,7 @@ async def _authoritative_room_members(
             room_key=room_key,
             room_id=room_id,
             readiness="unready",
-            error=type(exc).__name__,
+            error=f"{type(exc).__name__}: {exc}",
         )
         return None
     if not isinstance(response, nio.JoinedMembersResponse):
