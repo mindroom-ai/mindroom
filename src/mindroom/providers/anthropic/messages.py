@@ -810,7 +810,9 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
         project_id := get_secret_from_env(VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"], runtime_paths=runtime_paths)
     ):
         kwargs["project_id"] = project_id
-    if "region" not in kwargs and (region := runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])):
+    if "region" not in kwargs and (
+        region := get_secret_from_env(VERTEXAI_CLAUDE_ENV_BY_KEY["region"], runtime_paths=runtime_paths)
+    ):
         kwargs["region"] = region
     if "base_url" not in kwargs and (base_url := runtime_paths.env_value(ENDPOINT_VARIABLES["vertexai_claude"])):
         kwargs["base_url"] = base_url
