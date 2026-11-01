@@ -129,6 +129,17 @@ export function apiErrorMessageFromPayload(
   );
 }
 
+/** The error message of a failed response, or `fallback` when its body has none. */
+export async function apiErrorMessageFromResponse(
+  response: Response,
+  fallback: string,
+): Promise<string> {
+  return apiErrorMessageFromPayload(
+    await response.json().catch(() => null),
+    fallback,
+  );
+}
+
 export async function fetchJSON<T>(
   url: string,
   options?: RequestInit,
