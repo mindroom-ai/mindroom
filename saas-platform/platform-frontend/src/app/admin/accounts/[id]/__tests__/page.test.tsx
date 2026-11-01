@@ -26,5 +26,6 @@ describe('AccountDetailsPage', () => {
     render(<AccountDetailsPage />)
 
     expect(await screen.findByText(shown)).toBeInTheDocument()
+    expect(screen.getByText('owner@example.com')).toBeInTheDocument()
   })
 })
