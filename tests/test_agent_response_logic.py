@@ -45,19 +45,12 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
 from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
-
-
-def _bind_runtime_config(config: Config) -> Config:
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    bound_config = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
-    return bound_config
 
 
 def _message(
@@ -99,7 +92,7 @@ class TestAgentResponseLogic:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = _bind_runtime_config(
+        self.config = bind_runtime_paths(
             Config(
                 agents={
                     name: AgentConfig(
@@ -118,6 +111,7 @@ class TestAgentResponseLogic:
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
+            test_runtime_paths(Path(tempfile.mkdtemp())),
         )
         self.runtime_paths = runtime_paths_for(self.config)
         self.domain = self.config.get_domain(self.runtime_paths)
@@ -190,7 +184,6 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         team_id = entity_ids(config, runtime_paths)["ops"]
         policy = _policy(config, runtime_paths, "ops", team_id)
@@ -233,7 +226,6 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
         policy = _policy(config, runtime_paths, "shared", ids["shared"])
@@ -285,7 +277,6 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
         policy = _policy(config, runtime_paths, "shared", ids["shared"])
@@ -618,7 +609,6 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         team_id = entity_ids(config, runtime_paths)["ops"]
         policy = _policy(config, runtime_paths, "ops", team_id)
@@ -1026,7 +1016,6 @@ class TestAgentResponseLogic:
             ),
             self.runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         room = create_mock_room("!room:localhost", ["calculator", "research"], config)
         thread_history = [
@@ -1066,7 +1055,6 @@ class TestAgentResponseLogic:
             ),
             self.runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
 
         should_respond = agent_response_should_respond(
@@ -1369,7 +1357,6 @@ class TestAgentResponseLogic:
             bot_accounts=["@telegram:localhost"],
         )
         config = bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         room = create_mock_room("!room:localhost", ["calculator"], config)
 

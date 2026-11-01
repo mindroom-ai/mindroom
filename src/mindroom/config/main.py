@@ -114,6 +114,7 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
 )
 from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN
+from mindroom.entity_resolution import call_room_ownership_key, resolve_agent_thread_mode, router_agents_for_room
 from mindroom.file_locks import advisory_file_lock
 from mindroom.git_urls import credential_free_repo_url
 
@@ -137,7 +138,7 @@ from mindroom.tool_system.worker_routing import unsupported_shared_only_integrat
 from mindroom.workspaces import control_plane_owns_private_templates, validate_workspace_template_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Callable, Collection
 
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.personal_agents import PersonalAgentRoster
@@ -616,10 +617,15 @@ class Config(BaseModel):
             msg = "calls.profiles references unknown Live agent model(s): " + ", ".join(invalid_live_models)
             raise ValueError(msg)
 
+        self._reject_call_agents_sharing_a_room(lambda room: room)
+        return self
+
+    def _reject_call_agents_sharing_a_room(self, room_key: Callable[[str], str]) -> None:
+        """Reject a room, compared by ``room_key``, that more than one call agent joins."""
         agents_by_room: dict[str, list[str]] = {}
         for agent_name in self.calls.agents:
             for room in self.agents[agent_name].rooms:
-                agents_by_room.setdefault(room, []).append(agent_name)
+                agents_by_room.setdefault(room_key(room), []).append(agent_name)
         conflicts = [
             f"{room} ({', '.join(sorted(agent_names))})"
             for room, agent_names in sorted(agents_by_room.items())
@@ -627,8 +633,7 @@ class Config(BaseModel):
         ]
         if conflicts:
             msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
-            raise ValueError(msg)
-        return self
+            raise ConfigRuntimeValidationError(msg)
 
     @model_validator(mode="after")
     def validate_membership_access_room_references(self) -> Config:
@@ -1062,9 +1067,7 @@ class Config(BaseModel):
         tolerate_plugin_load_errors: bool,
     ) -> Config:
         config = cls.model_validate(data, context={"runtime_paths": runtime_paths})
-        from mindroom.entity_resolution import validate_call_agent_room_ownership  # noqa: PLC0415
-
-        validate_call_agent_room_ownership(config, runtime_paths)
+        config._reject_call_agents_sharing_a_room(lambda room: call_room_ownership_key(room, runtime_paths))
         # A sandbox runner runs tool calls, never a model, and its config snapshot carries no models.
         if not runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]):
             config._validate_model_references()
@@ -1520,8 +1523,6 @@ class Config(BaseModel):
         Router inherits a mode only when all relevant configured agents share it.
         In ambiguous cases, default to "thread".
         """
-        from mindroom.entity_resolution import resolve_agent_thread_mode, router_agents_for_room  # noqa: PLC0415
-
         runtime_room_override = resolve_room_thread_mode_override(runtime_paths, room_id)
         if runtime_room_override is not None:
             return runtime_room_override
@@ -1669,7 +1670,7 @@ def validate_loaded_config_source(
     *,
     uses_includes: bool,
     tolerate_plugin_load_errors: bool = False,
-) -> tuple[Config, dict[Path, str]]:
+) -> Config:
     """Validate and, when needed, persist one already-parsed config source."""
     path = runtime_paths.config_path
     source_files = frozenset(source_digests)
@@ -1694,7 +1695,7 @@ def validate_loaded_config_source(
         exc.config_source_fingerprint = source_files_fingerprint(path, source_digests)  # ty: ignore[invalid-assignment]
         raise
     config.record_source_metadata(path, source_digests, uses_includes=uses_includes)
-    return config, source_digests
+    return config
 
 
 def load_config(
@@ -1710,7 +1711,7 @@ def load_config(
 
     original = path.read_bytes()
     data, source_digests, uses_includes = load_yaml_config_source_with_digests(path, source=original)
-    config, source_digests = validate_loaded_config_source(
+    config = validate_loaded_config_source(
         data,
         source_digests,
         original,
@@ -1718,7 +1719,7 @@ def load_config(
         uses_includes=uses_includes,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
-    logger.info("loaded_agent_configuration", path=str(path), source_file_count=len(source_digests))
+    logger.info("loaded_agent_configuration", path=str(path), source_file_count=len(config.source_files))
     logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
     return config
 

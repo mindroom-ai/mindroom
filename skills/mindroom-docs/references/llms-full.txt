@@ -2179,7 +2179,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key
 ```
 
-This works for all API key environment variables (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, etc.).
+This works for every model provider key and every variable a tool's settings read (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
+The plain variable wins when the process environment or the `.env` beside `config.yaml` sets it, and a blank value or an unedited starter-template placeholder counts as unset, so an exported blank variable does not hide the `.env` value.
 
 ## OpenAI API Models
 
@@ -7061,6 +7062,7 @@ It applies only when MindRoom creates the room, and never joins someone who alre
 
 An onboarding failure affects only that human, and the onboarding room keeps working for everyone else.
 Failed onboarding is retried automatically, first after 30 seconds and then at doubling intervals up to one hour, and a config reload retries it immediately.
+Onboarding blocked by an adopted room's unlisted members is also retried as soon as that room's membership changes.
 A personal room that fails its ownership or membership checks keeps retrying only while its reconciliation is still failing; otherwise it is checked again on restart or config reload.
 A join or command that arrives before the personal-room agent connects is handled once it does.
 Revoking the human's access to the agent, or disabling `personal_rooms`, cancels a welcome that has not been sent yet.
@@ -7068,7 +7070,7 @@ Revoking the human's access to the agent, or disabling `personal_rooms`, cancels
 | Log message | Meaning |
 | --- | --- |
 | `Personal-room validation failed for an onboarding trigger` | An existing personal room failed ownership or membership checks, for example because another account already holds the alias, or a guest the agent cannot remove was raised to the agent's power level. |
-| `Personal-room imported roster has unattested members` | An adopted room contains someone other than a MindRoom agent that its record does not list; the warning names every unlisted member, and MindRoom does not change the room. |
+| `Personal-room imported roster has unattested members` | An adopted room contains someone other than a MindRoom agent that its record does not list; the warning names every unlisted member, and retries repeat it only when those members change. MindRoom does not change the room, and that human's onboarding, such as the invite, admin grant, and welcome, waits until the room holds only participants its record lists. |
 | `Personal-room validation failed for an owner membership event` | The owner joined or changed their profile in a personal room that fails these checks; the agent keeps answering there. A room whose reconciliation is still failing keeps retrying up to hourly; otherwise the room is checked again on restart or config reload. |
 | `Personal-room onboarding trigger failed` | Any other failure, such as an invite refused by the human's homeserver. |
 | `Personal-room reconciliation failed` | An automatic retry failed; the log shows the attempt number and the delay before the next try. |
@@ -7556,7 +7558,7 @@ MindRoom rejects these fields, unknown field names, and values of the wrong type
 From lowest to highest priority, a tool's settings come from:
 
 1. The tool's built-in defaults.
-2. The environment variables its page names, such as `TAVILY_API_KEY`, read from the process environment or, when unset there, from the `.env` next to `config.yaml`.
+2. The environment variables its page names, such as `TAVILY_API_KEY`, read from the process environment, then the `.env` next to `config.yaml`, then their [`_FILE` variants](https://docs.mindroom.chat/configuration/models/#file-based-secrets).
 3. Saved tool settings from the dashboard or credential store.
 4. `defaults.tools` inline settings.
 5. `agents.<name>.tools` inline settings.
@@ -11558,8 +11560,8 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 
 These tools work only while an agent is responding in a Matrix conversation.
 Unless the call passes explicit IDs, they act on the current room and thread.
-`thread_tags`, `thread_resolution`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root; other tools need the thread root ID itself.
-A thread target is refused with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
+`matrix_message`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root.
+`thread_tags`, `thread_resolution`, `thread_move`, and `thread_summary` refuse a thread target with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
 Tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
 `matrix_api` is the exception: it defaults `room_id` to the current room but never infers event IDs, thread IDs, or state keys from the conversation.
 Attachment IDs (`att_*`) are limited to the current conversation and IDs registered earlier in the same tool run; see [Attachments](https://docs.mindroom.chat/attachments/#attachment-ids).
@@ -15489,7 +15491,7 @@ Use it to supply credentials from the environment or seeds, encrypt the credenti
 ### Credentials from the Environment
 
 MindRoom reads these variables from the process environment or the config-adjacent `.env` as shared credentials: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (as service `github_private`), `EMBEDDER_API_KEY` (as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (as `google_vertex_adc`).
-Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a `_FILE` variant, read only when the plain variable is unset or empty.
+Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a [`_FILE` variant](https://docs.mindroom.chat/configuration/models/#file-based-secrets).
 Services declared through [Credential Seeds](#credential-seeds) are supplied the same way.
 A credential saved for the same service in the dashboard wins over the variable; deleting that saved credential makes the variable apply again.
 MindRoom stores no copy: changes to these variables, their `_FILE` files, and seed declarations apply when MindRoom restarts, and a removed variable stops supplying its credential, including to workers granted it through `worker_grantable_credentials`.
@@ -15514,7 +15516,7 @@ Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve
 ```
 
 - Each credential field is `{"env": "NAME"}`, `{"file": "path"}` (relative paths resolve from the config directory), `{"value": ...}`, or a plain literal.
-- If an env ref such as `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
+- An env ref such as `EXAMPLE_CLIENT_SECRET` also accepts its [`_FILE` variant](https://docs.mindroom.chat/configuration/models/#file-based-secrets).
 - If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential.
 - Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other value makes that tool fail to load.
 - A credential saved for the same service in the dashboard wins over its seed.

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 
 from mindroom.custom_tools import matrix_conversation_operations
 from mindroom.custom_tools.attachment_helpers import (
+    explicit_thread_root,
     resolve_context_thread_id,
     resolve_requested_room_id,
     room_access_allowed,
@@ -244,6 +245,9 @@ class MatrixMessageTools(Toolkit):
                         message=f"Recipient '{recipient}' uses room conversations. Omit new_thread/thread_id or use thread_id=\"room\".",
                     )
                 thread_id = "room"
+        # A replayed keyed send delivers its stored target, so only a new request resolves its thread.
+        if stored_intent is None and thread_id is not None and thread_id != "room":
+            thread_id = await explicit_thread_root(context, room_id=room_id, thread_id=thread_id)
         effective_thread_id = resolve_context_thread_id(
             context,
             room_id=room_id,

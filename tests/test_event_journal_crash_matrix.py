@@ -142,6 +142,7 @@ class TurnRuntime:
     approval_signals: ApprovalSignals
     homeserver: FakeHomeserver
     model_runs: int = 0
+    crash_before_model: bool = False
     crash_after_model: bool = False
     crash_after_enqueue: bool = False
     crash_after_acknowledgement: bool = False
@@ -186,6 +187,9 @@ class TurnRuntime:
         the handoff settles the source inside the transaction that records the
         answer, so the worker never offers the same source twice.
         """
+        if self.crash_before_model:
+            msg = "crashed before the model ran"
+            raise CrashError(msg)
         self.model_runs += 1
         answer = f"answer to {event.event_id}"
         if self.crash_after_model:
@@ -320,13 +324,12 @@ class TestCrashMatrix:
     ) -> None:
         """No durable result yet, so the model has to run — exactly once."""
         await admit(runtime.store)
-        runtime.crash_after_model = True
-        runtime.model_runs = -1  # The crashed attempt does not count as a real run.
+        runtime.crash_before_model = True
 
         await runtime.worker().drain_once()
         assert await runtime.store.pending() != ()
 
-        runtime.crash_after_model = False
+        runtime.crash_before_model = False
         await runtime.worker().drain_once()
 
         await assert_settled_once(runtime)

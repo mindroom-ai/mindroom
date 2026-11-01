@@ -186,6 +186,18 @@ def test_unset_name_falls_through_to_name_file_with_the_same_rule(
     assert get_secret_from_env("OPENAI_API_KEY", runtime_paths) == expected
 
 
+@pytest.mark.parametrize("exported", ["", "your-openai-key-here"], ids=["blank", "placeholder"])
+def test_an_unset_exported_key_does_not_hide_the_env_file_key(tmp_path: Path, exported: str) -> None:
+    """An unset exported key falls through to the `.env` key, which wins over a `_FILE` variant, as for tools."""
+    secret_file = tmp_path / "openai-key"
+    secret_file.write_text("sk-from-file\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-env-file\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path, {"OPENAI_API_KEY": exported, "OPENAI_API_KEY_FILE": str(secret_file)})
+
+    assert get_api_key_for_provider("openai", runtime_paths) == "sk-env-file"
+    assert get_runtime_credentials_manager(runtime_paths).declared_variable("openai") == "OPENAI_API_KEY"
+
+
 def test_get_secret_from_env_resolves_relative_file_paths_from_config_dir(tmp_path: Path) -> None:
     """Relative *_FILE secret paths in the runtime `.env` should anchor to the config directory."""
     secret_file = tmp_path / "secrets" / "openai.key"
