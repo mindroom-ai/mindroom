@@ -98,7 +98,7 @@ def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
     }
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    publish_api_payload(main.app, paths, payload)
+    publish_api_payload(main.app, payload)
     return {
         "client": TestClient(main.app, base_url=PORTAL_ORIGIN),
         "paths": paths,
@@ -136,7 +136,7 @@ def _serve(signin: dict[str, Any], payload: dict[str, Any] | None = None, **env:
     paths = replace(signin["paths"], process_env={**signin["paths"].process_env, **env})
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    publish_api_payload(main.app, paths, payload or signin["payload"])
+    publish_api_payload(main.app, payload or signin["payload"])
 
 
 def _connect_state(client: TestClient) -> str:
@@ -669,7 +669,7 @@ def _serve_with_trusted_upstream(
     paths = replace(signin["paths"], process_env=env)
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    publish_api_payload(main.app, paths, payload)
+    publish_api_payload(main.app, payload)
 
     def upstream(name: str) -> dict[str, str]:
         return {

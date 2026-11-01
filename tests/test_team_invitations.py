@@ -23,10 +23,6 @@ from tests.conftest import (
 )
 
 
-def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    return bind_runtime_paths(config, test_runtime_paths(tmp_path))
-
-
 class TestTeamRoomMembership:
     """Test team room membership functionality."""
 
@@ -43,7 +39,7 @@ class TestTeamRoomMembership:
             display_name="Team 1",
             password=TEST_PASSWORD,
         )
-        config = _bind_runtime_paths(
+        config = bind_runtime_paths(
             Config(
                 agents={
                     "agent1": AgentConfig(
@@ -60,7 +56,7 @@ class TestTeamRoomMembership:
                 },
                 router=RouterConfig(model="default"),
             ),
-            tmp_path,
+            test_runtime_paths(tmp_path),
         )
         config.defaults.enable_streaming = False
         bot = make_test_agent_bot(

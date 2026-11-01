@@ -255,7 +255,7 @@ def _make_test_app(runtime_paths: constants.RuntimePaths, payload: dict[str, Any
     bind_test_embedded_runtime(api_app)
     api_app.include_router(auth.router)
     api_app.include_router(oauth_router)
-    publish_api_payload(api_app, runtime_paths, payload)
+    publish_api_payload(api_app, payload)
     return api_app
 
 
@@ -3162,7 +3162,7 @@ def test_shared_browser_reset_rechecks_credential_manager_authority(tmp_path: Pa
     )
     provider, target = _general_agent_reset_target(api_app, runtime_paths)
     reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
-    publish_api_payload(api_app, runtime_paths, _config_payload(worker_scope="shared", allowed_users=[]))
+    publish_api_payload(api_app, _config_payload(worker_scope="shared", allowed_users=[]))
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
@@ -3315,7 +3315,7 @@ def test_browser_reset_rejects_target_removed_by_config_reload(tmp_path: Path) -
     reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
     reloaded_payload = _config_payload(worker_scope="user_agent")
     reloaded_payload["agents"]["general"]["tools"] = []
-    publish_api_payload(api_app, runtime_paths, reloaded_payload)
+    publish_api_payload(api_app, reloaded_payload)
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
@@ -3381,7 +3381,7 @@ def test_browser_reset_rejects_a_target_whose_scope_changed_since_the_link(tmp_p
         ),
     )
     reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
-    publish_api_payload(api_app, runtime_paths, _config_payload(worker_scope="user"))
+    publish_api_payload(api_app, _config_payload(worker_scope="user"))
 
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
@@ -4868,7 +4868,6 @@ def test_agent_connect_token_callback_rechecks_link_requester_permission(tmp_pat
             state = _state_from_auth_url(authorize_response.headers["location"])
             publish_api_payload(
                 api_app,
-                runtime_paths,
                 _config_payload(worker_scope="user_agent", allowed_users=["@bob:example.org"]),
             )
             callback_response = client.get(
@@ -4921,7 +4920,7 @@ def test_agent_connect_token_rejects_changed_canonical_target(
     with patch("mindroom.api.oauth.snapshot_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app, headers=trusted_upstream_headers()) as client:
             if change_before_authorize:
-                publish_api_payload(api_app, runtime_paths, changed_payload)
+                publish_api_payload(api_app, changed_payload)
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
@@ -4931,7 +4930,7 @@ def test_agent_connect_token_rejects_changed_canonical_target(
                 stale_response = authorize_response
             else:
                 state = _state_from_auth_url(authorize_response.headers["location"])
-                publish_api_payload(api_app, runtime_paths, changed_payload)
+                publish_api_payload(api_app, changed_payload)
                 stale_response = client.get(
                     f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
                     follow_redirects=False,
@@ -5190,7 +5189,6 @@ def test_agent_oauth_callback_rechecks_agent_reply_permission(tmp_path: Path) ->
             state = _state_from_auth_url(authorize_response.headers["location"])
             publish_api_payload(
                 api_app,
-                runtime_paths,
                 _config_payload(
                     worker_scope="shared",
                     allowed_users=["@bob:example.org"],
@@ -5863,7 +5861,7 @@ def test_callback_rejects_changed_credential_target(tmp_path: Path) -> None:
             login_with_api_key(client)
             connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
             state = _state_from_auth_url(connect_response.json()["auth_url"])
-            publish_api_payload(api_app, runtime_paths, _config_payload(worker_scope="shared"))
+            publish_api_payload(api_app, _config_payload(worker_scope="shared"))
             callback_response = client.get(
                 f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
             )

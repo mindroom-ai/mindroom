@@ -131,7 +131,7 @@ def workspace_portal(
     }
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    publish_api_payload(main.app, paths, payload)
+    publish_api_payload(main.app, payload)
     config = main._app_context(main.app).runtime_config
     assert config is not None
     providers = oauth_provider_registry(publish_test_plugins(config, paths), skip_broken_plugins=False)

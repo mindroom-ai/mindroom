@@ -291,7 +291,6 @@ async def test_router_updates_rooms_on_config_change(
         async def reconcile_room_aliases(bots: list[object]) -> None:
             orchestrator._rooms.resolve_aliases(bots, orchestrator.config)  # type: ignore[arg-type]
 
-        setup_rooms.reset_mock()
         setup_rooms.side_effect = reconcile_room_aliases
 
         # A reload reconciles the rooms of running bots only.

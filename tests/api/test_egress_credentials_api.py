@@ -164,7 +164,7 @@ def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_
     }
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    publish_api_payload(main.app, paths, payload)
+    publish_api_payload(main.app, payload)
     headers = {name: _signed_headers(key, name) for name in ("alice", "bob", "carol", "admin")}
     return {
         "client": TestClient(main.app, base_url="https://portal.example.org"),
@@ -213,7 +213,7 @@ def oauth_egress_portal(egress_portal: dict[str, Any], monkeypatch: pytest.Monke
         # The Connections portal lists a provider only for agents that have a tool using it.
         payload["agents"][agent]["tools"].append({"name": "google_drive", "defer": True})
     payload["egress_broker"]["services"].update(_oauth_services())
-    publish_api_payload(main.app, paths, payload)
+    _republish(egress_portal)
     return {**egress_portal, "providers": providers}
 
 
@@ -257,7 +257,7 @@ def mixed_log(audit_log: AuditLog) -> AuditLog:
 
 def _republish(portal: dict[str, Any]) -> None:
     """Publish the portal's edited config payload and apply it, as a dashboard save and reload do."""
-    publish_api_payload(main.app, portal["paths"], portal["payload"])
+    publish_api_payload(main.app, portal["payload"])
 
 
 def _restart_with_env(portal: dict[str, Any], **env: str) -> None:

@@ -82,7 +82,7 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
     }
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    publish_api_payload(main.app, paths, payload)
+    publish_api_payload(main.app, payload)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     monkeypatch.setattr(
         oauth_registry,
@@ -116,7 +116,7 @@ def _enable_egress_broker(portal: dict[str, Any]) -> None:
     portal["paths"] = paths
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    publish_api_payload(main.app, paths, portal["payload"])
+    publish_api_payload(main.app, portal["payload"])
 
 
 def test_catalog_includes_deferred_oauth_tools_without_status_calls(
@@ -139,7 +139,7 @@ def test_catalog_includes_deferred_oauth_tools_without_status_calls(
 def test_catalog_lists_tools_without_browser_authentication(portal: dict[str, Any]) -> None:
     """Tool visibility does not depend on having an OAuth provider."""
     portal["payload"]["agents"]["personal"]["tools"].extend(["matrix_message", "claude_agent"])
-    publish_api_payload(main.app, portal["paths"], portal["payload"])
+    publish_api_payload(main.app, portal["payload"])
     response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
     assert response.status_code == 200, response.text
     tools = {tool["name"]: tool for tool in response.json()["agents"][0]["tools"]}
@@ -178,7 +178,7 @@ def test_catalog_uses_mcp_display_metadata_without_exposing_model_instructions(
         }
     portal["payload"]["mcp_servers"] = {"wiki": server}
     portal["payload"]["agents"]["personal"]["tools"] = ["mcp_wiki"]
-    publish_api_payload(main.app, portal["paths"], portal["payload"])
+    publish_api_payload(main.app, portal["payload"])
 
     response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
 
@@ -463,7 +463,7 @@ def test_personal_mutations_reject_cleartext_public_origin(
     paths = replace(portal["paths"], process_env=env)
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    publish_api_payload(main.app, paths, portal["payload"])
+    publish_api_payload(main.app, portal["payload"])
     client = TestClient(main.app, base_url="http://portal.example.org")
     response = client.post(
         f"/api/connections/agents/personal/google_drive/{action}",
@@ -617,7 +617,7 @@ def test_shared_service_account_is_not_a_personal_connection(portal: dict[str, A
     )
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    publish_api_payload(main.app, paths, portal["payload"])
+    publish_api_payload(main.app, portal["payload"])
     response = portal["client"].get(
         "/api/connections/agents/personal/google_drive/status",
         headers=portal["headers"]["alice"],
@@ -642,7 +642,7 @@ def test_shared_service_account_is_not_a_personal_connection(portal: dict[str, A
 def test_canonical_alias_uses_the_same_private_scope(portal: dict[str, Any]) -> None:
     """An alternate signed Matrix identity resolves to its configured canonical owner."""
     portal["payload"]["authorization"] = {"aliases": {"@alice:example.org": ["@bob:example.org"]}}
-    publish_api_payload(main.app, portal["paths"], portal["payload"])
+    publish_api_payload(main.app, portal["payload"])
     client, headers = portal["client"], portal["headers"]
     connect = client.post("/api/connections/agents/personal/google_drive/connect", headers=headers["bob"], json={})
     assert connect.status_code == 200
@@ -665,7 +665,7 @@ def test_canonical_alias_uses_the_same_private_scope(portal: dict[str, Any]) -> 
 def test_shared_agent_configuration_fails_closed(portal: dict[str, Any]) -> None:
     """Removing private ownership cannot silently turn the portal into shared credentials."""
     portal["payload"]["agents"]["personal"].pop("private")
-    publish_api_payload(main.app, portal["paths"], portal["payload"])
+    publish_api_payload(main.app, portal["payload"])
     assert portal["client"].get("/api/connections", headers=portal["headers"]["alice"]).status_code == 403
 
 
@@ -695,7 +695,7 @@ def shared_portal(portal: dict[str, Any]) -> dict[str, Any]:
             },
         },
     )
-    publish_api_payload(main.app, portal["paths"], portal["payload"])
+    publish_api_payload(main.app, portal["payload"])
     return portal
 
 
@@ -724,7 +724,7 @@ def test_catalog_lists_only_authorized_agents(shared_portal: dict[str, Any], use
 def test_agent_user_sees_shared_connection_without_management(shared_portal: dict[str, Any]) -> None:
     """Using a shared agent reveals the connected account without shared-account mutation authority."""
     shared_portal["payload"]["agents"]["research"]["access"] = {"users": ["@bob:example.org"]}
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     client, headers = shared_portal["client"], shared_portal["headers"]
     response = client.get("/api/connections", headers=headers["bob"])
     research = next(agent for agent in response.json()["agents"] if agent["agent_name"] == "research")
@@ -774,7 +774,7 @@ def test_agent_user_can_manage_only_their_personal_connection(
         requester_scoped_credentials=requester_provider,
     )
     monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (provider,))
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     client, headers = shared_portal["client"], shared_portal["headers"]
     base = "/api/connections/agents/research/google_drive"
     response = client.get("/api/connections", headers=headers["bob"])
@@ -801,7 +801,7 @@ def test_agent_user_can_manage_only_their_personal_connection(
     connect = client.post(f"{base}/connect", headers=headers["bob"], json={})
     state = parse_qs(urlparse(connect.json()["auth_url"]).query)["state"][0]
     agent["access"]["users"] = ["@alice:example.org"]
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     callback = client.get(
         "/api/oauth/google_drive/callback",
         params={"code": "test-code", "state": state},
@@ -810,7 +810,7 @@ def test_agent_user_can_manage_only_their_personal_connection(
     )
     assert callback.status_code == 403
     agent["access"]["users"].append("@bob:example.org")
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     assert client.get(f"{base}/status", headers=headers["bob"]).json()["connected"] is False
 
 
@@ -850,7 +850,7 @@ def test_shared_connection_lifecycle_and_revoked_manager(
     if worker_scope is not None:
         for agent_name in ("research", "support"):
             shared_portal["payload"]["agents"][agent_name]["worker_scope"] = worker_scope
-        publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+        publish_api_payload(main.app, shared_portal["payload"])
     client, headers = shared_portal["client"], shared_portal["headers"]
     base = "/api/connections/agents/research/google_drive"
     connect = client.post(f"{base}/connect", headers=headers["alice"], json={})
@@ -876,7 +876,7 @@ def test_shared_connection_lifecycle_and_revoked_manager(
         is False
     )
     shared_portal["payload"]["agents"]["research"]["credential_managers"] = ["@mallory:example.org"]
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     for action in ("status", "connect", "disconnect"):
         response = client.request(
             "GET" if action == "status" else "POST",
@@ -896,7 +896,7 @@ def test_shared_connection_lifecycle_and_revoked_manager(
 def test_shared_manager_alias_is_canonicalized(shared_portal: dict[str, Any]) -> None:
     """Catalog and actions use the same canonical identity as credential authorization."""
     shared_portal["payload"]["authorization"] = {"aliases": {"@alice:example.org": ["@bob:example.org"]}}
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     response = shared_portal["client"].get("/api/connections", headers=shared_portal["headers"]["bob"])
     assert [agent["agent_name"] for agent in response.json()["agents"]] == ["personal", "research"]
     assert (
@@ -914,7 +914,7 @@ def test_shared_manager_alias_is_canonicalized(shared_portal: dict[str, Any]) ->
 def test_provider_must_belong_to_selected_agent(shared_portal: dict[str, Any], action: str) -> None:
     """A provider available to the personal agent cannot be used for an unrelated shared agent."""
     shared_portal["payload"]["agents"]["research"]["tools"] = ["calculator"]
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     response = shared_portal["client"].request(
         "GET" if action == "status" else "POST",
         f"/api/connections/agents/research/google_drive/{action}",
@@ -966,7 +966,7 @@ def test_invalid_personal_target_disables_shared_connections(
     else:
         shared_portal["payload"]["agents"]["personal"].pop("private")
         shared_portal["payload"]["agents"]["personal"]["credential_managers"] = ["@alice:example.org"]
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     client, headers = shared_portal["client"], shared_portal["headers"][user]
     assert client.get("/api/connections", headers=headers).status_code == 403
     for action in ("status", "connect", "disconnect"):
@@ -1001,7 +1001,7 @@ def test_catalog_reports_connection_sharing_by_provider_and_scope(
 ) -> None:
     """Disconnect impact follows credential ownership rather than agent privacy."""
     shared_portal["payload"]["agents"]["research"]["worker_scope"] = worker_scope
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     provider = _fake_provider(
         provider_id="google_drive",
         credential_service="google_drive_oauth",
@@ -1117,7 +1117,7 @@ def test_state_never_bootstraps_an_oauth_client_to_read_connected_state(
 def test_state_shows_a_shared_account_as_connected_to_managers_and_to_users(shared_portal: dict[str, Any]) -> None:
     """Everyone who uses a shared agent sees its connection, whether or not they may change it."""
     shared_portal["payload"]["agents"]["research"]["access"] = {"users": ["@bob:example.org"]}
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     for user in ("alice", "bob"):
         assert _connected(shared_portal, user, "research") is False
     _connect_account(shared_portal, "alice", "research")
@@ -1146,7 +1146,7 @@ def test_state_survives_a_service_whose_state_cannot_be_read(
         },
     }
     portal["payload"]["agents"]["personal"]["tools"].append("mcp_wiki")
-    publish_api_payload(main.app, portal["paths"], portal["payload"])
+    publish_api_payload(main.app, portal["payload"])
     _connect_account(portal, "alice", "personal")
     _fail_connection_status(
         monkeypatch,
@@ -1233,13 +1233,13 @@ def test_catalog_names_credential_managers_only_to_users_they_matter_to_while_th
     """Without Agent Keys, managers are named only to a user with a connection on the agent that only they can change."""
     research_managers = ["@alice:example.org", "@mallory:example.org"]
     shared_portal["payload"]["agents"]["research"]["access"] = {"users": ["@bob:example.org"]}
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     # Bob uses Research and cannot change its shared Drive connection; Alice manages it herself.
     assert _catalog_managers(shared_portal, "bob")["research"] == research_managers
     assert _catalog_managers(shared_portal, "alice")["research"] == []
 
     shared_portal["payload"]["agents"]["research"]["tools"] = ["calculator"]
-    publish_api_payload(main.app, shared_portal["paths"], shared_portal["payload"])
+    publish_api_payload(main.app, shared_portal["payload"])
     assert _catalog_managers(shared_portal, "bob")["research"] == []
 
     _enable_egress_broker(shared_portal)

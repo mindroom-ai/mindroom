@@ -104,7 +104,7 @@ def atlassian_portal(
     }
     main.initialize_api_app(main.app, paths)
     bind_test_embedded_runtime(main.app)
-    publish_api_payload(main.app, paths, payload)
+    publish_api_payload(main.app, payload)
     config = main._app_context(main.app).runtime_config
     assert config is not None
     headers = {

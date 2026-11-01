@@ -45,7 +45,6 @@ def _client(
     main.initialize_api_app(main.app, paths)
     publish_api_payload(
         main.app,
-        paths,
         {**data.config.model_dump(mode="json"), "models": {"default": {"provider": "openai", "id": "test-model"}}},
     )
     headers = {
