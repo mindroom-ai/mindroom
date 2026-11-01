@@ -312,6 +312,22 @@ describe("App tab switching", () => {
     expect(screen.queryByText("Dashboard page")).not.toBeInTheDocument();
   });
 
+  it("makes reloading or closing the tab ask while the configuration has unsaved changes", () => {
+    // True when the browser would show its leave-page prompt.
+    const unloadAsks = () =>
+      !window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    const { unmount } = render(<App />);
+    expect(unloadAsks()).toBe(false);
+    unmount();
+
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...vi.mocked(useConfigStore)(),
+      isDirty: true,
+    });
+    render(<App />);
+    expect(unloadAsks()).toBe(true);
+  });
+
   it("moves focus with Skip to content without a history entry the router cannot block", () => {
     render(<App />);
 

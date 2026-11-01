@@ -32,6 +32,42 @@ describe("useUnsavedDraft", () => {
     expect(confirmLeavingUnsavedDrafts()).toBe(true);
   });
 
+  it("makes reloading or closing the tab ask only while a mounted editor holds an unsaved draft", () => {
+    // True when the browser would show its leave-page prompt.
+    const unloadAsks = () =>
+      !window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    const addSpy = vi.spyOn(window, "addEventListener");
+    const removeSpy = vi.spyOn(window, "removeEventListener");
+    const first = renderHook(({ isDirty }) => useUnsavedDraft(isDirty), {
+      initialProps: { isDirty: false },
+    });
+    const second = renderHook(({ isDirty }) => useUnsavedDraft(isDirty), {
+      initialProps: { isDirty: false },
+    });
+
+    expect(unloadAsks()).toBe(false);
+
+    first.rerender({ isDirty: true });
+    second.rerender({ isDirty: true });
+    expect(unloadAsks()).toBe(true);
+
+    first.rerender({ isDirty: false });
+    expect(unloadAsks()).toBe(true);
+
+    second.unmount();
+    expect(unloadAsks()).toBe(false);
+    const added = addSpy.mock.calls.filter(([type]) => type === "beforeunload");
+    const removed = removeSpy.mock.calls.filter(
+      ([type]) => type === "beforeunload",
+    );
+    // Nothing stays registered, so the browser keeps the page cacheable.
+    expect(added).not.toHaveLength(0);
+    expect(removed.map(([, listener]) => listener)).toEqual(
+      expect.arrayContaining(added.map(([, listener]) => listener)),
+    );
+    first.unmount();
+  });
+
   it("asks before an editor's own action only when its draft is unsaved", () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     const clean = renderHook(() => useUnsavedDraft(false));
