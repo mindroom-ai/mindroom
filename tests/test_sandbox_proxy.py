@@ -6108,6 +6108,8 @@ def _forward_proxy_to_seeded_runner(
         },
     )
     sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runner_paths, runner_token=_TEST_AUTH_TOKEN)
+    # The forwarder decodes one JSON body, so a slow call on a loaded host must not stream keepalive lines too.
+    monkeypatch.setattr(sandbox_runner_module, "EXECUTE_KEEPALIVE_SECONDS", 3600.0)
     runner = TestClient(sandbox_runner_app)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     primary_paths = _configure_proxy_runtime(
