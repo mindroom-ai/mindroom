@@ -618,7 +618,6 @@ def build_message_content(
             latest_thread_event_id=latest_thread_event_id,
         )
     elif reply_to_event_id:
-        # A room-level reply keeps its source for MindRoom without the quote clients render for m.in_reply_to.
         content["m.relates_to"] = {UNQUOTED_REPLY_RELATION_KEY: {"event_id": reply_to_event_id}}
 
     if extra_content:

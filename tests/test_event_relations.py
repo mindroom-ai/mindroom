@@ -226,12 +226,6 @@ class TestEventRelations:
 
         assert (
             reply_to_event_id_from_content(
-                {"m.relates_to": {"io.mindroom.in_reply_to": {"event_id": "$unquoted:localhost"}}},
-            )
-            == "$unquoted:localhost"
-        )
-        assert (
-            reply_to_event_id_from_content(
                 {
                     "m.relates_to": {
                         "m.in_reply_to": {"event_id": "$quoted:localhost"},

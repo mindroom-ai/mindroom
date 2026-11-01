@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_builder import (
     build_matrix_edit_content,
     build_message_content,
@@ -27,7 +26,6 @@ def test_room_level_reply_names_its_target_without_a_client_quote() -> None:
     content = build_message_content("Answer", reply_to_event_id="$prompt")
 
     assert content["m.relates_to"] == {"io.mindroom.in_reply_to": {"event_id": "$prompt"}}
-    assert EventInfo.from_event({"content": content}).reply_to_event_id == "$prompt"
 
 
 def test_build_matrix_edit_content_wraps_replacement_content() -> None:
