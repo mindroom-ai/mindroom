@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useEffectEvent } from "react";
 import {
   Home,
   Loader2,
@@ -134,10 +134,9 @@ export function HomeAssistantIntegration({
     }
   };
 
+  const checkStatusOnOpen = useEffectEvent(checkStatus);
   useEffect(() => {
-    checkStatus();
-    // Check once when the card opens; actions check again themselves.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    checkStatusOnOpen();
   }, []);
 
   const connectOAuth = async () => {

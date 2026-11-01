@@ -1,6 +1,7 @@
 import {
   useState,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -479,10 +480,9 @@ export function Integrations() {
     }
   };
 
+  const reloadIntegrations = useEffectEvent(loadIntegrations);
   useEffect(() => {
-    loadIntegrations();
-    // Reload when the tools or the scope change, not on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    reloadIntegrations();
   }, [backendTools, currentScopeKey]);
 
   // OAuth cards connect for the selected agent's scope; other credentials stay shared-only.
