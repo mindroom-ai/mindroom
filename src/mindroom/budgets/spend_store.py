@@ -1,8 +1,8 @@
 """Month-to-date spend kept across restarts in one SQLite file beside the caps.
 
-The file holds the latest completed scan with a fingerprint of the settings it was priced with, the cost of each reply
-that finished since that scan started, and the scan requests no completed scan has served yet.
-All of it is derived from retained usage, so a store that is missing or unreadable costs only a scan.
+The file holds the latest completed scan with a fingerprint of the settings it counted with, the cost of each reply that
+finished since that scan started, and the scan requests no completed scan has served yet.
+All of it is derived from retained usage, so a store that is missing or unusable costs only a scan.
 """
 
 from __future__ import annotations
@@ -61,14 +61,25 @@ def spend_store_path(runtime_paths: RuntimePaths) -> Path:
 
 
 def spend_fingerprint(config: Config) -> str:
-    """Return a digest of the settings stored spend depends on: budgets, bridge aliases, and model prices."""
-    budgets = config.budgets.model_dump(mode="json") if config.budgets is not None else None
+    """Return a digest of the settings that change what a scan counts, and of whether budgets are on.
+
+    Prices price usage; the agents choose which session stores a scan reads; and the agents, teams, bot accounts,
+    internal user, and bridge aliases decide whom an alias charges. Caps and the fallback model apply when spend is read.
+    """
     prices = [
         [provider, model_id, priced.pricing.model_dump(mode="json"), priced.input_includes_cache]
         for (provider, model_id), priced in sorted(model_prices(config).items())
     ]
-    payload = json.dumps([budgets, config.authorization.aliases, prices], sort_keys=True)
-    return hashlib.sha256(payload.encode()).hexdigest()
+    payload = [
+        config.budgets is not None,
+        prices,
+        sorted((name, agent.private is not None) for name, agent in config.agents.items()),
+        sorted(config.teams),
+        sorted(config.bot_accounts),
+        config.mindroom_user.username if config.mindroom_user is not None else None,
+        {canonical: sorted(aliases) for canonical, aliases in config.authorization.aliases.items()},
+    ]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def _timestamp(moment: datetime) -> str:

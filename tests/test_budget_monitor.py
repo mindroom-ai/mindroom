@@ -7,6 +7,7 @@ import asyncio
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +19,7 @@ from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model, budget_user_id
 from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.budgets.spend import SpendSnapshot, UnpricedModelUsage
-from mindroom.budgets.spend_store import load_spend, spend_store_path
+from mindroom.budgets.spend_store import load_spend, spend_store_path, store_scan
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -855,7 +856,7 @@ async def test_a_restart_within_the_reconciliation_interval_resumes_the_stored_s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["stale", "last_month", "repriced", "requested", "budgets_were_off"])
+@pytest.mark.parametrize("reason", ["stale", "last_month", "repriced", "agent_added", "requested", "budgets_were_off"])
 async def test_a_restart_scans_when_the_stored_scan_cannot_stand_in(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -873,6 +874,9 @@ async def test_a_restart_scans_when_the_stored_scan_cannot_stand_in(
         clock.now = datetime(2026, 11, 1, 0, 5, tzinfo=UTC)
     elif reason == "repriced":
         config.models["astra"].pricing = ModelPricing(input=1, output=6)
+    elif reason == "agent_added":
+        # The scan before the restart did not read this agent's usage.
+        config.agents["code"] = AgentConfig(display_name="Code")
     elif reason == "requested":
         # The scan the request starts fails, so the request is still unserved when the runtime stops.
         scans.error = RuntimeError("database locked")
@@ -893,38 +897,43 @@ async def test_a_restart_scans_when_the_stored_scan_cannot_stand_in(
 
 
 @pytest.mark.asyncio
-async def test_a_config_reload_rescans_only_when_budgets_aliases_or_prices_change(
+async def test_a_config_reload_rescans_only_when_what_a_scan_counts_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monitor, scans, current = await _started(tmp_path, monkeypatch, {ALICE: 9.0})
 
-    unrelated = _config()
-    unrelated.agents["code"] = AgentConfig(display_name="Code")
-    for config in (_config(), unrelated):
+    # Caps and the fallback model apply when spend is read, so they change nothing a scan counts.
+    for config in (_config(), _config(monthly_limit_usd=20, fallback_model="local")):
         await monitor.sync(config)
     await _quiet()
     assert scans.calls == 1
 
     repriced = _config()
     repriced.models["luna"].pricing = ModelPricing(input=0.1, output=1)
-    realiased = repriced.model_copy(update={"authorization": AuthorizationConfig(aliases={BOB: [ALICE_BRIDGE]})})
-    recapped = realiased.model_copy(update={"budgets": _config(monthly_limit_usd=20).budgets})
-    for calls, config in enumerate((repriced, realiased, recapped), start=2):
+    with_agent = repriced.model_copy(update={"agents": {"code": AgentConfig(display_name="Code")}})
+    with_bot = with_agent.model_copy(update={"bot_accounts": [BRIDGE_BOT]})
+    realiased = with_bot.model_copy(update={"authorization": AuthorizationConfig(aliases={BOB: [ALICE_BRIDGE]})})
+    for calls, config in enumerate((repriced, with_agent, with_bot, realiased), start=2):
         current[0] = config
         await monitor.sync(config)
         await _until(lambda calls=calls: scans.calls == calls)
+    renamed = realiased.model_copy(update={"agents": {"code": AgentConfig(display_name="Coder")}})
+    current[0] = renamed
+    await monitor.sync(renamed)
+    await _quiet()
+    assert scans.calls == 5
 
     # Replies add nothing while budgets are off, so turning them back on recounts.
-    current[0] = recapped.model_copy(update={"budgets": None})
+    current[0] = renamed.model_copy(update={"budgets": None})
     await monitor.sync(current[0])
     await _quiet()
-    current[0] = recapped
-    await monitor.sync(recapped)
-    await _until(lambda: scans.calls == 5)
+    current[0] = renamed
+    await monitor.sync(renamed)
+    await _until(lambda: scans.calls == 6)
     await _quiet()
 
-    assert scans.calls == 5
+    assert scans.calls == 6
     await monitor.stop()
 
 
@@ -963,28 +972,42 @@ async def test_a_completed_scan_drops_the_stored_reply_costs_it_covers_and_keeps
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("store", ["missing", "corrupt", "other_schema"])
+@pytest.mark.parametrize("store", ["missing", "corrupt", "other_schema", "unparsable", "locked"])
 async def test_an_unusable_spend_store_falls_back_to_a_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     store: str,
 ) -> None:
+    """Only a store that cannot be used again is replaced; one that is only locked is kept."""
     path = spend_store_path(_paths(tmp_path))
     path.parent.mkdir(parents=True)
+    lock = None
     if store == "corrupt":
         path.write_bytes(b"not a database" * 100)
     elif store == "other_schema":
-        with sqlite3.connect(path) as connection:
+        with closing(sqlite3.connect(path)) as connection:
             connection.execute("PRAGMA user_version = 7")
+    elif store == "unparsable":
+        store_scan(path, _snapshot({ALICE: 1.0}), "fingerprint")
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("UPDATE scan SET generated_at = 'yesterday'")
+    elif store == "locked":
+        lock = sqlite3.connect(path, isolation_level=None)
+        lock.execute("BEGIN EXCLUSIVE")
     scans = _Scans(monkeypatch, {ALICE: 12.0})
 
     with capture_logs() as logs:
         monitor, _current = _monitor(tmp_path, _config())
+    if lock is not None:
+        lock.close()
+
+    events = {entry["event"] for entry in logs}
+    assert ("budget_spend_store_unavailable" in events) is (store == "locked")
+    assert ("budget_spend_store_unreadable" in events) is (store not in {"missing", "locked"})
+    assert path.exists() is (store == "locked")
     await monitor.sync(_config())
     await _until(lambda: monitor._spend_usd(ALICE) == 12.0)
-
     assert scans.calls == 1
-    assert ("budget_spend_store_unreadable" in [entry["event"] for entry in logs]) is (store != "missing")
     stored = load_spend(path)
     assert stored.snapshot is not None
     assert stored.snapshot.spend_usd == {ALICE: 12.0}
