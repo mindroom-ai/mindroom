@@ -679,7 +679,7 @@ def _build_agent_model_provider(
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")
-def build_agent_toolkit(  # noqa: C901, PLR0911
+def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     tool_name: str,
     *,
     agent_tools: AgentTools,
@@ -775,6 +775,11 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         info = config.generated_agent(agent_name)
         generated, created = info is not None, info is not None and info.created
         return wrap_direct(AgentManagerTools(agent_name, can_create=can_create, generated=generated, created=created))
+
+    if tool_name == "contacts":
+        from mindroom.custom_tools.contacts import ContactsTools  # noqa: PLC0415
+
+        return wrap_direct(ContactsTools(agent_name))
 
     if tool_name == "skill_manage":
         from mindroom.custom_tools.skill_manage import SkillManageTools  # noqa: PLC0415

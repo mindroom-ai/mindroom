@@ -86,6 +86,7 @@ _WORKFLOW_RESTRICTED_TOOLS = frozenset(
     {
         "agent_manager",
         "compact_context",
+        "contacts",
         "delegate",
         "dynamic_tools",
         "dynamic_workflow",

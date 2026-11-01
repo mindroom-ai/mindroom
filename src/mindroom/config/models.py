@@ -58,6 +58,7 @@ TOOL_PRESETS: dict[str, tuple[str, ...]] = {
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
     {
         "agent_manager",
+        "contacts",
         "delegate",
         "dynamic_tools",
         "external_trigger_manager",

@@ -295,8 +295,8 @@ class AgentToolFacts:
     """What one agent's config decides about its toolkits, before a turn or the runtime decides the rest.
 
     ``authored`` are its tool entries (see `authored_tool_entries`). ``injected`` are toolkits its settings add without
-    an entry: delegation, self-config, agent management, skill saving, and its graph. ``disabled`` are toolkits its
-    settings turn off even when an entry names them. ``tool_names`` are every toolkit its entries name, presets and
+    an entry: delegation, self-config, agent management, skill saving, contacts, and its graph. ``disabled`` are
+    toolkits its settings turn off even when an entry names them. ``tool_names`` are every toolkit its entries name, presets and
     implied toolkits expanded, less the disabled ones; ``startup_tool_names`` the eager and initial ones among them.
     ``scope_incompatible`` maps a deferred entry to the expanded toolkits its execution scope cannot run.
     ``worker_tools`` is the resolved worker tool list, or None to follow the runtime's sandbox settings.
@@ -333,6 +333,9 @@ def agent_tool_facts(config: Config, agent_name: str, *, policy: ResolvedAgentPo
             # Like Hermes, an agent that learns skills can also save them in chat, and its skill review can only call
             # tools the agent's own request offered.
             ("skill_manage", agent.skill_learning.enabled),
+            # A contact answers only through matrix_message, so an agent with contacts always has it.
+            ("contacts", agent.contacts is not None),
+            ("matrix_message", agent.contacts is not None),
             ("knowledge_graph", graph),
         )
         if enabled

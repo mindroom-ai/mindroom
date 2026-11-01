@@ -148,6 +148,7 @@ config_manager = [
 confluence = [
   "atlassian-python-api",
 ]
+contacts = []
 crawl4ai = [
   "crawl4ai>=0.7.3",
 ]

@@ -790,6 +790,7 @@ async def test_validate_workflow_tool_policy_rejects_unknown_tool(tmp_path: Path
     [
         "agent_manager",
         "compact_context",
+        "contacts",
         "delegate",
         "dynamic_tools",
         "dynamic_workflow",

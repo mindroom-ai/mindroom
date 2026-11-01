@@ -270,7 +270,7 @@ def test_launch_toolkits_include_egress_credentials_only_while_the_broker_is_on(
     assert ("egress_credentials" in names) is broker_on
 
 
-@pytest.mark.parametrize("restricted", ["agent_manager", "skill_manage"])
+@pytest.mark.parametrize("restricted", ["agent_manager", "contacts", "skill_manage"])
 def test_launch_grants_exclude_chat_only_tools(tmp_path: Path, restricted: str) -> None:
     """Like self_config, these stay with the agent's chat even when the agent lists them."""
     context = _context_for_config(
