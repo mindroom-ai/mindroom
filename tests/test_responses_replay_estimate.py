@@ -169,10 +169,10 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
     adapter = responses_adapter(tmp_path, "unrecognized-image-model")
     counter = adapter.token_counter
     request_before = _replayed_input(adapter, [message])
-    provider_tokens = count(counter, stable_serialize(request_before)).tokens
+    provider_tokens = count(counter, stable_serialize(request_before))
     if floor == "canonical":
         # The content block's transport counts as text, by whichever of the two counts is larger.
-        expected_tokens = max(count(counter, stable_serialize(block)).tokens, provider_tokens)
+        expected_tokens = max(count(counter, stable_serialize(block)), provider_tokens)
     else:
         # Historical viewed images use a bounded visual fallback rather than encoded transport text.
         assert provider_tokens > 100_000
@@ -501,9 +501,9 @@ def test_responses_budget_preserves_literal_data_urls_files_and_tool_arguments(t
         Message(role="tool", tool_call_id="call_example", content=literal),
     ]
     adapter = responses_adapter(tmp_path, store=False)
-    assert (
-        adapter.estimate_portable_replay_tokens(messages)
-        == count(adapter.token_counter, stable_serialize(_replayed_input(adapter, messages))).tokens
+    assert adapter.estimate_portable_replay_tokens(messages) == count(
+        adapter.token_counter,
+        stable_serialize(_replayed_input(adapter, messages)),
     )
 
 
@@ -514,9 +514,9 @@ def test_models_without_a_patch_budget_count_the_replayed_input_as_text(tmp_path
 
     assert adapter.portable_replay_uses_visual_tokens() is False
     assert responses_adapter(tmp_path).portable_replay_uses_visual_tokens() is True
-    assert (
-        adapter.estimate_portable_replay_tokens(messages)
-        == count(adapter.token_counter, stable_serialize(_replayed_input(adapter, messages))).tokens
+    assert adapter.estimate_portable_replay_tokens(messages) == count(
+        adapter.token_counter,
+        stable_serialize(_replayed_input(adapter, messages)),
     )
 
 

@@ -177,7 +177,7 @@ def checkpoint_estimated_tokens(items: Sequence[dict[str, Any]], counter: TokenC
     """
     readable = [{key: value for key, value in item.items() if key != "encrypted_content"} for item in items]
     ciphertext = sum(len(str(item.get("encrypted_content") or "")) for item in items)
-    return count(counter, _serialized(readable)).tokens + opaque_tokens(ciphertext)
+    return count(counter, _serialized(readable)) + opaque_tokens(ciphertext)
 
 
 def _serialized(items: Sequence[dict[str, Any]]) -> str:

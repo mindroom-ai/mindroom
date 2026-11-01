@@ -60,7 +60,7 @@ def estimate_responses_replay_tokens(
     formatted = [_without_reasoning_ciphertext(item) for item in replayed]
     reasoning_tokens = _earlier_reasoning_tokens(messages, replayed)
     if not responses_replay_uses_visual_tokens(model_id):
-        return count(counter, stable_serialize(formatted)).tokens + reasoning_tokens
+        return count(counter, stable_serialize(formatted)) + reasoning_tokens
     estimated_input = []
     image_tokens = 0
     for item in formatted:
@@ -75,7 +75,7 @@ def estimate_responses_replay_tokens(
                     if isinstance(block, dict) and block.get("type") == "input_image"
                 )
         estimated_input.append(projected)
-    return count(counter, stable_serialize(estimated_input)).tokens + image_tokens + reasoning_tokens
+    return count(counter, stable_serialize(estimated_input)) + image_tokens + reasoning_tokens
 
 
 def _without_reasoning_ciphertext(item: Any) -> Any:  # noqa: ANN401

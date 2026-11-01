@@ -861,7 +861,9 @@ async def prepare_agent_execution_context(
     if not include_openai_compat_guidance:
         response_sender_id = entity_identity_registry(config, runtime_paths).current_ids.get(agent_name)
         response_sender = response_sender_id.full_id if response_sender_id is not None else None
-    static_token_estimator = await build_static_token_estimator(
+    # Encoding a long prompt would stall the replies sharing the event loop.
+    static_token_estimator = await asyncio.to_thread(
+        build_static_token_estimator,
         build.spec.model.token_counter,
         system_messages,
         PreparedTools(functions=build.spec.functions).specs(),
@@ -953,7 +955,8 @@ async def prepare_bound_team_run_context(
     the run adds is among them. ``history_settings`` are the built team's, whose replay policy and compaction config
     the scope follows.
     """
-    static_token_estimator = await build_static_token_estimator(
+    static_token_estimator = await asyncio.to_thread(
+        build_static_token_estimator,
         model.token_counter,
         leader_system_messages,
         leader_tools,

@@ -56,6 +56,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError, RateLimited
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import TokenCounter
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
 from mindroom.message_target import MessageTarget
@@ -64,7 +65,6 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.errors import classify_provider_error
 from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_counting.counts import count_exact
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -639,13 +639,10 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
         ],
     )
 
-    async def fallback_endpoint(_text: str) -> int:
-        return 999
-
     primary = summary_model()
     fallback = summary_model(
         model_id="fallback-model-id",
-        token_counter=fake_token_counter(key="fallback", count=fallback_endpoint),
+        token_counter=TokenCounter(estimate=lambda text: 999 if text == "probe" else quarter_tokens(text)),
     )
     summary_mock = AsyncMock(
         side_effect=[
@@ -686,9 +683,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     assert "RUN1-MARKER" in summary_inputs[0]
     assert "RUN2-MARKER" in summary_inputs[2]
     retry_sleep.assert_not_awaited()
-    # The second chunk rebuilds its input with the fallback's token estimator, which sizes a text the fallback's route
-    # counted at that count.
-    await count_exact(fallback.token_counter, "probe")
+    # The second chunk rebuilds its input with the fallback's token estimator.
     assert build_summary_input_spy.call_args_list[-1].kwargs["token_estimator"]("probe") == 999
     assert folded_run_ids(storage) == ["run-1", "run-2"]
     assert summary_rows_of(storage, "agent:test_agent") == [

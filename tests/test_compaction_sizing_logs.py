@@ -10,9 +10,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.history.compaction import _rewrite_working_session_for_compaction
-from mindroom.llm.provider import TokenCounter
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_counting.counts import TokenCount, count_exact
 from tests.conftest import seed_session
 from tests.fakes.summary_model import summary_model as _summary_model
 from tests.fakes.token_counter import fake_token_counter, quarter_tokens
@@ -62,38 +60,15 @@ def _assert_truthful_sizing_fields(
     *,
     estimate: int,
     budget_tokens: int,
-    kind: str,
 ) -> None:
     assert entry["summary_input_estimate"] == estimate
-    assert entry["summary_input_estimate_kind"] == kind
     assert entry["summary_input_budget_tokens"] == budget_tokens
     assert "estimated_input_tokens" not in entry
     assert "summary_input_budget" not in entry
 
 
-async def _endpoint(text: str) -> int:
-    return len(text)
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("route", "kind"),
-    [
-        ("uncounted", "estimated"),
-        # A count of other text leaves the summary input on the estimate.
-        ("counted-other-text", "estimated"),
-        ("own-tokenizer", "exact"),
-    ],
-)
-async def test_chunk_events_report_how_the_summary_input_was_counted(tmp_path: Path, route: str, kind: str) -> None:
-    counter = (
-        TokenCounter(key="local", estimate=quarter_tokens, exact_locally=True)
-        if route == "own-tokenizer"
-        else fake_token_counter(count=_endpoint)
-    )
-    if route == "counted-other-text":
-        # The endpoint counted other text at four times its estimate.
-        await count_exact(counter, "x" * 40)
+async def test_chunk_events_report_the_summary_input_as_the_summary_model_counts_it(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
@@ -114,17 +89,15 @@ async def test_chunk_events_report_how_the_summary_input_was_counted(tmp_path: P
             storage=storage,
             working_session=working_session,
             summary_input_budget=8_000,
-            summary_model=_summary_model(token_counter=counter),
+            summary_model=_summary_model(token_counter=fake_token_counter()),
         )
 
     assert rewrite_result is not None
-    sent = TokenCount(quarter_tokens(summary_inputs[0]), kind)
     for event in ("Compaction summary chunk request", "Compaction summary chunk completed"):
         _assert_truthful_sizing_fields(
             _single_event(logs, event),
-            estimate=sent.tokens,
+            estimate=quarter_tokens(summary_inputs[0]),
             budget_tokens=8_000,
-            kind=kind,
         )
 
 
@@ -159,7 +132,6 @@ async def test_failed_event_uses_truthful_sizing_fields(tmp_path: Path) -> None:
         _single_event(logs, "Compaction summary chunk failed"),
         estimate=quarter_tokens(summary_inputs[0]),
         budget_tokens=8_000,
-        kind="estimated",
     )
 
 

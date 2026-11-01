@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -370,39 +370,6 @@ class NativeHistory:
         return NativeHistory(native_compaction=None, portable_replay=self.portable_replay)
 
 
-@dataclass(frozen=True)
-class HistoryAnchor:
-    """The system prompt and tools tokens a run's requests were sized with, and how those requests were counted.
-
-    ``counter_key`` names the counter that counted them, and ``native_route`` the native-compaction route the requests
-    replayed history on, None for whole history. A later reply on the same counter and route takes the tokens off the
-    request size the provider reported, to size the history that request held.
-    """
-
-    non_prompt_tokens: int
-    counter_key: str
-    native_route: str | None
-
-    def metadata(self) -> dict[str, Any]:
-        """Return the anchor as its run's stored metadata holds it."""
-        return {
-            "non_prompt_tokens": self.non_prompt_tokens,
-            "counter": self.counter_key,
-            "native_route": self.native_route,
-        }
-
-    @classmethod
-    def from_metadata(cls, value: object) -> HistoryAnchor | None:
-        """Return the anchor a run's stored metadata holds, or None when it holds none."""
-        if not isinstance(value, dict):
-            return None
-        data = cast("dict[str, object]", value)
-        tokens, counter_key, native_route = data.get("non_prompt_tokens"), data.get("counter"), data.get("native_route")
-        if not isinstance(tokens, int) or not isinstance(counter_key, str) or not isinstance(native_route, str | None):
-            return None
-        return cls(tokens, counter_key, native_route)
-
-
 @dataclass(frozen=True, kw_only=True)
 class PreparedHistoryState:
     """Prepared persisted-history state for one run.
@@ -418,7 +385,4 @@ class PreparedHistoryState:
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     prepared_context_tokens: int | None = None
-    # Set when the run's settings replay the scope's whole history; a run whose final plan replays all of it records
-    # it, so a later reply can tell that history apart in the request size the provider reports.
-    history_anchor: HistoryAnchor | None = None
     native_history: NativeHistory | None

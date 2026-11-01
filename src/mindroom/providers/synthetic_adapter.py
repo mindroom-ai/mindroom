@@ -112,7 +112,7 @@ class SyntheticProvider:
 
     @property
     def token_counter(self) -> TokenCounter:
-        """The synthetic model estimates, as a route without a counting endpoint does."""
+        """The synthetic model estimates, as any route without a local tokenizer does."""
         return counter_for_model(self.identity)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:

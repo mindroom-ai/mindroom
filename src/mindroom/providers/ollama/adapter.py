@@ -83,7 +83,7 @@ class OllamaProvider:
 
     @property
     def token_counter(self) -> TokenCounter:
-        """Ollama has no counting endpoint, so it estimates."""
+        """Ollama serves models whose tokenizer does not run locally, so the route estimates."""
         return counter_for_model(self.identity)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:

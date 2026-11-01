@@ -9,7 +9,6 @@ credentials file from the config, else ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_
 
 from __future__ import annotations
 
-import asyncio
 import re
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -85,22 +84,8 @@ class GeminiProvider:
 
     @property
     def token_counter(self) -> TokenCounter:
-        """Gemini counts through its free ``countTokens`` endpoint."""
-        # The client's own parameters, which ``client_params`` may override, name where counts go.
-        params = self._client_params()
-        endpoint = (
-            f"vertexai:{params.get('project')}:{params.get('location')}"
-            if params["vertexai"]
-            else f"gemini-api:{params['http_options'].get('base_url', '')}"
-        )
-        return counter_for_model(self.identity, count=self._count_content_tokens, framed=True, endpoint=endpoint)
-
-    async def _count_content_tokens(self, text: str) -> int:
-        """Count a content holding ``text``, framing included."""
-        # Building the client may discover Google credentials, which blocks.
-        client = await asyncio.to_thread(self._sdk_client)
-        counted = await client.aio.models.count_tokens(model=self.identity.id, contents=text)
-        return counted.total_tokens or 0
+        """Gemini's tokenizer does not run locally, so the route estimates."""
+        return counter_for_model(self.identity)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.

@@ -26,7 +26,7 @@ from mindroom.history.session_context import (
 from mindroom.history.types import (
     PreparedHistoryState,
 )
-from mindroom.llm.messages import Message, stable_serialize, system_texts
+from mindroom.llm.messages import Message, stable_serialize, system_text
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import (
@@ -131,8 +131,7 @@ def _leader_non_prompt_tokens(built: BuiltTeam) -> int:
         for tool in leader_tool_specs(built.spec)
     ]
     counter = built.spec.leader.model.token_counter
-    parts = [*system_texts(built.spec.leader.system_messages), stable_serialize(payloads)]
-    return sum(count(counter, part).tokens for part in parts)
+    return count(counter, system_text(built.spec.leader.system_messages)) + count(counter, stable_serialize(payloads))
 
 
 @pytest.mark.asyncio
@@ -190,7 +189,7 @@ async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
     non_prompt_tokens = _leader_non_prompt_tokens(built)
     assert kwargs["non_prompt_tokens"] == non_prompt_tokens
     sent_prompt = render_prepared_messages_text(prepared.turn.in_request_order())
-    sent_tokens = count(built.spec.leader.model.token_counter, sent_prompt).tokens
+    sent_tokens = count(built.spec.leader.model.token_counter, sent_prompt)
     assert resolved_inputs.execution_plan.static_prompt_tokens == sent_tokens + non_prompt_tokens
 
 
@@ -206,14 +205,14 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
     sized: dict[str, Any] = {}
     real_estimator = execution_preparation.build_static_token_estimator
 
-    async def capture_estimator(
+    def capture_estimator(
         counter: TokenCounter,
         system_messages: tuple[Message, ...],
         tools: Any,  # noqa: ANN401
         deferred_tool_names: frozenset[str],
     ) -> Any:  # noqa: ANN401
         sized["system_messages"], sized["tools"] = system_messages, list(tools)
-        return await real_estimator(counter, system_messages, tools, deferred_tool_names)
+        return real_estimator(counter, system_messages, tools, deferred_tool_names)
 
     monkeypatch.setattr(execution_preparation, "build_static_token_estimator", capture_estimator)
 

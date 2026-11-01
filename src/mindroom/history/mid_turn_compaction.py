@@ -413,7 +413,7 @@ def _require_fit(policy: _Policy, tokens: int, summary_message: Message) -> None
     """Refuse to send a rewritten request whose kept messages and summary exceed the model's own window."""
     if tokens <= policy.fit_limit:
         return
-    summary_tokens = count(policy.counter, str(summary_message.content)).tokens
+    summary_tokens = count(policy.counter, str(summary_message.content))
     raise HistorySummaryBudgetError(
         summary_tokens=summary_tokens,
         available_tokens=max(0, policy.fit_limit - (tokens - summary_tokens)),
@@ -489,7 +489,7 @@ def _tool_tokens(
     """
     if deferred:
         deferred -= claude_loaded_tool_names(messages)
-    return count(counter, tool_definitions_text(tools, deferred)).tokens
+    return count(counter, tool_definitions_text(tools, deferred))
 
 
 def _thinking_tokens(messages: Sequence[Message], counter: TokenCounter) -> int:
@@ -502,7 +502,7 @@ def _thinking_tokens(messages: Sequence[Message], counter: TokenCounter) -> int:
     for message in messages:
         if not is_own_model_message(message):
             continue
-        text = count(counter, (message.reasoning_content or "") + (message.redacted_reasoning_content or "")).tokens
+        text = count(counter, (message.reasoning_content or "") + (message.redacted_reasoning_content or ""))
         # The visible part as canonical history counts it, not as the route replays it with its reasoning.
         visible = estimate_request_messages_tokens([message], counter=replace(counter, replay=None))
         total += max(text, message.metrics.tokens.output_tokens - visible, 0)

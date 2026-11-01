@@ -214,7 +214,7 @@ _VOICE = openai_model_counter("gpt-realtime")
 
 
 def _voice_tokens(text: str) -> int:
-    return count(_VOICE, text).tokens
+    return count(_VOICE, text)
 
 
 def _client() -> AsyncMock:

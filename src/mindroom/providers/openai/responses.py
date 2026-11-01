@@ -73,24 +73,12 @@ class ResponsesAdapter:
 
     @property
     def token_counter(self) -> TokenCounter:
-        """OpenAI's own endpoint counts through its free input-token endpoint where tiktoken does not know the model.
-
-        Codex serves OpenAI's models too but has no counting endpoint; a proxied endpoint may serve any model.
-        """
-        openai_endpoint = self.identity.endpoint == OPENAI_BASE_URL_DEFAULT
+        """OpenAI's own endpoint and Codex serve OpenAI's models, which tiktoken counts; a proxy may serve any model."""
         return counter_for_model(
             self.identity,
-            local_encoder=openai_endpoint or self.wire.route == "codex",
-            count=self._count_input_tokens if openai_endpoint else None,
-            framed=True,
+            local_encoder=self.identity.endpoint == OPENAI_BASE_URL_DEFAULT or self.wire.route == "codex",
             replay=self,
         )
-
-    async def _count_input_tokens(self, text: str) -> int:
-        """Count one input holding ``text``, framing included."""
-        client = await self.clients.client()
-        counted = await client.responses.input_tokens.count(model=self.identity.id, input=text)
-        return counted.input_tokens
 
     def native_compaction_settings(
         self,

@@ -934,7 +934,7 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
     # Claude counted that request at 1.63 times its o200k count, which every chunk must leave room for.
     o200k = load_o200k()
     assert all(
-        len(o200k.encode(summary_input)) * 1.63 <= count(claude, summary_input).tokens <= summary_input_limit
+        len(o200k.encode(summary_input)) * 1.63 <= count(claude, summary_input) <= summary_input_limit
         for summary_input in summary_inputs
     )
 

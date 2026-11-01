@@ -44,15 +44,11 @@ defaults:
 ### How tokens are counted
 
 Every token limit, including `context_window`, the compaction thresholds, and `memory.file.max_entrypoint_tokens`, is counted as the model that receives the text counts tokens.
-Claude on Anthropic, Vertex AI, and Bedrock, Gemini, OpenAI models through OpenAI's own Responses endpoint, and `llama_cpp` models count exactly through the provider's free token counting.
-OpenAI models with a known tokenizer, such as GPT-4o, also count exactly on Chat Completions, Azure, Codex, and OpenRouter.
-Other models, such as those on Ollama or other OpenAI-compatible servers, use an estimate.
+OpenAI models with a known tokenizer, such as GPT-4o, count exactly on OpenAI's own endpoints, Azure, Codex, and OpenRouter.
+Other models use an estimate that is deliberately high, by up to about half for Claude and two thirds for Gemini, so limits act early rather than late.
+Conversation history is sized from the request size the provider reported for the previous reply; without one, such as under a history limit, after another model answered, or once native compaction has condensed part of it, it uses the estimate.
 Estimates need the `o200k_base` vocabulary, and older OpenAI models such as GPT-4 on OpenAI's own routes need `cl100k_base`; each downloads on first use, so without network access set `TIKTOKEN_CACHE_DIR` to a directory that already holds them, or the log shows `o200k_base did not load` and estimates fall back to a quarter token per character.
-A reply waits for the provider to count text it has not counted before, such as a changed system prompt or a `MEMORY.md` over its token cap, up to five seconds per count; later replies reuse that count.
-Conversation history is sized from the request size the provider reported for the previous reply, so it costs no wait; without one, such as under a history limit or after another model answered, the reply waits for a count of the history, or uses the estimate once native compaction has condensed part of it.
-Other text, such as the current message, compaction input, and the files `prompt_curation` compares with its `trigger_tokens`, uses the model's estimate, which may count high.
-Counting sends that text to the provider that also receives the agent's requests.
-A count that fails uses the estimate and logs a `Token count failed` warning, once until that route's counting works again.
+No reply waits for a token count.
 
 ## Agent Compaction Settings
 

@@ -50,7 +50,7 @@ _COUNTER = openai_model_counter("gpt-realtime")
 
 
 def _tokens(text: str) -> int:
-    return count(_COUNTER, text).tokens
+    return count(_COUNTER, text)
 
 
 def _agent_call_event(*, sender: str = CALLER, **content_overrides: object) -> dict:
@@ -748,7 +748,7 @@ async def test_resolve_drops_tool_markers_from_agent_messages(monkeypatch: pytes
 def test_build_call_brief_fits_the_budget_as_its_recipient_counts_tokens() -> None:
     """A model that counts a token per character keeps fewer messages within the same budget."""
     messages = [("Alice", f"message {index} " + "word " * 20) for index in range(40)]
-    one_per_character = TokenCounter(key="characters", estimate=len)
+    one_per_character = TokenCounter(estimate=len)
     brief = build_call_brief(_context(messages), token_budget=1_500, counter=one_per_character)
 
     assert len(brief) <= 1_500

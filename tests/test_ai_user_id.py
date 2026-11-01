@@ -37,7 +37,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
-    HISTORY_ANCHOR_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
@@ -1346,8 +1345,6 @@ class TestUserIdPassthrough:
         assert persisted_run.metadata is not None
         prepared_context = persisted_run.metadata[AI_RUN_METADATA_KEY].pop("prepared_context")
         assert isinstance(prepared_context["tokens"], int)
-        anchor = persisted_run.metadata.pop(HISTORY_ANCHOR_RUN_METADATA_KEY)
-        assert isinstance(anchor["non_prompt_tokens"], int)
         assert persisted_run.metadata == {
             AI_RUN_METADATA_KEY: {
                 "version": 1,
@@ -2092,8 +2089,6 @@ class TestUserIdPassthrough:
         prepared_context = stored.metadata[AI_RUN_METADATA_KEY]["prepared_context"]
         assert isinstance(prepared_context["tokens"], int)
         assert prepared_context["tokens"] > 0
-        # The run records its system prompt and tools, which the next reply's reported-size anchor takes off.
-        assert 0 < stored.metadata[HISTORY_ANCHOR_RUN_METADATA_KEY]["non_prompt_tokens"] < prepared_context["tokens"]
         assert recorder.run_metadata is not None
         assert recorder.run_metadata[AI_RUN_METADATA_KEY]["prepared_context"] == prepared_context
 

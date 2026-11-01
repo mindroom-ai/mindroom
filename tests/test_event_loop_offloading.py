@@ -674,7 +674,7 @@ async def test_the_memory_preload_counts_tokens_as_the_turn_s_model_does(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A turn on another model than the agent's authored one sizes its MEMORY.md preload with that model's counter."""
-    turn_counter = fake_token_counter(key="turn-model")
+    turn_counter = fake_token_counter()
     install_model_providers(monkeypatch, {"other": ScriptedModel([], token_counter=turn_counter)})
     memory = AsyncMock(return_value=MemoryPromptParts())
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", memory)

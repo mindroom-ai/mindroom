@@ -238,24 +238,8 @@ class ClaudeProvider:
 
     @property
     def token_counter(self) -> TokenCounter:
-        """Claude counts through the Messages API's free token counting endpoint, which every route serves."""
-        return counter_for_model(
-            self.identity,
-            count=self._count_message_tokens,
-            framed=True,
-            # Only Bedrock has no endpoint identity; its region names where counts go.
-            endpoint=f"bedrock:{_bedrock_region(self.settings)}" if self.route == "bedrock_claude" else None,
-        )
-
-    async def _count_message_tokens(self, text: str) -> int:
-        """Count a user message holding ``text``, framing included."""
-        # Building the client may discover Google credentials, which blocks.
-        client = await asyncio.to_thread(self._client)
-        counted = await client.messages.count_tokens(
-            model=self.identity.id,
-            messages=[{"role": "user", "content": text}],
-        )
-        return counted.input_tokens
+        """Claude's tokenizer does not run locally, so the route estimates."""
+        return counter_for_model(self.identity)
 
     def native_compaction_settings(
         self,
@@ -730,14 +714,6 @@ def _raw_request_params(settings: ClaudeSettings, *, omit_thinking_setting: bool
     return request_params
 
 
-def _bedrock_region(settings: ClaudeSettings) -> str | None:
-    """Return the region a Bedrock client uses: ``client_params``' over the settings', then the boto3 session's."""
-    region = (settings.client_params or {}).get("aws_region") or settings.aws_region
-    if region is None and settings.session is not None:
-        region = settings.session.region_name
-    return region
-
-
 def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
     """Return this request's AWS credentials; a boto3 session resolves rotating credentials every time."""
     if settings.session is None:
@@ -745,7 +721,7 @@ def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
             "aws_access_key": settings.aws_access_key,
             "aws_secret_key": settings.aws_secret_key,
             "aws_session_token": settings.aws_session_token,
-            "aws_region": _bedrock_region(settings),
+            "aws_region": settings.aws_region,
         }
     resolved = settings.session.get_credentials()
     if resolved is None:
@@ -759,7 +735,7 @@ def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
         "aws_access_key": credentials.access_key,
         "aws_secret_key": credentials.secret_key,
         "aws_session_token": credentials.token,
-        "aws_region": _bedrock_region(settings),
+        "aws_region": settings.aws_region or settings.session.region_name,
     }
 
 

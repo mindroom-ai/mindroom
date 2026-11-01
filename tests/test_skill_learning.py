@@ -606,7 +606,7 @@ def test_the_transcript_budget_is_the_review_model_s_tokens_of_this_conversation
     run.user_id = "@alice:x"
     messages = conversation_messages(_stored("session", run))
 
-    one_per_character = TokenCounter(key="characters", estimate=len)
+    one_per_character = TokenCounter(estimate=len)
     assert reviewer_module._transcript_budget_chars(one_per_character, messages, 1_000) == 1_000
     assert 3_900 < reviewer_module._transcript_budget_chars(fake_token_counter(), messages, 1_000) <= 4_100
 
@@ -627,7 +627,7 @@ def test_the_review_transcript_fits_its_token_budget_as_rendered() -> None:
 
     transcript = reviewer_module._review_transcript(messages, None, counter, 3_000)
 
-    assert count(counter, transcript).tokens <= 3_000
+    assert count(counter, transcript) <= 3_000
     assert "最近のメッセージ 29 " in transcript
 
 
@@ -644,7 +644,7 @@ def test_a_small_review_budget_still_fits_keeping_the_newest_messages() -> None:
 
     transcript = reviewer_module._review_transcript(messages, "An earlier summary. " * 200, counter, 768)
 
-    assert count(counter, transcript).tokens <= 768
+    assert count(counter, transcript) <= 768
     assert transcript.rstrip().endswith("東京で会議の議事録をまとめました。")
 
 

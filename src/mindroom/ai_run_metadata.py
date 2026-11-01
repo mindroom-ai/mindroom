@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
-from mindroom.constants import AI_RUN_METADATA_KEY, HISTORY_ANCHOR_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.usage import RunMetrics
 from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
@@ -138,19 +138,8 @@ def _prepared_history_payload(prepared_history: PreparedHistoryState) -> dict[st
 
 
 def build_prepared_history_metadata_content(prepared_history: PreparedHistoryState) -> dict[str, Any]:
-    """Build a run's metadata: the prepared-context and compaction diagnostics its reply publishes, and its history anchor.
-
-    The anchor stays in the stored run and is never published.
-    """
-    content: dict[str, Any] = {
-        AI_RUN_METADATA_KEY: {"version": _AI_RUN_METADATA_VERSION, **_prepared_history_payload(prepared_history)},
-    }
-    anchor = prepared_history.history_anchor
-    replay_plan = prepared_history.replay_plan
-    # A request that replays part of the history, however the plan was cut, reports the size of that part alone.
-    if anchor is not None and replay_plan is not None and replay_plan.mode == "configured":
-        content[HISTORY_ANCHOR_RUN_METADATA_KEY] = anchor.metadata()
-    return content
+    """Build Matrix message metadata for prepared-context and compaction diagnostics."""
+    return {AI_RUN_METADATA_KEY: {"version": _AI_RUN_METADATA_VERSION, **_prepared_history_payload(prepared_history)}}
 
 
 def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -> dict[str, Any] | None:

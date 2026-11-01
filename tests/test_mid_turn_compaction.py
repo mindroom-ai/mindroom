@@ -519,7 +519,7 @@ def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None
         strict=None,
     )
     counter = fake_token_counter()
-    static = asyncio.run(build_static_token_estimator(counter, (), [lookup], frozenset()))
+    static = build_static_token_estimator(counter, (), [lookup], frozenset())
 
     assert mid_turn_compaction._tool_tokens([lookup], [], frozenset(), counter) == static.estimate("")
 
@@ -761,7 +761,7 @@ async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The summarizer counts a token per byte, more than request estimates do.
-    by_bytes = TokenCounter(key="bytes", estimate=utf8_byte_bound)
+    by_bytes = TokenCounter(estimate=utf8_byte_bound)
     install_model_providers(
         monkeypatch,
         {"summary": summary_model(model_id="claude-haiku-5-5", token_counter=by_bytes)},

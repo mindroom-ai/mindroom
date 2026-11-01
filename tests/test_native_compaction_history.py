@@ -29,7 +29,7 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import with_force_compaction
 from mindroom.history.summary_message import compaction_summary_message
-from mindroom.history.types import HistoryAnchor, HistoryScope, PreparedHistoryState, ResolvedReplayPlan, ScopeSummary
+from mindroom.history.types import HistoryScope, PreparedHistoryState, ResolvedReplayPlan, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus
@@ -349,7 +349,6 @@ async def _prepare_after_native_answer(
         PreparedHistoryState(
             replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=0, add_history_to_context=True),
             prepared_context_tokens=1_000,
-            history_anchor=HistoryAnchor(100, model.token_counter.key, settings.route),
             native_history=None,
         ),
     )
@@ -393,39 +392,12 @@ async def test_a_native_answer_that_created_a_checkpoint_never_sizes_the_next_re
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("checkpoint", "measured"), [(False, True), (True, False)], ids=["text", "checkpoint"])
-async def test_a_native_route_measures_history_no_checkpoint_stands_in_for(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    checkpoint: bool,
-    measured: bool,
-) -> None:
-    """After another model answered, the provider counts plain history; a checkpoint's ciphertext it cannot count."""
-    measured_texts: list[str] = []
-
-    async def record(_counter: object, *texts: str) -> None:
-        measured_texts.extend(text for text in texts if text)
-
-    monkeypatch.setattr("mindroom.history.runtime.measure", record)
-
-    await _prepare_after_native_answer(
-        tmp_path,
-        checkpoint=checkpoint,
-        allow_native_compaction=True,
-        answered_by_another_model=True,
-    )
-
-    assert bool(measured_texts) is measured
-
-
-@pytest.mark.asyncio
-async def test_a_native_anchor_does_not_size_a_turn_without_native_compaction(tmp_path: Path) -> None:
-    """A turn without native compaction replays the whole history, which a native request's size may not describe."""
+async def test_a_native_answer_without_a_checkpoint_sizes_a_turn_without_native_compaction(tmp_path: Path) -> None:
+    """Before any checkpoint, a native request sends the whole history, as a turn without native compaction does."""
     prepared = await _prepare_after_native_answer(tmp_path, checkpoint=False, allow_native_compaction=False)
 
     assert prepared.native_history is None or prepared.native_history.native_compaction is None
-    # The transcript's estimate, not the native request's 30,000 tokens.
-    assert prepared.compaction_decision.current_history_tokens > 35_000
+    assert 29_900 < prepared.compaction_decision.current_history_tokens < 30_100
 
 
 @pytest.mark.asyncio
@@ -974,5 +946,5 @@ def test_the_checkpoint_guard_sizes_ciphertext_by_its_length_not_its_tokens() ->
     counter = openai_model_counter("gpt-4o")
     items = [{"type": "compaction", "id": "cmp_1", "encrypted_content": ciphertext}]
 
-    readable = count(counter, json.dumps([{"type": "compaction", "id": "cmp_1"}])).tokens
+    readable = count(counter, json.dumps([{"type": "compaction", "id": "cmp_1"}]))
     assert checkpoint_estimated_tokens(items, counter) == readable + (len(ciphertext) + 3) // 4

@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,7 +17,6 @@ import pytest
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.config.resolution import entity_model_name
-from mindroom.constants import HISTORY_ANCHOR_RUN_METADATA_KEY
 from mindroom.execution_preparation import prepare_agent_execution_context, prepare_bound_team_run_context
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_tokens
@@ -42,10 +41,8 @@ from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionLifecycleStart,
     CompactionOutcome,
-    HistoryAnchor,
     HistoryPolicy,
     HistoryScope,
-    NativeHistory,
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
@@ -57,6 +54,7 @@ from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, NativeCompactionReplay, TokenCounter
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -1879,13 +1877,13 @@ def _reported_run(
     created_at: int = _SUMMARY_WRITTEN_AT + 1,
     images: list[Image] | None = None,
     reasoning_tokens: int | None = None,
-    non_prompt_tokens: int | None = 400,
-    counter_key: str = "fake",
+    plan_mode: Literal["configured", "limited"] = "configured",
+    native_checkpoint: bool = False,
 ) -> RunRecord:
     """Return a completed run whose answer carries the request size its provider reported and the model's stamp.
 
-    The run records that its request was sized with ``non_prompt_tokens`` of system prompt and tools, as the counter
-    keyed ``counter_key`` counts them, when not None.
+    The run publishes the replay plan ``plan_mode`` its request was sent with, and with ``native_checkpoint`` the answer
+    holds a native compaction checkpoint.
     By default the answer's request starts the second after any summary a test writes. With ``reasoning_tokens``
     the answer also stores one encrypted reasoning item, as a Responses route records it, and reports that much
     reasoning.
@@ -1909,15 +1907,17 @@ def _reported_run(
                 },
             ],
         }
+    if native_checkpoint:
+        checkpoint = {"route": "checkpoints", "items": [{"type": "compaction", "encrypted_content": "gAAAA"}]}
+        answer.provider_data = {**(answer.provider_data or {}), NATIVE_CHECKPOINT_KEY: checkpoint}
     stamp_model(answer, ModelIdentity(id=model, provider="fake"))
     run = _completed_run(run_id, messages=[Message(role="user", content="u" * 2_000, images=images), answer])
     run.model = model
     run.model_provider = "fake"
     run.metadata = build_prepared_history_metadata_content(
         PreparedHistoryState(
-            replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=600, add_history_to_context=True),
+            replay_plan=ResolvedReplayPlan(mode=plan_mode, estimated_tokens=600, add_history_to_context=True),
             prepared_context_tokens=1_000,
-            history_anchor=None if non_prompt_tokens is None else HistoryAnchor(non_prompt_tokens, counter_key, None),
             native_history=None,
         ),
     )
@@ -1936,16 +1936,11 @@ async def _prepare_with_reported_usage(
     """Prepare a reply after three runs; return it, the chars / 4 history estimate, and the compaction notices.
 
     ``latest`` configures the newest run, and a summary folding ``folded_run_ids`` is stored as written at
-    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, ``non_prompt_tokens`` are today's system prompt
-    and tools, while each run records the 400 its request was sized with. The answering model counts with
-    ``counter``, a quarter token per character when it is None.
+    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, ``non_prompt_tokens`` are the system prompt and
+    tools. The answering model counts with ``counter``, a quarter token per character when it is None.
     """
     counter = counter or fake_token_counter()
-    runs = [
-        _reported_run("run-0", counter_key=counter.key),
-        _reported_run("run-1", counter_key=counter.key),
-        _reported_run("run-2", **{"counter_key": counter.key, **latest}),
-    ]
+    runs = [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", **latest)]
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -2068,32 +2063,11 @@ async def test_history_preparation_counts_off_the_event_loop(tmp_path: Path) -> 
         tmp_path,
         {"input_tokens": 8_000},
         folded_run_ids=("run-0",),
-        counter=TokenCounter(key="threads", estimate=estimate),
+        counter=TokenCounter(estimate=estimate),
     )
 
     assert counted_on
     assert loop_thread not in counted_on
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("provider_token_counts")
-async def test_without_a_usable_reported_size_the_provider_counts_the_history(tmp_path: Path) -> None:
-    """A reply after a request that recorded no system prompt and tools waits for an exact count of the history."""
-    counted: list[str] = []
-
-    async def endpoint(text: str) -> int:
-        counted.append(text)
-        return len(text)
-
-    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
-        tmp_path,
-        {"input_tokens": 8_000, "non_prompt_tokens": None},
-        counter=fake_token_counter(count=endpoint),
-    )
-
-    assert counted
-    # One token per character, against the estimate's quarter.
-    assert prepared.compaction_decision.current_history_tokens == sum(len(text) for text in counted) > 3 * estimate
 
 
 @pytest.mark.asyncio
@@ -2102,7 +2076,7 @@ async def test_the_reported_request_size_decides_over_an_estimate_that_overcount
 
     An estimate that counts a conversation a third too high would otherwise compact it early.
     """
-    one_per_character = TokenCounter(key="overcounts", estimate=len)
+    one_per_character = TokenCounter(estimate=len)
     prepared, _estimate, lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 1_000},
@@ -2151,7 +2125,7 @@ def _finalize_with_history_budget(
 @pytest.mark.asyncio
 async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_path: Path) -> None:
     """A history the reported size kept below the trigger replays whole, not trimmed by an estimate that overcounts."""
-    one_per_character = TokenCounter(key="overcounts", estimate=len)
+    one_per_character = TokenCounter(estimate=len)
     prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 1_000},
@@ -2166,39 +2140,6 @@ async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_pat
     assert state.replay_plan is not None
     assert state.replay_plan.mode != "limited"
     assert state.replay_plan.estimated_tokens == reported
-    # The run records the system prompt and tools it was sized with, which the next reply's anchor takes off.
-    assert state.history_anchor == HistoryAnchor(400, "overcounts", None)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("history_budget", "policy"),
-    [
-        # Budget fitting replays part of the history, or none of its runs.
-        pytest.param(2_000, None, id="budget-fitting"),
-        # A replay limit the next reply's settings may no longer have.
-        pytest.param(20_000, HistoryPolicy(mode="runs", limit=2), id="replay-limit"),
-    ],
-)
-async def test_a_request_with_trimmed_history_leaves_no_anchor_for_the_next_reply(
-    tmp_path: Path,
-    history_budget: int,
-    policy: HistoryPolicy | None,
-) -> None:
-    """A request that replayed part of the history reports the size of that part, which cannot size the whole."""
-    one_per_character = TokenCounter(key="overcounts", estimate=len)
-    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
-        tmp_path,
-        {"input_tokens": 1_000},
-        counter=one_per_character,
-    )
-
-    state = _finalize_with_history_budget(tmp_path, prepared, history_budget, policy)
-
-    assert state.replay_plan is not None
-    assert (state.replay_plan.mode, state.replay_plan.num_history_runs) != ("configured", None)
-    # The run records no system prompt and tools, so the next reply sizes its history by estimate.
-    assert HISTORY_ANCHOR_RUN_METADATA_KEY not in build_prepared_history_metadata_content(state)
 
 
 @pytest.mark.asyncio
@@ -2217,53 +2158,6 @@ async def test_the_replay_plan_trims_by_the_reported_size_over_the_final_budget(
     assert state.replay_plan is not None
     assert state.replay_plan.mode == "limited"
     assert state.replay_plan.num_history_runs == 2
-
-
-@pytest.mark.asyncio
-async def test_a_request_on_a_native_route_records_its_route_with_its_anchor(tmp_path: Path) -> None:
-    """A native request replays history through its route, so only a later reply on that route reads its size."""
-    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 1_000})
-    native = NativeHistory(
-        native_compaction=NativeCompactionReplay(route="checkpoints", threshold=None),
-        portable_replay=True,
-    )
-
-    state = _finalize_with_history_budget(tmp_path, replace(prepared, native_history=native), 20_000)
-
-    assert state.replay_plan is not None
-    assert state.replay_plan.mode == "configured"
-    assert state.history_anchor == HistoryAnchor(400, "fake", "checkpoints")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("today", "taken_off"),
-    [
-        # Minus today's 7,000, history would show 1,500 tokens, under the 4,000-token trigger, as does the estimate.
-        pytest.param(7_000, 400, id="grown"),
-        pytest.param(100, 100, id="shrunk"),
-    ],
-)
-async def test_the_reported_request_size_takes_off_the_smaller_system_prompt(
-    tmp_path: Path,
-    today: int,
-    taken_off: int,
-) -> None:
-    """The reported request carried the 400-token system prompt and tools its run recorded, not today's.
-
-    A prompt grown since, such as after longer instructions or context files, counts in today's static estimate, not as
-    history that shrank. A prompt that shrank stays counted as history until the next run records it, because taking
-    off an estimate's margin with it could undercount the history.
-    """
-    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
-        tmp_path,
-        {"input_tokens": 8_000},
-        non_prompt_tokens=today,
-    )
-
-    assert estimate < 4_000
-    assert prepared.compaction_decision.current_history_tokens == 8_000 + 500 - taken_off
-    assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
 
 
 @pytest.mark.asyncio
@@ -2289,10 +2183,10 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
     ("latest", "setup"),
     [
         pytest.param({}, {}, id="no-reported-usage"),
-        # Without the system prompt and tools that request was sized with, its history cannot be told apart.
-        pytest.param({"input_tokens": 8_000, "non_prompt_tokens": None}, {}, id="no-recorded-system-prompt"),
-        # Another server under the same model name can tokenize differently.
-        pytest.param({"input_tokens": 8_000, "counter_key": "another-endpoint"}, {}, id="another-counting-route"),
+        # A request whose replay plan cut the history reported the size of the part it sent.
+        pytest.param({"input_tokens": 8_000, "plan_mode": "limited"}, {}, id="partial-replay"),
+        # A native checkpoint replays differently on each route, and its response was billed for the transcript it replaced.
+        pytest.param({"input_tokens": 8_000, "native_checkpoint": True}, {}, id="native-checkpoint"),
         pytest.param({"input_tokens": 8_000, "model": "other-model"}, {}, id="another-model-answered"),
         pytest.param(
             {"input_tokens": 8_000, "images": [Image(url="https://example.com/chart.png")]},

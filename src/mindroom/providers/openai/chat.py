@@ -83,7 +83,7 @@ class ChatAdapter:
 
     @property
     def token_counter(self) -> TokenCounter:
-        """OpenAI's models count locally on routes that serve only them; a llama.cpp server counts through its tokenizer.
+        """OpenAI's models count locally on routes that serve only them.
 
         Any other route may serve another model under an OpenAI name, so the name only picks its estimate.
         """
@@ -93,15 +93,7 @@ class ChatAdapter:
             local_encoder=self.identity.endpoint == OPENAI_BASE_URL_DEFAULT
             or route == "azure"
             or (route == "openrouter" and self.identity.id.startswith("openai/")),
-            count=self._tokenize if route == "llama_cpp" else None,
         )
-
-    async def _tokenize(self, text: str) -> int:
-        """Count ``text`` with llama.cpp's ``/tokenize``, at the server root, through the route's configured client."""
-        client = await self.clients.client()
-        root = str(client.base_url).rstrip("/").removesuffix("/v1")
-        tokenized = await client.post(f"{root}/tokenize", body={"content": text, "add_special": False}, cast_to=object)
-        return len(cast("dict[str, list[int]]", tokenized)["tokens"])
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs = chat_request_kwargs(

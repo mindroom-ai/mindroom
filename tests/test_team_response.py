@@ -21,12 +21,7 @@ from mindroom.agents import create_agent
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
-from mindroom.constants import (
-    AI_RUN_METADATA_KEY,
-    HISTORY_ANCHOR_RUN_METADATA_KEY,
-    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
-    ROUTER_AGENT_NAME,
-)
+from mindroom.constants import AI_RUN_METADATA_KEY, MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.execution_preparation import render_prepared_messages_text
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
@@ -668,13 +663,6 @@ async def test_the_reply_metadata_and_timing_carry_the_prepared_context_and_comp
 
     ai_run = collector[AI_RUN_METADATA_KEY]
     assert ai_run["prepared_context"] == {"tokens": timing.metadata["prepared_context_tokens"]}
-    # The run stores the leader's system prompt and tools for the next reply's reported-size anchor; the reply never
-    # publishes it, since the counter key names the route's endpoint.
-    assert HISTORY_ANCHOR_RUN_METADATA_KEY not in collector
-    record, _members = team.stored_runs(run_id=ai_run["run_id"])
-    assert record.metadata is not None
-    anchor = record.metadata[HISTORY_ANCHOR_RUN_METADATA_KEY]
-    assert 0 < anchor["non_prompt_tokens"] < ai_run["prepared_context"]["tokens"]
     compaction = ai_run["compaction"]
     assert (compaction["decision"], compaction["outcome"], compaction["reason"]) == (
         timing.metadata["compaction_decision"],

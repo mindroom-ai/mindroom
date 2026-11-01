@@ -99,8 +99,7 @@ class MemoryEntrypointContext:
     source_path: Path | None = None
     included_lines: int = 0
     total_lines: int = 0
-    # The whole file as the preload would inline it, and its lines, which the preload is cut from.
-    file_text: str = ""
+    # The file's lines, which the preload is cut from.
     lines: tuple[str, ...] = ()
 
     @property

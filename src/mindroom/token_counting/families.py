@@ -20,8 +20,6 @@ from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from mindroom.llm.provider import PortableReplayEstimator
 
 __all__ = ["counter_for_model", "load_o200k", "openai_model_counter", "start_loading_o200k"]
@@ -166,33 +164,17 @@ def counter_for_model(
     identity: ModelIdentity,
     *,
     local_encoder: bool = False,
-    count: Callable[[str], Awaitable[int]] | None = None,
-    framed: bool = False,
     replay: PortableReplayEstimator | None = None,
-    endpoint: str | None = None,
 ) -> TokenCounter:
-    """Return the counter of the model ``identity`` names, counting through ``count`` when no local encoder matches.
+    """Return the counter of the model ``identity`` names.
 
     ``local_encoder`` says the route serves OpenAI's own models, so the tokenizer tiktoken maps the model id to is the
     model's own; any other route may serve another model under an OpenAI name, so the name only picks its estimate.
-    ``framed`` says ``count`` counts a whole message holding the text. ``endpoint`` names where ``count`` reaches for a
-    route whose identity names no endpoint, so a failing endpoint pauses only its own counts.
     """
     name = identity.id.lower().rsplit("/", 1)[-1]
     if local_encoder and (encoding := _own_encoding(name)) is not None:
-        return TokenCounter(
-            key=f"tiktoken:{encoding}",
-            estimate=partial(_encoding_tokens, encoding),
-            exact_locally=True,
-            replay=replay,
-        )
-    return TokenCounter(
-        key=f"{identity.provider}:{endpoint or identity.endpoint or ''}:{identity.id}",
-        estimate=partial(_scaled_o200k_tokens, _margin(name)),
-        count=count,
-        framed=framed,
-        replay=replay,
-    )
+        return TokenCounter(estimate=partial(_encoding_tokens, encoding), replay=replay)
+    return TokenCounter(estimate=partial(_scaled_o200k_tokens, _margin(name)), replay=replay)
 
 
 def openai_model_counter(model_id: str) -> TokenCounter:

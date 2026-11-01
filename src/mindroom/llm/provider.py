@@ -61,21 +61,13 @@ class Capabilities:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TokenCounter:
-    """How a route counts the tokens of text its model receives; ``mindroom.token_counting`` reads it for every count.
+    """How a route estimates the tokens of text its model receives; ``mindroom.token_counting`` reads it for every count.
 
-    ``key`` identifies the counts: two counters with one key count the same text alike, so exact counts
-    and a failing endpoint's pause are kept per key. ``estimate`` counts locally and never over the network; it
-    returns None while its encoder is still loading. ``exact_locally`` says the estimate is the model's own tokenizer.
-    ``count`` counts text exactly through the provider; None when the route has no counting endpoint. ``framed``
-    says ``count`` counts the text as a whole message, framing included, which counting takes off.
+    ``estimate`` counts locally, never over the network, and returns None while its encoder is still loading.
     ``replay`` is how the route sizes explicitly replayed history, or None to size it canonically.
     """
 
-    key: str
     estimate: Callable[[str], int | None]
-    exact_locally: bool = False
-    count: Callable[[str], Awaitable[int]] | None = None
-    framed: bool = False
     replay: PortableReplayEstimator | None = None
 
 

@@ -99,7 +99,7 @@ class _ReviewRequest:
 def _transcript_budget_chars(counter: TokenCounter, messages: Sequence[Sequence[Utterance]], budget_tokens: int) -> int:
     """Return how many characters of this conversation fit ``budget_tokens``, as the review model counts them."""
     text = "\n".join(part.unredacted for message in messages for part in message)
-    tokens = count(counter, text).tokens
+    tokens = count(counter, text)
     return budget_tokens * len(text) // tokens if tokens else budget_tokens
 
 
@@ -117,7 +117,7 @@ def _review_transcript(
     budget_chars = _transcript_budget_chars(counter, messages, budget_tokens)
     for _ in range(_TRANSCRIPT_FIT_PASSES):
         transcript = render_transcript(messages, summary=summary, budget_chars=budget_chars)
-        tokens = count(counter, transcript).tokens
+        tokens = count(counter, transcript)
         if tokens <= budget_tokens:
             return transcript
         budget_chars = budget_chars * budget_tokens // tokens
@@ -126,7 +126,7 @@ def _review_transcript(
     return fit_text(
         transcript,
         budget_tokens,
-        lambda text: count(counter, text).tokens,
+        lambda text: count(counter, text),
         notice="[Earlier transcript omitted to fit the review budget.]\n",
         keep="end",
     )

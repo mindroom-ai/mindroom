@@ -71,7 +71,6 @@ import mindroom.reply_turn.locked_turn as locked_turn_module
 import mindroom.reply_turn.request as reply_request_module
 import mindroom.response_runner as response_runner_module
 import mindroom.streaming as streaming_module
-import mindroom.token_counting.counts as token_counts_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import ai as mindroom_ai
@@ -223,12 +222,11 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalDeliveryView, EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.history.request_messages import TurnMessages
-    from mindroom.llm.provider import ModelProvider, ModelRequest, TokenCounter
+    from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.orchestrator import _MultiAgentOrchestrator
     from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
-    from mindroom.token_counting.counts import TokenCount
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
     from mindroom.tool_system.tool_access import ToolKey
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -747,7 +745,7 @@ async def prepare_history_for_run_for_test(
     """
     resolved_scope = scope or HistoryScope(kind="agent", scope_id=agent_name)
     model = model or estimate_only_model()
-    static_token_estimator = await build_static_token_estimator(model.token_counter, (), (), frozenset())
+    static_token_estimator = build_static_token_estimator(model.token_counter, (), (), frozenset())
     if static_prompt_tokens is None:
         static_prompt_tokens = static_token_estimator.estimate(full_prompt)
     resolved_inputs = resolve_entity_preparation_inputs(
@@ -3769,30 +3767,6 @@ def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
 def _loaded_o200k() -> None:
     """Load the token encoder once, so no test's estimates depend on how far its background load has come."""
     load_o200k()
-
-
-_PROVIDER_COUNT_EXACT = token_counts_module.count_exact
-
-
-async def _local_count(counter: "TokenCounter", text: str) -> "TokenCount":
-    return token_counts_module.count(counter, text)
-
-
-@pytest.fixture(autouse=True)
-def _reset_token_counts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep a test's cached exact counts and cooldowns from leaking into later tests.
-
-    Replies measure what they size through the provider's counting endpoint; here they count locally, so a test's
-    model wire only sees the requests the test sends. A test of provider counting asks for ``provider_token_counts``.
-    """
-    monkeypatch.setattr(token_counts_module, "_state", token_counts_module._Counts())
-    monkeypatch.setattr(token_counts_module, "count_exact", _local_count)
-
-
-@pytest.fixture
-def provider_token_counts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Let ``measure`` reach the counting endpoints of the counters a test builds."""
-    monkeypatch.setattr(token_counts_module, "count_exact", _PROVIDER_COUNT_EXACT)
 
 
 @pytest.fixture(autouse=True)

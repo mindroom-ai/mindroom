@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
@@ -21,13 +20,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.provider import ModelIdentity, TokenCounter
-from mindroom.memory import entrypoint_withholds_lines
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.token_counting import families
-from mindroom.token_counting.counts import count_exact
 from mindroom.token_counting.families import counter_for_model
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
-from tests.fakes.token_counter import fake_token_counter
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,6 +59,10 @@ def _setup(tmp_path: Path, **settings: object) -> tuple[Config, PromptCurationAu
     return config, automation, root
 
 
+# MEMORY.md's tokens as the preload's cap counts them, each line with its newline.
+_PRELOAD_TOKENS = sum(quarter_tokens(f"{line}\n") for line in MEMORY.splitlines())
+
+
 def _plan(tmp_path: Path, **settings: object) -> tuple[_CurationPlan, Config, Path]:
     config, automation, root = _setup(tmp_path, **settings)
     plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
@@ -74,18 +75,11 @@ def _snapshot(root: Path) -> dict[str, bytes]:
 
 
 def test_the_files_are_measured_as_the_agent_s_model_estimates_them(tmp_path: Path) -> None:
-    """A model whose estimate is twice the quarter token reaches the trigger with half the text.
-
-    A check cannot wait for the provider, so plan and verify share the estimate, whatever the provider counted.
-    """
+    """A model whose estimate is twice the quarter token reaches the trigger with half the text."""
     config, automation, root = _setup(tmp_path, trigger_tokens=2_000)
     assert _plan_curation(config, root, "mind", automation, fake_token_counter()) is None
 
-    async def quarter(text: str) -> int:
-        return len(text) // 4
-
-    counter = TokenCounter(key="denser", estimate=lambda text: len(text) // 2, count=quarter)
-    asyncio.run(count_exact(counter, MEMORY))
+    counter = TokenCounter(estimate=lambda text: len(text) // 2)
     plan = _plan_curation(config, root, "mind", automation, counter)
 
     assert plan is not None
@@ -108,26 +102,6 @@ def test_curation_plans_without_the_vocabulary(tmp_path: Path, monkeypatch: pyte
 
     assert plan is not None
     assert plan.curated["MEMORY.md"] == -(-len(MEMORY) // 4)
-
-
-def test_verify_measures_on_the_basis_the_plan_used(tmp_path: Path) -> None:
-    """A provider count of an edited file during the curation reply never moves the comparison with the plan."""
-
-    async def halved(text: str) -> int:
-        return len(text) // 8
-
-    counter = fake_token_counter(count=halved)
-    config, automation, root = _setup(tmp_path)
-    plan = _plan_curation(config, root, "mind", automation, counter)
-    assert plan is not None
-    edited = "# Memory\n" + "".join(SECTIONS[:7])
-    (root / "MEMORY.md").write_text(edited, encoding="utf-8")
-    asyncio.run(count_exact(counter, edited))
-
-    result = _verify_curation(plan)
-
-    assert result.tokens_after > plan.measured_tokens * 0.8
-    assert not any("shrank" in finding for finding in result.findings)
 
 
 def test_files_under_the_trigger_ask_for_nothing(tmp_path: Path) -> None:
@@ -169,7 +143,8 @@ def test_memory_past_the_preload_line_cap_asks_for_a_cut_under_the_token_trigger
     assert (plan.upper_tokens, plan.floor_tokens) == (1163, 1098)
     prompt = _curation_prompt(config, plan)
     assert (
-        "total 1292 tokens (limit 10000), and MEMORY.md has 17 lines and 1285 tokens (preload limits 16 lines" in prompt
+        f"total 1292 tokens (limit 10000), and MEMORY.md has 17 lines and {_PRELOAD_TOKENS} tokens (preload limits 16 lines"
+        in prompt
     )
     assert "If MEMORY.md is over either preload limit" in prompt
 
@@ -186,40 +161,20 @@ def test_memory_past_the_preload_token_cap_asks_for_a_cut_under_the_token_trigge
     assert plan is not None
     assert plan.measured_tokens == 1292
     prompt = _curation_prompt(config, plan)
-    assert "MEMORY.md has 17 lines and 1285 tokens (preload limits 200 lines and 1000 tokens;" in prompt
+    assert f"MEMORY.md has 17 lines and {_PRELOAD_TOKENS} tokens (preload limits 200 lines and 1000 tokens;" in prompt
     assert "If MEMORY.md is over either preload limit, take lines out of it first" in prompt
 
 
-def test_memory_the_preload_shows_whole_asks_for_no_cut(tmp_path: Path) -> None:
-    """Whether the preload withholds lines is judged as a reply builds it, from the provider's count of the file."""
-    config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
-    config.memory.file.max_entrypoint_tokens = 1_000
-
-    async def half_the_estimate(text: str) -> int:
-        return len(text) // 8
-
-    counter = fake_token_counter(count=half_the_estimate)
-    # The file as a reply's preload counts it, without its final newline.
-    asyncio.run(count_exact(counter, MEMORY.strip()))
-    # Its 1,286 estimated tokens are 643 to the provider, so a reply preloads every line.
-    assert not entrypoint_withholds_lines(MEMORY, config, counter)
-
-    assert _plan_curation(config, root, "mind", automation, counter) is None
-
-
 def test_the_prompt_shows_memory_on_the_basis_the_preload_judges_it(tmp_path: Path) -> None:
-    """MEMORY.md's tokens in the prompt are the provider's count a reply made, the count the preload caps by."""
+    """MEMORY.md's tokens in the prompt are counted line by line, as the preload's token cap counts them."""
     config, automation, root = _setup(tmp_path)
-
-    async def half_the_estimate(text: str) -> int:
-        return len(text) // 8
-
-    counter = fake_token_counter(count=half_the_estimate)
-    asyncio.run(count_exact(counter, MEMORY.strip()))
+    counter = TokenCounter(estimate=lambda text: len(text) // 4 + 1)
     plan = _plan_curation(config, root, "mind", automation, counter)
 
     assert plan is not None
-    assert f"MEMORY.md has 17 lines and {len(MEMORY.strip()) // 8} tokens" in _curation_prompt(config, plan)
+    per_line = sum(len(f"{line}\n") // 4 + 1 for line in MEMORY.splitlines())
+    assert per_line > counter.estimate(MEMORY)
+    assert f"MEMORY.md has 17 lines and {per_line} tokens" in _curation_prompt(config, plan)
 
 
 def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) -> None:
@@ -229,7 +184,8 @@ def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) ->
     prompt = _curation_prompt(config, plan)
 
     assert (
-        "total 1292 tokens (limit 1000), and MEMORY.md has 17 lines and 1285 tokens (preload limits 200 lines" in prompt
+        f"total 1292 tokens (limit 1000), and MEMORY.md has 17 lines and {_PRELOAD_TOKENS} tokens (preload limits 200 lines"
+        in prompt
     )
     assert "MEMORY.md (1286 tokens), SOUL.md (4 tokens), USER.md (2 tokens)" in prompt
     assert "at most 1163 tokens in total, but not below 1098" in prompt

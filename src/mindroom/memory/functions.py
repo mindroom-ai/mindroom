@@ -219,7 +219,7 @@ async def _entrypoint_preamble(
         config,
         execution_identity=execution_identity,
     )
-    entrypoint = await cap_entrypoint(entrypoint, config, counter)
+    entrypoint = await asyncio.to_thread(cap_entrypoint, entrypoint, config, counter)
     body = (
         _render_entrypoint_body(entrypoint, config, kept_copy=conversation is not None)
         if entrypoint.text or entrypoint.omitted_lines

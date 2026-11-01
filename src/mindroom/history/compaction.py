@@ -48,7 +48,7 @@ from mindroom.providers.names import provider_route
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import runs_without
 from mindroom.timing import timed
-from mindroom.token_counting.counts import TokenCount, count
+from mindroom.token_counting.counts import count
 from mindroom.tool_system.runtime_context import (
     current_requester_id,
     get_tool_runtime_context,
@@ -668,14 +668,8 @@ async def _report_committed(
 
 
 def _summary_input_tokens(summary_model: ModelProvider) -> Callable[[str], int]:
-    """Return the summary model's count of summary input text, as its route counts it."""
-    counter = summary_model.token_counter
-    return lambda text: _summary_input_count(counter, text).tokens
-
-
-def _summary_input_count(counter: TokenCounter, text: str) -> TokenCount:
-    """Count summary input with its family margin kept, since a summary input that undercounts fails its request."""
-    return count(counter, text, upper_bound=True)
+    """Return the summary model's count of summary input text, an upper bound: an input that undercounts fails."""
+    return partial(count, summary_model.token_counter, upper_bound=True)
 
 
 def _after_native_checkpoint(previous_summary: str | None, runs: Sequence[AnyRunRecord]) -> _SummarySource | None:
@@ -758,12 +752,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
     )
     attempt = 1
     while True:
-        summary_input_count = await asyncio.to_thread(
-            _summary_input_count,
-            summary_model.model.token_counter,
-            summary_input,
-        )
-        summary_input_estimate = summary_input_count.tokens
+        summary_input_estimate = await asyncio.to_thread(token_estimator, summary_input)
         attempt_fields = {
             "session_id": summarizer.session_id,
             "scope": summarizer.scope.key,
@@ -773,7 +762,6 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
             "candidate_runs": len(source.runs),
             "included_runs": len(included_runs),
             "summary_input_estimate": summary_input_estimate,
-            "summary_input_estimate_kind": summary_input_count.kind,
             "summary_input_budget_tokens": budget,
             "timeout_seconds": summarizer.timeout_seconds,
         }

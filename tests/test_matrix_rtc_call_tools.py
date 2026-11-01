@@ -1923,10 +1923,11 @@ async def test_call_responder_sizes_the_origin_brief_with_its_own_model(
         models={"thinker": ModelConfig(provider="openai", id="gpt-4o")},
     )
     runtime_paths = test_runtime_paths(tmp_path)
-    brief_counters: list[str] = []
+    counters: dict[str, TokenCounter] = {}
+    brief_counters: list[TokenCounter] = []
 
     def brief(counter: TokenCounter) -> str:
-        brief_counters.append(counter.key)
+        brief_counters.append(counter)
         return "brief text"
 
     async def fake_ai_response(_turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
@@ -1940,7 +1941,7 @@ async def test_call_responder_sizes_the_origin_brief_with_its_own_model(
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.model_token_counter",
-        lambda _config, _paths, model_name, **_kwargs: fake_token_counter(key=model_name),
+        lambda _config, _paths, model_name, **_kwargs: counters.setdefault(model_name, fake_token_counter()),
     )
     tooling = await build_call_tools(
         agent_name=AGENT,
@@ -1958,7 +1959,9 @@ async def test_call_responder_sizes_the_origin_brief_with_its_own_model(
 
     await tooling.responder("What did we decide?", None)
 
-    assert brief_counters == ["thinker"]
+    assert list(counters) == ["thinker"]
+    assert len(brief_counters) == 1
+    assert brief_counters[0] is counters["thinker"]
 
 
 @pytest.mark.asyncio

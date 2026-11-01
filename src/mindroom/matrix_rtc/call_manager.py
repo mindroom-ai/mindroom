@@ -175,7 +175,7 @@ def _build_live_instructions(
     """Use full context when it fits the voice model, which counts with ``counter``, else require full delegation."""
     suffix = f"\n\n{_LIVE_VOICE_INSTRUCTIONS}"
     complete = f"{agent_system_prompt}{suffix}"
-    complete_tokens = count(counter, complete).tokens
+    complete_tokens = count(counter, complete)
     if complete_tokens <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
         # The 8 tokens cover the newlines joining the brief to the prompt.
         remaining = min(CALL_BRIEF_TOKEN_BUDGET, _LIVE_INSTRUCTION_TOKEN_LIMIT - complete_tokens - 8)
@@ -189,7 +189,7 @@ def _build_live_instructions(
         f"You are speaking as {agent_display_name}, the configured agent in a live voice call. "
         f"{_LIVE_OVERSIZED_INSTRUCTIONS}"
     )
-    if count(counter, bounded).tokens <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
+    if count(counter, bounded) <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
         return bounded
     return f"You are the configured agent in a live voice call. {_LIVE_OVERSIZED_INSTRUCTIONS}"
 

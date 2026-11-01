@@ -1,8 +1,7 @@
 """The prompt_curation automation: when an agent's always-loaded files grow too large, ask it to condense them.
 
 The check measures `MEMORY.md` and the always-loaded context files in the workspace it maintains (`private.context_files`
-for a private agent) by the agent's model's local token estimate, an upper bound, so verify compares sizes on the basis
-the plan measured them: a check runs in a worker thread and cannot wait for the provider to count.
+for a private agent) with the agent's model's token counter.
 When they exceed the trigger, or `MEMORY.md` has more lines than the preload keeps, the prompt asks the agent for a
 bounded cut in a normal visible run.
 Agents told to "clean up" tend to cut most of a file, so verify measures the files again once the run ends and, when
@@ -25,7 +24,8 @@ from mindroom.logging_config import get_logger
 from mindroom.memory import entrypoint_tokens, entrypoint_withholds_lines, read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.providers.registry import model_token_counter
-from mindroom.token_counting.counts import count, estimated
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import load_o200k
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -87,7 +87,7 @@ def _read(root: Path, path: str) -> bytes | None:
 
 
 def _tokens(counter: TokenCounter, payload: bytes) -> int:
-    return count(counter, payload.decode("utf-8")).tokens
+    return count(counter, payload.decode("utf-8"))
 
 
 def _memory_dir_tokens(root: Path, exclude: Iterable[str], counter: TokenCounter) -> int:
@@ -97,7 +97,7 @@ def _memory_dir_tokens(root: Path, exclude: Iterable[str], counter: TokenCounter
     """
     excluded = set(exclude)
     return sum(
-        count(counter, memory_file.text).tokens
+        count(counter, memory_file.text)
         for memory_file in read_scope_memory_files(root)
         if memory_file.relative_path.startswith(_MEMORY_DIR_PREFIX) and memory_file.relative_path not in excluded
     )
@@ -118,12 +118,10 @@ def _plan_curation(
 
     Raises ``OSError``, ``ValueError``, or ``UnicodeDecodeError`` for a file that cannot be read safely.
     """
-    # Verify compares its sizes with these, so both measure by the estimate alone, on the encoder this plan had.
-    measure = estimated(counter)
     curated_payloads = {
         path: payload for path in _curated_paths(config, agent_name) if (payload := _read(root, path)) is not None
     }
-    curated = {path: _tokens(measure, payload) for path, payload in curated_payloads.items()}
+    curated = {path: _tokens(counter, payload) for path, payload in curated_payloads.items()}
     measured = sum(curated.values())
     memory_text = curated_payloads.get(_ENTRYPOINT, b"").decode("utf-8")
     memory_lines = len(memory_text.splitlines())
@@ -135,7 +133,7 @@ def _plan_curation(
         root=root,
         settings=settings,
         snapshot=curated_payloads,
-        memory_tokens=_memory_dir_tokens(root, curated_payloads, measure),
+        memory_tokens=_memory_dir_tokens(root, curated_payloads, counter),
         curated=curated,
         memory_lines=memory_lines,
         entrypoint_tokens=entrypoint_tokens(memory_text, counter),
@@ -143,7 +141,7 @@ def _plan_curation(
         max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
         upper_tokens=round(measured * (1 - settings.min_reduction)),
         floor_tokens=round(measured * (1 - settings.max_reduction)),
-        counter=measure,
+        counter=counter,
     )
 
 
@@ -250,6 +248,8 @@ def check_curation(ctx: AutomationContext) -> Ask | None:
         msg = f"prompt_curation cannot run the {ctx.entry.name} entry"
         raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
     config, agent_name = ctx.config, ctx.agent_name
+    # Verification compares its sizes with this plan's, so both count after the vocabulary has loaded.
+    load_o200k()
     # The workspace of an agent with file memory, which this automation requires, is its file-memory root.
     counter = model_token_counter(
         config,

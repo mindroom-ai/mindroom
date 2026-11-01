@@ -19,8 +19,8 @@ from mindroom.attachments.storage import _attachment_id_for_event, register_loca
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
-    HISTORY_ANCHOR_RUN_METADATA_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -53,7 +53,6 @@ from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
 from mindroom.history.types import (
     CompactionDecision,
-    HistoryAnchor,
     HistoryPolicy,
     PreparedHistoryState,
     ResolvedReplayPlan,
@@ -64,7 +63,6 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.types import ConversationSession
 from mindroom.timestamp_formatting import format_timestamp_ms
-from mindroom.token_counting.counts import TokenCount, count
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
@@ -234,7 +232,6 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         compaction_decision=CompactionDecision(mode="none", reason="auto_disabled"),
         native_history=None,
         counter=fake_token_counter(),
-        non_prompt_tokens=0,
     )
 
 
@@ -559,21 +556,20 @@ def test_scheduled_limit_caps_larger_plans_only() -> None:
 
 
 @pytest.mark.parametrize("limit", [0, 2])
-def test_a_scheduled_limit_leaves_no_anchor_for_the_next_reply(limit: int) -> None:
+def test_a_scheduled_limit_publishes_a_cut_plan_for_the_next_reply(limit: int) -> None:
     """A scheduled run replays at most its limit, so the size its provider reports cannot size the whole history."""
     prepared = PreparedHistoryState(
         replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=500, add_history_to_context=True),
         replays_persisted_history=True,
         prepared_context_tokens=1_500,
-        history_anchor=HistoryAnchor(1_000, "fake", None),
         native_history=None,
     )
-    assert HISTORY_ANCHOR_RUN_METADATA_KEY in build_prepared_history_metadata_content(prepared)
 
     capped = _prepared_history_with_scheduled_limit(prepared, limit)
 
-    # The run records no system prompt and tools, so the next reply sizes its history by estimate.
-    assert HISTORY_ANCHOR_RUN_METADATA_KEY not in build_prepared_history_metadata_content(capped)
+    # The next reply sizes history from a reported size only after a request that published a configured plan.
+    published = build_prepared_history_metadata_content(capped)[AI_RUN_METADATA_KEY]["compaction"]["replay_plan"]
+    assert published["mode"] != "configured"
 
 
 def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:
@@ -889,7 +885,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
     tools = PreparedTools(functions=build.spec.functions).specs()
     assert tools
     counter = build.spec.model.token_counter
-    estimator = await build_static_token_estimator(
+    estimator = build_static_token_estimator(
         counter,
         system_messages,
         tools,
@@ -902,51 +898,8 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
     assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens
     assert (
         estimator.non_prompt_tokens
-        > (await build_static_token_estimator(counter, system_messages, (), frozenset())).non_prompt_tokens
+        > build_static_token_estimator(counter, system_messages, (), frozenset()).non_prompt_tokens
     )
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("provider_token_counts")
-async def test_reply_preparation_sizes_the_static_prompt_by_the_providers_count(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The reply waits for the provider to count the system prompt and tools, and sizes them by that count."""
-    counted: list[str] = []
-
-    async def endpoint(text: str) -> int:
-        counted.append(text)
-        return len(text)
-
-    config, runtime_paths = _bound_agent_config(tmp_path, tools=("calculator",))
-    build = _build(config, runtime_paths)
-    counter = fake_token_counter(count=endpoint)
-    build = replace(build, spec=replace(build.spec, model=ScriptedModel([], token_counter=counter)))
-    system_messages = prompt_for_turn(build)
-    prepare_scope_history = AsyncMock(return_value=MagicMock())
-    monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare_scope_history)
-    monkeypatch.setattr(
-        execution_preparation,
-        "finalize_history_preparation",
-        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
-    )
-
-    await _prepare_agent_execution_context_for_test(
-        make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
-        scope_context=None,
-        build=build,
-        system_messages=system_messages,
-        prompt="Current request",
-        thread_history=None,
-        runtime_paths=runtime_paths,
-        config=config,
-        resolved_runtime_model=resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent"), None),
-    )
-
-    assert counted
-    assert all(count(counter, text) == TokenCount(len(text), "exact") for text in counted)
-    assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == sum(len(text) for text in counted)
 
 
 @pytest.mark.asyncio
@@ -965,7 +918,7 @@ async def test_reply_preparation_counts_tokens_off_the_event_loop(
 
     config, runtime_paths = _bound_agent_config(tmp_path, tools=("calculator",))
     build = _build(config, runtime_paths)
-    counter = TokenCounter(key="slow", estimate=slow_estimate)
+    counter = TokenCounter(estimate=slow_estimate)
     build = replace(build, spec=replace(build.spec, model=ScriptedModel([], token_counter=counter)))
     monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
     monkeypatch.setattr(
@@ -1041,7 +994,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     )
 
     assert [message.role for message in prepared.turn.context] == ["user", "assistant"]
-    estimator = await build_static_token_estimator(fake_token_counter(), leader_system_messages, (), frozenset())
+    estimator = build_static_token_estimator(fake_token_counter(), leader_system_messages, (), frozenset())
     # Persisted replay is budgeted around the turn's estimate; fallback replay records the estimate of its own turn.
     sized = static_prompt_tokens[0] if replays_persisted_history else prepared.prepared_history.prepared_context_tokens
     assert sized == estimator.estimate(render_prepared_messages_text(prepared.turn.in_request_order()))

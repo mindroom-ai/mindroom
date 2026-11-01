@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.constants import HISTORY_ANCHOR_RUN_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
     ConversationChangedError,
@@ -33,7 +33,6 @@ from mindroom.history.replay import (
     has_effective_persisted_replay,
     log_replay_plan,
     plan_replay_that_fits,
-    prompt_visible_history_texts,
     scope_visible_runs,
 )
 from mindroom.history.storage import (
@@ -50,7 +49,6 @@ from mindroom.history.types import (
     CompactionLifecycleStatus,
     CompactionMode,
     CompactionReplyOutcome,
-    HistoryAnchor,
     HistoryScope,
     HistoryScopeState,
     PreparedHistoryState,
@@ -61,11 +59,10 @@ from mindroom.history.types import (
 from mindroom.llm.messages import is_own_model_message
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import message_context_tokens
-from mindroom.native_compaction import checkpoint_items
+from mindroom.native_compaction import native_checkpoint_id
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.timing import timed
-from mindroom.token_counting.counts import measure
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -144,8 +141,6 @@ class PreparedScopeHistory:
     native_history: NativeHistory | None
     # How the route the run's requests go to counts tokens, which the final replay plan sizes with.
     counter: TokenCounter
-    # The system prompt and tools tokens the run's requests are sized with.
-    non_prompt_tokens: int
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     # The history size the provider reported for the scope's latest request, when it still describes the history the
     # run replays; the final replay plan sizes with it as the compaction check did.
@@ -181,7 +176,6 @@ async def prepare_scope_history(
                 runs=(),
             ),
             counter=counter,
-            non_prompt_tokens=non_prompt_tokens,
         )
 
     execution_plan = resolved_inputs.execution_plan
@@ -213,14 +207,22 @@ async def prepare_scope_history(
         history_settings=resolved_inputs.history_settings,
         counter=counter,
     )
-    reported_history_tokens, estimated_history_tokens = await _history_sizes(
-        session=session,
-        visible_runs=visible_runs,
-        resolved_inputs=resolved_inputs,
-        config=config,
-        model=model,
-        non_prompt_tokens=non_prompt_tokens,
-        native_route=native_route,
+    # Large provider projections spend seconds in tokenizers that release the GIL.
+    estimated_history_tokens = await asyncio.to_thread(estimate_history_tokens, native_route=native_route)
+    reported_history_tokens = (
+        await asyncio.to_thread(
+            partial(
+                _reported_history_tokens,
+                session=session,
+                visible_runs=visible_runs,
+                resolved_inputs=resolved_inputs,
+                config=config,
+                model=model,
+                non_prompt_tokens=non_prompt_tokens,
+            ),
+        )
+        if visible_runs
+        else None
     )
     # The provider's count of the latest request is closer than an estimate of the whole history.
     current_history_tokens = estimated_history_tokens if reported_history_tokens is None else reported_history_tokens
@@ -316,13 +318,12 @@ async def prepare_scope_history(
         compaction_reply_outcome=compaction_reply_outcome,
         native_history=native_history,
         counter=counter,
-        non_prompt_tokens=non_prompt_tokens,
         # A compaction rewrote the history that request held.
         reported_history_tokens=reported_history_tokens if compaction_decision.mode != "required" else None,
     )
 
 
-async def _history_sizes(
+def _reported_history_tokens(
     *,
     session: ConversationSession,
     visible_runs: list[AnyRunRecord],
@@ -330,72 +331,14 @@ async def _history_sizes(
     config: Config,
     model: ModelProvider,
     non_prompt_tokens: int,
-    native_route: str | None,
-) -> tuple[int | None, int]:
-    """Return the history size the provider reported for the scope's latest request, if still current, and its estimate.
-
-    Without a report, the reply first waits for the provider to count the history, so the estimate reads exact counts;
-    history that holds a native checkpoint keeps its estimate. Large provider projections spend seconds in tokenizers
-    that release the GIL, so sizing runs in worker threads.
-    """
-    counter = model.token_counter
-    history_settings = resolved_inputs.history_settings
-    reported = (
-        await asyncio.to_thread(
-            partial(
-                _reported_history_tokens,
-                session=session,
-                latest_run=visible_runs[-1],
-                resolved_inputs=resolved_inputs,
-                config=config,
-                model=model,
-                non_prompt_tokens=non_prompt_tokens,
-                native_route=native_route,
-            ),
-        )
-        if visible_runs
-        else None
-    )
-    if reported is None:
-        texts = await asyncio.to_thread(
-            partial(
-                prompt_visible_history_texts,
-                session=session,
-                history_settings=history_settings,
-                counter=counter,
-                native_route=native_route,
-            ),
-        )
-        await measure(counter, *texts)
-    estimated = await asyncio.to_thread(
-        partial(
-            estimate_prompt_visible_history_tokens,
-            session=session,
-            history_settings=history_settings,
-            counter=counter,
-            native_route=native_route,
-        ),
-    )
-    return reported, estimated
-
-
-def _reported_history_tokens(
-    *,
-    session: ConversationSession,
-    latest_run: AnyRunRecord,
-    resolved_inputs: HistoryPreparationInputs,
-    config: Config,
-    model: ModelProvider,
-    non_prompt_tokens: int,
-    native_route: str | None,
 ) -> int | None:
     """Size history from the request the provider reported for the scope's latest answer, or None when stale.
 
-    That request held the system prompt and tools its run records it was sized with, and all the history this reply
-    replays except the answer. The replay budgets are what the window leaves after today's static estimate, whose
-    system prompt and tools are ``non_prompt_tokens``, so the smaller of the two is taken off: a system prompt grown
-    since then counts in today's estimate rather than as history that shrank, and one that shrank stays counted.
+    That request held the system prompt, the tools, and all the history this reply replays except the answer.
+    The replay budgets are what the window leaves after the static estimate, so taking off that estimate's system
+    prompt and tools share, ``non_prompt_tokens``, converts the count to their units.
     """
+    latest_run = visible_runs[-1]
     if (
         # Replay limits drop the oldest content as runs accrue, so that request held more than will replay.
         not resolved_inputs.history_settings.replays_whole_history
@@ -403,22 +346,21 @@ def _reported_history_tokens(
         or (latest_run.model, latest_run.model_provider) != (model.identity.id, model.identity.provider)
     ):
         return None
-    recorded = HistoryAnchor.from_metadata((latest_run.metadata or {}).get(HISTORY_ANCHOR_RUN_METADATA_KEY))
-    # Without what that request's system prompt and tools came to, as this route counts them, its history cannot be told
-    # apart; and a request on another native route, or none, replayed history another way.
-    if recorded is None or (recorded.counter_key, recorded.native_route) != (model.token_counter.key, native_route):
+    # A request whose replay plan cut the history reported the size of the part it sent.
+    if _replay_plan_mode(latest_run) != "configured":
         return None
     messages = latest_run.messages
     anchor = next(
         (index for index in range(len(messages) - 1, -1, -1) if is_own_model_message(messages[index])),
         None,
     )
-    # History replay drops or bounds media that request carried in full, and a response that created a native
-    # checkpoint is billed for the transcript the checkpoint replaced.
+    # History replay drops or bounds media that request carried in full. A native checkpoint stands in for the transcript
+    # before it on its own route only, and the response that created it was billed for that transcript, so a request
+    # sizes this reply's history only while no checkpoint exists.
     if (
         anchor is None
         or any(message.images or message.audio or message.videos or message.files for message in messages)
-        or checkpoint_items(messages[anchor], native_route)
+        or any(native_checkpoint_id(message) for run in visible_runs for message in run.messages)
     ):
         return None
     answer = messages[anchor]
@@ -433,7 +375,15 @@ def _reported_history_tokens(
     # Sized as the next request replays them: as history, whose earlier reasoning a model may render.
     replayed = [replace(message, from_history=True) for message in messages[anchor:]]
     newer_tokens = estimate_request_messages_tokens(replayed, counter=model.token_counter)
-    return reported + newer_tokens - min(recorded.non_prompt_tokens, non_prompt_tokens)
+    return reported + newer_tokens - non_prompt_tokens
+
+
+def _replay_plan_mode(run: AnyRunRecord) -> object:
+    """Return the replay plan mode the run's published metadata records, or None when it records none."""
+    ai_run = (run.metadata or {}).get(AI_RUN_METADATA_KEY)
+    compaction = ai_run.get("compaction") if isinstance(ai_run, dict) else None
+    plan = compaction.get("replay_plan") if isinstance(compaction, dict) else None
+    return plan.get("mode") if isinstance(plan, dict) else None
 
 
 def reported_context_tokens(message: Message, *, model: ModelProvider, config: Config, model_name: str) -> int | None:
@@ -795,12 +745,6 @@ def finalize_history_preparation(
         compaction_decision=prepared_scope_history.compaction_decision,
         compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
         prepared_context_tokens=prepared_context_tokens,
-        # Authored replay limits keep older history out of every request, and a native checkpoint stands in for it.
-        history_anchor=(
-            HistoryAnchor(prepared_scope_history.non_prompt_tokens, counter.key, native_history_route(native_history))
-            if history_settings.replays_whole_history
-            else None
-        ),
         native_history=native_history,
     )
 

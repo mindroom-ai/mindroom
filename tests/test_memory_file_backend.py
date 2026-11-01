@@ -39,8 +39,8 @@ from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
 from mindroom.token_counting import families
-from mindroom.token_counting.counts import count, count_exact
-from mindroom.token_counting.families import counter_for_model
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import counter_for_model, load_o200k
 from mindroom.tool_system.runtime_context import current_execution_identity, detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -1521,25 +1521,6 @@ async def test_file_backend_entrypoint_token_cap_keeps_whole_lines(
     assert str(memory_path) in prompt_parts.session_preamble
 
 
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_token_cap_counts_newlines_across_many_short_lines(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """The cap measures the joined text, so many short lines cannot each round down past it."""
-    config.memory.file.max_entrypoint_lines = 500
-    config.memory.file.max_entrypoint_tokens = 200
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text("abcdef\n" * 200, encoding="utf-8")
-
-    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
-
-    # 114 lines join to 797 characters (199 tokens); 115 would be 804 (201 tokens).
-    assert "[Memory entrypoint truncated - showing 114 of 200 lines" in prompt_parts.session_preamble
-
-
 def _fact_lines(storage_path: Path, config: Config, count_lines: int) -> list[str]:
     """Write a MEMORY.md of ``count_lines`` 41-character facts under a 100-token cap, and return its lines."""
     config.memory.file.max_entrypoint_lines = 500
@@ -1556,60 +1537,41 @@ async def _preloaded(lines: list[str], config: Config, counter: TokenCounter) ->
     return [line for line in lines if line in parts.session_preamble]
 
 
+def _line_tokens(counter: TokenCounter, lines: list[str]) -> int:
+    return sum(count(counter, f"{line}\n", upper_bound=True) for line in lines)
+
+
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("provider_token_counts")
-@pytest.mark.parametrize("characters_per_token", [2, 8], ids=["denser-than-the-estimate", "sparser-than-the-estimate"])
-async def test_file_backend_entrypoint_fills_the_token_cap_as_the_provider_counts_it(
+@pytest.mark.parametrize(
+    "identity",
+    [ModelIdentity(id="gpt-4o", provider="openai"), ModelIdentity(id="claude-opus-5-5", provider="anthropic")],
+    ids=["own-tokenizer", "family-estimate"],
+)
+async def test_file_backend_entrypoint_fills_the_token_cap_as_the_model_counts_it(
     storage_path: Path,
     config: Config,
-    characters_per_token: int,
+    identity: ModelIdentity,
 ) -> None:
-    """The provider counts the file and the preload, so the preload holds as many lines as fit the cap, and no more."""
+    """The preload keeps as many whole lines as fit the cap, each counted with its newline, and the text fits it."""
+    load_o200k()
     lines = _fact_lines(storage_path, config, 40)
+    counter = counter_for_model(identity, local_encoder=identity.provider == "openai")
 
-    async def endpoint(text: str) -> int:
-        return len(text) // characters_per_token
-
-    counter = fake_token_counter(count=endpoint)
     kept = await _preloaded(lines, config, counter)
 
-    assert await endpoint("\n".join(kept)) <= 100 < await endpoint("\n".join(lines[: len(kept) + 1]))
+    assert count(counter, "\n".join(kept)) <= _line_tokens(counter, kept) <= 100
+    assert _line_tokens(counter, lines[: len(kept) + 1]) > 100
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("provider_token_counts")
-@pytest.mark.parametrize("line_count", [5, 300], ids=["within-both-caps", "over-the-line-cap"])
-async def test_file_backend_entrypoint_within_the_token_cap_costs_no_count(
-    storage_path: Path,
-    config: Config,
-    line_count: int,
-) -> None:
-    """The estimate, an upper bound, already shows the file fits the token cap, so no reply waits for a count."""
-    lines = _fact_lines(storage_path, config, line_count)
-    config.memory.file.max_entrypoint_lines = 200
-    config.memory.file.max_entrypoint_tokens = 50_000
-    calls: list[str] = []
-
-    async def endpoint(text: str) -> int:
-        calls.append(text)
-        return len(text) // 4
-
-    kept = await _preloaded(lines, config, fake_token_counter(count=endpoint))
-
-    assert calls == []
-    assert len(kept) == min(line_count, 200)
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("provider_token_counts")
 async def test_file_backend_entrypoint_fits_the_cap_before_the_vocabulary_loads(
     storage_path: Path,
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The first reply after a start, before o200k_base loads, still asks the provider whether the file fits.
+    """Before o200k_base loads, each line counts its UTF-8 bytes, which no model's tokenizer exceeds.
 
-    A quarter token per character puts the file at 420 tokens, under the 500-token cap; the provider counts 840.
+    A quarter token per character would put the file at 420 tokens, under the 500-token cap.
     """
     lines = _fact_lines(storage_path, config, 40)
     config.memory.file.max_entrypoint_tokens = 500
@@ -1622,90 +1584,38 @@ async def test_file_backend_entrypoint_fits_the_cap_before_the_vocabulary_loads(
 
     monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
     monkeypatch.setattr(tiktoken, "get_encoding", slow_get_encoding)
-
-    async def endpoint(text: str) -> int:
-        return len(text) // 2
-
-    counter = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"), count=endpoint)
+    counter = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"))
     try:
         kept = await _preloaded(lines, config, counter)
     finally:
         release.set()
 
-    assert await endpoint("\n".join(kept)) <= 500 < await endpoint("\n".join(lines))
+    def utf8_bytes(chosen: list[str]) -> int:
+        return sum(len(f"{line}\n".encode()) for line in chosen)
+
+    assert utf8_bytes(kept) <= 500 < utf8_bytes(lines[: len(kept) + 1])
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("provider_token_counts")
-async def test_file_backend_entrypoint_cut_of_an_unchanged_file_is_stable(storage_path: Path, config: Config) -> None:
-    """Later replies read the provider's counts of an unchanged file and its preload, and keep the same cut."""
-    lines = _fact_lines(storage_path, config, 40)
-    calls: list[str] = []
-
-    async def endpoint(text: str) -> int:
-        calls.append(text)
-        return len(text) // 2
-
-    counter = fake_token_counter(count=endpoint)
-    first = await _preloaded(lines, config, counter)
-    counted = len(calls)
-
-    assert counted
-    assert await _preloaded(lines, config, counter) == first
-    assert len(calls) == counted
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_cut_never_counts_one_preload_twice(storage_path: Path, config: Config) -> None:
-    """Each pass of the cut drops at least one line, so a route without cached counts never counts one preload twice."""
-    config.memory.file.max_entrypoint_lines = 500
-    config.memory.file.max_entrypoint_tokens = 450
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    # Dense lines lead the file, so its average rate undercounts the preload that keeps them.
-    lines = ["y" * 100] * 5 + ["x" * 100] * 45
-    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    counted: list[str] = []
-
-    def estimate(text: str) -> int:
-        counted.append(text)
-        return text.count("y") + text.count("x") // 4
-
-    counter = TokenCounter(key="dense-head", estimate=estimate)
-    parts = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
-
-    preloads = [text for text in counted if text.startswith("y") and text != "\n".join(lines)]
-    assert len(preloads) == len(set(preloads))
-    assert "\n".join(lines[:4]) in parts.session_preamble
-    assert "\n".join(lines[:5]) not in parts.session_preamble
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_rescale_keeps_the_head_and_the_newest_entries(
+async def test_file_backend_entrypoint_over_the_cap_keeps_the_head_and_the_newest_entries(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """A provider count over the cap shrinks the newest entries kept, never the curated head before them."""
+    """A file over the cap keeps its curated head, then the newest entries that fit."""
     config.memory.file.max_entrypoint_tokens = 120
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     entries = [f"- [id=m{index:02}] Entry {index:02} " + "w" * 24 for index in range(20)]
     (workspace / "MEMORY.md").write_text("# Memory\nCurated fact.\n" + "\n".join(entries) + "\n", encoding="utf-8")
 
-    async def double(text: str) -> int:
-        return len(text) // 2
-
-    counter = fake_token_counter(count=double)
-    first = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
-    preload = "\n".join(["# Memory", "Curated fact.", *[entry for entry in entries if entry in first.session_preamble]])
-    assert (await count_exact(counter, preload)).tokens > 120
-
+    counter = TokenCounter(estimate=lambda text: len(text) // 2)
     counted = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
 
     kept = [entry for entry in entries if entry in counted.session_preamble]
     assert "# Memory\nCurated fact." in counted.session_preamble
+    assert 0 < len(kept) < len(entries)
     assert kept == entries[len(entries) - len(kept) :]
-    assert count(counter, "\n".join(["# Memory", "Curated fact.", *kept])).tokens <= 120
+    assert _line_tokens(counter, ["# Memory", "Curated fact.", *kept]) <= 120
 
 
 @pytest.mark.asyncio
