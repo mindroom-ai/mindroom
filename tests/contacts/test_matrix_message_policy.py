@@ -572,6 +572,32 @@ async def test_a_contact_turn_cannot_write_into_its_room_once_the_contact_is_rem
 
 
 @pytest.mark.asyncio
+async def test_a_keyed_send_prepared_before_removal_is_never_delivered_after_it(tmp_path: Path) -> None:
+    """A keyed send stored while the contact was active is refused on retry once it is removed, and nothing is left."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    context = _context(config, paths)
+    async with claim_matrix_message_send(context, CONTACT_ROOM, "answer-1") as claim:
+        await claim.prepare(
+            {"msgtype": "m.text", "body": "Dinner at eight?"},
+            recipient=None,
+            recipient_user_id=None,
+            thread_id=THREAD_ID,
+            starts_thread=False,
+        )
+    _remove(paths)
+
+    refused = await _call(context, message="Dinner at eight?", idempotency_key="answer-1")
+    retried = await _call(context, message="Dinner at eight?", idempotency_key="answer-1")
+
+    assert (refused["status"], refused["message"]) == ("error", REMOVED_ERROR)
+    assert (retried["status"], retried["message"]) == ("error", REMOVED_ERROR)
+    assert _sent(context) == []
+    async with claim_matrix_message_send(context, CONTACT_ROOM, "answer-1") as claim:
+        assert claim.intent is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("call", _WRITES)
 async def test_no_turn_writes_into_a_removed_contacts_room(tmp_path: Path, call: dict[str, object]) -> None:

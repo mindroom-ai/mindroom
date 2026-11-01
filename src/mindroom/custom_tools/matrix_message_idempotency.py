@@ -173,6 +173,14 @@ class MatrixMessageSendClaim:
             raise MatrixMessageIdempotencyError(_CAPACITY_ERROR)
         await run_blocking_until_complete(_write, self.path, self.state)
 
+    async def discard(self) -> None:
+        """Forget a prepared send that Matrix never confirmed, so no retry with its key can deliver it."""
+        intent = self.intent
+        assert intent is not None
+        assert intent.event_id is None
+        del self.state.sends[self.key]
+        await run_blocking_until_complete(_write, self.path, self.state)
+
     async def deliver(self) -> tuple[str, str | None]:
         """Return success only after Matrix acknowledgement and durable receipt storage."""
         intent = self.intent
