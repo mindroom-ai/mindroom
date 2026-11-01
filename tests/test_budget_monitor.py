@@ -8,12 +8,15 @@ import json
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock
 
 import pytest
 from structlog.testing import capture_logs
 
 from mindroom.budgets import monitor as monitor_module
+from mindroom.budgets import spend_state as spend_state_module
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model, budget_user_id
 from mindroom.budgets.pricing import model_prices, run_cost_usd
@@ -27,16 +30,17 @@ from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.providers.registry import build_model_provider
+from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.budget_helpers import set_month_spend
-from tests.conftest import persist_session
+from tests.conftest import orchestrator_runtime_paths, persist_session
 from tests.identity_helpers import fixture_entity_matrix_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-    from pathlib import Path
 
 ALICE = "@alice:example.test"
 ALICE_BRIDGE = "@telegram-alice:example.test"
@@ -815,6 +819,12 @@ def _state_path(tmp_path: Path) -> Path:
     return budget_caps_path(_paths(tmp_path)).parent / "spend_state.json"
 
 
+async def _idle_stop(monitor: BudgetMonitor) -> None:
+    """Stop ``monitor`` as a runtime with no live work does."""
+    monitor.keep_on_stop = True
+    await monitor.stop()
+
+
 async def _restarted(tmp_path: Path, config: Config, clock: _Clock, **timing: float) -> BudgetMonitor:
     """Return a fresh monitor over the storage an earlier monitor used, synced to ``config``."""
     monitor, _current = _monitor(tmp_path, config, clock, **timing)
@@ -846,7 +856,7 @@ async def test_a_clean_stop_and_restart_resumes_the_kept_spend_without_a_scan(
     before.response_finished(CAROL, 0.25, OCTOBER)
     status = before.status()
     spend = {user_id: before._spend_usd(user_id) for user_id in (ALICE, BOB, CAROL)}
-    await before.stop()
+    await _idle_stop(before)
     assert json.loads(_state_path(tmp_path).read_text())["reply_costs"] == {ALICE: 1.0, CAROL: 0.25}
 
     clock.now = OCTOBER + timedelta(hours=5)
@@ -878,7 +888,7 @@ async def test_a_start_without_a_clean_stop_right_before_it_scans(
     await before.sync(_config())
     await _until(lambda: before.status().snapshot is not None)
     if reason != "crashed":
-        await before.stop()
+        await _idle_stop(before)
         assert _state_path(tmp_path).exists()
     if reason == "reply_after_stop":
         before.response_finished(ALICE, 1.0, OCTOBER)
@@ -899,7 +909,7 @@ async def test_a_start_without_a_clean_stop_right_before_it_scans(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "reason",
-    ["stale", "last_month", "repriced", "agent_added", "requested", "scanning", "budgets_off"],
+    ["stale", "last_month", "repriced", "agent_added", "requested", "scanning", "budgets_off", "busy"],
 )
 async def test_a_restart_scans_when_the_kept_spend_cannot_stand_in(
     tmp_path: Path,
@@ -929,6 +939,8 @@ async def test_a_restart_scans_when_the_kept_spend_cannot_stand_in(
     elif reason == "budgets_off":
         current[0] = _config().model_copy(update={"budgets": None})
         await before.sync(current[0])
+    # A shutdown that cancels live work keeps nothing: a cancelled reply stores its usage without reporting its cost.
+    before.keep_on_stop = reason != "busy"
     await before.stop()
     scans.release.set()
     await _quiet()
@@ -1050,3 +1062,209 @@ def test_the_fingerprint_follows_what_a_scan_counts_not_how_the_config_is_writte
     assert spend_fingerprint(reordered, paths) == fingerprint
     assert all(spend_fingerprint(changed, paths) != fingerprint for changed in changes)
     assert spend_fingerprint(config, moved_sessions) != fingerprint
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("await_paused", "cost_usd"), [("loop", 1.0), ("loop", None), ("write", 1.0), ("write", None)])
+async def test_a_reply_finishing_while_the_stop_keeps_spend_makes_the_next_start_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    await_paused: str,
+    cost_usd: float | None,
+) -> None:
+    clock = _Clock()
+    scans = _Scans(monkeypatch, {ALICE: 9.0})
+    before, _current = _monitor(tmp_path, _config(), clock)
+    await before.sync(_config())
+    await _until(lambda: before.status().snapshot is not None)
+    paused, resume = threading.Event(), threading.Event()
+    if await_paused == "loop":
+        stop_loop = before._loop.stop
+
+        async def pause_loop_stop() -> None:
+            paused.set()
+            await asyncio.to_thread(resume.wait, 5)
+            await stop_loop()
+
+        monkeypatch.setattr(before._loop, "stop", pause_loop_stop)
+    else:
+        write = monitor_module.write_json_file_durable
+
+        def pause_write(*args: Any) -> None:  # noqa: ANN401
+            paused.set()
+            resume.wait(5)
+            write(*args)
+
+        monkeypatch.setattr(monitor_module, "write_json_file_durable", pause_write)
+    before.keep_on_stop = True
+    stopping = asyncio.create_task(before.stop())
+    await _until(paused.is_set)
+
+    before.response_finished(ALICE, cost_usd, OCTOBER)
+    resume.set()
+    await stopping
+
+    assert not _state_path(tmp_path).exists()
+    restarted = await _restarted(tmp_path, _config(), clock)
+    await _until(lambda: scans.calls == 2)
+    await restarted.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["at_load", "after_stop", "delete_and_overwrite"])
+async def test_kept_spend_that_cannot_be_deleted_is_never_resumed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: str,
+) -> None:
+    """A file that cannot be deleted is overwritten with state no start accepts, or removed once deleting works."""
+    clock = _Clock()
+    scans = _Scans(monkeypatch, {ALICE: 9.0})
+    first, _current = _monitor(tmp_path, _config(), clock)
+    await first.sync(_config())
+    await _until(lambda: first.status().snapshot is not None)
+    await _idle_stop(first)
+    path = _state_path(tmp_path)
+    unlink = Path.unlink
+
+    def fail_on_kept_state(self: Path, *, missing_ok: bool = False) -> None:
+        if self == path:
+            msg = "read-only file system"
+            raise OSError(msg)
+        unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_on_kept_state)
+    if failing == "delete_and_overwrite":
+        monkeypatch.setattr(spend_state_module, "write_json_file_durable", lambda *_args: fail_on_kept_state(path))
+    if failing == "at_load":
+        # This start reads the kept spend but cannot delete it, and then crashes after more spend.
+        _monitor(tmp_path, _config(), clock)[0].response_finished(ALICE, 1.0, OCTOBER)
+    else:
+        # More spend after the stop, and then a crash.
+        first.response_finished(ALICE, 1.0, OCTOBER)
+    if failing == "delete_and_overwrite":
+        monkeypatch.undo()
+        scans = _Scans(monkeypatch, {ALICE: 9.0})
+        scans.calls = 1
+        # The next reply after the file system recovers removes it.
+        first.response_finished(ALICE, 1.0, OCTOBER)
+    else:
+        monkeypatch.setattr(Path, "unlink", unlink)
+
+    restarted = await _restarted(tmp_path, _config(), clock)
+
+    await _until(lambda: scans.calls == 2)
+    await restarted.stop()
+
+
+def test_kept_spend_a_start_cannot_remove_or_overwrite_is_not_used(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _state_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(_kept_state_json({ALICE: 8.0}))
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        msg = "read-only file system"
+        raise OSError(msg)
+
+    monkeypatch.setattr(Path, "unlink", fail)
+    monkeypatch.setattr(spend_state_module, "write_json_file_durable", fail)
+    monitor, _current = _monitor(tmp_path, _config())
+
+    assert monitor.status().snapshot is None
+    assert monitor._spend_usd(ALICE) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_write_of_kept_spend_makes_the_next_start_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock()
+    scans = _Scans(monkeypatch, {ALICE: 9.0})
+    before, _current = _monitor(tmp_path, _config(), clock)
+    await before.sync(_config())
+    await _until(lambda: before.status().snapshot is not None)
+    # What an earlier stop kept must not survive a stop whose own state cannot be written.
+    _state_path(tmp_path).parent.mkdir(parents=True)
+    _state_path(tmp_path).write_text(_kept_state_json({ALICE: 1.0}))
+
+    def fail(*_args: object) -> None:
+        msg = "no space left on device"
+        raise OSError(msg)
+
+    monkeypatch.setattr(monitor_module, "write_json_file_durable", fail)
+    await _idle_stop(before)
+
+    assert not _state_path(tmp_path).exists()
+    restarted = await _restarted(tmp_path, _config(), clock)
+    await _until(lambda: scans.calls == 2)
+    await restarted.stop()
+
+
+def test_kept_spend_of_an_earlier_month_shows_nothing_before_the_first_sync(tmp_path: Path) -> None:
+    path = _state_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(_kept_state_json({ALICE: 50.0}, reply_costs={BOB: 5.0}))
+    clock = _Clock()
+    clock.now = datetime(2026, 11, 2, tzinfo=UTC)
+
+    monitor, _current = _monitor(tmp_path, _config(), clock)
+
+    assert monitor._spend_usd(ALICE) == 0.0
+    assert monitor._spend_usd(BOB) == 0.0
+    assert monitor.status().users == ()
+    assert _decide(monitor, ALICE, "astra") == "astra"
+
+
+@pytest.mark.asyncio
+async def test_the_scan_after_a_rejected_resume_replaces_every_kept_total(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _state_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(_kept_state_json({ALICE: 8.0}, reply_costs={ALICE: 1.0, BOB: 2.0}))
+    scans = _Scans(monkeypatch, {ALICE: 3.0})
+    scans.release.clear()
+    monitor, _current = _monitor(tmp_path, _config())
+    assert monitor._spend_usd(ALICE) == 9.0
+
+    await monitor.sync(_config())
+    await _until(lambda: scans.calls == 1)
+    scans.release.set()
+    await _until(lambda: monitor._spend_usd(ALICE) == 3.0)
+
+    assert monitor._spend_usd(BOB) == 0.0
+    assert [(user.user_id, user.spend_usd) for user in monitor.status().users] == [(ALICE, 3.0)]
+    await monitor.stop()
+
+
+def _kept_state_json(spend: Mapping[str, float], reply_costs: Mapping[str, float] | None = None) -> str:
+    """Return kept spend of October whose fingerprint fits no config, so a start always rescans it."""
+    state = SpendState(fingerprint="other settings", snapshot=_snapshot(spend), reply_costs=dict(reply_costs or {}))
+    return state.model_dump_json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live", ["nothing", "matrix_reply", "openai_request", "unreadable_script_runs"])
+async def test_the_runtime_lets_budgets_keep_spend_only_when_no_work_is_live(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    live: str,
+) -> None:
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=Config())
+    if live == "matrix_reply":
+        assert orchestrator.response_admission_gate.admit()
+    elif live == "openai_request":
+        orchestrator.openai_responses.add(ActiveResponseIdentity())
+    elif live == "unreadable_script_runs":
+        monkeypatch.setattr(
+            type(orchestrator.script_runtime),
+            "active_runs",
+            AsyncMock(side_effect=RuntimeError("script store unavailable")),
+        )
+
+    assert await orchestrator._no_live_work() is (live == "nothing")

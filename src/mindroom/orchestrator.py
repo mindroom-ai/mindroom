@@ -291,6 +291,8 @@ class _MultiAgentOrchestrator:
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     turn_recovery: TurnJournalRecovery = field(init=False, repr=False)
     response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False)
+    # The OpenAI-compatible requests the embedded API is serving, bound while it serves.
+    openai_responses: set[ActiveResponseIdentity] = field(default_factory=set, init=False)
     _mcp_catalog_change_task_owner: object = field(default_factory=object, init=False, repr=False)
     _pending_mcp_catalog_restarts: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     plugin_watch: PluginWatchState = field(init=False)
@@ -479,6 +481,20 @@ class _MultiAgentOrchestrator:
     def script_runtime(self) -> ScriptRuntimeLifecycle:
         """Return the process-local background-script lifecycle collaborator."""
         return self._script_runtime
+
+    async def _no_live_work(self) -> bool:
+        """Return whether no work that ``mindroom check-active-responses`` counts is live; unknown counts as live."""
+        try:
+            script_runs = await self._script_runtime.active_runs()
+        except Exception:
+            logger.warning("shutdown_activity_unknown", exc_info=True)
+            return False
+        return not (
+            any(not run.recoverable for run in script_runs)
+            or self.response_admission_gate.in_flight_response_count
+            or self.openai_responses
+            or self.active_call_identities()
+        )
 
     def active_call_identities(self) -> list[ActiveResponseIdentity]:
         """Return one identity per voice call that any bot has joined or is joining."""
@@ -1434,6 +1450,8 @@ class _MultiAgentOrchestrator:
 
     async def stop(self) -> None:  # noqa: C901, PLR0915 - one ordered shutdown sequence
         """Stop all agent bots."""
+        # A reply this shutdown cancels stores its usage without reporting its cost, so budgets keep spend only when idle.
+        self._budgets.keep_on_stop = await self._no_live_work()
         self.running = False
         self._runtime_ready_event.clear()
         # First, so integration events that arrive from now on are refused instead of reaching stopping bots.
@@ -1561,6 +1579,7 @@ async def _run_api_server(
     script_runtime = orchestrator.script_runtime
     api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.bind_embedded_runtime(api_main.app, orchestrator.embedded_runtime())
+    orchestrator.openai_responses = api_main.config_lifecycle.app_state(api_main.app).openai_responses
     config = uvicorn.Config(
         api_main.app,
         host=host,

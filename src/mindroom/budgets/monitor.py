@@ -18,18 +18,14 @@ import contextlib
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.background_tasks import SupervisedLoop
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.pricing import model_prices
 from mindroom.budgets.spend import SpendSnapshot, collect_monthly_spend, month_bounds
-from mindroom.budgets.spend_state import (
-    SpendState,
-    keep_spend_state,
-    spend_fingerprint,
-    take_spend_state,
-)
+from mindroom.budgets.spend_state import SpendState, discard_spend_state, read_spend_state, spend_fingerprint
+from mindroom.durable_write import write_json_file_durable
 from mindroom.logging_config import get_logger
 from mindroom.providers.identity import model_identity
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
@@ -208,25 +204,26 @@ class BudgetMonitor:
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _loop: SupervisedLoop = field(init=False)
     _state_path: Path = field(init=False)
-    # Whether ``stop`` kept the spend for the next start, which any later reply makes stale.
-    _state_kept: bool = field(default=False, init=False)
+    # Set when the runtime found no live work its shutdown cancels without reporting a cost, so ``stop`` may keep spend.
+    keep_on_stop: bool = field(default=False, init=False)
+    # What a stop kept for the next start: valid until a later reply makes it stale, and stale until it is removed.
+    _kept: Literal["valid", "stale"] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Load the per-user caps a previous run stored, and the spend its clean stop kept."""
         self.caps = BudgetCaps(budget_caps_path(self.runtime_paths))
         self._loop = SupervisedLoop("budget_monitor", self._run)
         self._state_path = budget_caps_path(self.runtime_paths).parent / "spend_state.json"
-        # The kept spend applies from the first reply; the first sync decides whether a scan must replace it.
-        state = take_spend_state(self._state_path)
-        if state is not None:
+        state = read_spend_state(self._state_path)
+        # What this start read is used only once removed, so no later start can resume it.
+        self._kept = "stale"
+        self._drop_stale_state()
+        if state is not None and self._kept is None:
             self._snapshot, self._snapshot_fingerprint = state.snapshot, state.fingerprint
             self._costs_since_scan = state.reply_costs
 
     async def sync(self, config: Config) -> None:
-        """Start the refresh loop once, and request a scan unless the spend kept fits ``config``.
-
-        The first call resumes the spend a clean stop kept when it fits; later calls rescan only when the settings change.
-        """
+        """Start the refresh loop once; the first call resumes kept spend that fits ``config``, later ones rescan on change."""
         fingerprint = spend_fingerprint(config, self.runtime_paths)
         previous, self._synced_fingerprint = self._synced_fingerprint, fingerprint
         self._loop.start()
@@ -254,11 +251,10 @@ class BudgetMonitor:
         user_id = budget_user_id(requester_id, config, self.runtime_paths)
         if user_id is None:
             return
-        if self._state_kept:
+        if self._kept is not None:
             # The kept spend no longer covers this reply, so the next start scans.
-            self._state_kept = False
-            with contextlib.suppress(OSError):
-                self._state_path.unlink(missing_ok=True)
+            self._kept = "stale"
+            self._drop_stale_state()
         if started_at is None or month_bounds(started_at)[0] != month_bounds(self.clock())[0]:
             cost_usd = None
         if cost_usd is None:
@@ -269,19 +265,37 @@ class BudgetMonitor:
     async def stop(self) -> None:
         """Stop the refresh loop, and keep the spend for the next start when nothing is left to count."""
         state = self._state_to_keep()
+        # A reply from now on makes the kept spend stale, even one that finishes before it is written.
+        self._kept = "valid" if state is not None else "stale"
         await self._loop.stop()
-        try:
-            await asyncio.to_thread(keep_spend_state, self._state_path, state)
-        except OSError:
-            logger.warning("budget_spend_state_not_kept", path=str(self._state_path), exc_info=True)
-            return
-        self._state_kept = state is not None
+        if state is not None:
+            try:
+                await asyncio.to_thread(write_json_file_durable, self._state_path, state.model_dump(mode="json"))
+            except OSError:
+                logger.warning("budget_spend_state_not_kept", path=str(self._state_path), exc_info=True)
+                self._kept = "stale"
+        if self._kept != "valid":
+            self._kept = "stale"
+            self._drop_stale_state()
+
+    def _drop_stale_state(self) -> None:
+        """Remove kept spend no start may resume; while that fails, each later reply tries again."""
+        if self._kept == "stale":
+            try:
+                discard_spend_state(self._state_path)
+            except OSError:
+                logger.warning("budget_spend_state_not_discarded", path=str(self._state_path), exc_info=True)
+                return
+            self._kept = None
 
     def _state_to_keep(self) -> SpendState | None:
-        """Return the spend a start can resume: none without budgets or a scan of this month, or with a scan due."""
+        """Return the spend a start can resume, none unless the runtime was idle and budgets are on.
+
+        A scan of this month must have completed, and none may be requested or running, because it would count usage
+        no kept reply cost covers.
+        """
         snapshot, fingerprint = self._current_snapshot(), self._snapshot_fingerprint
-        # A requested or running scan would count usage that no kept reply cost covers.
-        if snapshot is None or fingerprint is None or self._wake.is_set() or self._scanning:
+        if not self.keep_on_stop or snapshot is None or fingerprint is None or self._wake.is_set() or self._scanning:
             return None
         config = self.config_provider()
         if config is None or config.budgets is None:

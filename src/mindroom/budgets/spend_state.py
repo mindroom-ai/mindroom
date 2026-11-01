@@ -1,7 +1,4 @@
-"""Month-to-date spend a clean stop keeps beside the caps, so a start soon after needs no full scan.
-
-The next start reads and deletes the file, so a crash or a later start can never reuse it.
-"""
+"""Month-to-date spend a clean, idle stop keeps beside the caps, so the start right after it needs no full scan."""
 
 from __future__ import annotations
 
@@ -59,23 +56,21 @@ def spend_fingerprint(config: Config, runtime_paths: RuntimePaths) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def keep_spend_state(path: Path, state: SpendState | None) -> None:
-    """Write ``state`` atomically for the next start, or delete any kept state when there is none to keep."""
-    if state is None:
-        path.unlink(missing_ok=True)
-    else:
-        write_json_file_durable(path, state.model_dump(mode="json"))
-
-
-def take_spend_state(path: Path) -> SpendState | None:
-    """Read and delete the state a clean stop kept, or return None when a scan must count spend instead."""
+def discard_spend_state(path: Path) -> None:
+    """Delete the state at ``path``, or overwrite it with state no start accepts when it cannot be deleted."""
     try:
-        data = path.read_bytes()
-        path.unlink()
-        return SpendState.model_validate_json(data)
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("budget_spend_state_not_deleted", path=str(path), exc_info=True)
+        write_json_file_durable(path, {"version": 0})
+
+
+def read_spend_state(path: Path) -> SpendState | None:
+    """Return the state a clean stop kept at ``path``, or None when a scan must count spend instead."""
+    try:
+        return SpendState.model_validate_json(path.read_bytes())
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
-        # A file that cannot be deleted could be read again after a crash, so it is never resumed either.
         logger.warning("budget_spend_state_unusable", path=str(path), exc_info=True)
         return None

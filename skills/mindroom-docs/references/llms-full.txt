@@ -6653,8 +6653,8 @@ Internal work with no requester (`system:internal`) and usage without a date or 
 A completed agent or team reply's cost counts as soon as the reply finishes, in chat and on the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/).
 A reply that is stopped, fails, or finishes after a tool approval counts once spend is recounted from recorded usage, which such a reply starts soon after it ends.
 Other usage, such as delegated agents, voice calls, and helper work, counts at the next recount: about every six hours, when the month starts, when budgets are turned on, and after a config change to model prices, agents, teams, bot accounts, the internal user, or bridge aliases.
-Counted spend carries over a clean stop and restart while the last recount is less than six hours old, so caps keep applying right after the restart.
-After a crash, or when a reply finishes after the stop, the next start recounts, and caps apply once that recount completes.
+Counted spend carries over a clean restart while the last recount is less than six hours old, so caps keep applying right after it; a restart is clean when no replies, calls, or scripts were running as MindRoom stopped.
+After a crash, a stop during such work, or a reply that finishes after the stop, the next start recounts, and caps apply once that recount completes.
 A reply that already started finishes on its model, so the reply that reaches the cap still uses its model and the user's next reply uses the fallback.
 
 ## Over-Budget Replies
