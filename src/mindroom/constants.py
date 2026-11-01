@@ -257,7 +257,7 @@ def _runtime_env_file_values_for_path(env_path: Path) -> dict[str, str]:
     if not env_path.is_file():
         return {}
     try:
-        values = dotenv_values(env_path)
+        values = dotenv_values(env_path, encoding="utf-8-sig")
     except UnicodeDecodeError as exc:
         msg = f"{env_path} is not UTF-8 text ({exc.reason} at byte {exc.start}); save it as UTF-8."
         raise RuntimeEnvFileError(msg) from exc

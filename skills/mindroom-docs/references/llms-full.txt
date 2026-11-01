@@ -2179,7 +2179,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key
 ```
 
-This works for every model provider key and every variable a tool's settings read (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
+This works for every model provider key and every endpoint, project, region, Azure, and CLI login home variable model providers read, every variable a tool's settings read, `TYPESAFE_API_KEY`, and the variables a skill's `requires.env` names (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
 The plain variable wins when the process environment or the `.env` beside `config.yaml` sets it, and a blank value or an unedited starter-template placeholder counts as unset, so an exported blank variable does not hide the `.env` value.
 
 ## OpenAI API Models
@@ -4362,7 +4362,7 @@ If `metadata.openclaw` is present, MindRoom loads the skill only when these rule
 
 - `os: ["linux", "darwin", "windows"]`: the current OS must be listed
 - `always: true` bypasses `requires`, but not an OS mismatch
-- `requires.env`: each environment variable is set, or a stored credential with that key exists
+- `requires.env`: each environment variable is set, directly or through its [`_FILE` variant](https://docs.mindroom.chat/configuration/models/#file-based-secrets), or a stored credential with that key exists
 - `requires.config`: each config path is truthy, for example `agents.code.tools`
 - `requires.bins`: all binaries exist in `PATH`
 - `requires.anyBins`: at least one binary exists in `PATH`

@@ -21,7 +21,6 @@ import json5
 
 from mindroom import yaml_io
 from mindroom.background_tasks import create_background_task
-from mindroom.constants import runtime_env_values
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
@@ -135,7 +134,6 @@ class _SkillsLoader:
 
     def load(self) -> list[Skill]:
         """Return the eligible skills for the configured roots and allowlist."""
-        env_vars = runtime_env_values(self.runtime_paths)
         config_data = self.config.model_dump()
         allowlist_set = set(self.allowlist or [])
 
@@ -149,7 +147,7 @@ class _SkillsLoader:
             if not _is_skill_eligible(
                 normalized,
                 config_data,
-                env_vars=env_vars,
+                runtime_paths=self.runtime_paths,
                 credential_keys=self.credential_keys,
             ):
                 continue
@@ -976,7 +974,7 @@ def _is_skill_eligible(
     skill: Skill,
     config_data: Mapping[str, Any],
     *,
-    env_vars: Mapping[str, str],
+    runtime_paths: RuntimePaths,
     credential_keys: set[str],
 ) -> bool:
     metadata = skill.metadata or {}
@@ -992,7 +990,7 @@ def _is_skill_eligible(
         return True
 
     requires = openclaw.get("requires")
-    return _requirements_met(requires, config_data, env_vars, credential_keys, skill.name)
+    return _requirements_met(requires, config_data, runtime_paths, credential_keys, skill.name)
 
 
 def _normalize_str_list(value: object) -> list[str]:
@@ -1014,7 +1012,7 @@ def _matches_current_os(requirements: Sequence[str]) -> bool:
 def _requirements_met(
     requires: object,
     config_data: Mapping[str, Any],
-    env_vars: Mapping[str, str],
+    runtime_paths: RuntimePaths,
     credential_keys: set[str],
     skill_name: str,
 ) -> bool:
@@ -1022,7 +1020,8 @@ def _requirements_met(
         return True
     reqs = cast("dict[str, Any]", requires)
 
-    if not all(env_vars.get(name) or name in credential_keys for name in _normalize_str_list(reqs.get("env"))):
+    env_requirements = _normalize_str_list(reqs.get("env"))
+    if not all(runtime_paths.first_env_value((name,)) or name in credential_keys for name in env_requirements):
         return False
 
     if not all(_config_path_truthy(config_data, path) for path in _normalize_str_list(reqs.get("config"))):

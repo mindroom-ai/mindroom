@@ -253,7 +253,7 @@ def _route_base_url(
     """Return a route's endpoint: the config's, else its endpoint variable's, else its default."""
     route = _CHAT_ROUTES[route_key]
     configured = _authored_base_url(client_params, base_url) or (
-        runtime_paths.env_value(route.base_url_variable) if route.base_url_variable else None
+        get_secret_from_env(route.base_url_variable, runtime_paths=runtime_paths) if route.base_url_variable else None
     )
     # Groq and Cerebras endpoints are hosts, as configs for their SDKs give them; the route appends its API path.
     if route_key == "groq":
@@ -353,7 +353,7 @@ def _chat_client_factory(
 
 def _with_cli_home(extra_kwargs: dict[str, Any], setting: str, variable: str, runtime: ProviderRuntime) -> None:
     """Fill a CLI login's home directory from the runtime env, the ``.env`` beside the config included, unless set."""
-    if setting not in extra_kwargs and (home := runtime.runtime_paths.env_value(variable)):
+    if setting not in extra_kwargs and (home := get_secret_from_env(variable, runtime_paths=runtime.runtime_paths)):
         extra_kwargs[setting] = home
 
 
@@ -373,10 +373,12 @@ def _populate_azure_env(extra_kwargs: dict[str, Any], runtime: ProviderRuntime) 
         endpoint := get_secret_from_env(AZURE_OPENAI_ENV_BY_KEY["endpoint"], runtime_paths=paths)
     ):
         extra_kwargs["azure_endpoint"] = endpoint
-    if "api_version" not in extra_kwargs and (version := paths.env_value(AZURE_OPENAI_ENV_BY_KEY["api_version"])):
+    if "api_version" not in extra_kwargs and (
+        version := get_secret_from_env(AZURE_OPENAI_ENV_BY_KEY["api_version"], runtime_paths=paths)
+    ):
         extra_kwargs["api_version"] = version
     if "azure_deployment" not in extra_kwargs and (
-        deployment := paths.env_value(AZURE_OPENAI_ENV_BY_KEY["deployment"])
+        deployment := get_secret_from_env(AZURE_OPENAI_ENV_BY_KEY["deployment"], runtime_paths=paths)
     ):
         extra_kwargs["azure_deployment"] = deployment
 
