@@ -238,6 +238,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | Variable | Description |
 |----------|-------------|
 | `OPENAI_BASE_URL` | Base URL for `provider: openai` models and the `openai` memory embedder and memory LLM, such as a local inference server; a model's `extra_kwargs.base_url` overrides it, and `extra_kwargs.client_params.base_url` overrides both |
+| `ANTHROPIC_BASE_URL` | Base URL for `provider: anthropic` models and the `anthropic` memory LLM, such as a gateway; a model's `extra_kwargs.client_params.base_url` and the memory LLM's `config.anthropic_base_url` override it |
 
 ### Dashboard and API
 
