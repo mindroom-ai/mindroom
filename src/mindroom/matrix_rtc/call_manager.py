@@ -838,11 +838,11 @@ class CallManager:
         owners: _CallRoomOwners | None = None,
     ) -> bool:
         """Return whether this agent is configured to join calls in ``room``, reading room ownership unless given."""
-        if owners is None:
-            owners = self._call_room_owners()
         room_alias = room.canonical_alias
         room_aliases = (room_alias,) if isinstance(room_alias, str) and room_alias else ()
         try:
+            if owners is None:
+                owners = self._call_room_owners()
             configured_agent = configured_call_agent_name_for_room(
                 self._config,
                 room.room_id,

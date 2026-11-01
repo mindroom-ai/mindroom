@@ -666,6 +666,24 @@ async def test_manager_joins_call_in_authorized_ad_hoc_invited_room(tmp_path: Pa
     assert bridge.connected_grant == GRANT
 
 
+@pytest.mark.asyncio
+async def test_manager_damaged_invited_room_record_stops_call_joins_without_failing(tmp_path: Path) -> None:
+    """A damaged invited-room record makes room ownership ambiguous instead of failing the room's events."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+
+    def read_damaged_record() -> dict[str, set[str]]:
+        msg = "Invalid invited-room retention file"
+        raise ValueError(msg)
+
+    manager = _manager(client, bridge, tmp_path, get_invited_rooms_by_agent=read_damaged_record)
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert bridge.connected_grant is None
+
+
 @pytest.mark.parametrize("invited_room", [False, True])
 @pytest.mark.asyncio
 async def test_manager_joins_requester_private_agent_in_owned_rooms(
