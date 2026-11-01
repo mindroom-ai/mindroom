@@ -309,12 +309,11 @@ export function Knowledge() {
     useState<KnowledgeGitConfig>(() => defaultGitSettings());
   // The Create form counts as a draft once something is typed into it.
   useUnsavedDraft(
-    [
-      newBaseName,
-      newBaseDescription,
-      newBasePath,
-      newBaseGitSettings.repo_url,
-    ].some((value) => value.trim() !== ""),
+    [newBaseName, newBaseDescription, newBasePath].some(
+      (value) => value.trim() !== "",
+    ) ||
+      JSON.stringify(newBaseGitSettings) !==
+        JSON.stringify(DEFAULT_GIT_SETTINGS),
   );
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);

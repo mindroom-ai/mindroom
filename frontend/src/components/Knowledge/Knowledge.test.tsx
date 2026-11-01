@@ -527,6 +527,28 @@ describe("Knowledge", () => {
     confirmSpy.mockRestore();
   });
 
+  it("counts a changed Git branch in the Create form as unsaved until it is restored", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mockStore({});
+    setKnowledgeApiMock({});
+    render(<Knowledge />);
+    await screen.findByText("Knowledge Bases");
+    fireEvent.click(screen.getByRole("button", { name: "Create git source" }));
+
+    fireEvent.change(screen.getByLabelText("Branch"), {
+      target: { value: "release" },
+    });
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+
+    fireEvent.change(screen.getByLabelText("Branch"), {
+      target: { value: "main" },
+    });
+    confirmSpy.mockClear();
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    expect(confirmSpy).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
   it("creates a git-based knowledge base in one step", async () => {
     mockStore({});
     setKnowledgeApiMock({
