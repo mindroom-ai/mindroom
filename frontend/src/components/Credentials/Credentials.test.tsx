@@ -505,10 +505,11 @@ describe("Credentials", () => {
     });
     expect(screen.getAllByText("anthropic").length).toBeGreaterThan(0);
     expect(screen.queryByText("ANTHROPIC_API_KEY")).toBeNull();
-    const requestedUrls = (global.fetch as any).mock.calls.map(
-      ([url]: [string]) => url,
-    );
-    expect(requestedUrls).toContain("/api/credentials/anthropic");
+    // Selecting the canonical service loads its credentials in an effect,
+    // which can still be pending once the save's own updates are on screen.
+    await waitFor(() => {
+      expect(readsOf("/api/credentials/anthropic")).toBeGreaterThan(0);
+    });
   });
 
   it("shows error and does not save when JSON is invalid", async () => {

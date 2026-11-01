@@ -91,7 +91,7 @@ def runner_dedicated_worker_key(runtime_paths: RuntimePaths) -> str | None:
     return None if raw is None else raw.strip()
 
 
-def runner_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
+def runner_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path:
     """Return the dedicated worker root visible to this runner."""
     raw_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"])
     if raw_root is not None:
@@ -125,9 +125,8 @@ def _runner_shared_storage_root(runtime_paths: RuntimePaths) -> Path | None:
     if shared_root is not None:
         return Path(shared_root.strip()).expanduser().resolve()
 
-    dedicated_root = runner_dedicated_worker_root(runtime_paths)
     worker_key = runner_dedicated_worker_key(runtime_paths)
-    if dedicated_root is None or worker_key is None:
+    if worker_key is None:
         return None
 
     storage_subpath_prefix = runtime_paths.env_value(
@@ -135,7 +134,7 @@ def _runner_shared_storage_root(runtime_paths: RuntimePaths) -> Path | None:
         default=_DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX,
     ).strip()
     return _shared_root_from_dedicated_worker_root(
-        dedicated_root=dedicated_root,
+        dedicated_root=runner_dedicated_worker_root(runtime_paths),
         worker_key=worker_key,
         storage_subpath_prefix=storage_subpath_prefix,
     )

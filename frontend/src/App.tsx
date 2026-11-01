@@ -36,7 +36,10 @@ import { Toaster } from "@/components/ui/toaster";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { ThemeToggle } from "@/components/ThemeToggle/ThemeToggle";
 import { showSaveFailureToastIfNeeded } from "@/components/shared";
-import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
+import {
+  confirmLeavingUnsavedDrafts,
+  useBeforeUnloadPrompt,
+} from "@/hooks/useUnsavedDraft";
 import {
   getConfigValidationIssues,
   getGlobalConfigDiagnostics,
@@ -124,6 +127,8 @@ function AppContent() {
         getNavigationValue(nextLocation.pathname) &&
       !confirmLeavingUnsavedDrafts(),
   );
+  // Configuration edits outlive a tab switch in the store, but not a reload.
+  useBeforeUnloadPrompt(isDirty);
 
   // Get the current tab from URL or default to 'dashboard'
   const currentTab = getNavigationValue(location.pathname);
