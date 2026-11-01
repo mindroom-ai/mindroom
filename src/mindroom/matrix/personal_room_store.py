@@ -108,7 +108,8 @@ def personal_room_create_lock(path: Path) -> AbstractAsyncContextManager[TextIO]
     return async_exclusive_file_lock(path.with_suffix(".create.lock"))
 
 
-# Room IDs of each agent's records by records directory, with the directory's mtime when they were read.
+# Each agent's records directory by storage root, and the room IDs of its records with the directory's mtime when read.
+_RECORDS_DIRECTORIES: dict[tuple[Path, str], Path] = {}
 _PERSONAL_ROOM_IDS: dict[Path, tuple[int, frozenset[str]]] = {}
 
 
@@ -125,7 +126,9 @@ def personal_room_ids(runtime_paths: RuntimePaths, agent_name: str) -> frozenset
 
     Call-room checks ask on every call event. A damaged record leaves out only its own room; the lifecycle reports it.
     """
-    directory = personal_room_record_path(runtime_paths, agent_name, "").parent
+    key = (runtime_paths.storage_root, agent_name)
+    if (directory := _RECORDS_DIRECTORIES.get(key)) is None:
+        directory = _RECORDS_DIRECTORIES[key] = personal_room_record_path(runtime_paths, agent_name, "").parent
     try:
         version = directory.stat().st_mtime_ns
     except FileNotFoundError:
