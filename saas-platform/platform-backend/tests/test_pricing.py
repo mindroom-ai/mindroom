@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from backend.entitlements import PAID_TIERS
 from backend.pricing import (
     PricingConfig,
     get_plan_details,
@@ -24,6 +25,27 @@ def clear_stripe_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
     monkeypatch.delenv("STRIPE_SECRET_KEY_FILE", raising=False)
     monkeypatch.delenv("STRIPE_PUBLISHABLE_KEY", raising=False)
+
+
+@pytest.fixture
+def fixture_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Load a pricing config whose Stripe price IDs name their plan, billing cycle, and mode."""
+    plan = {"name": "Your own keys", "price_monthly": 1000, "price_yearly": 9600, "description": "", "features": []}
+    for billing_cycle in ("monthly", "yearly"):
+        plan[f"stripe_price_id_{billing_cycle}"] = f"price_byok_{billing_cycle}_test"
+        plan[f"stripe_price_id_{billing_cycle}_live"] = f"price_byok_{billing_cycle}_live"
+    config = {
+        "product": {"name": "MindRoom", "description": "", "metadata": {"platform": "mindroom"}},
+        "plans": {
+            "free": {"name": "No plan", "price_monthly": 0, "price_yearly": 0, "description": "", "features": []},
+            "byok": plan,
+        },
+        "trial": {"enabled": True, "days": 3, "applicable_plans": ["byok"]},
+        "discounts": {"annual_percentage": 20},
+    }
+    path = tmp_path / "pricing-config.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setattr("backend.pricing.config_path", path)
 
 
 class TestPricingConfig:
@@ -67,34 +89,25 @@ class TestPricingConfig:
         assert "hobby" in model.trial.applicable_plans
         assert "pro" in model.trial.applicable_plans
 
-        # Check discounts
-        assert model.discounts.annual_percentage == 20
-
     def test_plan_pricing_values(self) -> None:
-        """Test that plan prices are correct."""
+        """Test the plan settings that a price change keeps."""
         model = load_pricing_config_model()
 
         # No-plan state for accounts without a subscription
         assert model.plans["free"].price_monthly == 0
         assert model.plans["free"].price_yearly == 0
 
-        # BYOK plan - $10/month
-        assert model.plans["byok"].price_monthly == 1000
-        assert model.plans["byok"].price_yearly == 9600
+        # BYOK plan
         assert model.plans["byok"].included_ai_budget_usd == 0
         assert model.plans["byok"].requires_customer_provider_keys is True
         assert model.plans["byok"].resource_profile == "small"
 
-        # Hobby plan - $20/month with $15 included AI usage
-        assert model.plans["hobby"].price_monthly == 2000
-        assert model.plans["hobby"].price_yearly == 19200
+        # Hobby plan with $15 included AI usage
         assert model.plans["hobby"].included_ai_budget_usd == 15
         assert model.plans["hobby"].requires_customer_provider_keys is False
         assert model.plans["hobby"].resource_profile == "small"
 
-        # Pro plan - $200/month with $150 included AI usage
-        assert model.plans["pro"].price_monthly == 20000
-        assert model.plans["pro"].price_yearly == 192000
+        # Pro plan with $150 included AI usage
         assert model.plans["pro"].included_ai_budget_usd == 150
         assert model.plans["pro"].requires_customer_provider_keys is False
         assert model.plans["pro"].resource_profile == "pro"
@@ -102,6 +115,16 @@ class TestPricingConfig:
         # Enterprise plan
         assert model.plans["enterprise"].price_monthly == "custom"
         assert model.plans["enterprise"].price_yearly == "custom"
+
+    def test_paid_plan_prices_follow_the_documented_rule(self) -> None:
+        """Every listed paid price is positive, and its yearly price is twelve months less the annual discount."""
+        model = load_pricing_config_model()
+        listed = {tier: model.plans[tier] for tier in PAID_TIERS if model.plans[tier].price_monthly != "custom"}
+
+        assert listed
+        for tier, plan in listed.items():
+            assert plan.price_monthly > 0, tier
+            assert plan.price_yearly * 100 == plan.price_monthly * 12 * (100 - model.discounts.annual_percentage), tier
 
     def test_stripe_price_ids(self) -> None:
         """Test that Stripe price IDs are present."""
@@ -170,15 +193,16 @@ class TestPricingConfig:
 class TestPricingHelperFunctions:
     """Test pricing helper functions."""
 
+    @pytest.mark.usefixtures("fixture_config")
     def test_get_stripe_price_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test getting Stripe price IDs."""
         monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_mock")
 
         # BYOK monthly
-        assert get_stripe_price_id("byok", "monthly") == "price_1TZQNK3GVsrZHuzX6EWO8kgD"
+        assert get_stripe_price_id("byok", "monthly") == "price_byok_monthly_test"
 
         # BYOK yearly
-        assert get_stripe_price_id("byok", "yearly") == "price_1TZQNK3GVsrZHuzXqbwHwhph"
+        assert get_stripe_price_id("byok", "yearly") == "price_byok_yearly_test"
 
         # No-plan state (no Stripe IDs)
         assert get_stripe_price_id("free", "monthly") is None
@@ -190,31 +214,32 @@ class TestPricingHelperFunctions:
         # Invalid billing cycle
         assert get_stripe_price_id("byok", "weekly") is None
 
+    @pytest.mark.usefixtures("fixture_config")
     def test_get_live_stripe_price_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test getting live Stripe price IDs in live mode."""
-        config = load_pricing_config_model()
         monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_mock")
 
-        for plan_key in ("byok", "hobby", "pro"):
-            plan = config.plans[plan_key]
-            assert get_stripe_price_id(plan_key, "monthly") == plan.stripe_price_id_monthly_live
-            assert get_stripe_price_id(plan_key, "yearly") == plan.stripe_price_id_yearly_live
+        assert get_stripe_price_id("byok", "monthly") == "price_byok_monthly_live"
+        assert get_stripe_price_id("byok", "yearly") == "price_byok_yearly_live"
 
+    @pytest.mark.usefixtures("fixture_config")
     def test_publishable_key_does_not_determine_stripe_price_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Server-side Stripe price IDs must match the server-side secret key."""
         monkeypatch.setenv("STRIPE_PUBLISHABLE_KEY", "pk_live_mock")
         monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_mock")
 
-        assert get_stripe_price_id("byok", "monthly") == "price_1TZQNK3GVsrZHuzX6EWO8kgD"
+        assert get_stripe_price_id("byok", "monthly") == "price_byok_monthly_test"
 
+    @pytest.mark.usefixtures("fixture_config")
     def test_stripe_secret_file_determines_price_mode(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Production file-mounted secrets select live price IDs."""
         secret_file = tmp_path / "stripe_secret_key"
         secret_file.write_text("sk_live_mock", encoding="utf-8")
         monkeypatch.setenv("STRIPE_SECRET_KEY_FILE", str(secret_file))
 
-        assert get_stripe_price_id("byok", "monthly") == "price_1TZQHw3GVsrZHuzXeXWd2f3Z"
+        assert get_stripe_price_id("byok", "monthly") == "price_byok_monthly_live"
 
+    @pytest.mark.usefixtures("fixture_config")
     def test_stripe_secret_env_takes_precedence_over_secret_file(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -224,7 +249,7 @@ class TestPricingHelperFunctions:
         monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_mock")
         monkeypatch.setenv("STRIPE_SECRET_KEY_FILE", str(secret_file))
 
-        assert get_stripe_price_id("byok", "monthly") == "price_1TZQNK3GVsrZHuzX6EWO8kgD"
+        assert get_stripe_price_id("byok", "monthly") == "price_byok_monthly_test"
 
     def test_get_stripe_price_match_uses_configured_test_and_live_ids(self) -> None:
         """Configured Stripe price IDs map back to canonical plan metadata."""
@@ -252,8 +277,6 @@ class TestPricingHelperFunctions:
         byok = get_plan_details("byok")
         assert byok is not None
         assert byok.name == "Bring Your Own Keys"
-        assert byok.price_monthly == 1000
-        assert byok.price_yearly == 9600
         assert len(byok.features) == 4
 
         # Hobby plan
@@ -344,31 +367,10 @@ class TestPricingIntegration:
 
     def test_pricing_consistency(self) -> None:
         """Test that pricing is consistent across different access methods."""
-        # Load via dict
-        config_dict = load_pricing_config()
-
-        # Load via model
-        config_model = load_pricing_config_model()
-
-        # Load directly from YAML
         config_path = Path(__file__).parent.parent.parent / "pricing-config.yaml"
         with config_path.open() as f:
             yaml_data = yaml.safe_load(f)
 
-        # Check hosted plan consistency.
-        assert config_dict["plans"]["byok"]["price_monthly"] == 1000
-        assert config_model.plans["byok"].price_monthly == 1000
-        assert yaml_data["plans"]["byok"]["price_monthly"] == 1000
-
-        assert config_dict["plans"]["hobby"]["included_ai_budget_usd"] == 15
-        assert config_model.plans["hobby"].included_ai_budget_usd == 15
-        assert yaml_data["plans"]["hobby"]["included_ai_budget_usd"] == 15
-
-        assert config_dict["plans"]["pro"]["included_ai_budget_usd"] == 150
-        assert config_model.plans["pro"].included_ai_budget_usd == 150
-        assert yaml_data["plans"]["pro"]["included_ai_budget_usd"] == 150
-
-        # Check Stripe IDs consistency
-        byok_monthly_id = "price_1TZQNK3GVsrZHuzX6EWO8kgD"
-        assert get_stripe_price_id("byok", "monthly") == byok_monthly_id
-        assert config_model.plans["byok"].stripe_price_id_monthly == byok_monthly_id
+        assert load_pricing_config() == yaml_data
+        assert load_pricing_config_model().model_dump(exclude_unset=True) == yaml_data
+        assert get_stripe_price_id("byok", "monthly") == yaml_data["plans"]["byok"]["stripe_price_id_monthly"]
