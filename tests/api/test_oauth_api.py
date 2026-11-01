@@ -6242,7 +6242,7 @@ def test_google_status_reports_connected_with_service_account(tmp_path: Path) ->
 def test_google_status_and_connect_on_unpaired_install_without_client(tmp_path: Path) -> None:
     """A fresh unpaired install reports a missing client, so the dashboard offers client setup instead of an error."""
     runtime_paths = _runtime_paths(tmp_path, {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"})
-    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    api_app = _make_test_app(runtime_paths, _config_payload())
     provider = google_oauth_provider("google_drive")
 
     with TestClient(api_app, base_url="http://localhost:8765") as client:
