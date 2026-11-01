@@ -308,15 +308,32 @@ async def test_edit_of_a_task_whose_state_no_longer_parses(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("body", [f"!edit_schedule {TASK_ID} in 10 minutes check logs", f"!cancel_schedule {TASK_ID}"])
-async def test_edit_or_cancel_whose_task_cannot_be_read(tmp_path: Path, body: str) -> None:
-    """An edit or cancellation whose task read fails says so, and changes nothing."""
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (_TASK_READ_LIMITED, str(_TASK_READ_LIMITED)),
+        (TimeoutError(), "TimeoutError: "),
+        (
+            aiohttp.ClientPayloadError("Response payload is not completed"),
+            "ClientPayloadError: Response payload is not completed",
+        ),
+    ],
+    ids=["error_response", "timeout", "broken_response"],
+)
+async def test_edit_or_cancel_whose_task_cannot_be_read(
+    tmp_path: Path,
+    body: str,
+    failure: object,
+    reason: str,
+) -> None:
+    """An edit or cancellation whose task read fails or raises says why, and changes nothing."""
     client = make_matrix_client_mock()
-    client.room_get_state_event = AsyncMock(return_value=_TASK_READ_LIMITED)
+    client.room_get_state_event = AsyncMock(side_effect=[failure])
     serve_task_state_events(client)
 
     reply = await _reply(tmp_path, body, client=client)
 
-    assert reply == f"❌ Failed to get scheduled task '{TASK_ID}' from room '{ROOM_ID}': {_TASK_READ_LIMITED}"
+    assert reply == f"❌ Failed to get scheduled task `{TASK_ID}` from room `{ROOM_ID}`: {reason}"
     client.room_put_state.assert_not_awaited()
 
 
