@@ -510,7 +510,6 @@ class TestAdminEndpoints:
                 {"instance_id": i, "status": status}
                 for i, status in enumerate(["running", "running", "running", "stopped"])
             ],
-            "audit_logs": [],
         }
 
         response = client.get("/admin/metrics/dashboard")

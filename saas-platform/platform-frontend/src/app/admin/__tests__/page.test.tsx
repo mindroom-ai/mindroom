@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import AdminDashboard from '../page'
 import { apiCall } from '@/lib/api'
 
@@ -13,7 +13,7 @@ jest.mock('@/lib/logger', () => ({
 describe('AdminDashboard', () => {
   const mockApiCall = apiCall as jest.Mock
 
-  function mockResponses(metrics: Record<string, unknown>) {
+  function mockResponses(metrics?: Record<string, unknown>) {
     mockApiCall.mockImplementation((path: string) => {
       if (path === '/health') {
         return Promise.resolve({
@@ -25,7 +25,7 @@ describe('AdminDashboard', () => {
           }),
         })
       }
-      if (path === '/admin/metrics/dashboard') {
+      if (path === '/admin/metrics/dashboard' && metrics) {
         return Promise.resolve({ ok: true, json: async () => metrics })
       }
       return Promise.resolve({ ok: false })
@@ -51,9 +51,7 @@ describe('AdminDashboard', () => {
 
     render(<AdminDashboard />)
 
-    await waitFor(() => {
-      expect(screen.getByText('Total Accounts')).toBeInTheDocument()
-    })
+    expect(await screen.findByText('Total Accounts')).toBeInTheDocument()
 
     expect(card('Total Accounts').getByText('1500')).toBeInTheDocument()
     expect(card('Active Subscriptions').getByText('1200')).toBeInTheDocument()
@@ -66,19 +64,11 @@ describe('AdminDashboard', () => {
   })
 
   it('shows a dash instead of zero for figures the metrics request did not return', async () => {
-    mockApiCall.mockImplementation((path: string) =>
-      Promise.resolve(
-        path === '/health'
-          ? { ok: true, json: async () => ({ status: 'ok', supabase: true, stripe: true }) }
-          : { ok: false },
-      ),
-    )
+    mockResponses()
 
     render(<AdminDashboard />)
 
-    await waitFor(() => {
-      expect(screen.getByText('Operational')).toBeInTheDocument()
-    })
+    expect(await screen.findByText('Operational')).toBeInTheDocument()
 
     for (const title of ['Total Accounts', 'Active Subscriptions', 'Running Instances', 'MRR (est.)']) {
       expect(card(title).getByText('—')).toBeInTheDocument()
@@ -93,9 +83,7 @@ describe('AdminDashboard', () => {
 
     render(<AdminDashboard />)
 
-    await waitFor(() => {
-      expect(screen.getByText('Degraded')).toBeInTheDocument()
-    })
+    expect(await screen.findByText('Degraded')).toBeInTheDocument()
 
     expect(card('System Health').getByText('Supabase: ✗ Error | Stripe: ✗ Error')).toHaveClass('text-red-600')
   })
@@ -105,9 +93,7 @@ describe('AdminDashboard', () => {
 
     render(<AdminDashboard />)
 
-    await waitFor(() => {
-      expect(screen.getByText('Degraded')).toBeInTheDocument()
-    })
+    expect(await screen.findByText('Degraded')).toBeInTheDocument()
 
     expect(card('System Health').getByText('Platform API unreachable')).toHaveClass('text-red-600')
     expect(card('Total Accounts').getByText('—')).toBeInTheDocument()
@@ -131,9 +117,7 @@ describe('AdminDashboard', () => {
 
     render(<AdminDashboard />)
 
-    await waitFor(() => {
-      expect(screen.getByText('instance_started')).toBeInTheDocument()
-    })
+    expect(await screen.findByText('instance_started')).toBeInTheDocument()
 
     expect(screen.getByText('account_123 - 2026-05-19T17:37:00Z')).toBeInTheDocument()
   })
