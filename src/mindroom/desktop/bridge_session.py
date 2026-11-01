@@ -165,7 +165,7 @@ async def _build_bridge(
 ) -> tuple[DesktopBridge, PlaywrightMCPBrowserProvider | None]:
     """Build the saved capabilities and their bridge, registering each provider's release on `resources`.
 
-    Only selected apps construct the GUI provider, so folder, shell, and browser runs need no GUI runtime.
+    Only selected apps construct the GUI provider, so folder and shell runs need no GUI runtime; browser control needs it.
     Folder and shell access are refused before anything is built on a computer without POSIX.
     Stopping the bridge closes its shell and closing it closes its folders; their own releases cover a build that failed first.
     """
