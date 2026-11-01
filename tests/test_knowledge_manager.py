@@ -8931,13 +8931,8 @@ async def test_git_refresh_marks_duplicate_source_sibling_stale(
 
 
 @pytest.mark.asyncio
-async def test_git_pull_that_changes_one_file_only_reindexes_that_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_git_pull_that_changes_one_file_only_reindexes_that_file(tmp_path: Path) -> None:
     """A one-file commit must cost one file's indexing, not the whole checkout's."""
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 

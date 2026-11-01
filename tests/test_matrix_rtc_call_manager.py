@@ -824,7 +824,8 @@ async def test_leaving_a_call_room_ends_its_call_and_forgets_its_state(tmp_path:
     assert state.retry_task.cancelled()
     assert state.expiry_handle.cancelled()
     assert manager._rooms == {}
-    # The failed state read's traceback keeps the finished reconcile's frame, and its lock, until a collection runs.
+    # The mock re-raises one stored OSError, so its traceback and the mock's frame form a cycle that keeps the finished
+    # reconcile's frame, and its lock, alive until a collection runs.
     gc.collect()
     assert ROOM_ID not in manager._locks
     assert ROOM_ID in manager._departed_rooms
