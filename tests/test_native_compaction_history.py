@@ -328,6 +328,7 @@ async def _prepare_after_native_answer(
     *,
     checkpoint: bool,
     allow_native_compaction: bool,
+    answered_by_another_model: bool = False,
 ) -> PreparedScopeHistory:
     """Prepare a reply after a native-route answer that reported a 30,000-token request over a long transcript."""
     config, paths = _make_config(
@@ -342,7 +343,7 @@ async def _prepare_after_native_answer(
     record_native_checkpoint(answer, _CHECKPOINT if checkpoint else [], settings)
     stamp_model(answer, model.identity)
     run = _completed_run("old", messages=[Message(role="user", content="old transcript " * 20000), answer])
-    run.model = model.identity.id
+    run.model = "another-model" if answered_by_another_model else model.identity.id
     run.model_provider = model.identity.provider
     run.metadata = build_prepared_history_metadata_content(
         PreparedHistoryState(
@@ -389,6 +390,32 @@ async def test_a_native_answer_that_created_a_checkpoint_never_sizes_the_next_re
     prepared = await _prepare_after_native_answer(tmp_path, checkpoint=True, allow_native_compaction=True)
 
     assert prepared.compaction_decision.current_history_tokens < 1_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("checkpoint", "measured"), [(False, True), (True, False)], ids=["text", "checkpoint"])
+async def test_a_native_route_measures_history_no_checkpoint_stands_in_for(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint: bool,
+    measured: bool,
+) -> None:
+    """After another model answered, the provider counts plain history; a checkpoint's ciphertext it cannot count."""
+    measured_texts: list[str] = []
+
+    async def record(_counter: object, *texts: str) -> None:
+        measured_texts.extend(text for text in texts if text)
+
+    monkeypatch.setattr("mindroom.history.runtime.measure", record)
+
+    await _prepare_after_native_answer(
+        tmp_path,
+        checkpoint=checkpoint,
+        allow_native_compaction=True,
+        answered_by_another_model=True,
+    )
+
+    assert bool(measured_texts) is measured
 
 
 @pytest.mark.asyncio

@@ -337,8 +337,7 @@ async def _reported_or_measured_history(
     """Return the history size the provider reported for the scope's latest request, if it still describes the history.
 
     Without one, the provider counts the scope's prompt-visible history instead, and the reply waits for that count, so
-    its estimate of the history reads exact counts; a native route keeps its estimate, whose checkpoint no provider
-    counts as text.
+    its estimate of the history reads exact counts.
     """
     reported = (
         await asyncio.to_thread(
@@ -356,7 +355,7 @@ async def _reported_or_measured_history(
         if visible_runs
         else None
     )
-    if reported is None and native_route is None:
+    if reported is None:
         counter = model.token_counter
         texts = await asyncio.to_thread(
             partial(
@@ -364,6 +363,7 @@ async def _reported_or_measured_history(
                 session=session,
                 history_settings=resolved_inputs.history_settings,
                 counter=counter,
+                native_route=native_route,
             ),
         )
         await measure(counter, *texts)

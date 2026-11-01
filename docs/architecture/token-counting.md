@@ -40,7 +40,7 @@ Provider tokens per o200k_base token on those samples:
 ## Decisions
 
 - Each route declares a `TokenCounter`; every count carries its kind: exact (the model's own tokenizer ran locally, or the provider counted the same text) or estimated.
-- A reply waits for the provider to count text it sizes that the provider has not counted yet: the system prompt's messages, the tool definitions, `MEMORY.md` and its preload when its estimate exceeds the token cap, and history that no reported request size describes, except right after a native checkpoint, whose ciphertext no provider counts as text.
+- A reply waits for the provider to count text it sizes that the provider has not counted yet: the system prompt's messages, the tool definitions, `MEMORY.md` and its preload when its estimate exceeds the token cap, and history that no reported request size describes, except history a native checkpoint stands in for, whose ciphertext no provider counts as text.
   Each count has a five-second limit, and a failed count pauses that route's counting for five minutes, so one broken endpoint costs a reply at most one wait.
   The rejected alternative counted in the background and estimated until the count arrived: replies never waited, but filling the gap took calibration from earlier counts, a per-file rate memory, and frozen counters, and every reply until a count arrived ran on an estimate.
 - History is sized from the request size the provider reported for the latest answer ([compaction](compaction.md)), because it changes every reply, so counting it would make every reply wait, and the reported size is a provider count already paid for.

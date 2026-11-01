@@ -77,11 +77,16 @@ def prompt_visible_history_texts(
     session: ConversationSession,
     history_settings: ResolvedHistorySettings,
     counter: TokenCounter,
+    native_route: str | None,
 ) -> tuple[str, ...]:
-    """Return the texts the canonical estimate of the scope's prompt-visible history counts, for a provider to count."""
-    history_messages = [
-        _without_attachments(message) for message in _prompt_visible_messages(session, history_settings)
-    ]
+    """Return the texts the canonical estimate of the scope's prompt-visible history counts, for a provider to count.
+
+    History a native checkpoint stands in for has none: no provider counts the checkpoint's ciphertext as text.
+    """
+    messages = _prompt_visible_messages(session, history_settings)
+    if any(checkpoint_items(message, native_route) for message in messages):
+        return ()
+    history_messages = [_without_attachments(message) for message in messages]
     replay_estimator = counter.replay
     uses_visual_tokens = replay_estimator is not None and replay_estimator.portable_replay_uses_visual_tokens()
     texts = [_canonical_text(history_messages, strip_content_blocks=uses_visual_tokens)]
