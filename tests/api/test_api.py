@@ -2302,6 +2302,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
         )
 
     assert f"{auth_url.scheme}://{auth_url.netloc}{auth_url.path}" == "http://127.0.0.1:8123/auth/authorize"
+    assert params["state"][0] != "general"
     assert params["client_id"] == ["http://localhost"]
     assert params["redirect_uri"] == ["http://localhost/api/homeassistant/callback"]
     assert callback_response.status_code in {302, 307}
