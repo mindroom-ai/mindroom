@@ -108,9 +108,9 @@ class _FakeClaudeSDKClient:
         self.query_models.append(self.model)
         return frame["message"]["content"]
 
-    def _echo(self) -> UserMessage:
-        """Return Claude Code's replay of the newest prompt, which arrives inside the turn that uses it."""
-        return UserMessage(content=self.queries[-1], uuid=self.prompt_ids[-1])
+    def _echo(self, index: int = -1) -> UserMessage:
+        """Return Claude Code's replay of a prompt, the newest by default, which arrives inside the turn that uses it."""
+        return UserMessage(content=self.queries[index], uuid=self.prompt_ids[index])
 
     async def receive_messages(self) -> AsyncGenerator[Message]:
         yield self._echo()
@@ -184,6 +184,7 @@ def _claude_result(output_tokens: int, *, input_tokens: int = 0, cache_reads: in
 
 
 _ECHO = UserMessage(content="Stands for Claude Code's replay of the newest prompt in a scripted stream.")
+_FIRST_ECHO = UserMessage(content="Stands for Claude Code's replay of the first prompt in a scripted stream.")
 
 
 @dataclass
@@ -199,7 +200,11 @@ class _ScriptedClaudeSDKClient(_FakeClaudeSDKClient):
     async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:
         await super().query(prompt, session_id=session_id)
         for message in type(self).turns.pop(0):
-            self.stream.put_nowait(self._echo() if message is _ECHO else message)
+            if message is _ECHO:
+                message = self._echo()  # noqa: PLW2901
+            elif message is _FIRST_ECHO:
+                message = self._echo(0)  # noqa: PLW2901
+            self.stream.put_nowait(message)
 
     async def receive_messages(self) -> AsyncGenerator[Message]:
         while True:
@@ -1386,6 +1391,9 @@ async def test_claude_send_answers_its_own_prompt_after_claude_code_starts_a_tur
     ]
 
 
+_UNAVAILABLE = replace(_claude_result(0), result="/status isn't available in this environment.")
+
+
 @pytest.mark.asyncio
 async def test_claude_send_returns_the_result_of_a_prompt_that_runs_no_turn(
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
@@ -1393,8 +1401,7 @@ async def test_claude_send_returns_the_result_of_a_prompt_that_runs_no_turn(
 ) -> None:
     """A command headless Claude Code does not offer, or a prompt a hook blocked, gets a result but no echo."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
-    unavailable = replace(_claude_result(0), result="/status isn't available in this environment.")
-    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[unavailable]])
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[_UNAVAILABLE]])
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
@@ -1404,21 +1411,41 @@ async def test_claude_send_returns_the_result_of_a_prompt_that_runs_no_turn(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("turns", "second_prompt", "second_reply"),
+    [
+        pytest.param(
+            [
+                [_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000, text="Working on the first task.")],
+                [
+                    _claude_result(200),
+                    _ECHO,
+                    _claude_response("claude-sonnet-5-5", "msg-2", 500, text="Second."),
+                    _claude_result(60),
+                ],
+            ],
+            "second",
+            "Second.",
+            id="answer-unread",
+        ),
+        pytest.param(
+            # Claude Code was running a turn of its own, which the stopped prompt joined after the stop.
+            [[], [_FIRST_ECHO, _self_started_result(30), _UNAVAILABLE]],
+            "/status",
+            "/status isn't available in this environment.",
+            id="prompt-joined-a-self-started-turn",
+        ),
+    ],
+)
 async def test_claude_send_after_a_stopped_call_returns_its_own_reply(
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
+    turns: list[list[Message]],
+    second_prompt: str,
+    second_reply: str,
 ) -> None:
     """A call stopped before Claude answered leaves that answer unread, and the next call reads past it to its own."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
-    turns = [
-        [_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000, text="Working on the first task.")],
-        [
-            _claude_result(200),
-            _ECHO,
-            _claude_response("claude-sonnet-5-5", "msg-2", 500, text="Second."),
-            _claude_result(60),
-        ],
-    ]
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
     prompted = asyncio.Event()
     send_script = _ScriptedClaudeSDKClient.query
@@ -1436,9 +1463,9 @@ async def test_claude_send_after_a_stopped_call_returns_its_own_reply(
     first.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first
-    second = await asyncio.wait_for(_in_call(run_context, tools.claude_send("second")), timeout=10)
+    second = await asyncio.wait_for(_in_call(run_context, tools.claude_send(second_prompt)), timeout=10)
 
-    assert second.startswith("Second.\n\n")
+    assert second.startswith(f"{second_reply}\n\n")
 
 
 @pytest.mark.asyncio
