@@ -219,8 +219,10 @@ These variables do not relax the address rules for the MCP connection itself.
 
 With `dynamic_client_registration: true` and no stored client, MindRoom registers a client when the first user connects and reuses it for later users.
 See [Built-In Providers](oauth-framework.md#built-in-providers) for when a dynamically registered client works from a hosted address.
-If discovery later resolves a different token endpoint, MindRoom registers a new client there and logs `oauth_dynamic_client_reregistered`, and users connected through the old client must reconnect.
+If discovery later resolves a different token endpoint, or `MINDROOM_PUBLIC_URL` or `MINDROOM_PORT` moves the callback to another `localhost` port or to an HTTPS address a dynamically registered client can serve, MindRoom registers a new client and logs `oauth_dynamic_client_reregistered`, and users connected through the old client must reconnect.
 With dynamic registration disabled, or when the new server offers no registration endpoint, connecting fails instead.
+If the authorization server refuses the new callback, MindRoom keeps the old client, existing connections keep working, and status and connect name the refused callback.
+A `MINDROOM_PUBLIC_URL` such as an `http://` LAN address, which a dynamically registered client cannot serve, also keeps the old client, which then works only when MindRoom is opened on `localhost`.
 
 To use your own OAuth app, store its client config in the credential service `<provider_id>_oauth_client`, or list other services in `client_config_services`.
 Tokens are stored in `<provider_id>_oauth`; when `provider_id` does not start with `mcp_`, both service names get an `mcp_` prefix.
