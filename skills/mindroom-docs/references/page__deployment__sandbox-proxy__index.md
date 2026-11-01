@@ -444,7 +444,8 @@ A runner or worker restart stops running commands; see the [shell tool](https://
 Dedicated Docker and Kubernetes workers with `worker_scope: shared`, `user`, or `user_agent` keep a headless browser session across calls, including open tabs and the browser profile, when Worker Computer is disabled.
 Include `browser` in the agent's `worker_tools` to use it.
 A change to the browser configuration or the prepared process environment closes the session before the next call.
-The `static_runner` backend and unscoped workers start a fresh browser for each call.
+On the `static_runner` backend every agent routed there shares one set of browser profiles, including signed-in sessions; with the default `inprocess` runner execution mode, calls without a `worker_scope` also share one running browser and its tabs, while other calls start a fresh browser.
+Unscoped dedicated workers start a fresh browser for each call.
 An explicit `target: host` uses the worker even when `default_target: desktop` is set.
 
 [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) adds a visible headed browser and Chat viewer to dedicated Docker and Kubernetes workers; the `static_runner` backend does not support it.

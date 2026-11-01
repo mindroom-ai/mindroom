@@ -10884,8 +10884,7 @@ browser_control(action="screenshot")
 
 Host-target profiles are named, with `mindroom` as the default; names starting with a dot are rejected.
 In the primary process a profile lives at `browser-profiles/<profile>` under the agent's state root, so every requester of a shared agent shares its signed-in sessions, while different agents never share them.
-This holds even with `worker_scope: user` or `user_agent` unless `browser` is in `worker_tools`, which gives each worker scope its own profiles.
-On the shared `static_runner` worker backend, every agent routed there shares one set of profiles and tabs; dedicated Docker or Kubernetes workers keep them separate.
+This holds even with `worker_scope: user` or `user_agent` unless `browser` is in `worker_tools`, which gives each dedicated Docker or Kubernetes worker its own profiles; on the shared `static_runner` backend every agent routed there shares one set (see [Browsers in workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#browsers-in-workers)).
 In the primary process a started profile keeps running, with its tabs, across replies until `action="stop"` or a MindRoom restart, and replies using it at the same time share it.
 Use a private agent when requesters need separate browser sessions.
 Chromium is taken from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable`.
@@ -19987,7 +19986,8 @@ A runner or worker restart stops running commands; see the [shell tool](https://
 Dedicated Docker and Kubernetes workers with `worker_scope: shared`, `user`, or `user_agent` keep a headless browser session across calls, including open tabs and the browser profile, when Worker Computer is disabled.
 Include `browser` in the agent's `worker_tools` to use it.
 A change to the browser configuration or the prepared process environment closes the session before the next call.
-The `static_runner` backend and unscoped workers start a fresh browser for each call.
+On the `static_runner` backend every agent routed there shares one set of browser profiles, including signed-in sessions; with the default `inprocess` runner execution mode, calls without a `worker_scope` also share one running browser and its tabs, while other calls start a fresh browser.
+Unscoped dedicated workers start a fresh browser for each call.
 An explicit `target: host` uses the worker even when `default_target: desktop` is set.
 
 [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) adds a visible headed browser and Chat viewer to dedicated Docker and Kubernetes workers; the `static_runner` backend does not support it.
