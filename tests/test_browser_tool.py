@@ -1174,8 +1174,11 @@ async def test_dialog_action_answers_only_the_next_dialog(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_resolve_tab_falls_back_to_an_open_tab_then_a_new_page() -> None:
-    """A closed or missing tab resolves to the first open tab, else a new page; the result becomes active."""
+async def test_resolve_tab_refuses_a_closed_target_id_and_falls_back_only_without_one() -> None:
+    """A closed or unknown targetId fails; without one, a closed active tab resolves to the first open tab, else a new page.
+
+    The resolved tab becomes active.
+    """
     tool = BrowserTools(TEST_RUNTIME_PATHS)
     closed = _BrowserTabState(target_id="closed", page=cast("Any", SimpleNamespace(is_closed=lambda: True)))
     first_open = _BrowserTabState(target_id="first", page=cast("Any", SimpleNamespace(is_closed=lambda: False)))
@@ -1191,10 +1194,14 @@ async def test_resolve_tab_falls_back_to_an_open_tab_then_a_new_page() -> None:
         active_target_id="closed",
     )
 
+    for stale in ("closed", "unknown"):
+        with pytest.raises(ValueError, match=f"^tab not found: {stale}$"):
+            await tool._resolve_tab(state, stale)
+    assert state.active_target_id == "closed"
+    assert await tool._resolve_tab(state, None) == ("first", first_open)
+    assert state.active_target_id == "first"
     assert await tool._resolve_tab(state, "second") == ("second", second_open)
     assert state.active_target_id == "second"
-    assert await tool._resolve_tab(state, "closed") == ("first", first_open)
-    assert state.active_target_id == "first"
 
     state.tabs = {"closed": closed}
     new_target_id, new_tab = await tool._resolve_tab(state, None)
@@ -3376,6 +3383,35 @@ async def test_a_tab_whose_open_fails_is_the_current_tab(tmp_path: Path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_closed_target_id_is_refused_without_touching_the_open_tab(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing a tab again by its ID, or acting on it, fails and leaves the tab still open as it was."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    browser = BrowserTools(paths, allow_private_networks=True)
+    kept_id = json.loads(await browser.browser("start"))["activeTargetId"]
+    closed_id = json.loads(await browser.browser("open", targetUrl="http://127.0.0.1:9/"))["targetId"]
+    await browser.browser("close", targetId=closed_id)
+
+    for action, arguments in (
+        ("close", {}),
+        ("focus", {}),
+        ("navigate", {"targetUrl": "http://127.0.0.1:9/elsewhere"}),
+    ):
+        with pytest.raises(ValueError, match=f"^tab not found: {closed_id}$"):
+            await browser.browser(action, targetId=closed_id, **arguments)
+
+    tabs = json.loads(await browser.browser("tabs"))
+    assert [tab["targetId"] for tab in tabs["tabs"]] == [kept_id]
+    kept_page = adapters[0].pages[0]
+    assert not kept_page.closed
+    assert kept_page.url == "about:blank"
+    await browser.aclose()
+
+
+@pytest.mark.asyncio
 async def test_failed_driver_acquisition_closes_manager_owned_resources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3806,6 +3842,52 @@ async def test_headless_worker_runtime_hands_its_browser_to_each_fresh_toolkit(
     with pytest.raises(ValueError, match="Bind the worker display before starting"):
         toolkits[1].bind_worker_headless(tmp_path / "workspace", {})
     await runtime.close()
+    assert not adapters[0].live_resources
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_kind", ["headless", "computer"])
+async def test_worker_runtimes_keep_their_browser_after_a_call_stops_at_its_time_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
+) -> None:
+    """A call the toolkit stops at its time limit leaves the worker's browser, its tabs, and its Computer running."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    headless, computer = WorkerBrowserRuntime(), WorkerComputerRuntime(FakeDisplay())
+    computer_toolkit = BrowserTools(paths)
+    computer_toolkit.bind_worker_display(":99", tmp_path / "workspace")
+    session = BrowserSession(computer_toolkit.browser, computer_toolkit.aclose)
+
+    async def call(action: str, **arguments: object) -> dict[str, Any]:
+        if runtime_kind == "computer":
+            return json.loads(await computer.run_browser_call("binding", lambda _display: session, [action], arguments))
+        toolkit = BrowserTools(paths)
+        binding = toolkit.bind_worker_headless(tmp_path / "workspace", {})
+        return json.loads(await headless.run(toolkit, (binding, ()), lambda: toolkit.browser(action, **arguments)))
+
+    tab_id = (await call("start"))["activeTargetId"]
+    generation = computer.status()["generation"]
+
+    async def frozen_title(_page: LifecyclePage) -> str:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    with monkeypatch.context() as patch:
+        patch.setattr("mindroom.custom_tools.browser.HOST_CALL_TIMEOUT_SECONDS", 0.05)
+        patch.setattr(LifecyclePage, "title", frozen_title)
+        with pytest.raises(TimeoutError, match=r"^Browser action=focus did not finish within 0\.05 seconds"):
+            await call("focus", targetId=tab_id)
+
+    assert [tab["targetId"] for tab in (await call("tabs"))["tabs"]] == [tab_id]
+    assert len(adapters) == 1
+    assert adapters[0].live_resources == {"driver", "context"}
+    if runtime_kind == "computer":
+        assert computer.status()["state"] == "ready"
+        assert computer.status()["generation"] == generation
+    await headless.close()
+    await computer.close()
     assert not adapters[0].live_resources
 
 

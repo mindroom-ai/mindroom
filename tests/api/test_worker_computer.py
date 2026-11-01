@@ -196,8 +196,8 @@ def test_worker_browser_call_reaches_its_own_time_limit_past_a_shorter_runner_ti
         )
 
     assert response.json()["error"] == (
-        "Sandbox tool execution failed: TimeoutError: Browser action=status did not finish within 1.5 seconds and "
-        "was stopped. If the page stays unresponsive, close its tab with action=close."
+        "Sandbox tool execution failed: HostCallTimeLimitError: Browser action=status did not finish within 1.5 "
+        "seconds and was stopped. If the page stays unresponsive, close its tab with action=close."
     )
 
 
