@@ -309,9 +309,12 @@ def _write_env_file(
         if changed:
             console.print(f"[green]Env file updated:[/green] {env_path}")
         # `mindroom run` serves the dashboard on every interface by default, so a kept
-        # .env without a dashboard key gets one; an explicitly empty key, in .env or
-        # exported, is the open-access opt-out, and an exported key wins over .env.
-        if "MINDROOM_API_KEY" not in os.environ and _append_missing_env_defaults(
+        # .env without a dashboard key gets one; an explicitly empty key in .env is the
+        # open-access opt-out, and an exported key wins over .env, but an exported blank does not.
+        if is_unset_env_value(
+            "MINDROOM_API_KEY",
+            os.environ.get("MINDROOM_API_KEY", ""),
+        ) and _append_missing_env_defaults(
             env_path,
             (("MINDROOM_API_KEY", _new_dashboard_api_key()),),
             title="Dashboard API key protecting /api/*; the dashboard login page asks for it",
@@ -1434,13 +1437,13 @@ def worker_dashboard_api_key_needed(runtime_paths: constants.RuntimePaths) -> bo
     """Return whether dedicated workers could reach the dashboard API while `MINDROOM_API_KEY` is unset.
 
     Worker shells keep network access to the primary, so an open API would hand them
-    MindRoom's configuration. An explicitly empty key, exported or in the `.env`, keeps open access, so this
-    checks whether the variable is present, not whether it has a value.
+    MindRoom's configuration. An explicitly empty `MINDROOM_API_KEY=` in the `.env` keeps open access; an exported
+    blank does not, because a container passthrough of a variable the host leaves unset exports one, and the key
+    generated into the `.env` wins over it.
     """
     from mindroom.workers.backend_kinds import worker_backend_kind  # noqa: PLC0415
 
-    key_present = "MINDROOM_API_KEY" in runtime_paths.process_env or "MINDROOM_API_KEY" in runtime_paths.env_file_values
-    return not key_present and worker_backend_kind(runtime_paths).dedicated
+    return "MINDROOM_API_KEY" not in runtime_paths.env_file_values and worker_backend_kind(runtime_paths).dedicated
 
 
 def ensure_worker_dashboard_api_key(runtime_paths: constants.RuntimePaths, *, dashboard_has_credential: bool) -> bool:

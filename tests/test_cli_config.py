@@ -1404,13 +1404,16 @@ class TestConfigInit:
         assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-existing\nMINDROOM_API_KEY=\n"
         assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
 
+    @pytest.mark.parametrize(("exported", "generated"), [("exported-key", False), ("", True)], ids=["key", "blank"])
     def test_init_keeping_existing_env_leaves_exported_dashboard_key_alone(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        exported: str,
+        generated: bool,
     ) -> None:
-        """An exported MINDROOM_API_KEY wins over `.env`, so setup writes no second key that a restart would ignore."""
-        monkeypatch.setenv("MINDROOM_API_KEY", "exported-key")
+        """An exported key wins over `.env`, so setup writes no second key; an exported blank does not, so it does."""
+        monkeypatch.setenv("MINDROOM_API_KEY", exported)
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text("OPENAI_API_KEY=sk-existing\n", encoding="utf-8")
@@ -1421,8 +1424,8 @@ class TestConfigInit:
         )
 
         assert result.exit_code == 0, result.output
-        assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-existing\n"
-        assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
+        assert ("MINDROOM_API_KEY=" in env_path.read_text(encoding="utf-8")) is generated
+        assert ("Generated MINDROOM_API_KEY" in normalize_console_output(result.output)) is generated
 
     @pytest.mark.parametrize(
         ("env_text", "process_env", "has_credential", "generated"),
@@ -1434,12 +1437,12 @@ class TestConfigInit:
                 "OPENAI_API_KEY=sk-existing\n",
                 {"MINDROOM_WORKER_BACKEND": "docker", "MINDROOM_API_KEY": ""},
                 False,
-                False,
+                True,
             ),
             ("OPENAI_API_KEY=sk-existing\n", {}, False, False),
             ("OPENAI_API_KEY=sk-existing\n", {"MINDROOM_WORKER_BACKEND": "docker"}, True, False),
         ],
-        ids=["docker", "docker-without-env-file", "explicit-open", "exported-open", "local-tools", "platform-auth"],
+        ids=["docker", "docker-without-env-file", "explicit-open", "exported-blank", "local-tools", "platform-auth"],
     )
     def test_run_protects_the_dashboard_api_from_dedicated_workers(
         self,

@@ -613,15 +613,14 @@ def exported_process_env() -> dict[str, str]:
 def _merged_env_layers(process_env: Mapping[str, str], env_file_values: Mapping[str, str]) -> dict[str, str]:
     """Merge the process env over the `.env` as ``RuntimePaths.env_value`` reads them.
 
-    An exported value wins unless it counts as unset and the `.env` holds the variable; an exported blank with no
-    `.env` value stays, for the readers that give an empty value its own meaning.
+    A usable exported value wins. A blank one lands only when neither layer has a usable value, for the readers that
+    give an empty value its own meaning, and a starter-template placeholder never lands.
     """
-    merged_env = dict(env_file_values)
-    merged_env.update(
-        (name, value)
-        for name, value in process_env.items()
-        if name not in merged_env or not runtime_env_policy.is_unset_env_value(name, value)
-    )
+    merged_env: dict[str, str] = {}
+    for layer in (env_file_values, process_env):
+        for name, value in layer.items():
+            if not runtime_env_policy.is_unset_env_value(name, value) or (name not in merged_env and not value.strip()):
+                merged_env[name] = value
     return merged_env
 
 

@@ -213,12 +213,17 @@ def test_merged_env_mappings_keep_the_env_file_value_under_a_blank_export(
     merged_env: Callable[[constants.RuntimePaths], Mapping[str, str]],
 ) -> None:
     """The env mappings tools and worker backends read follow ``env_value``; a lone exported blank still stays."""
-    (tmp_path / ".env").write_text("MINDROOM_TIMEZONE=Europe/Amsterdam\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "MINDROOM_TIMEZONE=Europe/Amsterdam\nANTHROPIC_API_KEY=your-anthropic-key-here\n",
+        encoding="utf-8",
+    )
     runtime_paths = constants.resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
-        process_env={"MINDROOM_TIMEZONE": "", "MINDROOM_LOCALE": ""},
+        process_env={"MINDROOM_TIMEZONE": "", "MINDROOM_LOCALE": "", "ANTHROPIC_API_KEY": ""},
     )
 
     env = merged_env(runtime_paths)
 
     assert (env["MINDROOM_TIMEZONE"], env["MINDROOM_LOCALE"]) == ("Europe/Amsterdam", "")
+    # A starter-template placeholder never reaches a tool, whatever the layer filters let through.
+    assert env.get("ANTHROPIC_API_KEY", "") == ""
