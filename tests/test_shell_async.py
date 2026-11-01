@@ -14,11 +14,11 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
-from mindroom.shell.execution import _MAX_OUTPUT_BYTES
+from mindroom.shell.execution import _MAX_OUTPUT_BYTES, _OutputBuffer, _OutputProgress, _progress_lines
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.progress import tool_progress_reporter
+from mindroom.tool_system.progress import shown_progress, tool_progress_reporter
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tools.shell import (
@@ -801,6 +801,74 @@ async def test_a_shell_call_reports_its_output_as_its_progress(tmp_path: Path) -
 
     assert result == "building\nbuilt"
     assert reports[0] == "building"
+
+
+@pytest.mark.asyncio
+async def test_a_progress_meter_reports_only_its_latest_state(tmp_path: Path) -> None:
+    """A line a command redraws with carriage returns, such as a download meter, reports only what it shows last."""
+    entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
+    reports: list[str] = []
+    command = "printf 'fetching\\n10%%\\r50%%\\r100%%'; timeout 0.5 tail -f /dev/null; echo"
+
+    with patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1), tool_progress_reporter(reports.append):
+        await entrypoint(["bash", "-c", command])
+
+    assert reports[0] == "fetching\n100%"
+
+
+@pytest.mark.asyncio
+async def test_a_running_commands_output_is_reported_whole(tmp_path: Path) -> None:
+    """A private key longer than the shown output is reported from its first line, so the shown output masks it."""
+    entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
+    reports: list[str] = []
+    key_lines = " ".join(f"'MIIE{index:02d}{'A' * 56}'" for index in range(25))
+    command = (
+        f"printf '%s\\n' provisioning '-----BEGIN PRIVATE KEY-----' {key_lines} '-----END PRIVATE KEY-----' waiting; "
+        "timeout 0.5 tail -f /dev/null; echo done"
+    )
+
+    with patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1), tool_progress_reporter(reports.append):
+        await entrypoint(["bash", "-c", command])
+
+    assert reports[0].startswith("provisioning\n-----BEGIN PRIVATE KEY-----")
+    assert reports[0].endswith("waiting")
+    assert "A" * 56 not in shown_progress(reports[0])
+
+
+def test_the_stream_that_printed_last_ends_the_report() -> None:
+    """Warnings on stderr do not hide a build's newer progress on stdout, which the live view shows as the tail."""
+    reports: list[str] = []
+    stdout, stderr = _OutputBuffer(), _OutputBuffer()
+
+    with patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0):
+        progress = _OutputProgress(reports.append, stdout, stderr)
+        stderr.append("".join(f"warning: unused variable {index}\n" for index in range(80)))
+        stdout.append("step 1/2\n")
+        progress.poll()
+        stderr.append("error: link failed\n")
+        progress.poll()
+
+    assert reports[0].endswith("step 1/2")
+    assert reports[0].startswith("Stderr:\nwarning: unused variable 0")
+    assert reports[1].endswith("error: link failed")
+
+
+def test_a_quiet_commands_unchanged_output_is_not_read_again() -> None:
+    """A command that prints nothing new, such as a dev server waiting for requests, costs its progress checks nothing."""
+    reports: list[str] = []
+    stdout, stderr = _OutputBuffer(), _OutputBuffer()
+    stdout.append("listening on :8000\n")
+
+    with (
+        patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0),
+        patch("mindroom.shell.execution._progress_lines", wraps=_progress_lines) as read,
+    ):
+        progress = _OutputProgress(reports.append, stdout, stderr)
+        for _ in range(5):
+            progress.poll()
+
+    assert reports == ["listening on :8000"]
+    assert read.call_count == 2
 
 
 @pytest.mark.asyncio

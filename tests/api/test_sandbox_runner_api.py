@@ -3743,7 +3743,8 @@ def test_sandbox_runner_stops_a_shell_command_past_its_timeout_in_subprocess_mod
     )
 
     assert response.status_code == 200
-    assert response.json() == {
+    # The response streams the command's progress lines before its result line.
+    assert json.loads(response.text.splitlines()[-1]) == {
         "ok": True,
         "result": "Stopped after 1s.\nOutput:\nstarted",
         "error": None,
