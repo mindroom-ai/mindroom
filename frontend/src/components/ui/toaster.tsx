@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -10,54 +10,38 @@ interface Toast {
 }
 
 let toastCount = 0;
-const toasts: Toast[] = [];
-const listeners: Array<(toasts: Toast[]) => void> = [];
+// Replaced on every change, never mutated: React compares snapshots by identity.
+let toasts: Toast[] = [];
+const listeners = new Set<() => void>();
 
-function notify() {
-  listeners.forEach((listener) => {
-    listener(toasts);
-  });
+function publish(next: Toast[]) {
+  toasts = next;
+  listeners.forEach((listener) => listener());
+}
+
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+function dismiss(id: string) {
+  publish(toasts.filter((t) => t.id !== id));
 }
 
 export function toast(props: Omit<Toast, "id">) {
   const id = String(toastCount++);
-  const toast = { id, ...props };
-  toasts.push(toast);
-  notify();
-
-  setTimeout(() => {
-    const index = toasts.findIndex((t) => t.id === id);
-    if (index > -1) {
-      toasts.splice(index, 1);
-      notify();
-    }
-  }, 5000);
+  publish([...toasts, { id, ...props }]);
+  setTimeout(() => dismiss(id), 5000);
 }
 
 export function Toaster() {
-  const [toasts, setToasts] = useState<Toast[]>([]);
-
-  useEffect(() => {
-    listeners.push(setToasts);
-    return () => {
-      const index = listeners.indexOf(setToasts);
-      if (index > -1) {
-        listeners.splice(index, 1);
-      }
-    };
-  }, []);
-
-  const dismiss = (id: string) => {
-    const index = toasts.findIndex((t) => t.id === id);
-    if (index > -1) {
-      toasts.splice(index, 1);
-      notify();
-    }
-  };
+  const shown = useSyncExternalStore(subscribe, () => toasts);
 
   return (
     <div className="fixed bottom-0 right-0 z-50 p-4 space-y-2">
-      {toasts.map((toast) => (
+      {shown.map((toast) => (
         <div
           key={toast.id}
           className={cn(
