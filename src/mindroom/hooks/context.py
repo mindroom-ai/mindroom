@@ -797,6 +797,7 @@ class ContactBeforeSendContext(HookContext):
     counterparty_name: str
     rules: str
     text: str
+    message_received_depth: int = 0
     verdict: Literal["send", "revise", "deny"] = "send"
     feedback: str = ""
 
@@ -851,7 +852,11 @@ def _message_received_depth_for_hook_send(context: HookContext) -> int:
         return envelope.message_received_depth + 1
     if isinstance(
         context,
-        CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext,
+        CustomEventContext
+        | ToolBeforeCallContext
+        | ToolAfterCallContext
+        | ToolEnvironmentContext
+        | ContactBeforeSendContext,
     ):
         return context.message_received_depth + 1
     return 1

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_CONTACT_BEFORE_SEND,
@@ -31,6 +31,7 @@ def _contact_context(
     agent_name: str = "code",
     room_id: str = "!room:localhost",
     text: str = "Hello Bob",
+    message_received_depth: int = 0,
 ) -> ContactBeforeSendContext:
     config = _config(tmp_path)
     return ContactBeforeSendContext(
@@ -43,6 +44,7 @@ def _contact_context(
         counterparty_name="Bob",
         rules="Share nothing about the budget.",
         text=text,
+        message_received_depth=message_received_depth,
         config=config,
         runtime_paths=runtime_paths_for(config),
         correlation_id="corr-contact",
@@ -277,3 +279,34 @@ async def test_contact_hook_sends_carry_the_requester(tmp_path: Path) -> None:
     assert source_hook == "contact-policy:contact:before_send"
     assert extra_content is not None
     assert extra_content[ORIGINAL_SENDER_KEY] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
+async def test_contact_hook_sends_continue_the_inbound_hook_chain_depth(tmp_path: Path) -> None:
+    """A hook send from a turn that a hook message started is one hop deeper than that message."""
+    sent: list[dict[str, object] | None] = []
+
+    async def message_sender(
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, object] | None,
+        *,
+        trigger_dispatch: bool = False,
+    ) -> str:
+        del room_id, body, thread_id, source_hook, trigger_dispatch
+        sent.append(extra_content)
+        return "$event"
+
+    @hook(EVENT_CONTACT_BEFORE_SEND)
+    async def notify(ctx: ContactBeforeSendContext) -> None:
+        await ctx.send_message("!room:localhost", "FYI")
+
+    registry = HookRegistry.from_plugins([_plugin("contact-policy", [notify])])
+    context = _contact_context(tmp_path, message_received_depth=2)
+    context.message_sender = message_sender
+
+    await emit_policy(registry, EVENT_CONTACT_BEFORE_SEND, context)
+
+    assert [content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] for content in sent if content is not None] == [3]

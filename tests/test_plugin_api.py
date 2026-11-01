@@ -162,7 +162,7 @@ _SIGNATURES = {
     ),
     "ContactBeforeSendContext": (
         f"({_TOOL_HOOK}, agent_name, room_id, thread_id, requester_id, contact_id, counterparty_id, "
-        "counterparty_name, rules, text, verdict, feedback)"
+        "counterparty_name, rules, text, message_received_depth, verdict, feedback)"
     ),
     "CurrentCall": "(*, call_id, toolkit, session_id, session_state, history_scope, runtime)",
     "CustomEventContext": (
