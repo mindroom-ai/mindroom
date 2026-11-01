@@ -32,6 +32,7 @@ export function Toaster() {
   return (
     <div
       role="status"
+      // The role implies it, but an open Radix dialog hides all but [aria-live] elements from screen readers.
       aria-live="polite"
       aria-atomic="false"
       className="fixed bottom-0 right-0 z-50 p-4 space-y-2"

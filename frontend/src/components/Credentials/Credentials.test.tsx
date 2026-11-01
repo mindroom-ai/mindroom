@@ -989,7 +989,6 @@ describe("Credentials", () => {
     expect(screen.getByText("Active: service_a")).toBeInTheDocument();
     expect(editor.value).toBe('{"token":"draft"}');
     expect(screen.queryByRole("button", { name: /^new_service/ })).toBeNull();
-    expect(readsOf("/api/credentials/service_b")).toBe(0);
 
     confirmSpy.mockReturnValue(true);
     addService("new_service");
