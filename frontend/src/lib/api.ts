@@ -164,14 +164,12 @@ export async function fetchJSON<T>(
     clearTimeout(timeoutId);
 
     if (!response.ok) {
-      let detail = `API call failed: ${response.status} ${response.statusText}`;
-      try {
-        const payload = await response.json();
-        detail = apiErrorMessageFromPayload(payload, detail);
-      } catch {
-        // Keep fallback detail text.
-      }
-      throw new Error(detail);
+      throw new Error(
+        await apiErrorMessageFromResponse(
+          response,
+          `API call failed: ${response.status} ${response.statusText}`,
+        ),
+      );
     }
 
     if (response.status === 204) {

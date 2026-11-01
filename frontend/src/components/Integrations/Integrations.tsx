@@ -794,7 +794,6 @@ export function Integrations() {
       );
       if (
         integration.status !== "connected" &&
-        integration.status !== "available" &&
         authProvider?.status !== "connected"
       ) {
         return (
