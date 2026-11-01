@@ -3951,7 +3951,7 @@
     "functions": [
       {
         "name": "mint_callback",
-        "description": "Create a single-use script for one background task.\nGive the returned instruction to the background agent.\nWhen it runs the script, its result wakes this agent in the current thread.",
+        "description": "Create a single-use script for one background task.\nGive the returned instruction to the background agent.\nWhen it runs the script, its result wakes this agent in the current thread.\nThe wake-up needs the router in this room.\nIn a room without it, such as a personal room, call `invite_router` first.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -9225,7 +9225,7 @@
     "functions": [
       {
         "name": "create_trigger",
-        "description": "Create an external trigger endpoint using caller-supplied public key material.",
+        "description": "Create an external trigger endpoint using caller-supplied public key material.\nDeliveries need the router in the target room.\nIn a room without it, such as a personal room, call `invite_router` first.",
         "parameters": {
           "type": "object",
           "properties": {

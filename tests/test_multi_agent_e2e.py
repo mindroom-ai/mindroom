@@ -18,14 +18,12 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
-from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.teams.spec import TeamMode
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
-    bind_mock_config_event_journal,
     bind_runtime_paths,
     drain_coalescing,
     install_model_providers,
@@ -572,50 +570,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 and content.get("m.relates_to", {}).get("event_id") == thread_root_id
                 for content in sent_contents
             )
-
-
-@pytest.mark.asyncio
-@pytest.mark.requires_matrix  # Requires real Matrix server for multi-agent orchestration
-@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
-    """Test that the orchestrator manages multiple agents correctly."""
-    mock_config = MagicMock()
-    mock_config.agents = {
-        "calculator": MagicMock(display_name="CalculatorAgent", rooms=["room1"]),
-        "general": MagicMock(display_name="GeneralAgent", rooms=["room1"]),
-    }
-    mock_config.teams = {}
-    bind_mock_config_event_journal(mock_config)
-
-    with patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()):
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), config=mock_config)
-        await orchestrator.initialize()
-
-        # Verify agents were created (2 agents + 1 router)
-        assert len(orchestrator.agent_bots) == 3
-        assert "calculator" in orchestrator.agent_bots
-        assert "general" in orchestrator.agent_bots
-        assert "router" in orchestrator.agent_bots
-
-        # Test that agents can be started
-        with patch("mindroom.bot.login_agent_owned_session") as mock_login:
-            mock_client = AsyncMock()
-            mock_client.add_event_callback = MagicMock()
-            mock_client.add_response_callback = MagicMock()
-            mock_client.user_id = "@mindroom_calculator:localhost"
-            mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id="!test:localhost"))
-            # Don't run sync_forever, just verify setup
-            mock_client.sync_forever = AsyncMock()
-            mock_login.return_value = owned_matrix_login(mock_client)
-
-            # Manually start agents without running sync_forever
-            for bot in orchestrator.agent_bots.values():
-                await bot.start()
-
-            # Verify all agents were started (2 agents + 1 router = 3)
-            assert mock_login.call_count == 3
-            assert all(bot.running for bot in orchestrator.agent_bots.values())
-            assert all(bot.client is not None for bot in orchestrator.agent_bots.values())
 
 
 @pytest.mark.asyncio

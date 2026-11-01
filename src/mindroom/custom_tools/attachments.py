@@ -141,6 +141,20 @@ def resolve_context_attachment_path(
     return attachment.local_path, None
 
 
+def read_context_attachment(
+    context: ToolRuntimeContext,
+    attachment_id: str,
+    *,
+    byte_limit: int,
+    limit_label: str,
+) -> tuple[bytes | None, str | None]:
+    """Read the bytes of an attachment available in this conversation, or return why it cannot be read; blocking."""
+    attachment = _resolve_context_attachment_record(context, attachment_id)
+    if isinstance(attachment, str):
+        return None, attachment
+    return _read_attachment_bytes(attachment, byte_limit=byte_limit, limit_label=limit_label)
+
+
 def _resolve_context_attachment_record(
     context: ToolRuntimeContext,
     attachment_id: str,

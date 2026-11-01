@@ -296,11 +296,11 @@ async def test_a_reply_renders_system_enrichment_into_its_system_message(
 
 
 @pytest.mark.asyncio
-async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_history(
+async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_stores_it_after_the_prompt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Transient context shares one user message after the prompt that the model sees but the run never stores."""
+    """Transient context shares one user message after the prompt, which the run stores there as turn context."""
     config = _config(tmp_path)
     transient_items = (EnrichmentItem(key="location", text="Current location: Amsterdam", persist=False),)
     model = ScriptedModel([answer("Done.")])
@@ -331,7 +331,10 @@ async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_
     assert "Current location: Amsterdam" in str(transient.content)
     storage = create_session_storage("code", config, runtime_paths_for(config), execution_identity=None)
     [run] = storage.list_runs("session-1")
-    assert "Current location: Amsterdam" not in " ".join(str(message.content) for message in run.messages)
+    stored_prompt, stored_transient, _answer = run.messages
+    assert "Current location: Amsterdam" not in str(stored_prompt.content)
+    assert stored_transient.content == transient.content
+    assert stored_transient.add_to_agent_memory is False
 
 
 def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedExactTeamMembers:

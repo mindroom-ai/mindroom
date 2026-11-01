@@ -47,6 +47,14 @@ class ToolCompleted:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolProgress:
+    """A running tool call reported its latest progress, such as the tail of its output, replacing the previous one."""
+
+    tool_call_id: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class RunFinished:
     """The run ended ``COMPLETED``, ``PAUSED``, or ``ERROR``; the record carries content, tools, and requirements.
 
@@ -56,7 +64,7 @@ class RunFinished:
     record: AnyRunRecord
 
 
-type RunEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RunFinished
+type RunEvent = TextDelta | ReasoningDelta | ToolStarted | ToolProgress | ToolCompleted | RunFinished
 
 __all__ = [
     "ReasoningDelta",
@@ -66,5 +74,6 @@ __all__ = [
     "TextDelta",
     "ToolCallOrigin",
     "ToolCompleted",
+    "ToolProgress",
     "ToolStarted",
 ]

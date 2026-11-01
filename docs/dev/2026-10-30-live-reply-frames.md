@@ -28,8 +28,17 @@ Reasoning and finer progress the runtime already had never reached the user.
 - A frame too large to send (over 60000 bytes serialized) stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
 - Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms}` (sidecar-only for large messages).
   Its duration runs from the start of each reasoning segment to the model's next output.
-  OpenAI's Responses API streams a reasoning summary only after the model has finished reasoning, so its deltas carry when the reasoning item began; Anthropic, Gemini, and Ollama stream reasoning while the model produces it, so the first delta's arrival marks the start.
+  OpenAI's Responses API streams a reasoning summary in parts, the first well after the model began reasoning, so its deltas carry when the reasoning item began; Anthropic, Gemini, and Ollama stream reasoning while the model produces it, so the first delta's arrival marks the start.
+  Measured on Codex on 2026-11-01, the first part came about 5 s after reasoning began for GPT-6.1 Sol and GPT-6 Luna, but only at the end of 16 s of reasoning for GPT-6 Astra.
+  The Responses API sends no summary unless the request asks for one, so Codex requests ask for `auto`, as the Codex CLI does; a reply on the OpenAI API shows reasoning only when its model sets `reasoning_summary` or `reasoning.summary`, and that route does not default it because an unverified organization's request then fails.
   Chat Completions carries no such start, so an OpenAI reasoning model reached that way, as through OpenRouter, still counts from the summary's arrival.
+- A running tool call's latest output (what its tool reports as progress, such as a shell command's output tail) reaches only live frames, as an optional `progress` string on the call's tools entry, capped at its last 1000 characters and dropped when the call completes.
+  Output changes many times a second and is noise once the result exists, so durable edits, the final message, and the stored tool trace never carry it; Element and other clients without frames see only the result.
+  It is redacted like result previews, before it is cut to its latest characters, so a long credential keeps the label that identifies it and a script that prints a credential does not show it to the room; team replies do not forward members' or the leader's output.
+  Redaction fails closed on a line it cannot delimit, such as `password:` with its value on the next line, so the output shows `[redaction failed]`, as the call's result preview does, until newer output pushes that line out of the report.
+  Masking only the shown part when that happens was tried and rejected: each rule it needed to keep a value from showing without its label exposed another way to show one.
+  A call keeps only its newest report and shows it at most ten times a second, the rate live frames go out, so a worker that floods reports costs the primary at most ten redactions a second per call.
+  A call's output stays with that call: a delegated agent's tool output does not reach the parent's delegation entry, which shows the delegation's own activity, and only a job forwards its output to the call that started it and may be waiting for it.
 
 ## Rejected alternatives
 

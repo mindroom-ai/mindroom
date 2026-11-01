@@ -584,7 +584,7 @@ class ToolJobRuntime:
                     # The job is not part of an approval continuation that starts it: a run the job resumes with
                     # approvals of its own never reads that continuation's receipt.
                     without_approval_receipt(),
-                    tool_progress_reporter(report_progress),
+                    tool_progress_reporter(report_progress, forward=True),
                     # The reply span that started the job may end first; the job owns its calls' outcome.
                     recording_tool_calls(None),
                     job_control_context(entry.control),

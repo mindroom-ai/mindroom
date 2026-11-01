@@ -174,7 +174,7 @@ RECALLED_MEMORY = "Alice prefers short reports."
 
 
 def recall_memories(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Have every agent turn recall ``RECALLED_MEMORY``, which its requests send as turn context no history keeps."""
+    """Have every agent turn recall ``RECALLED_MEMORY``, which its requests send as turn context."""
     monkeypatch.setattr(
         "mindroom.ai.build_memory_prompt_parts",
         AsyncMock(return_value=MemoryPromptParts(transient_turn_context=f"<memory>{RECALLED_MEMORY}</memory>")),

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.api import sandbox_request_cancellation
 from mindroom.background_tasks import create_background_task
-from mindroom.tool_system.progress import cap_progress, tool_progress_reporter
+from mindroom.tool_system.progress import tool_progress_reporter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -31,8 +31,8 @@ class _LatestProgress:
         self.changed = asyncio.Event()
 
     def report(self, text: str) -> None:
-        # Tool threads report too; the stream's state belongs to its loop.
-        self._loop.call_soon_threadsafe(self._set, cap_progress(text))
+        # Tool threads report too; the stream's state belongs to its loop. The primary masks and cuts what it shows.
+        self._loop.call_soon_threadsafe(self._set, text)
 
     def _set(self, text: str) -> None:
         self._text = text

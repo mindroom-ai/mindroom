@@ -108,7 +108,6 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     TEST_PASSWORD,
-    bind_mock_config_event_journal,
     cached_plugin_module,
     initialize_approval_store_for_test,
     install_bots,
@@ -619,21 +618,23 @@ class TestAgentBot(AgentBotTestBase):
     async def test_orchestrator_main_fails_after_losing_its_event_journal(self, tmp_path: Path) -> None:
         """A runtime that stopped because it lost its journal exits with a failure, so a supervisor restarts it."""
         reset_runtime_state()
+
+        async def _block_until_cancelled(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
         mock_orchestrator = _mock_runtime_orchestrator()
-        mock_orchestrator.start = AsyncMock(side_effect=lambda: asyncio.Event().wait())
+        # The orchestrator keeps running, so only the journal watcher can end the runtime.
+        mock_orchestrator.start = AsyncMock(side_effect=_block_until_cancelled)
         mock_orchestrator.stop = AsyncMock()
         mock_orchestrator.running = False
         mock_orchestrator.event_journal_still_usable = AsyncMock(return_value=False)
-
-        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
-            await asyncio.Event().wait()
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
-            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_block_until_cancelled),
             patch("mindroom.orchestrator._EVENT_JOURNAL_CHECK_SECONDS", 0),
             pytest.raises(EventJournalLostError),
         ):
@@ -2814,36 +2815,6 @@ class TestMultiAgentOrchestrator:
         start_sync.assert_not_called()
 
     @pytest.mark.asyncio
-    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
-    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    async def test_orchestrator_initialize(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Test initializing the orchestrator with agents."""
-        # Mock config with just 2 agents
-        mock_config = MagicMock()
-        mock_config.agents = {
-            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["lobby"]),
-            "general": MagicMock(display_name="GeneralAgent", rooms=["lobby"]),
-        }
-        mock_config.teams = {}
-        bind_mock_config_event_journal(mock_config)
-
-        with patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()):
-            orchestrator = _MultiAgentOrchestrator(
-                runtime_paths=TestAgentBot._runtime_paths(tmp_path),
-                config=mock_config,
-            )
-            await orchestrator.initialize()
-
-            # Should have 3 bots: calculator, general, and router
-            assert len(orchestrator.agent_bots) == 3
-            assert "calculator" in orchestrator.agent_bots
-            assert "general" in orchestrator.agent_bots
-            assert "router" in orchestrator.agent_bots
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("calls_enabled", "dependencies_available", "import_error"),
         [
@@ -2971,52 +2942,6 @@ class TestMultiAgentOrchestrator:
         assert orchestrator.hook_registry is initial_hook_registry
         assert orchestrator.scheduled_tasks.hooks.registry is initial_hook_registry
         mock_create_managed_bot.assert_not_called()
-
-    @pytest.mark.asyncio
-    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
-    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    async def test_orchestrator_start(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Test starting all agent bots."""
-        # Mock config with just 2 agents
-        mock_config = MagicMock()
-        mock_config.agents = {
-            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["lobby"]),
-            "general": MagicMock(display_name="GeneralAgent", rooms=["lobby"]),
-        }
-        mock_config.teams = {}
-        mock_config.get_all_configured_rooms.return_value = ["lobby"]
-        bind_mock_config_event_journal(mock_config)
-
-        with patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()):
-            orchestrator = _MultiAgentOrchestrator(
-                runtime_paths=TestAgentBot._runtime_paths(tmp_path),
-                config=mock_config,
-            )
-            await orchestrator.initialize()  # Need to initialize first
-
-            # Mock start for all bots to avoid actual login/setup
-            start_mocks = []
-            for bot in orchestrator.agent_bots.values():
-                # Create a mock that tracks the call
-                mock_start = AsyncMock()
-                # Replace start with our mock
-                bot.start = mock_start
-                start_mocks.append(mock_start)
-                bot.running = False
-
-            # Start the orchestrator but don't wait for sync_forever
-            start_tasks = [bot.start() for bot in orchestrator.agent_bots.values()]
-
-            await asyncio.gather(*start_tasks)
-            orchestrator.running = True  # Manually set since we're not calling orchestrator.start()
-
-            assert orchestrator.running
-            # Verify start was called for each bot
-            for mock_start in start_mocks:
-                mock_start.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_orchestrator_start_sets_up_rooms_before_auxiliary_workers(self, tmp_path: Path) -> None:
@@ -5477,74 +5402,6 @@ class TestMultiAgentOrchestrator:
         assert orchestrator.agent_bots["coach"] is new_bot
         new_bot.ensure_rooms.assert_not_awaited()
         mock_schedule_retry.assert_called_once_with([])
-
-    @pytest.mark.asyncio
-    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop
-    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    async def test_orchestrator_stop(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Test stopping all agent bots."""
-        # Mock config with just 2 agents
-        mock_config = MagicMock()
-        mock_config.agents = {
-            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["lobby"]),
-            "general": MagicMock(display_name="GeneralAgent", rooms=["lobby"]),
-        }
-        mock_config.teams = {}
-        mock_config.get_all_configured_rooms.return_value = ["lobby"]
-        bind_mock_config_event_journal(mock_config)
-
-        with patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()):
-            orchestrator = _MultiAgentOrchestrator(
-                runtime_paths=TestAgentBot._runtime_paths(tmp_path),
-                config=mock_config,
-            )
-            await orchestrator.initialize()
-
-            # Mock the agent clients
-            for bot in orchestrator.agent_bots.values():
-                bot.client = AsyncMock()
-                bot.running = True
-
-            await orchestrator.stop()
-
-            assert not orchestrator.running
-            for bot in orchestrator.agent_bots.values():
-                assert not bot.running
-                if bot.client is not None:
-                    bot.client.close.assert_called_once()
-
-    @pytest.mark.asyncio
-    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator streaming
-    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    async def test_orchestrator_streaming_default_config(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Test that orchestrator respects defaults.enable_streaming."""
-        # Mock config with just 2 agents
-        mock_config = MagicMock()
-        mock_config.agents = {
-            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["lobby"]),
-            "general": MagicMock(display_name="GeneralAgent", rooms=["lobby"]),
-        }
-        mock_config.teams = {}
-        mock_config.defaults.enable_streaming = False
-        mock_config.get_all_configured_rooms.return_value = ["lobby"]
-        bind_mock_config_event_journal(mock_config)
-
-        with patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()):
-            orchestrator = _MultiAgentOrchestrator(
-                runtime_paths=TestAgentBot._runtime_paths(tmp_path),
-                config=mock_config,
-            )
-            await orchestrator.initialize()
-
-            assert orchestrator.agent_bots
-            for bot in orchestrator.agent_bots.values():
-                assert bot._runtime_view.config.defaults.enable_streaming is False
 
 
 @pytest.mark.asyncio

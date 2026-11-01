@@ -139,7 +139,9 @@
       ],
       "instructions": "You are a helpful assistant.",
       "prompt_cache_key": "parity-cache-key",
-      "reasoning": {},
+      "reasoning": {
+        "summary": "auto"
+      },
       "store": false,
       "tools": [
         {
