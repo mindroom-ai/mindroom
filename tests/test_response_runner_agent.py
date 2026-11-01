@@ -92,6 +92,7 @@ from mindroom.response_sources import Owned, ResponseSources, Unclaimed, Unclaim
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import PausePresentationError, StreamingDeliveryError
+from mindroom.tool_system.events import FailedReply
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_store import SourcePreparation
 from tests.bot_helpers import (
@@ -165,12 +166,19 @@ async def _respond(bot: AgentBot, request: ResponseRequest, *, streaming: bool =
     return delivery
 
 
-def _consuming_send(transport: StreamTransportOutcome) -> Callable[..., Awaitable[StreamTransportOutcome]]:
-    """Return a ``send_streaming_response`` that reads the whole response stream, then reports ``transport``."""
+def _consuming_send(
+    transport: StreamTransportOutcome,
+    consumed: list[object] | None = None,
+) -> Callable[..., Awaitable[StreamTransportOutcome]]:
+    """Return a ``send_streaming_response`` that reads the whole response stream, then reports ``transport``.
+
+    Given ``consumed``, it records there each chunk it read.
+    """
 
     async def send(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-        async for _chunk in cast("AsyncIterator[object]", args[4]):
-            pass
+        async for chunk in cast("AsyncIterator[object]", args[4]):
+            if consumed is not None:
+                consumed.append(chunk)
         return transport
 
     return send
@@ -2683,6 +2691,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
+        assert bot.client.room_send.await_args.kwargs["content"]["m.new_content"]["body"] == "friendly-error"
         assert [outcome.run_succeeded for outcome in captured_outcomes] == [False]
 
     @pytest.mark.asyncio
@@ -2693,6 +2702,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A delivered streaming Matrix error reply should not be a successful run outcome."""
         captured_outcomes: list[ResponseOutcome] = []
+        consumed: list[object] = []
 
         async def fake_apply_post_response_effects(
             _delivery: FinalDeliveryOutcome,
@@ -2709,7 +2719,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
-                new=AsyncMock(side_effect=_consuming_send(stream_transport("$response", "friendly-error"))),
+                new=AsyncMock(side_effect=_consuming_send(stream_transport("$response", "friendly-error"), consumed)),
             ),
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
@@ -2737,6 +2747,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
+        assert [chunk.text for chunk in consumed if isinstance(chunk, FailedReply)] == ["friendly-error"]
         assert [outcome.run_succeeded for outcome in captured_outcomes] == [False]
 
     @pytest.mark.asyncio
