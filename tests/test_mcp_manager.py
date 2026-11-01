@@ -23,6 +23,7 @@ import pytest
 from authlib.integrations.base_client.errors import OAuthError
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
+import mindroom.matrix.state as matrix_state_module
 import mindroom.mcp.manager as mcp_manager_module
 import mindroom.oauth.service as oauth_service_module
 from mindroom.agents import create_agent
@@ -2404,9 +2405,26 @@ async def test_oauth_mcp_bridge_gives_the_cached_input_schema_when_the_arguments
     """A refused call, or a failed one that sent names the schema does not list, ends with the cached schema.
 
     A generic failure first names the unlisted arguments, and one whose names the schema lists stays as the server
-    wrote it. Every call reaches the server, and the tools are listed only once.
+    wrote it. Every call reaches the server, the tools are listed only once, and nothing reads the Matrix state from
+    disk once the server has answered: the schema is the one the call was sent against.
     """
     _patch_manager(monkeypatch)
+    answered = False
+    read_state = matrix_state_module._matrix_state_cache_key
+    dispatch = _FakeClientSession.call_tool
+
+    def state_key_before_the_answer(state_file: Path) -> object:
+        assert not answered, "the error hint read the Matrix state"
+        return read_state(state_file)
+
+    async def answer(self: _FakeClientSession, *args: object, **kwargs: object) -> CallToolResult:
+        nonlocal answered
+        result = await dispatch(self, *args, **kwargs)
+        answered = True
+        return result
+
+    monkeypatch.setattr(matrix_state_module, "_matrix_state_cache_key", state_key_before_the_answer)
+    monkeypatch.setattr(_FakeClientSession, "call_tool", answer)
     schema = {
         "type": "object",
         "properties": {"kind": {"type": "string", "enum": ["document", "collection"]}},
@@ -2440,6 +2458,7 @@ async def test_oauth_mcp_bridge_gives_the_cached_input_schema_when_the_arguments
     errors: list[str] = []
     try:
         for arguments in calls:
+            answered = False
             with pytest.raises(MCPToolCallError) as failed:
                 await call_tool(tool_name="fetch", arguments=arguments)
             errors.append(str(failed.value))

@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.mcp.config import resolved_mcp_tool_prefix
 from mindroom.mcp.errors import MCPToolCallError, MCPToolUnavailableError
@@ -31,6 +31,8 @@ _ARGUMENT_REJECTION = re.compile(r"-32602|validation error|invalid (?:arguments|
 # The most of an input schema a failed call's error repeats, so a schema with long descriptions or enums cannot fill
 # the conversation.
 _MAX_SCHEMA_HINT_CHARACTERS = 4000
+# The most unlisted argument names a failed call's error names one by one.
+_MAX_UNLISTED_NAMES = 20
 
 
 def bind_mcp_server_manager(manager: MCPServerManager | None) -> None:
@@ -213,14 +215,15 @@ class MindRoomMCPToolkit(Toolkit):
         return await self._call_tool_with_error_payload(tool_name, dict(arguments or {}))
 
     def _argument_hint(self, error: MCPToolCallError, tool_name: str, arguments: Mapping[str, object]) -> str | None:
-        """Return what ``error`` gains about the call's arguments from the cached input schema, or None.
+        """Return what ``error`` gains about the call's arguments from the called tool's input schema, or None.
 
-        A server's refusal of the arguments gets the schema, which the model may not have loaded. So does any failure
-        of a call that sent top-level names the schema's ``properties`` do not list, which first names them: a schema
-        that admits other names leaves the server's error generic. The call itself was sent as the model made it,
-        since such a schema may accept those names. The schema is cut at ``_MAX_SCHEMA_HINT_CHARACTERS``, saying so.
+        The schema is the one the call was sent against, which the error carries. A server's refusal of the arguments
+        gets the schema, which the model may not have loaded. So does any failure of a call that sent top-level names
+        the schema's ``properties`` do not list, which first names them, since a schema that admits other names lets
+        the server fail generically. The call itself was sent as the model made it. The schema is cut at
+        ``_MAX_SCHEMA_HINT_CHARACTERS``, saying so.
         """
-        schema = self._cached_input_schema(tool_name)
+        schema = error.input_schema
         if schema is None:
             return None
         properties = schema.get("properties")
@@ -229,28 +232,14 @@ class MindRoomMCPToolkit(Toolkit):
             return None
         note = ""
         if unknown:
-            names = ", ".join(f"'{name}'" for name in unknown)
+            names = ", ".join(f"'{name}'" for name in unknown[:_MAX_UNLISTED_NAMES])
+            if len(unknown) > _MAX_UNLISTED_NAMES:
+                names = f"{names}, and {len(unknown) - _MAX_UNLISTED_NAMES} more"
             note = f"Arguments not listed in the properties of the input schema of '{tool_name}': {names}.\n"
-        text = json.dumps(schema)
+        text = json.dumps(schema, ensure_ascii=False)
         if len(text) > _MAX_SCHEMA_HINT_CHARACTERS:
             text = f"{text[:_MAX_SCHEMA_HINT_CHARACTERS]}... [truncated, {len(text)} characters in all]"
         return f"{note}Input schema of '{tool_name}': {text}"
-
-    def _cached_input_schema(self, tool_name: str) -> dict[str, Any] | None:
-        """Return remote tool ``tool_name``'s input schema from the catalog already discovered, without any I/O.
-
-        That is the scope's discovered catalog for an OAuth server and the toolkit's own catalog for any other.
-        """
-        if not self._is_oauth_backed():
-            catalog = self.catalog
-        elif self.manager is not None:
-            catalog = self.manager.cached_request_catalog(self.server_id, worker_target=self.worker_target)
-        else:
-            return None
-        if catalog is None:
-            return None
-        tools = self._filtered_catalog_tools(catalog)
-        return next((tool.input_schema for tool in tools if tool.remote_name == tool_name), None)
 
     async def _call_tool_with_error_payload(
         self,
