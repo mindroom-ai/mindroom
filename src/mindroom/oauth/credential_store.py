@@ -372,6 +372,11 @@ def _initialize_store_state(
 
     A new scope's store starts with the tokens the provider's former routes stored for it, if any.
     """
+    # LEGACY_COMPAT: OAuth stores adopted from undecodable credential files.
+    # Legacy format: `credential_unreadable = 1` beside the retained file payload, written when adoption could not decode it.
+    # Last legacy release: v2026.9.48; v2026.9.49 removed credential-file adoption, and current writers store 0.
+    # Handling: nothing reads the column, so such a row reads like any other: its payload decodes or raises.
+    # Coverage: tests/test_oauth_credential_store.py::test_row_adopted_as_unreadable_reads_like_any_other.
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS oauth_credential_state (
