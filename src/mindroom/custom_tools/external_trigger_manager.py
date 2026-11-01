@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.custom_tools.attachment_helpers import explicit_thread_root
 from mindroom.custom_tools.external_trigger_context import (
     ExternalTriggerContextError,
@@ -163,20 +165,23 @@ class ExternalTriggerManagerTools(Toolkit):
                 target_thread_id=target_thread_id,
                 new_thread=new_thread,
             )
-            record = store.create_record(
-                trigger_id=trigger_id,
-                owner_user_id=context.requester_id,
-                created_by_agent_name=context.agent_name,
-                created_in_room_id=context.room_id,
-                created_in_thread_id=context.resolved_thread_id or context.thread_id,
-                target=target,
-                public_key=public_key,
-                key_id=key_id,
-                description=description,
-                allowed_kinds=allowed_kinds or (),
-                replay_window_seconds=replay_window_seconds,
-                max_body_bytes=max_body_bytes,
-                config=context.config,
+            record = await run_blocking_until_complete(
+                partial(
+                    store.create_record,
+                    trigger_id=trigger_id,
+                    owner_user_id=context.requester_id,
+                    created_by_agent_name=context.agent_name,
+                    created_in_room_id=context.room_id,
+                    created_in_thread_id=context.resolved_thread_id or context.thread_id,
+                    target=target,
+                    public_key=public_key,
+                    key_id=key_id,
+                    description=description,
+                    allowed_kinds=allowed_kinds or (),
+                    replay_window_seconds=replay_window_seconds,
+                    max_body_bytes=max_body_bytes,
+                    config=context.config,
+                ),
             )
         except _TOOL_ERRORS as exc:
             return self._payload("error", message=str(exc))
