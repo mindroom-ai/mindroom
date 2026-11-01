@@ -39,32 +39,29 @@ Provider tokens per o200k_base token on those samples:
 
 ## Decisions
 
-- Each route declares a `TokenCounter`; every count carries its kind: exact (the model's own tokenizer ran locally, or the provider counted the same text), calibrated (the route's estimate scaled by what its provider counted for other text), or estimated.
-- A reply never waits for a provider count.
-  The system prompt's messages, the tool definitions, and the `MEMORY.md` preload are counted in the background, a few at a time and each with a time limit; a later reply finds them cached.
-  A failed count pauses that route's counting for a while, so one broken endpoint does not cost every reply a failed call.
-- The family margins are upper bounds, because a cap or a compaction input that undercounts fails a request, while one that overcounts only wastes room.
-  History is the exception where it can: the compaction check sizes it from the request size the provider reported for the latest answer ([compaction](compaction.md)), so the margins apply only to a history without one, such as the first reply after another model answered.
+- Each route declares a `TokenCounter`; every count carries its kind: exact (the model's own tokenizer ran locally, or the provider counted the same text) or estimated.
+- A reply waits for the provider to count text it sizes that the provider has not counted yet: the system prompt's messages, the tool definitions, `MEMORY.md` and its preload, and history that no reported request size describes.
+  Each count has a five-second limit, and a failed count pauses that route's counting for five minutes, so one broken endpoint costs a reply at most one wait.
+  The rejected alternative counted in the background and estimated until the count arrived: replies never waited, but filling the gap took calibration from earlier counts, a per-file rate memory, and frozen counters, and every reply until a count arrived ran on an estimate.
+- History is sized from the request size the provider reported for the latest answer ([compaction](compaction.md)), because it changes every reply, so counting it would make every reply wait, and the reported size is a provider count already paid for.
+- Text that changes every reply and stays small (the current prompt, the newest answer) and text whose size only bounds a request (compaction input, the skill review transcript, a voice call's brief, mid-turn sizing) keeps the estimate: a wait for each would cost more than its error.
 - Estimates are o200k_base scaled by a margin per family: Claude 1.8, Gemini 1.35, OpenAI 1.0, any other model 1.25.
-  The Claude and Gemini margins cover the largest ratios measured above (JSON 1.798, Markdown notes 1.309); the other margin covers a Qwen thread where o200k undercounted by about 10% (see [compaction](compaction.md)).
-  Calibration replaces the margin once the provider has counted text, except in compaction input, which a single route-wide ratio could undercount when its content differs from the text the provider counted; the `MEMORY.md` cut uses the file's own rate instead.
-- Calibration learns only from the provider's counts of text, never from the input tokens a request reported.
-  Reported usage is a different quantity: it carries message framing, content the provider adds (Claude's structured-output tool, Gemini's cached content, earlier thinking), and per-route cache accounting, so a ratio learned from it would skew every text count.
-  History sizing keeps the reported size of the latest request as its own anchor ([compaction](compaction.md)).
-  Calibration is kept per route, not per agent, because a per-agent key would thread an agent name through every count for a second-order difference in content mix.
+  The margins are upper bounds, because a cap or a compaction input that undercounts fails a request, while one that overcounts only wastes room; the Claude and Gemini margins cover the largest ratios measured above (JSON 1.798, Markdown notes 1.309), and the other margin covers a Qwen thread where o200k undercounted by about 10% (see [compaction](compaction.md)).
+- Provider counts are not turned into a route-wide ratio for other text: the ratio depends on the content (Claude Opus 5.5 ranges from 1.225 to 1.798 above), so a ratio learned from the system prompt misjudged history and compaction input, and a moving ratio moved the `MEMORY.md` cut of an unchanged file and broke the conversation's cached prompt.
 - Every local encode on a reply's path runs in a worker thread, and text is encoded in pieces of at most 8,192 characters, cut just before a word: tiktoken's cost grows with the square of a run without whitespace (200,000 such characters took 18 s in one piece), while the pieces counted 829 repository files exactly as one encode did.
   A stretch of 8,192 characters with no word start is cut anyway, which can add a token per cut; such counts keep the exact label, since the error stays far below the provider's own framing.
-- While o200k_base loads, and for good when it cannot, estimates count a quarter token per character.
-  The UTF-8 byte count is an upper bound but triples history estimates, which would compact conversations that fit on the first reply after a start.
-- The `MEMORY.md` preload selects whole lines by their uncalibrated estimates, scaled by the file's latest provider rate, then counts the preload they make and shrinks the selection until it fits; the file and the preload are both counted in the background.
-  The file's own rate lets the preload grow to the cap, and after an append the rate of the last counted text stands in until the new text is counted, because the margin estimate would shrink the preload and the conversation would keep the smaller copy; calibrated line counts would instead move the cut of an unchanged file whenever the provider counted other text, breaking the conversation's cached prompt, and per-line provider counts would cost a call per line.
+- While o200k_base loads, and for good when it cannot, estimates count a quarter token per character, and compaction input its UTF-8 bytes.
+  The byte count is an upper bound but triples history estimates, which would compact conversations that fit on the first reply after a start.
+- The provider counts the whole `MEMORY.md`; a file over the token cap keeps that share of its characters, chosen as whole lines (the curated head, then the newest entries), and the preload those lines make is counted in turn and shrunk until it fits.
+  The rejected alternative estimated each line, which only fit the cap closely once each line's estimate was scaled by the file's measured rate and that rate was remembered across appends.
 - Counting may send text a reply withholds, such as the part of `MEMORY.md` past the preload cap, when it goes to the provider of the agent's own model: that model reads those files through its tools anyway.
-- Exact counts stay in memory; a restart counts each stable input once more, in the background.
+- Exact counts stay in memory; after a restart, the first reply that sizes each stable input waits for its count once more.
 - Parts, not whole requests, are counted: each part caches on its own and changes on its own schedule.
 
 ## Limitations
 
 - Ollama, OpenRouter models other than OpenAI's, and other OpenAI-compatible servers have no counting endpoint wired, so their counts stay estimated with fixed margins; vLLM's `/tokenize` is not used because no route identifies a vLLM server.
 - OpenAI models tiktoken does not map, such as the GPT-6 family, count exactly only through the input-token endpoint of OpenAI's own Responses route; on Codex, Azure, and Chat Completions they stay estimated.
-- `prompt_curation` measures file sizes with the calibration frozen when it plans, not with provider counts, because verify must compare the edited files on the basis the plan measured; its checks also run synchronously, with no event loop to await a count on.
-  It judges whether the `MEMORY.md` preload withholds lines as a reply's preload does, from the file's own provider count.
+- `prompt_curation` measures file sizes by the model's estimate, not provider counts: its checks run in a worker thread, apart from the event loop the provider clients use, and verify must compare the edited files on the basis the plan measured.
+  It judges whether the `MEMORY.md` preload withholds lines from the provider's count of the file once a reply has counted it.
+- A scope whose history no reported request size describes, such as one under a replay limit, waits for a count of its whole history on every reply.
