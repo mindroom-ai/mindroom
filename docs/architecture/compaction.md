@@ -54,6 +54,8 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
   A checkpoint too large to leave room for its own run in the summary input is not used, so compaction still progresses.
 - A summary input that shrank after a failure keeps that size for the compaction's later chunks, because they would otherwise repeat the failure, and a slow model spends its whole timeout on each one; a chunk still grows to hold its first run whole.
 - A request without persisted replay (team members, workflow participants, scheduled tasks with `history_limit: 0`) compacts run-locally: its summary is an ordinary message of its own run and is stored with it.
+- Replay never drops a saved summary, so neither compaction stores one larger than the hard replay budget: before a reply, the budget beside that reply's static prompt; during one, the replay window minus the reserve and what the fold keeps (system prompt, tools, current prompt, transient messages), which the scope's next reply replays it beside.
+  A refused mid-turn fold leaves the request unchanged, as a failed one does, because using the summary only in memory would leave the turn's stored run beside raw runs the summary already covers.
 
 ## Limitations
 

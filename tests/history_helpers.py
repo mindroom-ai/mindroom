@@ -737,11 +737,15 @@ class ToolLoopModel:
 
 @dataclass
 class SummaryCalls:
-    """A compaction summary call that records its inputs and reports usage; it can fail or be cancelled."""
+    """A compaction summary call that records its inputs and reports usage; it can fail or be cancelled.
+
+    Each call returns ``summary`` when set, else a short summary numbered by call.
+    """
 
     inputs: list[str] = field(default_factory=list)
     fail: bool = False
     cancel: bool = False
+    summary: str | None = None
 
     async def __call__(
         self,
@@ -760,7 +764,7 @@ class SummaryCalls:
         if self.fail:
             msg = "summary model unavailable"
             raise RuntimeError(msg)
-        return f"SUMMARY-{len(self.inputs)}"
+        return self.summary or f"SUMMARY-{len(self.inputs)}"
 
 
 def seeded_storage(config: Config, runtime_paths: RuntimePaths) -> ConversationStore:

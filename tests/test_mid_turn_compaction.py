@@ -26,7 +26,11 @@ from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.prompt_tokens import build_static_token_estimator
-from mindroom.history.replay import configured_replay_plan, estimate_request_messages_tokens
+from mindroom.history.replay import (
+    configured_replay_plan,
+    estimate_request_messages_tokens,
+    estimate_summary_text_tokens,
+)
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.history.storage import new_scope_session, read_scope_state, with_force_compaction
@@ -72,7 +76,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.usage.storage import run_usage_snapshot
-from tests.conftest import install_model_providers, seed_session
+from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     BIG_TOOL,
@@ -707,18 +711,14 @@ async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scoped", [False, True])
 async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
     tmp_path: Path,
     summary_calls: SummaryCalls,
-    *,
-    scoped: bool,
 ) -> None:
+    """A run-local fold that leaves the request over the model's window fails the turn; a scoped one stores nothing."""
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
-    agent = (
-        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _Agent(model, config, paths)
-    )
+    agent = _Agent(model, config, paths)
 
     with pytest.raises(
         mid_turn_compaction.HistorySummaryBudgetError,
@@ -740,8 +740,10 @@ async def test_rewritten_request_within_the_model_window_is_sent(
 ) -> None:
     config, paths = _config(tmp_path, context_window=100_000, replay_window_tokens=4000)
     model = ToolLoopModel(tool_rounds=5)
+    lifecycle = RecordingCompactionLifecycle()
+    storage = seeded_storage(config, paths)
     agent = (
-        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _Agent(model, config, paths)
+        _scoped_agent(model, config, paths, storage, lifecycle=lifecycle) if scoped else _Agent(model, config, paths)
     )
 
     output = await _run(agent, [Message(role="user", content="p" * 16_000)])
@@ -749,6 +751,61 @@ async def test_rewritten_request_within_the_model_window_is_sent(
     assert str(output.content).endswith("done")
     # The prompt alone exceeds the replay window, so compacting again would only summarize every new tool result.
     assert len(summary_calls.inputs) == 1
+    if scoped:
+        # Nor can the scope's replies replay any summary beside it.
+        [failure] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
+        assert failure.failure_reason.endswith("; 0 available).")
+        assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context_window", "replay_window_tokens"),
+    [
+        # The model's own window holds the summary beside the prompt; only the replay window does not.
+        (100_000, 4000),
+        (4000, None),
+    ],
+)
+async def test_a_fold_whose_summary_the_next_reply_cannot_replay_is_not_stored(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+    *,
+    context_window: int,
+    replay_window_tokens: int | None,
+) -> None:
+    """Replay never drops a saved summary, so a fold stores none the reply's history budget cannot hold.
+
+    The turn continues uncompacted, and the next reply prepares its history instead of failing on that summary.
+    """
+    config, paths = _config(tmp_path, context_window=context_window, replay_window_tokens=replay_window_tokens)
+    storage = seeded_storage(config, paths)
+    # Each message carries about 1,000 tokens of context, and the summary fits the replay window only without it.
+    context = "c" * 4000
+    summary_calls.summary = "fact " * 2400
+    assert estimate_summary_text_tokens(summary_calls.summary) < 3500
+    lifecycle = RecordingCompactionLifecycle()
+    agent = _scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle)
+
+    output = await _run(agent, f"Do the task. {context}")
+    next_reply = await prepare_history_for_run_for_test(
+        agent_name="test_agent",
+        full_prompt=f"Thanks. {context}",
+        session_id="session-1",
+        runtime_paths=paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=storage.load_session("session-1"),
+    )
+
+    assert str(output.content).endswith("done")
+    [failure] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
+    assert failure.failure_reason.startswith("The summary exceeds the history budget")
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
+    # The fold stopped compacting for the turn; the next reply refuses the same summary and replays what fits.
+    assert len(summary_calls.inputs) == 2
+    assert next_reply.compaction_reply_outcome == "failed"
 
 
 @pytest.mark.asyncio
