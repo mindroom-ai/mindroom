@@ -43,6 +43,18 @@ describe("Toaster", () => {
     expect(screen.queryByText("Save Failed")).not.toBeInTheDocument();
   });
 
+  it("announces toasts politely to screen readers", () => {
+    render(<Toaster />);
+
+    act(() => {
+      toast({ title: "Save failed", variant: "destructive" });
+    });
+
+    const region = screen.getByRole("status");
+    expect(region).toHaveAttribute("aria-live", "polite");
+    expect(region).toHaveTextContent("Save failed");
+  });
+
   it("closes only the toast whose X was clicked", () => {
     render(<Toaster />);
 
@@ -51,7 +63,9 @@ describe("Toaster", () => {
       toast({ title: "Second" });
       toast({ title: "Third" });
     });
-    fireEvent.click(screen.getAllByRole("button")[1]);
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Dismiss notification" })[1],
+    );
 
     expect(screen.getByText("First")).toBeInTheDocument();
     expect(screen.queryByText("Second")).not.toBeInTheDocument();

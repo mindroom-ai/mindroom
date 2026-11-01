@@ -991,6 +991,66 @@ describe("Credentials", () => {
     expect((global.fetch as any).mock.calls).toHaveLength(4);
   });
 
+  /** Opens service_a, types a draft into the raw editor, and returns the editor. */
+  async function draftForServiceA(names: string[]) {
+    serveServices(names, () => undefined);
+    renderOpen();
+    await showsTokenOf("service_a");
+    const editor = screen.getByPlaceholderText(
+      '{"api_key":"..."}',
+    ) as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: '{"token":"draft"}' } });
+    return editor;
+  }
+
+  const addService = (name: string) => {
+    fireEvent.change(screen.getByPlaceholderText("new_service_name"), {
+      target: { value: name },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+  };
+
+  it("prompts before Add discards unsaved changes, and keeps them when declined", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const editor = await draftForServiceA(["service_a", "service_b"]);
+
+    // Adding the selected service again replaces nothing, so it does not ask.
+    addService("service_a");
+    expect(confirmSpy).not.toHaveBeenCalled();
+
+    addService("service_b");
+    expect(confirmSpy).toHaveBeenLastCalledWith(
+      "Discard unsaved changes for 'service_a'?",
+    );
+    expect(screen.getByText("Active: service_a")).toBeInTheDocument();
+    expect(editor.value).toBe('{"token":"draft"}');
+
+    addService("new_service");
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Active: service_a")).toBeInTheDocument();
+    expect(editor.value).toBe('{"token":"draft"}');
+    expect(screen.queryByRole("button", { name: /^new_service/ })).toBeNull();
+    expect(readsOf("/api/credentials/service_b")).toBe(0);
+
+    confirmSpy.mockReturnValue(true);
+    addService("new_service");
+    expect(screen.getByText("Active: new_service")).toBeInTheDocument();
+    expect(editor.value).toBe("{}");
+  });
+
+  it("prompts before Refresh discards unsaved changes, and keeps them when declined", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const editor = await draftForServiceA(["service_a"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(confirmSpy).toHaveBeenCalledWith(
+      "Discard unsaved changes for 'service_a'?",
+    );
+    expect(readsOf("/api/credentials/list")).toBe(1);
+    expect(editor.value).toBe('{"token":"draft"}');
+  });
+
   it("ignores stale credentials response from previously selected service", async () => {
     const firstCredentials = deferred<any>();
 
