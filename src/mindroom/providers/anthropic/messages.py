@@ -34,7 +34,6 @@ from anthropic.types.beta import (
 
 from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.environment import get_secret_from_env
-from mindroom.credentials.sync import get_anthropic_base_url
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
@@ -777,8 +776,10 @@ def _anthropic_kwargs(authored: dict[str, Any], api_key: str | None, runtime_pat
     """Fill the direct route's key and, unless ``client_params`` sets one, its endpoint from the runtime env."""
     kwargs: dict[str, Any] = {**authored, "api_key": api_key} if api_key else dict(authored)
     client_params = kwargs.get("client_params") or {}
-    if "base_url" not in client_params:
-        kwargs["client_params"] = {**client_params, "base_url": get_anthropic_base_url(runtime_paths)}
+    if "base_url" not in client_params and (
+        base_url := get_secret_from_env(ENDPOINT_VARIABLES["anthropic"], runtime_paths=runtime_paths)
+    ):
+        kwargs["client_params"] = {**client_params, "base_url": base_url}
     return kwargs
 
 

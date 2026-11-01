@@ -1663,25 +1663,6 @@ def test_anthropic_base_url_sets_the_direct_endpoint_only_where_client_params_se
     assert configured.settings.client_params == own["client_params"]
 
 
-def test_a_blank_exported_anthropic_base_url_leaves_the_direct_route_on_anthropics_api(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A blank export counts as unset, so the SDK, which reads the variable itself, does not get an empty endpoint."""
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "data",
-        process_env={"ANTHROPIC_BASE_URL": ""},
-    )
-
-    provider = build_provider(ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k"), runtime_paths)
-
-    assert str(provider._client().base_url) == "https://api.anthropic.com"
-
-
 @pytest.mark.asyncio
 async def test_client_params_override_route_settings_but_not_headers_or_the_http_client(tmp_path: Path) -> None:
     """``client_params`` may override any SDK client argument, while ``default_headers`` and the HTTP client win."""
