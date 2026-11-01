@@ -66,6 +66,48 @@ const serveGithubToken = () =>
       }),
     });
 
+/** The answer to a read of `path` from a backend holding these services, each with the token `<service>-value`. */
+const serviceResponse = (names: string[], path: string) => {
+  const [, , , service, suffix] = path.split("/");
+  const body =
+    path === "/api/credentials/list"
+      ? names
+      : suffix === "status"
+        ? { service, has_credentials: true, key_names: ["token"] }
+        : { service, credentials: { token: `${service}-value` } };
+  return { ok: true, json: async () => body };
+};
+
+/** Serves these services; a request `fails(path)` names is rejected with that message. */
+const serveServices = (
+  names: string[],
+  fails: (path: string) => string | undefined,
+) =>
+  (global.fetch as any).mockImplementation(async (input: string) => {
+    const path = String(input);
+    const failure = fails(path);
+    if (failure) {
+      throw new Error(failure);
+    }
+    return serviceResponse(names, path);
+  });
+
+/** Waits until the raw editor shows the token `serviceResponse` gives this service. */
+const showsTokenOf = (service: string) =>
+  waitFor(() => {
+    expect(
+      (screen.getByPlaceholderText('{"api_key":"..."}') as HTMLTextAreaElement)
+        .value,
+    ).toContain(`"token": "${service}-value"`);
+  });
+
+/** How many plain reads (no method) of this exact path the page made. */
+const readsOf = (path: string) =>
+  (global.fetch as any).mock.calls.filter(
+    ([input, init]: [string, RequestInit | undefined]) =>
+      input === path && init?.method === undefined,
+  ).length;
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -565,15 +607,11 @@ describe("Credentials", () => {
         return { ok: true, json: async () => body };
       },
     );
-    const readsOf = (path: string) =>
-      (global.fetch as any).mock.calls.filter(
-        ([input, init]: [string, RequestInit | undefined]) =>
-          input === path && init?.method === undefined,
-      ).length;
-
     renderOpen();
 
-    fireEvent.click(await screen.findByRole("button", { name: /^openai/ }));
+    // The page selects the first service itself, and a click made before that runs is overridden.
+    await screen.findByText("Active: anthropic");
+    fireEvent.click(screen.getByRole("button", { name: /^openai/ }));
     await screen.findByText("Active: openai");
     await waitFor(() => {
       expect(readsOf("/api/credentials/openai")).toBe(1);
@@ -595,20 +633,10 @@ describe("Credentials", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const deletion = deferred<any>();
     (global.fetch as any).mockImplementation(
-      async (input: string, init?: RequestInit) => {
-        if (init?.method === "DELETE") {
-          return deletion.promise;
-        }
-        const path = String(input);
-        const [, , , service, suffix] = path.split("/");
-        const body =
-          path === "/api/credentials/list"
-            ? ["service_a", "service_b"]
-            : suffix === "status"
-              ? { service, has_credentials: true, key_names: ["token"] }
-              : { service, credentials: { token: `${service}-value` } };
-        return { ok: true, json: async () => body };
-      },
+      async (input: string, init?: RequestInit) =>
+        init?.method === "DELETE"
+          ? deletion.promise
+          : serviceResponse(["service_a", "service_b"], String(input)),
     );
 
     renderOpen();
@@ -787,40 +815,131 @@ describe("Credentials", () => {
     });
   });
 
-  it("continues loading services when one status request fails", async () => {
-    (global.fetch as any)
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ["good_service", "zbad_service"],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "good_service",
-          has_credentials: true,
-          key_names: ["token"],
-        }),
-      })
-      .mockRejectedValueOnce(new Error("Status endpoint failed"))
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          service: "good_service",
-          credentials: { token: "abc" },
-        }),
-      });
+  /** zbad_service's status request fails while `statusFails()` says so. */
+  const serveOneFailingStatus = (statusFails: () => boolean) =>
+    serveServices(["good_service", "other_service", "zbad_service"], (path) =>
+      path === "/api/credentials/zbad_service/status" && statusFails()
+        ? "Status endpoint failed"
+        : undefined,
+    );
+  const PARTIAL_WARNING =
+    "Some service statuses could not be loaded. You can still edit credentials.";
+
+  it("continues loading services when one status request fails, and keeps its warning", async () => {
+    serveOneFailingStatus(() => true);
 
     renderOpen();
 
+    await showsTokenOf("good_service");
+    expect(
+      screen.getByRole("button", { name: /^zbad_service/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(PARTIAL_WARNING)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^other_service/ }));
+
+    await showsTokenOf("other_service");
+    expect(screen.getByText(PARTIAL_WARNING)).toBeInTheDocument();
+  });
+
+  it("shows the list's warning above the selected service's own error", async () => {
+    serveServices(["good_service", "zbad_service"], (path) =>
+      path.startsWith("/api/credentials/zbad_service")
+        ? "zbad_service unreadable"
+        : undefined,
+    );
+
+    renderOpen();
+
+    await showsTokenOf("good_service");
+    fireEvent.click(screen.getByRole("button", { name: /^zbad_service/ }));
+
+    const serviceError = await screen.findByText("zbad_service unreadable");
+    expect(
+      screen.getByText(PARTIAL_WARNING).compareDocumentPosition(serviceError) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("drops the partial-status warning once every status loads on Refresh", async () => {
+    let statusFails = true;
+    serveOneFailingStatus(() => statusFails);
+
+    renderOpen();
+
+    await screen.findByText(PARTIAL_WARNING);
+    statusFails = false;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
     await waitFor(() => {
-      expect(screen.getByText("good_service")).toBeInTheDocument();
-      expect(screen.getByText("zbad_service")).toBeInTheDocument();
-      expect(
-        screen.getByText(
-          "Some service statuses could not be loaded. You can still edit credentials.",
-        ),
-      ).toBeInTheDocument();
+      expect(screen.queryByText(PARTIAL_WARNING)).not.toBeInTheDocument();
     });
+  });
+
+  it("keeps the list error when the list fails to reload on Refresh", async () => {
+    let refreshed = false;
+    serveServices(["service_a", "service_b"], (path) =>
+      path === "/api/credentials/list" && refreshed
+        ? "Service list unavailable"
+        : undefined,
+    );
+
+    renderOpen();
+
+    await screen.findByText("Active: service_a");
+    await waitFor(() => {
+      expect(readsOf("/api/credentials/service_a")).toBe(1);
+    });
+    refreshed = true;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(readsOf("/api/credentials/service_a")).toBe(2);
+    });
+    expect(
+      await screen.findByText("Service list unavailable"),
+    ).toBeInTheDocument();
+
+    // The stale list stays usable, and working with it keeps the list's error.
+    fireEvent.click(screen.getByRole("button", { name: /^service_b/ }));
+    await showsTokenOf("service_b");
+    expect(screen.getByText("Service list unavailable")).toBeInTheDocument();
+  });
+
+  it("reloads only the list on Refresh when there is no service", async () => {
+    serveNoServices();
+
+    renderOpen();
+
+    await screen.findByText(
+      "No services found yet. Add one and save JSON credentials.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(readsOf("/api/credentials/list")).toBe(2);
+    });
+    expect((global.fetch as any).mock.calls).toHaveLength(2);
+  });
+
+  it("clears the previous service's error when another service is selected", async () => {
+    serveServices(["service_a", "service_b"], (path) =>
+      path === "/api/credentials/service_a"
+        ? "Credentials unavailable"
+        : undefined,
+    );
+
+    renderOpen();
+
+    expect(
+      await screen.findByText("Credentials unavailable"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^service_b/ }));
+
+    await showsTokenOf("service_b");
+    expect(
+      screen.queryByText("Credentials unavailable"),
+    ).not.toBeInTheDocument();
   });
 
   it("prompts before switching services with unsaved changes", async () => {

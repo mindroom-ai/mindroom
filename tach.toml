@@ -1859,6 +1859,7 @@ path = "mindroom.api.openai_compat"
 depends_on = [
     "mindroom.agent_run_context",
     "mindroom.ai",
+    "mindroom.ai_run_metadata",
     "mindroom.api.config_lifecycle",
     "mindroom.api.open_access",
     "mindroom.api.openai_request_parsing",
@@ -6373,6 +6374,7 @@ expose = [
     "presentation.strip_team_display",
     "resume.continue_paused_team_run",
     "runtime.MemberEvent",
+    "runtime.team_usage",
     "runtime.team_usage_runs",
     "spec.TeamMode",
 ]

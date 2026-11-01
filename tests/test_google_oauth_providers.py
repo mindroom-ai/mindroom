@@ -185,6 +185,23 @@ def test_each_google_provider_declares_its_service_on_the_shared_google_contract
     assert provider.token_parser is _google_token_parser
 
 
+def test_a_blank_exported_domain_restriction_does_not_hide_the_env_file_one(tmp_path: Path) -> None:
+    """A blank export, as a compose passthrough of an unset variable produces, must not lift a `.env` restriction."""
+    (tmp_path / ".env").write_text(
+        "GOOGLE_DRIVE_ALLOWED_HOSTED_DOMAINS=example.com\nGOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.org\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"GOOGLE_DRIVE_ALLOWED_HOSTED_DOMAINS": "", "GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS": " "},
+    )
+    provider = google_oauth_provider("google_drive")
+
+    assert provider.resolved_allowed_hosted_domains(runtime_paths) == ("example.com",)
+    assert provider.resolved_allowed_email_domains(runtime_paths) == ("example.org",)
+
+
 @pytest.mark.parametrize("scope_field", ["scopes", "scope"])
 @pytest.mark.parametrize(
     ("requested_scope", "response_scope", "expected_scope"),
