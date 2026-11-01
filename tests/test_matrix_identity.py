@@ -51,8 +51,8 @@ class TestMatrixID:
         """Set up test config."""
         self.config = Config(
             agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
+                "general": AgentConfig(display_name="General", rooms=["!test:example.org"]),
             },
             teams={},
             room_models={},
@@ -275,8 +275,8 @@ class TestHelperFunctions:
         """Set up test config."""
         self.config = Config(
             agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
+                "general": AgentConfig(display_name="General", rooms=["!test:example.org"]),
             },
             teams={},
             room_models={},

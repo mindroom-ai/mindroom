@@ -37,6 +37,7 @@ from mindroom.matrix.state import update_matrix_state
 from mindroom.matrix.users import INTERNAL_USER_AGENT_NAME, load_agent_user, login_agent_http_client
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
+    managed_room_alias,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
     split_concrete_matrix_user_ids,
@@ -354,7 +355,7 @@ async def _ensure_room_exists(
     # Resolving the alias recovers rooms that exist on the server but not in our state.
     server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
     alias_localpart = managed_room_alias_localpart(room_key, runtime_paths=runtime_paths)
-    full_alias = f"#{alias_localpart}:{server_name}"
+    full_alias = managed_room_alias(room_key, server_name, runtime_paths)
 
     resolution = await _resolve_managed_alias(client, full_alias, existing_room.room_id if existing_room else None)
     if resolution is _AliasResolution.RETRY_LATER:

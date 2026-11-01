@@ -261,8 +261,8 @@ async def test_ensure_all_rooms_skips_unmanaged_room_references(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Room IDs and aliases in an agent's rooms are joined as-is, never created as managed rooms."""
-    config = membership_config(tmp_path, agent_rooms=["lobby", "#ops:example.com", "!raw:example.com"])
+    """Room IDs and full aliases in an agent's rooms are joined as-is, never created as managed rooms."""
+    config = membership_config(tmp_path, agent_rooms=["lobby", "#lobby:localhost", "!raw:example.com"])
     ensured_keys: list[str] = []
 
     async def ensure_room(*, room_key: str, **_kwargs: object) -> str:
