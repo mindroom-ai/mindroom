@@ -409,7 +409,9 @@ class TestWebhookEndpoints:
         assert {key: value for key, value in payload.items() if key != "updated_at"} == expected
 
     @pytest.mark.parametrize("event_kind", ["created", "updated"])
-    @pytest.mark.parametrize("metadata", [{"tier": "byok"}, {"tier": "byok", "billing_cycle": "annual"}])
+    @pytest.mark.parametrize(
+        "metadata", [{"tier": "byok"}, {"tier": "byok", "billing_cycle": "annual"}], ids=["missing", "annual"]
+    )
     def test_subscription_requires_billing_cycle(
         self,
         client: TestClient,

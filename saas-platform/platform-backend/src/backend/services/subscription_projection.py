@@ -76,7 +76,7 @@ def subscription_fields(sb: Any, subscription: dict) -> _SubscriptionFields:
         "stripe_price_id": price_data.get("id"),
         "tier": _get_tier_from_price(price_data),
         "billing_cycle": _get_billing_cycle_from_price(price_data),
-        # Amount Stripe bills each billing cycle, in cents; null only for tiered and pay-what-you-want prices.
+        # Amount Stripe bills each billing cycle, in cents; null for tiered, pay-what-you-want, and sub-cent prices.
         "price_cents": price_data.get("unit_amount"),
         "status": subscription_status(sb, subscription["status"], subscription["id"]),
         "trial_ends_at": maybe_timestamp_to_iso(subscription.get("trial_end")),
