@@ -535,7 +535,7 @@ async def _consent_group_members(
     """
     runtime_paths = context.user.runtime_paths
     members: list[OAuthProvider] = []
-    lead_sign_in: tuple[str, str, str] | None = None
+    lead_client_endpoints: tuple[str, str, str] | None = None
     for service in agent.services:
         provider = context.providers[service.provider]
         if (
@@ -556,10 +556,10 @@ async def _consent_group_members(
         client = await asyncio.to_thread(provider.client_config, runtime_paths)
         if client is None:
             continue
-        sign_in = (client.client_id, provider.authorization_url, provider.token_url)
-        if lead_sign_in is None:
-            lead_sign_in = sign_in
-        if sign_in == lead_sign_in:
+        client_endpoints = (client.client_id, provider.authorization_url, provider.token_url)
+        if lead_client_endpoints is None:
+            lead_client_endpoints = client_endpoints
+        if client_endpoints == lead_client_endpoints:
             members.append(provider)
     return members
 
