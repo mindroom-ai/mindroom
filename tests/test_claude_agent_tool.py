@@ -973,6 +973,8 @@ async def test_claude_send_refreshes_last_used_after_long_query(
     await _in_call(run_context, tools.claude_send("long"))
 
     _TimeJumpFakeClaudeSDKClient.jump_seconds = 0.0
+    # The sweep runs a pass before the next call reuses the session.
+    await asyncio.sleep(0)
     result = await _in_call(run_context, tools.claude_send("after-long"))
 
     assert "Echo: after-long" in result
