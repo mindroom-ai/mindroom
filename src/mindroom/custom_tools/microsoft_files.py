@@ -297,7 +297,9 @@ def _iso_serial(value: object) -> float | None:
         moment = datetime.fromisoformat(value.strip()).replace(tzinfo=UTC)
     except ValueError:
         return None
-    return (moment - _EXCEL_EPOCH) / timedelta(days=1)
+    serial = (moment - _EXCEL_EPOCH) / timedelta(days=1)
+    # Excel counts a 1900-02-29 that never was, so its serials before 1900-03-01 are one lower.
+    return serial - 1 if serial < 61 else serial
 
 
 def _shown_as_text(value: object) -> bool:
@@ -330,8 +332,8 @@ def _stored_as_written(held: object, written: object, *, text_cell: bool) -> boo
                 return False
             return math.isclose(held, serial, rel_tol=0.0, abs_tol=1e-6)
     if isinstance(held, int | float) and isinstance(written, int | float) and not isinstance(held, bool):
-        # Only rounding in the last of a double's digits is tolerated, so distinct 15-digit values differ.
-        return not isinstance(written, bool) and math.isclose(held, written, rel_tol=1e-15, abs_tol=0.0)
+        # Only rounding in a double's last bit is tolerated, so two distinct numbers Excel can store differ.
+        return not isinstance(written, bool) and abs(held - written) <= math.ulp(max(abs(held), abs(written)))
     return _same(held, written)
 
 
@@ -366,14 +368,18 @@ class _RangeEdit:
 
     @property
     def writes(self) -> list[list[Any]]:
-        """Return the values with null for every cell given what it held when read.
+        """Return the values with null for every cell given what it held when read and no new number format.
 
         Graph parses every written cell again, so an unchanged cell is left out rather than rewritten, where text
-        such as an ISO date would become a date; the approval card shows those cells as unchanged.
+        such as an ISO date would become a date; the approval card shows those cells as unchanged. A cell whose
+        format changes is written again, so text such as a formula typed into a text cell is parsed in the new one.
         """
         return [
-            [None if _same(value, before) else value for value, before in zip(row, read, strict=True)]
-            for row, read in zip(self.values, self.expected_formulas, strict=True)
+            [
+                None if _same(value, read[column]) and _at(self.number_formats, row, column) is None else value
+                for column, value in enumerate(values)
+            ]
+            for row, (values, read) in enumerate(zip(self.values, self.expected_formulas, strict=True))
         ]
 
     def cell(self, row: int, column: int) -> str:

@@ -773,12 +773,12 @@ def test_excel_update_verifies_formulas_as_excel_stores_them(tmp_path: Path, mon
 
 def test_excel_update_tolerates_only_last_digit_rounding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _workbook([["", ""]])
-    files.store = lambda value: {0.3: 0.30000000000000004, 123456789012345: 123456789012346}.get(value, value)
+    files.store = lambda value: {0.3: 0.30000000000000004, 999999999999999: 1e15}.get(value, value)
     tools, _graph = _tools(tmp_path, monkeypatch, files)
 
-    result = _update(tools, [[0.3, 123456789012345]], [["", ""]])
+    result = _update(tools, [[0.3, 999999999999999]], [["", ""]])
 
-    assert result["differences"] == [{"cell": "B1", "written": 123456789012345, "stored": 123456789012346}]
+    assert result["differences"] == [{"cell": "B1", "written": 999999999999999, "stored": 1e15}]
 
 
 @pytest.mark.parametrize(
@@ -863,6 +863,15 @@ def test_excel_update_refuses_a_change_the_approval_card_shows_as_none(
     assert _patches(graph) == []
 
 
+def test_excel_update_counts_early_1900_dates_as_excel_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Excel's serials skip its fictitious 1900-02-29 only from 1900-03-01 on."""
+    files = _workbook([["", ""]])
+    files.store = lambda value: {"1900-01-01": 1, "1900-03-01": 61}.get(value, value)
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    assert _update(tools, [["1900-01-01", "1900-03-01"]], [["", ""]])["verified"] is True
+
+
 def test_excel_update_compares_iso_dates_with_their_serial_number(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -945,6 +954,20 @@ def test_excel_update_reports_a_format_whose_quoted_text_changed_case(
     result = _update(tools, [[1, None]], [["", ""]], number_formats=[['0"USD"', None]])
 
     assert result["differences"] == [{"cell": "A1", "number_format": '0"USD"', "stored_number_format": '0"usd"'}]
+
+
+def test_excel_update_rewrites_an_unchanged_cell_whose_format_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A formula typed into a text cell becomes live when the cell is reformatted and written again."""
+    files = _workbook([["=A1", "=A1"]], [["@", "@"]])
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [["=A1", "=A1"]], [["=A1", "=A1"]], number_formats=[["General", None]])
+
+    assert _patches(graph) == [{"numberFormat": [["General", None]]}, {"values": [["=A1", None]]}]
+    assert result["verified"] is True
 
 
 def test_excel_update_sends_no_format_patch_for_formats_that_are_all_null(

@@ -137,7 +137,7 @@ A read returns `values`, each cell's raw value, such as a date's serial number o
 Writing a range takes its `formulas` from a read of the same address as `expected_formulas`, so an approval card shows each cell before and after the edit.
 The write reads the range again first and writes nothing, failing with `cells_changed` and the range's `current_formulas`, when a cell's value or formula differs from that read; number formats are not compared.
 Microsoft Graph has no conditional range write, so a change in the moment between that check and the write is not caught.
-Cells whose new value equals what was read are left as they are rather than written again.
+Cells whose new value equals what was read are left as they are rather than written again, unless the write also changes their number format, so a formula typed into a text-formatted cell becomes live when the cell gets another format.
 Approval cards show a decimal or very large number and the same text alike, such as `1.5` and `"1.5"`, so a cell that would change only between them fails with `ambiguous_change`.
 
 Excel parses written text as if someone typed it, so text it would store as something else, such as `0042` losing its zeros or `1/2` becoming a date, fails with `converted_text` unless the cell is formatted as text.
