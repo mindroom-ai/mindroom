@@ -431,7 +431,8 @@ class _CallAgentCache:
         refresh_scheduler: KnowledgeRefreshScheduler | None,
     ) -> AgentBuild:
         """Build the call's agent."""
-        # Build the same tools and system prompt as text chat, less its Markdown output format, which a call speaks.
+        # Build the same tools and system prompt as text chat, less its Markdown output format, which a call speaks,
+        # and the background-job guidance, which its calls cannot use: they all finish inside the call's turn.
         # The shell's mindroom-agent CLI stays off: call turns have no turn identity to own it.
         build = create_agent(
             self.agent_name,
@@ -888,7 +889,7 @@ def _function_requires_text_chat(function: ToolFunction, config: Config) -> bool
 
 
 def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild:
-    """Keep functions that need text chat visible, so the prompt matches chat's, but refuse them when called."""
+    """Keep functions that need text chat visible, as chat offers them, but refuse them when called."""
     refused: set[str] = set()
 
     def callable_in_a_call(function: ToolFunction) -> ToolFunction:

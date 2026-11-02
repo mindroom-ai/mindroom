@@ -319,6 +319,7 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
 ) -> None:
     """The cached call agent offers chat's functions and prompt, less the Markdown line a spoken reply has no use for.
 
+    No job runtime runs here, so chat's prompt has no background-job guidance for the call's to leave out either.
     A gated call is refused in a call whether chat would pause for it or ask as its job, before any other tool-call
     policy sees it, so no card is posted and nothing is recorded.
     """
