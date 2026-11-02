@@ -869,7 +869,7 @@
       "description": "Generic execution policy for registered toolkits; its feature switch and exclusions are pinned at startup.",
       "properties": {
         "enabled": {
-          "default": false,
+          "default": true,
           "description": "Enable managed tool waits and durable jobs; requires restart.",
           "title": "Enabled",
           "type": "boolean"
@@ -5798,7 +5798,7 @@
     "background_tool_jobs": {
       "$ref": "#/$defs/BackgroundToolJobsConfig",
       "default": {
-        "enabled": false,
+        "enabled": true,
         "exclude_toolkits": [],
         "approval_wait_timeout": 300.0
       },

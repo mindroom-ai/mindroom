@@ -226,6 +226,8 @@ def _reply(
     config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
     if approval_rules:
         config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
+        # An approval-gated call pauses the reply, which only a reply without background tool jobs does.
+        config.background_tool_jobs.enabled = False
     model = ScriptedModel([list(turn) for turn in turns])
     install_model_providers(monkeypatch, {"default": model})
     runtime = make_test_tool_runtime_context(
@@ -1528,6 +1530,7 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     The rest of the hooks are wired. A reply with a job actor projects its job definitions before participation.
     """
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"respond","reason":"Yes."}'), answer("ok")])
+    reply.config.background_tool_jobs.enabled = False
     captured: dict[str, Any] = {}
     original = ai.run_agent
 

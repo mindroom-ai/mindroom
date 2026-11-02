@@ -403,6 +403,8 @@ def _context_agent(
             "models": {"default": {"provider": "ollama", "id": "test-model"}},
             "administrators": ["@alice:example.test"],
             "tool_approval": {"default": "require_approval" if require_approval else "auto_approve"},
+            # Approved calls run under the approval policy gate, not as background jobs.
+            "background_tool_jobs": {"enabled": False},
             "agents": {
                 "routing": {
                     "display_name": "Routing",

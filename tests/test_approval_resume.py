@@ -23,7 +23,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.approval_continuation_helpers import receipt_call_ids
-from tests.approval_resume_helpers import AGENT_RESUMES, CodeResume, resume_case, setup_case, setup_resume
+from tests.approval_resume_helpers import AGENT_RESUMES, AgentResume, CodeResume, resume_case, setup_case, setup_resume
 from tests.run_record_helpers import (
     PRODUCT,
     approved_call,
@@ -53,6 +53,13 @@ def _answered(script: Sequence[ScriptStep]) -> tuple[str, MessageMetrics]:
     return step.message.content, step.message.metrics
 
 
+async def _setup_case(case: AgentResume, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CodeResume:
+    """Load the captured pause of ``case`` under a config without background tool jobs, which pause for approval."""
+    run = await setup_case(case, tmp_path, monkeypatch)
+    run.config.background_tool_jobs.enabled = False
+    return run
+
+
 def _without_published_metadata(record: RunRecord, *keys: str) -> dict[str, object]:
     """Return ``record``'s run metadata without ``keys`` and what the reply publishes, which the metadata goldens pin."""
     left_out = {AI_RUN_METADATA_KEY, *keys}
@@ -67,7 +74,7 @@ async def test_a_paused_approval_resumes_into_a_completed_run(
 ) -> None:
     """Approving the paused ``multiply`` runs it, denying it answers it with the reason, and the run completes."""
     case = AGENT_RESUMES[run_id]
-    run = await setup_case(case, tmp_path, monkeypatch)
+    run = await _setup_case(case, tmp_path, monkeypatch)
     before = run.paused.to_dict()
 
     outcome = await resume_case(case, run)
@@ -110,7 +117,7 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
 ) -> None:
     """The child's approved call runs in the child, whose answer continues the parent as an external result."""
     case = AGENT_RESUMES["run-delegation-approved"]
-    run = await setup_case(case, tmp_path, monkeypatch)
+    run = await _setup_case(case, tmp_path, monkeypatch)
     [child] = DelegationState.from_metadata(run.paused.metadata).children
     assert [(call.invoking_agent, call.tool_name, call.toolkit_name) for call in run.calls()] == [
         ("helper", "multiply", "calculator"),
@@ -204,7 +211,7 @@ async def test_a_resume_sends_each_model_its_stored_request_then_its_decided_res
     delegation's result.
     """
     case = AGENT_RESUMES[run_id]
-    run = await setup_case(case, tmp_path, monkeypatch)
+    run = await _setup_case(case, tmp_path, monkeypatch)
     stored = {"code-model": run.paused.messages}
     children = DelegationState.from_metadata(run.paused.metadata).children
     for child in children:

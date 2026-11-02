@@ -140,6 +140,8 @@ def _team(
         scripts={"default": leader, "general-model": general, "research-model": research},
         mode=mode,
     )
+    # These turns pause the reply for approval, which needs background tool jobs off.
+    team.config.background_tool_jobs.enabled = False
     if approval_rules:
         team.config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
     return team

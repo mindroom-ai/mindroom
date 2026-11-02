@@ -79,6 +79,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests import team_turn_helpers
 from tests.agent_tool_helpers import UnansweredCallTools
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
 from tests.approval_continuation_helpers import (
@@ -121,11 +122,9 @@ from tests.team_turn_helpers import (
     ProbeToolkit,
     TeamTurn,
     authored_team_config,
-    build_team_turn,
     delegate,
     member_approval,
     rendered,
-    squad_turn,
 )
 from tests.teams.squad import member as squad_member
 from tests.test_tool_hooks import _plugin
@@ -134,7 +133,7 @@ from tests.turn_dispatch_helpers import nothing_else_queued
 from tests.usage_helpers import usage_rows
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Callable, Mapping
     from contextlib import AbstractContextManager
     from pathlib import Path
 
@@ -152,6 +151,21 @@ _TOUCH_NEEDS_APPROVAL = [ApprovalRuleConfig(match="touch", action="require_appro
 
 # Every test registers the members' probe toolkit.
 pytestmark = pytest.mark.usefixtures("squad_probe")
+
+
+def _without_tool_jobs[**P](build: Callable[P, TeamTurn]) -> Callable[P, TeamTurn]:
+    """Build a team whose config turns background tool jobs off, so gated calls pause the reply for approval."""
+
+    def built(*args: P.args, **kwargs: P.kwargs) -> TeamTurn:
+        team = build(*args, **kwargs)
+        team.config.background_tool_jobs.enabled = False
+        return team
+
+    return built
+
+
+squad_turn = _without_tool_jobs(team_turn_helpers.squad_turn)
+build_team_turn = _without_tool_jobs(team_turn_helpers.build_team_turn)
 
 
 @pytest.mark.asyncio

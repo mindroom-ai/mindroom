@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.delegation.execution import answered_delegation_calls
 from mindroom.delegation.recovery import read_child_run
@@ -91,6 +91,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
         },
         defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         tool_approval={"rules": [{"match": "run_subagent" if gate else "add", "action": "require_approval"}]},
     )
     entity_ids(config, paths)
@@ -237,6 +238,7 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
         },
         defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         tool_approval={
             "rules": [
                 {"match": "add", "action": "require_approval"},
@@ -334,6 +336,7 @@ async def test_an_approved_childs_call_and_its_delegation_keep_their_own_results
         },
         defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}]},
     )
     entity_ids(config, paths)

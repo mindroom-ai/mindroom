@@ -188,8 +188,6 @@ tool_approval:
     action: require_approval
   - match: manage_team
     action: require_approval
-background_tool_jobs:
-  enabled: true
 defaults:
   tools:
   - scheduler

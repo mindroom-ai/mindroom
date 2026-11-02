@@ -19,7 +19,7 @@ from mindroom.approval.resume import ResumeDecisions, forward_resume
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.delegation.state import DELEGATION_STATE_KEY
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history import session_context
@@ -80,6 +80,8 @@ def _config(paths: RuntimePaths) -> Config:
             defaults=DefaultsConfig(tools=[]),
             memory={"backend": "none"},
             tool_approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="multiply", action="require_approval")]),
+            # These turns pause for approval and delegate through the native delegation driver.
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         ),
         "code",
         users=[REQUESTER],

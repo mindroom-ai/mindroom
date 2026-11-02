@@ -282,6 +282,8 @@ async def test_a_team_approval_resumes_the_paused_leader_requests_native_replay(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
     team.models["default"] = leader
+    # The member's gated call pauses the team reply for approval.
+    team.config.background_tool_jobs.enabled = False
     team.config.models["default"].context_window = 200_000
     team.config.defaults.compaction = CompactionConfig(threshold_tokens=30_000)
     earlier = TeamRunRecord(

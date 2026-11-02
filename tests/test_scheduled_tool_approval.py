@@ -25,7 +25,7 @@ from mindroom.approval.tool_approval import ToolApprovalTransportError, schedule
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.custom_tools.thread_model import ThreadModelTools
@@ -1999,6 +1999,8 @@ def _code_config() -> Config:
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
+            # The build's gated calls run under the approval policy gate, not as background jobs.
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         ),
     )
 
@@ -2810,33 +2812,21 @@ async def test_a_model_switch_is_never_a_scheduled_call() -> None:
         )
 
 
-class _SubagentTools(Toolkit):
-    """A ``delegate`` toolkit's subagent function, as agent assembly offers it."""
-
-    def __init__(self) -> None:
-        super().__init__(name="delegate", tools=[self.run_subagent])
-
-    def run_subagent(self, task: str) -> str:
-        """Run a subagent.
-
-        Args:
-            task: The subagent's task.
-
-        """
-        return task
-
-
 @pytest.mark.asyncio
 async def test_a_subagent_call_is_never_a_scheduled_call() -> None:
     """A subagent call runs a child turn in its conversation, which a stored call cannot run later."""
     context = _tool_context(_gated_config())
+
+    def run_subagent(task: str) -> str:
+        """Run a subagent."""
+        return task
 
     with (
         tool_runtime_context(context),
         _responders(context.config, "general"),
         pytest.raises(SchedulingError, match="needs live input or conversation control"),
     ):
-        await _LiveRun(((_SubagentTools(), "delegate"),)).call(
+        await _LiveRun(((Toolkit(name="delegate", tools=[run_subagent]), "delegate"),)).call(
             "schedule_tool_call",
             tool_name="run_subagent",
             arguments_json='{"task": "Research"}',
