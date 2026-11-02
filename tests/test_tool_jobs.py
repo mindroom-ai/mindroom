@@ -1147,13 +1147,13 @@ async def test_a_job_change_keeps_the_mid_turn_judgment_its_wait_awaits(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_a_wait_ends_its_message_waiter_even_when_the_judgment_absorbs_the_cancellation(
+async def test_a_message_waiter_whose_judgment_absorbed_its_cancellation_ends_instead_of_waiting_again(
     tmp_path: Path,
 ) -> None:
-    """A wait that ends while the judge decides leaves no message waiter behind, even one whose cancellation is lost."""
+    """A cancelled message waiter ends once its judgment returns, so it is never left pending for the GC to destroy."""
     runtime = await tool_job_runtime(tmp_path)
     state = _QueuedMessageState()
-    proceed, judging = asyncio.Event(), asyncio.Event()
+    proceed, judging, absorbed, answer = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
     loop = asyncio.get_running_loop()
     reported: list[str] = []
     loop.set_exception_handler(lambda _loop, context: reported.append(context["message"]))
@@ -1164,8 +1164,9 @@ async def test_a_wait_ends_its_message_waiter_even_when_the_judgment_absorbs_the
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             # An HTTP client whose own timeout fires with the cancellation takes it for that timeout (anyio does),
-            # and its retry then answers.
-            await asyncio.sleep(0)
+            # and the judgment then answers that the message can wait.
+            absorbed.set()
+            await answer.wait()
         return True
 
     async def operation() -> BackgroundOutcome:
@@ -1192,67 +1193,18 @@ async def test_a_wait_ends_its_message_waiter_even_when_the_judgment_absorbs_the
         await asyncio.wait_for(judging.wait(), JOB_TEST_TIMEOUT)
         proceed.set()
         assert (await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)).job.result == "done"
+        await asyncio.wait_for(absorbed.wait(), JOB_TEST_TIMEOUT)
+        left = message_waiters()
+        answer.set()
+
+        await asyncio.wait_for(asyncio.gather(*left, return_exceptions=True), JOB_TEST_TIMEOUT)
         assert message_waiters() == []
-        # The conversation's queue state goes once it is idle, as the coordinator evicts it, and the loop moves on.
+        # The conversation's queue state goes once it is idle, as the coordinator evicts it.
         del waiter, state
-        await asyncio.sleep(0)
         gc.collect()
         assert reported == []
     finally:
         loop.set_exception_handler(None)
-        proceed.set()
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_a_wait_cancelled_while_ending_its_message_waiter_gives_back_its_claim(tmp_path: Path) -> None:
-    """A finished job's claim returns to the job when the wait is cancelled before it can hand the claim over."""
-    runtime = await tool_job_runtime(tmp_path)
-    state = _QueuedMessageState()
-    proceed, judging, absorbed, answer = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
-
-    async def evaluate(_request: JudgmentRequest) -> bool:
-        judging.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            # The judgment takes the waiter's cancellation for its own timeout and keeps going a while.
-            absorbed.set()
-            await answer.wait()
-        return True
-
-    async def operation() -> BackgroundOutcome:
-        await proceed.wait()
-        return BackgroundOutcome("completed", "done")
-
-    state.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
-    try:
-        job = await start_job(
-            runtime,
-            "work",
-            tool_name="tool",
-            depth=0,
-            adapter={},
-            owner=job_owner(),
-            operation=operation,
-        )
-        with pending_human_messages_context(state):
-            waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
-        state.add_waiting_human_message("$thanks", text="Thanks")
-        await asyncio.wait_for(judging.wait(), JOB_TEST_TIMEOUT)
-        proceed.set()
-        # The job ends, the wait claims its outcome and, while it ends the message waiter, is cancelled.
-        await asyncio.wait_for(absorbed.wait(), JOB_TEST_TIMEOUT)
-        waiter.cancel()
-        answer.set()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
-
-        again = await asyncio.wait_for(runtime.wait(job.job_id, owner=job_owner(), depth=0), JOB_TEST_TIMEOUT)
-
-        assert again.job.result == "done"
-        assert again.claim is not None
-    finally:
         proceed.set()
         answer.set()
         await runtime.shutdown()

@@ -728,31 +728,10 @@ class ToolJobRuntime:
                     message = asyncio.ensure_future(human.wait())
                 released = await _changed_or_released(changed, message, timeout=remaining)
         finally:
-            await self._end_wait(job_id, claim, message, retained=retained)
-
-    async def _end_wait(
-        self,
-        job_id: str,
-        claim: JobClaim | None,
-        message: asyncio.Future[None] | None,
-        *,
-        retained: bool,
-    ) -> None:
-        """Release a claim the wait does not return, and end its message waiter with any judgment that waiter awaits."""
-        if message is not None:
-            message.cancel()
-        if not retained:
-            await self.release_wait(job_id, claim)
-        if message is None:
-            return
-        # Awaited after the release, which a second cancellation must not skip.
-        try:
-            await asyncio.gather(message, return_exceptions=True)
-        except asyncio.CancelledError:
-            # Cancelled here, the wait never returns the claim it retained, so the claim goes back.
-            if retained:
+            if message is not None:
+                message.cancel()
+            if not retained:
                 await self.release_wait(job_id, claim)
-            raise
 
     def hold_inline(self, job_id: str, claim: JobClaim) -> None:
         """Treat a claimed outcome as the result of the call that started the job while that call's reply runs."""
