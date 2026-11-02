@@ -30,9 +30,10 @@ __all__ = ["GITHUB_APP_PERMISSIONS", "github_app_secret", "request_repository"]
 logger = get_logger(__name__)
 
 # The App permissions a token gets for each access level: enough for git clone, fetch, and push, and for reading or
-# writing issues and pull requests through the API and `gh`. `gh pr view`, `gh pr status`, and `gh pr checks` also read
-# a pull request's CI results, which need `checks` and `statuses`. GitHub adds metadata read to every token anyway.
-_CI_RESULTS = {"checks": "read", "statuses": "read"}
+# writing issues and pull requests through the API and `gh`. `gh pr view` and `gh pr checks` also read a pull request's
+# CI results, including the Actions run behind each check, which need `checks`, `statuses`, and `actions`. GitHub adds
+# metadata read to every token anyway.
+_CI_RESULTS = {"checks": "read", "statuses": "read", "actions": "read"}
 GITHUB_APP_PERMISSIONS: Mapping[GitHubRepositoryAccess, Mapping[str, str]] = MappingProxyType(
     {
         "read": MappingProxyType(

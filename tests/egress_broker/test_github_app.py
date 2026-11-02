@@ -73,6 +73,7 @@ def test_read_write_permissions_can_push_and_write_pull_requests() -> None:
         "pull_requests": "read",
         "checks": "read",
         "statuses": "read",
+        "actions": "read",
     }
     assert GITHUB_APP_PERMISSIONS["read_write"] == {
         "contents": "write",
@@ -81,6 +82,7 @@ def test_read_write_permissions_can_push_and_write_pull_requests() -> None:
         "pull_requests": "write",
         "checks": "read",
         "statuses": "read",
+        "actions": "read",
     }
 
 
