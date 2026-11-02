@@ -33,7 +33,7 @@ from mindroom.contacts.store import (
     read_contacts,
     update_contacts,
 )
-from mindroom.contacts.turns import contact_tool_choices
+from mindroom.contacts.turns import contact_tool_choices, contact_turn_tools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
@@ -99,14 +99,42 @@ def _validate_side_tools(
     return tools
 
 
-def _notice_body(config: Config, record: ContactRecord) -> str:
-    """Return the request as the target owner reads it, with the rules that would apply to their side."""
+def _side_terms(config: Config, runtime_paths: RuntimePaths, record: ContactRecord, side: SideName) -> tuple[str, str]:
+    """Return the rules and the tools of one agent side of a contact, as its owner reads them."""
+    agent_name = record.party(side).id
+    rules = effective_rules(config, agent_name, record.side(side)) or "None."
+    return rules, ", ".join(contact_turn_tools(config, runtime_paths, agent_name, record, side))
+
+
+def own_side_terms(context: ToolRuntimeContext, record: ContactRecord) -> str:
+    """Return the rules and tools the caller's agent has in a contact, or nothing when the caller's side is a person.
+
+    An approval card shows only the call's arguments, and a call that leaves them out applies the configured defaults.
+    """
+    config, paths = context.current_config, context.runtime_paths
+    side = record.owner_side(resolve_human_requester_alias(context.requester_id, config, paths))
+    if side is None or (party := record.party(side)).kind != "agent":
+        return ""
+    rules, tools = _side_terms(config, paths, record, side)
+    return (
+        f"\nRules {party.id} follows in this contact:\n{rules}\n"
+        f"Tools it may use there: {tools}. Change them with update_contact."
+    )
+
+
+def _notice_body(config: Config, runtime_paths: RuntimePaths, record: ContactRecord) -> str:
+    """Return the request as the target owner reads it, with the rules and tools that would apply to their side."""
     target = record.target
     asks = "you" if target.kind == "person" else f"your agent {party_name(config, target)} ({target.id})"
     lines = [f"{party_label(config, record.requester)} asks to contact {asks}.", "", f"Reason: {record.reason}", ""]
     if target.kind == "agent":
-        rules = effective_rules(config, target.id, record.target_side)
-        lines += ["Rules that would apply to your agent by default:", rules or "None.", ""]
+        rules, tools = _side_terms(config, runtime_paths, record, "target")
+        lines += [
+            "Rules that would apply to your agent by default:",
+            rules,
+            f"Tools it would use by default: {tools}",
+            "",
+        ]
     lines += [f"Contact ID: {record.id}", "Reply in this thread to accept, decline, or set rules."]
     return "\n".join(lines)
 
@@ -139,7 +167,7 @@ async def _post_request_notice(context: ToolRuntimeContext, record: ContactRecor
         msg = f"{poster} is not running, so it cannot post the request; ask again later"
         raise ValueError(msg)
     content = build_message_content(
-        _notice_body(config, record),
+        _notice_body(config, paths, record),
         extra_content={"msgtype": "m.notice", SKIP_MENTIONS_KEY: True, _CONTACT_REQUEST_KEY: record.id},
     )
     delivered = await send_message_result(client, room_id, content, transaction_id=f"contact-request-{record.id}")

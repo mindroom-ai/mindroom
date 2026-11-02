@@ -84,14 +84,20 @@ def _runtime() -> _Runtime:
     return runtime
 
 
-def _data(*, tools: list[str] | None = None, contacts: bool = True, accept_invites: bool = True) -> dict[str, Any]:
+def _data(
+    *,
+    tools: list[str] | None = None,
+    contacts: bool = True,
+    accept_invites: bool = True,
+    contact_tools: tuple[str, ...] = (),
+) -> dict[str, Any]:
     data = _with_template()
     agent = data["personal_agents"]["mind"]["agent"]
     agent["tools"] = tools or ["calculator", "scheduler", "self_config", "matrix_message"]
     agent["include_default_tools"] = False
     agent["accept_invites"] = accept_invites
     if contacts:
-        agent["contacts"] = {"rules": ["Never share keys."]}
+        agent["contacts"] = {"rules": ["Never share keys."], "tools": list(contact_tools)}
     data["personal_rooms"] = {"agent": "mind", "onboarding_rooms": ["lobby"]}
     return data
 
@@ -185,6 +191,14 @@ def _activate(paths: RuntimePaths, contact_id: str) -> None:
 
 def _stored(paths: RuntimePaths) -> list[ContactRecord]:
     return read_contacts(paths).contacts
+
+
+def _terms(agent_name: str, rules: str, tools: str) -> str:
+    """Return how a toolkit result names the rules and tools the caller's agent has in a contact."""
+    return (
+        f"\nRules {agent_name} follows in this contact:\n{rules}\n"
+        f"Tools it may use there: {tools}. Change them with update_contact."
+    )
 
 
 def test_confirm_gates() -> None:
@@ -404,8 +418,14 @@ async def test_asking_again_says_the_existing_contact_is_unchanged(tmp_path: Pat
 
     (record,) = _stored(paths)
     send.assert_awaited_once()
-    assert again == f"Contact {record.id} with mind_bob already exists and is pending; it is returned unchanged."
-    assert reverse == f"Contact {record.id} with mind_alice already exists and is pending; it is returned unchanged."
+    assert again == (
+        f"Contact {record.id} with mind_bob already exists and is pending; it is returned unchanged."
+        + _terms("mind_alice", "- Never share keys.", "matrix_message")
+    )
+    assert reverse == (
+        f"Contact {record.id} with mind_alice already exists and is pending; it is returned unchanged."
+        + _terms("mind_bob", "- Never share keys.", "matrix_message")
+    )
     assert with_rules == (
         f"Error: Contact {record.id} with mind_bob already exists and is pending; "
         "change your side's rules or tools with update_contact"
@@ -714,12 +734,32 @@ async def test_toolkit_calls_run_the_flow_and_report_errors_as_text(tmp_path: Pa
     assert requested == (
         f"Asked {CO_OWNER} to approve contact {record.id} with mind_bob; "
         "you are told in this thread when they accept or decline."
+        + _terms("mind_alice", "- Never share keys.\n- Be brief", "calculator, matrix_message")
     )
-    assert updated == f"Updated contact {record.id}."
+    assert updated == f"Updated contact {record.id}." + _terms(
+        "mind_alice",
+        "- Never share keys.\n- Be kind",
+        "calculator, matrix_message",
+    )
     assert removed == f"Removed contact {record.id}."
     assert unknown == "Error: There is no contact nope"
     assert record.status == "removed"
     assert record.requester_side.rules == "Be kind"
+
+
+@pytest.mark.asyncio
+async def test_the_owner_sees_the_default_tools_of_a_contact_when_the_call_names_none(tmp_path: Path) -> None:
+    """The approval card shows only the call's arguments, so the notice and the result name the configured default."""
+    config, paths = _setup(tmp_path, contact_tools=("calculator",))
+    runtime = _runtime()
+
+    with tool_runtime_context(_context(config, paths, "mind_alice", OWNER, runtime)), _delivered() as send:
+        requested = await ContactsTools("mind_alice").request_contact("mind_bob", "Plan the dinner")
+
+    assert requested.endswith(_terms("mind_alice", "- Never share keys.", "calculator, matrix_message"))
+    notice = send.await_args.args[2]["body"]
+    assert "Rules that would apply to your agent by default:\n- Never share keys.\n" in notice
+    assert "Tools it would use by default: calculator, matrix_message\n" in notice
 
 
 @pytest.mark.asyncio

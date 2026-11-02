@@ -109,7 +109,7 @@ class ContactsTools(Toolkit):
             )
         except ValueError as exc:
             return f"Error: {exc}"
-        return _asked(context, record, posted=posted)
+        return _asked(context, record, posted=posted) + flow.own_side_terms(context, record)
 
     async def accept_contact(
         self,
@@ -124,16 +124,11 @@ class ContactsTools(Toolkit):
         then the requesting agent is told in the thread it asked from and continues there.
         """
         try:
-            record = await flow.accept_contact(
-                _require_context(),
-                self.agent_name,
-                contact_id,
-                rules=rules,
-                tools=tools,
-            )
+            context = _require_context()
+            record = await flow.accept_contact(context, self.agent_name, contact_id, rules=rules, tools=tools)
         except ValueError as exc:
             return f"Error: {exc}"
-        return f"Accepted. Contact room: {record.room_id}."
+        return f"Accepted. Contact room: {record.room_id}." + flow.own_side_terms(context, record)
 
     async def decline_contact(self, contact_id: str) -> str:
         """Decline a pending contact request that asks your owner, and tell the thread it came from.
@@ -158,16 +153,11 @@ class ContactsTools(Toolkit):
         Your owner approves the change on a card.
         """
         try:
-            record = await flow.update_contact(
-                _require_context(),
-                self.agent_name,
-                contact_id,
-                rules=rules,
-                tools=tools,
-            )
+            context = _require_context()
+            record = await flow.update_contact(context, self.agent_name, contact_id, rules=rules, tools=tools)
         except ValueError as exc:
             return f"Error: {exc}"
-        return f"Updated contact {record.id}."
+        return f"Updated contact {record.id}." + flow.own_side_terms(context, record)
 
     async def remove_contact(self, contact_id: str) -> str:
         """Remove a contact; the agents leave its room and the owners keep it and its history.

@@ -38,6 +38,7 @@ from tests.contacts.test_tools import (
     _runtime,
     _setup,
     _stored,
+    _terms,
 )
 from tests.test_generated_agents import CO_OWNER, OWNER
 
@@ -621,4 +622,8 @@ async def test_toolkit_accept_contact_names_the_room(tmp_path: Path) -> None:
         accepted = await tool.accept_contact(record.id)
 
     assert refused.startswith("Error: Not among the tools a contact may use: browser")
-    assert accepted == f"Accepted. Contact room: {CONTACT_ROOM}."
+    assert accepted == f"Accepted. Contact room: {CONTACT_ROOM}." + _terms(
+        "mind_bob",
+        "- Never share keys.",
+        "matrix_message",
+    )

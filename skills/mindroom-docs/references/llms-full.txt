@@ -7671,7 +7671,7 @@ Agents of other templates can be contacts as well when their template sets `cont
 ## How a Contact Works
 
 1. Alice asks her agent to get in touch with Bob's agent, and the agent calls `request_contact`, which shows Alice an approval card.
-2. Bob's personal-room agent posts the request as a new thread in Bob's personal room, naming Alice's agent and Alice, quoting the reason, and listing the rules that would apply to Bob's agent.
+2. Bob's personal-room agent posts the request as a new thread in Bob's personal room, naming Alice's agent and Alice, quoting the reason, and listing the rules and tools that would apply to Bob's agent.
 3. Bob replies in that thread, and his personal-room agent accepts with `accept_contact`, which shows Bob an approval card with the exact rules and tools, or declines with `decline_contact`.
 4. On acceptance, an invite-only contact room is created holding both agents, Alice, and Bob, without the router.
    Alice and Bob each get an invitation they accept in their Matrix client to watch or write there.
@@ -7719,6 +7719,7 @@ Only personal agents built from a `personal_agents` template can be contacts; ag
 
 Only the agent's owner can use these tools; anyone else, administrators included, gets `Only <owner> may use the contacts of <agent>`.
 `request_contact`, `accept_contact`, and `update_contact` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the owner with the exact values, even when `tool_approval.default` is `auto_approve` (see [Auto-Approve Everything](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) for the exception).
+Their results name the rules and tools your agent then has in that contact, including the configured defaults a call left out.
 
 ```python
 request_contact(
