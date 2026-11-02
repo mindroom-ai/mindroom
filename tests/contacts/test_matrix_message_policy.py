@@ -50,12 +50,10 @@ OTHER_ROOM = "!other:localhost"
 PERSONAL_ROOM = "!personal-alice:localhost"
 THREAD_ID = "$thread:localhost"
 EVENT_ID = "$event:localhost"
-DESTINATION_ERROR = "Error: in a contact conversation you can only write to this room or to your owner's personal room"
-OWNER_ROOM_ERROR = "Error: in a contact conversation you can only send a plain message to your owner's personal room"
-OWNER_ROOM_KEY_ERROR = "Error: in a contact conversation you cannot use idempotency_key in your owner's personal room"
 CONTACT_ROOM_KEY_ERROR = "Error: idempotency_key cannot be used in a contact room"
-OWNER_ROOM_THREAD_ERROR = (
-    "Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread"
+CONTACT_TURN_ERROR = (
+    "Error: in a contact conversation you can only write to this room, or send a message without recipient or "
+    "idempotency_key to your owner's personal room, in its timeline or a new thread"
 )
 TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
 REMOVED_ERROR = "Error: contact c1 was removed, so nothing more can be sent into its room"
@@ -345,7 +343,7 @@ async def test_contact_turn_writes_nowhere_but_its_room_and_the_owners_personal_
     reported = await _call(context, message="Bob's agent asked about Friday.", room_id=PERSONAL_ROOM)
 
     assert refused["status"] == "error"
-    assert refused["message"] == DESTINATION_ERROR
+    assert refused["message"] == CONTACT_TURN_ERROR
     assert reported["status"] == "ok"
     assert reported["room_id"] == PERSONAL_ROOM
     assert seen == []
@@ -375,7 +373,7 @@ async def test_contact_turn_only_sends_plain_messages_to_the_owners_personal_roo
     payload = await _call(context, room_id=PERSONAL_ROOM, **call)
 
     assert payload["status"] == "error"
-    assert payload["message"] == OWNER_ROOM_ERROR
+    assert payload["message"] == CONTACT_TURN_ERROR
     assert _sent(context) == []
     context.client.room_messages.assert_not_awaited()
 
@@ -400,7 +398,7 @@ async def test_contact_turn_reports_to_the_owner_only_in_the_timeline_or_a_new_t
         "status": "error",
         "tool": "matrix_message",
         "room_id": PERSONAL_ROOM,
-        "message": OWNER_ROOM_THREAD_ERROR,
+        "message": CONTACT_TURN_ERROR,
     }
     assert timeline["status"] == threaded["status"] == "ok"
     assert [content["body"] for content in _sent(context)] == ["Bob asked about Friday.", "Bob asked about Saturday."]
@@ -432,7 +430,7 @@ async def test_contact_turn_cannot_replay_the_owners_keyed_send_in_their_persona
     payload = await _call(contact, message="Bob asked about Friday.", room_id=PERSONAL_ROOM, idempotency_key="report-1")
 
     assert payload["status"] == "error"
-    assert payload["message"] == OWNER_ROOM_KEY_ERROR
+    assert payload["message"] == CONTACT_TURN_ERROR
     assert _sent(contact) == []
 
 
@@ -559,7 +557,7 @@ async def test_a_contact_turn_cannot_write_into_its_room_once_the_contact_is_rem
     elsewhere = await _call(context, message="Psst.", room_id=OTHER_ROOM)
 
     assert (refused["status"], refused["message"]) == ("error", REMOVED_ERROR)
-    assert (elsewhere["status"], elsewhere["message"]) == ("error", DESTINATION_ERROR)
+    assert (elsewhere["status"], elsewhere["message"]) == ("error", CONTACT_TURN_ERROR)
     assert seen == []
     assert _sent(context) == []
 

@@ -35,19 +35,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-_CONTACT_DESTINATION_ERROR = (
-    "Error: in a contact conversation you can only write to this room or to your owner's personal room"
-)
-_CONTACT_OWNER_ROOM_ERROR = (
-    "Error: in a contact conversation you can only send a plain message to your owner's personal room"
-)
-_CONTACT_OWNER_ROOM_KEY_ERROR = (
-    "Error: in a contact conversation you cannot use idempotency_key in your owner's personal room"
-)
-_CONTACT_OWNER_ROOM_THREAD_ERROR = (
-    "Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread"
-)
 _CONTACT_ROOM_KEY_ERROR = "Error: idempotency_key cannot be used in a contact room"
+_CONTACT_TURN_ERROR = (
+    "Error: in a contact conversation you can only write to this room, or send a message without recipient or "
+    "idempotency_key to your owner's personal room, in its timeline or a new thread"
+)
 
 
 def _contact_target_error(
@@ -61,32 +53,23 @@ def _contact_target_error(
 ) -> str | None:
     """Return why this turn may not act in ``room_id`` this way, or None when it may.
 
-    No turn sends into a room that is or was the agent's contact room with an ``idempotency_key``, because a retry
-    would deliver the message it prepared without the contact's current rules.
-    A turn in a room that is or was the agent's contact room is a contact turn here, even after a removal mid-turn.
-    A contact turn acts only in its own room, apart from a plain message to its owner in their personal room with it,
-    in that room's timeline or a new thread, never in one of the owner's own threads.
-    Anything more there, such as naming a recipient, would start a normal turn with the owner's full authority.
-    A keyed send there shares the owner's own keyed sends, so a matching key would deliver what the owner's turn
-    prepared, such as a pending request to an agent, instead of the contact turn's message.
+    A keyed retry into a room that is or was a contact room would deliver a message prepared under outdated rules.
+    A turn in such a room is a contact turn, even after a removal mid-turn, and beyond its room it may only report to
+    its owner's personal room: a recipient, one of the owner's threads, or a key shared with the owner's keyed sends
+    would act with the owner's authority.
     """
     config = context.current_config
-    keyed_into_contact_room = idempotency_key is not None and (
-        contact_room(config, context.runtime_paths, room_id, context.agent_name) is not None
-    )
-    if keyed_into_contact_room:
+    paths = context.runtime_paths
+    if idempotency_key is not None and contact_room(config, paths, room_id, context.agent_name) is not None:
         return _CONTACT_ROOM_KEY_ERROR
-    contact = contact_room(config, context.runtime_paths, context.room_id, context.agent_name)
+    contact = contact_room(config, paths, context.room_id, context.agent_name)
     if contact is None or room_id == context.room_id:
         return None
     record, side = contact
-    if personal_room_of(config, context.runtime_paths, record.party(side).owner) != (context.agent_name, room_id):
-        return _CONTACT_DESTINATION_ERROR
-    if action != "send" or recipient is not None:
-        return _CONTACT_OWNER_ROOM_ERROR
-    if thread_id not in {None, "room"}:
-        return _CONTACT_OWNER_ROOM_THREAD_ERROR
-    return _CONTACT_OWNER_ROOM_KEY_ERROR if idempotency_key is not None else None
+    report = action == "send" and recipient is None and idempotency_key is None and thread_id in {None, "room"}
+    if report and personal_room_of(config, paths, record.party(side).owner) == (context.agent_name, room_id):
+        return None
+    return _CONTACT_TURN_ERROR
 
 
 def _optional_string(value: str | None, name: str) -> str | None:
