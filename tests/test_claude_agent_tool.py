@@ -1492,8 +1492,8 @@ async def test_claude_send_returns_why_a_hook_blocked_its_prompt(
         ),
         pytest.param(
             # Claude Code was running a turn of its own, which the stopped prompt joined after the stop.
-            [[], [_FIRST_ECHO, _self_started_result(30), _NO_TURN]],
-            _NO_TURN.result,
+            [[], [_FIRST_ECHO, _self_started_result(30), _ECHO, _SUMMARY, _claude_result(60)]],
+            "Here is the summary.",
             id="prompt-joined-a-self-started-turn",
         ),
         pytest.param(
