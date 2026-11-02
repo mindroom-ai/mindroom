@@ -133,14 +133,14 @@ A read returns `values`, each cell's raw value, such as a date's serial number o
 Writing a range takes its `formulas` from a read of the same address as `expected_formulas`, so an approval card shows each cell before and after the edit.
 The write reads the range again first and writes nothing, failing with `cells_changed` and the range's `current_formulas`, when someone changed it since that read.
 Microsoft Graph has no conditional range write, so a change in the moment between that check and the write is not caught.
-Cells whose new value equals what was read are left as they are rather than written again, because Excel parses every written cell again.
-A write the range already holds is reported with `already_applied` and not written again.
+Cells whose new value equals what was read are left as they are rather than written again.
+Approval cards show a number and the same text alike, such as `1.5` and `"1.5"`, so a cell that would change only between them fails with `ambiguous_change`.
 
 Excel parses written text as if someone typed it, so text it would store as something else, such as `0042` losing its zeros or `1/2` becoming a date, fails with `converted_text` unless the cell is formatted as text.
 Dates written as `YYYY-MM-DD`, optionally followed by a time such as `09:30`, are stored as dates.
 A formula written into a text-formatted cell would be stored as text, so it fails with `formula_as_text` unless the write also gives that cell another format.
 `number_formats` sets formats such as `0.0%`, or `@` for text, before the values are written, and `null` keeps a cell's format.
-After writing, the range is read again, and the result reports `verified: true` when Excel stored every cell and format as written, and otherwise `verified: false` with the cells it stored differently.
+After writing, the range is read again, and the result reports `verified: true` when Excel stored every written cell and format as written, and otherwise `verified: false` with the cells it stored differently.
 
 Search uses Microsoft Search, which covers work and school accounts.
 Search and folder listings return a `next_page_token` while more results exist; passing it back continues the same search or listing.
@@ -432,6 +432,7 @@ To give an agent read access only, set `write: false` on the tool.
 | `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |
 | `cells_changed` | The Excel range changed since it was read; nothing was written, and `current_formulas` shows what it holds now. |
 | `converted_text` | Excel would store the text in `cell` as a number, date, or formula; write a number or a `YYYY-MM-DD` date, or set that cell's `number_formats` entry to `@`. |
+| `ambiguous_change` | `cell` would change only between a number and the same text, which approval cards show alike; write the type the cell holds, or `null`. |
 | `formula_as_text` | `cell` is formatted as text, so Excel would keep the formula as text; set that cell's `number_formats` entry to another format, such as `General`. |
 | `locked` | The file is checked out or locked; try again later. |
 | `name_conflict` | A file with that name already exists in the folder; replace it or choose another name. |

@@ -811,19 +811,6 @@ def test_excel_update_refuses_a_formula_a_text_cell_would_keep_as_text(
     assert _update(tools, [["=1+1", "=1+1"]], [["", ""]], number_formats=[[None, "General"]])["verified"] is True
 
 
-def test_excel_update_never_takes_text_for_a_formula_already_written(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Text in a text-formatted cell is literal, so `=abc` does not already hold the formula `=ABC`."""
-    tools, graph = _tools(tmp_path, monkeypatch, _workbook([["=abc", ""]], [["@", "General"]]))
-
-    result = _update(tools, [["=ABC", None]], [["=abc", ""]])
-
-    assert result["code"] == "formula_as_text"
-    assert _patches(graph) == []
-
-
 def test_excel_update_writes_iso_dates_as_dates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _workbook([["", ""]])
     files.store = lambda value: {"2026-11-02": 46328, "2026-11-02 09:30": 46328 + 9.5 / 24}.get(value, value)
@@ -832,8 +819,45 @@ def test_excel_update_writes_iso_dates_as_dates(tmp_path: Path, monkeypatch: pyt
     result = _update(tools, [["2026-11-02", "2026-11-02 09:30"]], [["", ""]])
 
     assert (result["verified"], files.formulas) == (True, [[46328, 46328 + 9.5 / 24]])
-    assert _update(tools, [["2026-11-02", None]], [["", ""]])["already_applied"] is True
     assert len(_patches(graph)) == 1
+
+
+def test_excel_update_reports_an_iso_date_excel_kept_as_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch, _workbook([["", ""]]))
+
+    result = _update(tools, [["2026-11-02", None]], [["", ""]])
+
+    assert result["differences"] == [{"cell": "A1", "written": "2026-11-02", "stored": "2026-11-02"}]
+
+
+def test_excel_update_reports_a_formula_whose_text_excel_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Case is folded only outside a formula's string literals, so a changed literal is a difference."""
+    files = _workbook([["", ""]])
+    files.store = lambda value: '=A1&"X"' if value == '=A1&"x"' else value
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [['=A1&"x"', None]], [["", ""]])
+
+    assert result["differences"] == [{"cell": "A1", "written": '=A1&"x"', "stored": '=A1&"X"'}]
+
+
+@pytest.mark.parametrize(("held", "written"), [(1.5, "1.5"), ("1.5", 1.5)])
+def test_excel_update_refuses_a_change_the_approval_card_shows_as_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    held: str | float,
+    written: str | float,
+) -> None:
+    """Approval cards carry floats as text, so a number and the same text look alike there."""
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([[held, ""]], [["@", "General"]]))
+
+    result = _update(tools, [[written, "x"]], [[held, ""]])
+
+    assert (result["code"], result["cell"]) == ("ambiguous_change", "A1")
+    assert _patches(graph) == []
 
 
 def test_excel_update_compares_iso_dates_with_their_serial_number(
@@ -892,14 +916,26 @@ def test_excel_update_sets_only_formats_when_no_value_changes(tmp_path: Path, mo
     assert (result["verified"], files.formats) == (True, [["0%", "General"]])
 
 
-def test_excel_update_skips_a_write_the_cells_already_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A replayed approval finds its own write and reports it instead of a conflict."""
-    files = _workbook([["x", 2]])
-    tools, graph = _tools(tmp_path, monkeypatch, files)
+@pytest.mark.parametrize(
+    ("held", "formats", "values", "before"),
+    [
+        # The same write repeated after it landed.
+        ([["x", 2]], ["General", "General"], [["x", 2]], [["old", 1]]),
+        # Someone typed the formula's text into a text-formatted cell meanwhile.
+        ([["=1+1", ""]], ["@", "General"], [["=1+1", None]], [["", ""]]),
+    ],
+)
+def test_excel_update_writes_only_over_what_was_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    held: list[list[str | int | float | bool]],
+    formats: list[str],
+    values: list[list[str | int | float | bool | None]],
+    before: list[list[str | int | float | bool]],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook(held, [formats]))
 
-    result = _update(tools, [["x", None]], [["old", 1]])
-
-    assert (result["status"], result["verified"], result["already_applied"]) == ("ok", True, True)
+    assert _update(tools, values, before)["code"] == "cells_changed"
     assert _patches(graph) == []
 
 

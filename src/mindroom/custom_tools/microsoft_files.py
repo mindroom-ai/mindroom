@@ -299,14 +299,20 @@ def _iso_serial(value: object) -> float | None:
     return (moment - _EXCEL_EPOCH) / timedelta(days=1)
 
 
+def _shown_alike(left: object, right: object) -> bool:
+    """Return whether an approval card shows two different cells alike, as it carries every float as text."""
+    return any(
+        isinstance(number, float) and isinstance(text, str) and str(number) == text
+        for number, text in ((left, right), (right, left))
+    )
+
+
 def _stored_as_written(held: object, written: object, *, text_cell: bool) -> bool:
     """Return whether a cell holds what was written, as Excel stores it.
 
     Excel uppercases a formula's names and references, stores an ISO date as its serial number, and may round a
     number's last digit; a text-formatted cell stores written text exactly.
     """
-    if _same(held, written):
-        return True
     if isinstance(written, str) and not text_cell:
         if written.startswith("=") and isinstance(held, str):
             return _formula_key(held) == _formula_key(written)
@@ -381,13 +387,19 @@ class _RangeEdit:
             raise MicrosoftGraphError(code="cells_changed", message=msg, current_formulas=formulas)
 
     def check_conversions(self, current: Mapping[str, Any]) -> None:
-        """Refuse text Excel would store as something else, and formulas a text-formatted cell would keep as text."""
+        """Refuse a written cell the approval card shows unchanged, or one Excel would store as something else."""
         writes = self.writes
         for row, column in self._cells():
             value = writes[row][column]
             requested = _at(self.number_formats, row, column)
             number_format = _at(current.get("numberFormat"), row, column) if requested is None else requested
             cell = self.cell(row, column)
+            if value is not None and _shown_alike(value, self.expected_formulas[row][column]):
+                msg = (
+                    f"{cell} would change only between a number and the same text, {value!r}, which the approval "
+                    "card shows as unchanged, so nothing was written. Write the type the cell holds, or null."
+                )
+                raise MicrosoftGraphError(code="ambiguous_change", message=msg, cell=cell)
             if number_format == _TEXT_NUMBER_FORMAT and isinstance(value, str) and value.startswith("="):
                 msg = (
                     f"{cell} is formatted as text, so Excel would store the formula {value!r} as text and nothing "
@@ -403,10 +415,11 @@ class _RangeEdit:
                 raise MicrosoftGraphError(code="converted_text", message=msg, cell=cell)
 
     def differences(self, stored: Mapping[str, Any]) -> list[dict[str, object]]:
-        """Return the written cells and number formats that the range does not hold as requested."""
+        """Return the written cells and number formats that the range does not hold as written."""
         differences: list[dict[str, object]] = []
+        writes = self.writes
         for row, column in self._cells():
-            value = self.values[row][column]
+            value = writes[row][column]
             held = _at(stored.get("formulas"), row, column)
             held_format = _at(stored.get("numberFormat"), row, column)
             text_cell = held_format == _TEXT_NUMBER_FORMAT
@@ -777,7 +790,9 @@ class MicrosoftFilesTools(Toolkit):
         after someone edited it in Excel; show the requester current_formulas and ask again.
         It writes nothing and fails with converted_text for text Excel would store as a number, date, time,
         boolean, or formula, such as 0042 or 1/2; write numbers as JSON numbers and dates as YYYY-MM-DD, or set
-        number_formats to @ for cells that keep text. It fails with formula_as_text for a formula in a
+        number_formats to @ for cells that keep text. It fails with ambiguous_change for a cell that would change
+        only between a number and the same text, which approval cards show alike. It fails with formula_as_text
+        for a formula in a
         text-formatted cell unless number_formats gives that cell another format, such as General. The result
         reports verified false and lists differences when Excel stored a cell differently from what was written;
         tell the requester.
@@ -817,9 +832,6 @@ class MicrosoftFilesTools(Toolkit):
             _checked_target(self._metadata(item, session), expected_web_url)
             path = f"{item.path}/workbook/worksheets/{edit.worksheet}/range(address='{edit.address}')"
             current = session.json("GET", path, params={"$select": _RANGE_SELECT})
-            if not edit.differences(current):
-                # A replayed approval finds its own earlier write here.
-                return {"range": _range(current), "verified": True, "already_applied": True}
             edit.check_unchanged(current)
             edit.check_conversions(current)
             if edit.number_formats is not None:
