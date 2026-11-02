@@ -431,8 +431,15 @@ async def test_preview_reads_the_oauth_connection_the_runtime_reads(
     agent_name: str | None,
 ) -> None:
     provider = google_oauth_provider("google_tasks")
+    # Connect the way the dashboard does for the saved scope, with the connecting user as requester.
     target = (
-        None if execution_scope is None else resolve_worker_target(execution_scope, agent_name, execution_identity=None)
+        None
+        if execution_scope is None
+        else resolve_worker_target(
+            execution_scope,
+            agent_name,
+            execution_identity=_worker_target("@alice:example.test").execution_identity,
+        )
     )
     runtime_paths, manager = _connect_google(provider, "oauth", tmp_path, target)
     tool = _google_tool("google_tasks")

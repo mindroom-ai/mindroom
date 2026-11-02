@@ -33,8 +33,8 @@ from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
+    build_requester_execution_identity,
     build_worker_target_from_runtime_env,
-    resolve_worker_target,
     unsupported_shared_only_integration_names,
 )
 
@@ -234,7 +234,21 @@ def _status_worker_target(
         return context.worker_target
     if context.execution_scope is None:
         return None
-    return resolve_worker_target(context.execution_scope, context.agent_name, execution_identity=None)
+    identity = (
+        None
+        if context.agent_name is None
+        else build_requester_execution_identity(
+            agent_name=context.agent_name,
+            runtime_paths=context.runtime_paths,
+            requester_id=None,
+        )
+    )
+    return build_worker_target_from_runtime_env(
+        context.execution_scope,
+        context.agent_name,
+        execution_identity=identity,
+        runtime_paths=context.runtime_paths,
+    )
 
 
 async def _load_oauth_provider_credentials(

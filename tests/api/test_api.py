@@ -1972,7 +1972,12 @@ def test_get_tools_does_not_treat_scoped_credentials_as_dashboard_truth(
     # The preview reads what the scope holds for no requester, never a requester's own store.
     targets = [call.kwargs["worker_target"] for call in mock_load_scoped_credentials.call_args_list]
     assert targets
-    assert all(target.execution_identity is None and target.worker_key is None for target in targets)
+    assert all(
+        target.execution_identity is not None
+        and target.execution_identity.requester_id is None
+        and target.worker_key is None
+        for target in targets
+    )
 
 
 def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: TestClient) -> None:
