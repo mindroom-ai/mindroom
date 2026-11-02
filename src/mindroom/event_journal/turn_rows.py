@@ -166,7 +166,7 @@ def _placeholders(values: Collection[object]) -> str:
     return ", ".join("?" for _ in values)
 
 
-def _fetch_in(transaction: Transaction, sql: str, prefix: tuple[object, ...], values: Iterable[object]) -> list[Row]:
+def fetch_in(transaction: Transaction, sql: str, prefix: tuple[object, ...], values: Iterable[object]) -> list[Row]:
     """Run ``sql`` once per bounded batch of ``values``; ``{in}`` marks where the batch's placeholders go."""
     rows: list[Row] = []
     for batch in batched(dict.fromkeys(values), _CHUNK, strict=False):
@@ -224,7 +224,7 @@ def _revision_from_row(row: Row) -> _Revision:
 
 def _turns(transaction: Transaction, agent_name: str, keys: Iterable[str]) -> dict[str, _Turn]:
     """Read these turns in key order, so whatever merges their rows does so alike on both backends."""
-    rows = _fetch_in(
+    rows = fetch_in(
         transaction,
         f"SELECT {_TURN_COLUMNS} FROM turns WHERE agent_name = ? AND turn_key IN ({{in}}) "  # noqa: S608
         "ORDER BY turn_key/*bytes*/",
@@ -238,7 +238,7 @@ def _load_rows(transaction: Transaction, agent_name: str, keys: Iterable[str]) -
     """Read every row of these turns."""
     turns = _turns(transaction, agent_name, keys)
     loaded = {key: _Rows(turn=turn, sources=[]) for key, turn in turns.items()}
-    for row in _fetch_in(
+    for row in fetch_in(
         transaction,
         f"SELECT {_SOURCE_COLUMNS} FROM turn_sources WHERE agent_name = ? AND turn_key IN ({{in}}) "  # noqa: S608
         "ORDER BY turn_key, ordinal",
@@ -246,7 +246,7 @@ def _load_rows(transaction: Transaction, agent_name: str, keys: Iterable[str]) -
         turns,
     ):
         loaded[str(row["turn_key"])].sources.append(_source_from_row(row))
-    for row in _fetch_in(
+    for row in fetch_in(
         transaction,
         "SELECT turn_key, event_id FROM turn_aliases WHERE agent_name = ? AND turn_key IN ({in}) "
         "ORDER BY turn_key, event_id/*bytes*/",
@@ -254,7 +254,7 @@ def _load_rows(transaction: Transaction, agent_name: str, keys: Iterable[str]) -
         turns,
     ):
         loaded[str(row["turn_key"])].aliases.append(str(row["event_id"]))
-    for row in _fetch_in(
+    for row in fetch_in(
         transaction,
         "SELECT turn_key, revision_id, source_event_id, timestamp_ms, response_event_id FROM turn_revisions "
         "WHERE agent_name = ? AND turn_key IN ({in}) ORDER BY turn_key, revision_id/*bytes*/",
@@ -266,7 +266,7 @@ def _load_rows(transaction: Transaction, agent_name: str, keys: Iterable[str]) -
 
 
 def _physical_owners(transaction: Transaction, agent_name: str, event_ids: Iterable[str]) -> dict[str, str]:
-    rows = _fetch_in(
+    rows = fetch_in(
         transaction,
         "SELECT event_id, turn_key FROM turn_sources WHERE agent_name = ? AND event_id IN ({in})",
         (agent_name,),
@@ -319,7 +319,7 @@ class _Owners:
 def _owners(transaction: Transaction, agent_name: str, event_ids: Collection[str]) -> _Owners:
     physical = _physical_owners(transaction, agent_name, event_ids)
     aliases: dict[str, set[str]] = {}
-    for row in _fetch_in(
+    for row in fetch_in(
         transaction,
         "SELECT event_id, turn_key FROM turn_aliases WHERE agent_name = ? AND event_id IN ({in})",
         (agent_name,),
@@ -416,7 +416,7 @@ def redacted_events(
     event_ids: Iterable[str],
 ) -> frozenset[str]:
     """Return which of these physical events are redacted in ``room_id``."""
-    rows = _fetch_in(
+    rows = fetch_in(
         transaction,
         "SELECT event_id FROM event_redactions WHERE agent_name = ? AND room_id = ? AND event_id IN ({in})",
         (agent_name, room_id),
@@ -493,7 +493,7 @@ def deleted_events(
     redacted = redacted_events(transaction, agent_name, room_id, ids)
     aliased = {
         str(row["event_id"]): (str(row["discovery_event_id"]), str(row["turn_key"]))
-        for row in _fetch_in(
+        for row in fetch_in(
             transaction,
             "SELECT s.event_id AS event_id, s.discovery_event_id AS discovery_event_id, s.turn_key AS turn_key "
             "FROM turn_sources s JOIN turns t ON t.agent_name = s.agent_name AND t.turn_key = s.turn_key "
@@ -542,7 +542,7 @@ def load_turn(transaction: Transaction, agent_name: str, turn_key: str) -> TurnR
 def _answered_among(transaction: Transaction, agent_name: str, event_ids: Collection[str]) -> frozenset[str]:
     answered = {
         str(row["event_id"])
-        for row in _fetch_in(
+        for row in fetch_in(
             transaction,
             "SELECT s.event_id AS event_id FROM turn_sources s JOIN turns t "
             "ON t.agent_name = s.agent_name AND t.turn_key = s.turn_key "
@@ -553,7 +553,7 @@ def _answered_among(transaction: Transaction, agent_name: str, event_ids: Collec
     }
     answered.update(
         str(row["event_id"])
-        for row in _fetch_in(
+        for row in fetch_in(
             transaction,
             "SELECT a.event_id AS event_id FROM turn_aliases a JOIN turns t "
             "ON t.agent_name = a.agent_name AND t.turn_key = a.turn_key "
@@ -1751,6 +1751,7 @@ __all__ = [
     "complete_turn_of",
     "deleted_events",
     "deleted_sources",
+    "fetch_in",
     "get_turn_record",
     "handled_among",
     "insert_turn",

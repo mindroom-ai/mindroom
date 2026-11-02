@@ -70,7 +70,7 @@ def _classify(
     )
 
 
-def _for_bob(source: Mapping[str, object]) -> bool:
+async def _for_bob(_event_id: str, source: Mapping[str, object]) -> bool:
     """Stand in for the agent's mention check: a message that opens with ``@bob`` is for Bob alone."""
     content = source.get("content")
     return isinstance(content, dict) and str(content.get("body", "")).startswith("@bob")
@@ -142,6 +142,10 @@ class _PendingTurns:
             and event.event_id != excluding_event_id
         )
 
+    async def pending_among(self, event_ids: Collection[str]) -> frozenset[str]:
+        """Return which of these events are in the pending set."""
+        return frozenset(event_ids) & {event.event_id for event in self.events}
+
 
 async def _guard(
     pending_turns: _PendingTurns,
@@ -195,6 +199,7 @@ async def test_history_and_journal_share_requester_turn_eligibility(
     pending = _pending(sender=sender, body=body, voice_echo=echo)
     if voice:
         pending.source["content"][SOURCE_KIND_KEY] = "voice"
+    pending_turns = _PendingTurns(events=(pending,))
     visible = ResolvedVisibleMessage(
         sender=sender,
         body=body,
@@ -209,13 +214,14 @@ async def test_history_and_journal_share_requester_turn_eligibility(
         ALICE,
         [visible],
         may_be_superseded_by_newer_requester_turn=True,
+        pending_turns=pending_turns,  # type: ignore[arg-type]
         classify=_classify,
         is_handled=AsyncMock(side_effect=lambda event_ids: frozenset(event_ids) if handled else frozenset()),
         for_another_participant=_for_bob,
         logger=structlog.get_logger("test"),
     )
     from_journal = await _guard(
-        _PendingTurns(events=(pending,)),
+        pending_turns,
         handled_event_ids={NEWER} if handled else (),
     )
     assert from_history is expected

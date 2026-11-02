@@ -1337,6 +1337,17 @@ def is_pending(transaction: Transaction, principal_id: str, event_id: str) -> bo
     return row is not None
 
 
+def pending_among(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
+    """Return which of these events still owe semantic work."""
+    rows = turn_rows.fetch_in(
+        transaction,
+        "SELECT event_id FROM journal_events WHERE principal_id = ? AND state = 'pending' AND event_id IN ({in})",
+        (principal_id,),
+        event_ids,
+    )
+    return frozenset(str(row["event_id"]) for row in rows)
+
+
 def _source_has_redaction_handoff(
     transaction: Transaction,
     principal_id: str,
