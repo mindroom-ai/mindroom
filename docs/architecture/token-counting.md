@@ -35,7 +35,7 @@ A live run on 2026-11-02 sent three replies per model through the reply path, a 
 | Model | Reply 1 (estimated) | Reply 2 (reported size) | Reply 3 (reported size) |
 |---|---:|---:|---:|
 | GPT-6 Luna | −0.2% | +1.3% | 0.0% |
-| Gemini 3.8 Flash | +20.6% | +0.4% | +0.3% |
+| Gemini 3.8 Flash | +20.7% | +0.3% | +0.2% |
 | Claude Sonnet 5.5 (Vertex AI) | +19.6% | +0.2% | +0.2% |
 
 Gemini bills a replayed thought signature about as the reasoning its reply reported: before its route's replay estimate added it, replies that reported 476 and 389 reasoning tokens grew the next requests by 447 and 385 tokens beyond their text, and replies 2 and 3 came out 4.7% and 3.7% low.
