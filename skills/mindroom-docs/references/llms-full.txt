@@ -18357,7 +18357,7 @@ await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 ```
 
 - Event names must match `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`, so they need at least one colon.
-- The namespaces `message`, `system`, `agent`, `bot`, `compaction`, `schedule`, `reaction`, `room`, `config`, `session`, and `tool` are reserved.
+- The namespaces `message`, `system`, `agent`, `bot`, `compaction`, `schedule`, `reaction`, `room`, `config`, `session`, `tool`, and `contact` are reserved.
 - Custom events run as observers.
 - Only code running during a tool call in the primary MindRoom process can emit them, which includes `tool:before_call` and `tool:after_call` hooks and custom-event hooks triggered by that call.
 - Hooks running outside a tool call and tools running in workers cannot emit them.
