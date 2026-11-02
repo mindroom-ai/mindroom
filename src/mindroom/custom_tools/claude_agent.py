@@ -169,7 +169,7 @@ class _ClaudeSessionManager:
                 self._sessions[session_key] = session
                 return session, True
         finally:
-            await self._disconnect_many(stale)
+            await self._close_many(stale)
 
     async def close(self, session_key: str) -> bool:
         """Close and remove a session by key."""
@@ -177,7 +177,7 @@ class _ClaudeSessionManager:
             session = self._sessions.pop(session_key, None)
         if session is None:
             return False
-        await self._disconnect_many([session])
+        await self._close_many([session])
         return True
 
     async def get(self, session_key: str) -> _ClaudeSessionState | None:
@@ -191,7 +191,7 @@ class _ClaudeSessionManager:
                     session.last_used_at = monotonic()
                 return session
         finally:
-            await self._disconnect_many(stale)
+            await self._close_many(stale)
 
     def _collect_expired_locked(self) -> list[_ClaudeSessionState]:
         now = monotonic()
@@ -269,7 +269,7 @@ class _ClaudeSessionManager:
             raise
         return owner
 
-    async def _disconnect_many(self, sessions: list[_ClaudeSessionState]) -> None:
+    async def _close_many(self, sessions: list[_ClaudeSessionState]) -> None:
         """Close sessions that have left the manager, on tasks of their own that a stopped caller cannot cut short."""
         closes = [
             create_background_task(_close(session), name="claude_session_close", owner=self) for session in sessions
