@@ -44,6 +44,7 @@ from mindroom.config.validation import (
     duplicate_items,
     non_empty_stripped,
     validate_history_limit_choice,
+    validate_matrix_localpart,
     validate_unique_entries,
 )
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
@@ -249,6 +250,13 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     display_name: str = Field(description="Human-readable name for the agent")
+    matrix_username: str | None = Field(
+        default=None,
+        description=(
+            "Matrix localpart for the account MindRoom creates for this agent, instead of mindroom_<agent key>; "
+            "set it before the agent's first start"
+        ),
+    )
     role: str = Field(
         default="",
         description="Description of the agent's purpose",
@@ -479,6 +487,12 @@ class AgentConfig(BaseModel):
         if value is False:
             return None
         return value
+
+    @field_validator("matrix_username")
+    @classmethod
+    def _validate_matrix_username(cls, value: str | None) -> str | None:
+        """Require a bare Matrix localpart."""
+        return None if value is None else validate_matrix_localpart(value, field_name="matrix_username")
 
     @field_validator("tools")
     @classmethod

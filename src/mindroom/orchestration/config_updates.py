@@ -50,9 +50,10 @@ _ENTITY_CONSTRUCTION_PROMPTS = frozenset(
 # AgentConfig fields running bots read from the live config where they use them, so an
 # edit reaches them without a restart; rooms reconcile memberships in place. Any other
 # field restarts the agent: display_name is set as its Matrix profile name at login,
-# accept_invites decides which invited rooms the bot loads when it is built, and private
-# sets the storage and session identity of requester-private state. A tool edit still
-# restarts the agent when it changes _agent_startup_tools().
+# accept_invites decides which invited rooms the bot loads when it is built, private
+# sets the storage and session identity of requester-private state, and matrix_username
+# is checked against the stored account before the restart, so a change fails the reload.
+# A tool edit still restarts the agent when it changes _agent_startup_tools().
 _AGENT_LIVE_FIELDS = frozenset(
     {
         "access",

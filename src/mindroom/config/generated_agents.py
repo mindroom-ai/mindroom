@@ -63,7 +63,9 @@ def _generated_agent_data(
     if created is not None:
         owners = created.owners
         # credential_managers stays the creator's, because an unscoped agent shares its creator's credentials.
+        # matrix_username names the creator's account; a created agent registers its own default one.
         data |= {
+            "matrix_username": None,
             "access": {"users": owners, "members_of_rooms": []},
             "accept_invites": owners,
             "rooms": [],
