@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -27,6 +26,8 @@ from tests.providers.golden_support import golden_id, golden_paths, golden_reque
 from tests.providers.openai_family_support import OPENAI_FAMILIES, golden_provider
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.llm.provider import ModelProvider
 
 GOLDENS = golden_paths((*OPENAI_FAMILIES, *CLAUDE_FAMILIES, *GEMINI_OLLAMA_FAMILIES))
@@ -71,18 +72,14 @@ _TRANSPORT_KEYS = frozenset(
 _CONTEXT_FIELDS = ("messages", "input", "contents", "system", "systemInstruction", "instructions", "tools")
 
 
-class _Recorder:
-    """A counter that records every text it counts and counts a quarter token per character."""
+def _recording_counter(texts: list[str]) -> TokenCounter:
+    """Return a counter that appends every text it counts to ``texts`` and counts a quarter token per character."""
 
-    def __init__(self) -> None:
-        self.texts: list[str] = []
+    def estimate(text: str) -> int:
+        texts.append(text)
+        return len(text) // 4
 
-    def counter(self) -> TokenCounter:
-        def estimate(text: str) -> int:
-            self.texts.append(text)
-            return len(text) // 4
-
-        return TokenCounter(estimate=estimate)
+    return TokenCounter(estimate=estimate)
 
 
 def _adapter(path: Path, root: Path) -> ModelProvider:
@@ -122,10 +119,10 @@ def test_a_route_sizes_every_text_its_body_sends(path: Path, tmp_path: Path, mon
     golden = load_golden(path)
     adapter = _adapter(path, tmp_path)
     request = golden_request(golden["input"], native=adapter.native_history_route)
-    recorder = _Recorder()
-    monkeypatch.setattr(type(adapter), "token_counter", property(lambda _self: recorder.counter()), raising=False)
+    texts: list[str] = []
+    monkeypatch.setattr(type(adapter), "token_counter", property(lambda _self: _recording_counter(texts)))
     pipeline_provider(adapter).request_tokens(request)
-    counted = "".join(recorder.texts)
+    counted = "".join(texts)
     body = golden["request"]["body"]
     sent = [text for field in _CONTEXT_FIELDS for text in _strings(body.get(field), field)]
     missing = [
@@ -155,7 +152,6 @@ def test_an_answer_and_what_follows_it_add_no_more_than_their_own_size(path: Pat
         )
 
 
-_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "providers"
 _REASONING = "The forecast says rain in the evening, so a light jacket and closed shoes are the right call. " * 12
 _THINKING = "Weigh the evening forecast against the walking plan before suggesting what to pack. " * 12
 
@@ -164,7 +160,18 @@ def _route(family: str, tmp_path: Path) -> ModelProvider:
     """Return the adapter one of ``family``'s goldens configures, built under its own directory."""
     root = tmp_path / family
     root.mkdir()
-    return _adapter(sorted((_FIXTURES / family).glob("*.json"))[0], root)
+    return _adapter(golden_paths((family,))[0], root)
+
+
+def _claude_answer(route: ModelProvider, *blocks: dict[str, Any], **fields: Any) -> Message:  # noqa: ANN401
+    """Return an earlier answer of ``route``'s Claude model that stored ``blocks``, with ``fields`` set."""
+    return Message(
+        role="assistant",
+        content="Pack a light rain jacket.",
+        provider_data={**model_provenance(route.identity.id, route.identity.provider), CLAUDE_BLOCKS_KEY: list(blocks)},
+        from_history=True,
+        **fields,
+    )
 
 
 def _conversation(answer: Message) -> ModelRequest:
@@ -202,17 +209,8 @@ def test_claude_counts_earlier_thinking_where_it_replays_it(family: str, replays
     route = _route(family, tmp_path)
     text = {"type": "text", "text": "Pack a light rain jacket."}
     thinking = {"type": "thinking", "thinking": _THINKING, "signature": "c2lnbmF0dXJl"}
-    provenance = model_provenance(route.identity.id, route.identity.provider)
 
-    def answer(*blocks: dict[str, Any]) -> Message:
-        return Message(
-            role="assistant",
-            content="Pack a light rain jacket.",
-            provider_data={**provenance, CLAUDE_BLOCKS_KEY: list(blocks)},
-            from_history=True,
-        )
-
-    added = _difference(route, answer(thinking, text), answer(text))
+    added = _difference(route, _claude_answer(route, thinking, text), _claude_answer(route, text))
 
     thought = route.request_tokens(ModelRequest(messages=(Message(role="user", content=_THINKING),)))
     assert added >= thought * 0.9 if replays else added == 0
@@ -248,18 +246,12 @@ def test_claude_counts_replayed_thinking_by_its_answer_s_hidden_output(tmp_path:
     route = _route("anthropic", tmp_path)
     text = {"type": "text", "text": "Pack a light rain jacket."}
     thinking = {"type": "thinking", "thinking": "Rain is likely.", "signature": "c2lnbmF0dXJl"}
-    provenance = model_provenance(route.identity.id, route.identity.provider)
     metrics = MessageMetrics(tokens=TokenCounts(output_tokens=3_000))
-
-    def answer(*blocks: dict[str, Any]) -> Message:
-        return Message(
-            role="assistant",
-            content="Pack a light rain jacket.",
-            metrics=metrics,
-            provider_data={**provenance, CLAUDE_BLOCKS_KEY: list(blocks)},
-            from_history=True,
-        )
-
     visible = route.request_tokens(ModelRequest(messages=(Message(role="user", content=text["text"]),)))
 
-    assert _difference(route, answer(thinking, text), answer(text)) >= 3_000 - visible
+    added = _difference(
+        route,
+        _claude_answer(route, thinking, text, metrics=metrics),
+        _claude_answer(route, text, metrics=metrics),
+    )
+    assert added >= 3_000 - visible
