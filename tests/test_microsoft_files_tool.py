@@ -70,7 +70,7 @@ class _Graph:
         # How Excel stores a written value, such as text it parses as a number.
         self.store: Callable[[object], object] = lambda value: value
 
-    def _range(self, request: httpx.Request) -> httpx.Response:
+    def range_response(self, request: httpx.Request) -> httpx.Response:
         if request.method == "PATCH":
             body = json.loads(request.content)
             if "numberFormat" in body:
@@ -96,7 +96,7 @@ class _Graph:
             return answer
         path = unquote(request.url.path)
         if "/workbook/worksheets/" in path and "/range(address=" in path:
-            return self._range(request)
+            return self.range_response(request)
         if request.method == "GET" and path == f"/v1.0{ITEM_PATH}":
             return httpx.Response(200, json=self.item)
         if request.method == "GET" and path == f"/v1.0{ITEM_PATH}/content":
@@ -627,7 +627,7 @@ def test_writes_run_only_on_the_target_whose_web_url_was_passed(
     assert (refused["code"], refused["web_url"]) == ("target_mismatch", WEB_URL)
     assert [request.method for request in graph.requests] == ["GET"]
     assert json.loads(call(tools, WEB_URL))["status"] == "ok"
-    assert graph.requests[-1].method in {"PUT", "PATCH"}
+    assert {"PUT", "PATCH"} & {request.method for request in graph.requests}
 
 
 def test_excel_list_worksheets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -760,15 +760,102 @@ def test_excel_update_refuses_cells_someone_changed_since_they_were_read(
     assert _patches(graph) == []
 
 
-def test_excel_update_compares_formulas_as_excel_stores_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_excel_update_verifies_formulas_as_excel_stores_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _workbook([["=SUM(C1:C2)", 1.5]])
     files.store = lambda value: value.upper() if isinstance(value, str) else value
     tools, graph = _tools(tmp_path, monkeypatch, files)
 
-    result = _update(tools, [["=sum(c1:c3)", 1.5]], [["=sum(c1:c2)", 1.5]])
+    result = _update(tools, [["=sum(c1:c3)", 0.3]], [["=SUM(C1:C2)", 1.5]])
 
-    assert _patches(graph) == [{"values": [["=sum(c1:c3)", 1.5]]}]
+    assert _patches(graph) == [{"values": [["=sum(c1:c3)", 0.3]]}]
     assert result["verified"] is True
+
+
+def test_excel_update_tolerates_only_last_digit_rounding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _workbook([["", ""]])
+    files.store = lambda value: {0.3: 0.30000000000000004, 123456789012345: 123456789012346}.get(value, value)
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [[0.3, 123456789012345]], [["", ""]])
+
+    assert result["differences"] == [{"cell": "B1", "written": 123456789012345, "stored": 123456789012346}]
+
+
+@pytest.mark.parametrize(
+    ("current", "expected"),
+    [([["=ABC", 1]], [["=abc", 1]]), ([["x", True]], [["x", 1]]), ([["x", 1]], [["x", True]])],
+)
+def test_excel_update_compares_what_was_read_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    current: list[list[str | int | float | bool]],
+    expected: list[list[str | int | float | bool]],
+) -> None:
+    """A case-only edit to text and a TRUE where 1 was read are both edits someone made."""
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook(current, [["@", "General"]]))
+
+    assert _update(tools, [["y", 2]], expected)["code"] == "cells_changed"
+    assert _patches(graph) == []
+
+
+def test_excel_update_refuses_a_formula_a_text_cell_would_keep_as_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([["", ""]], [["General", "@"]]))
+
+    result = _update(tools, [["=1+1", "=1+1"]], [["", ""]])
+
+    assert (result["code"], result["cell"]) == ("formula_as_text", "B1")
+    assert _patches(graph) == []
+    assert _update(tools, [["=1+1", "=1+1"]], [["", ""]], number_formats=[[None, "General"]])["verified"] is True
+
+
+def test_excel_update_never_takes_text_for_a_formula_already_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text in a text-formatted cell is literal, so `=abc` does not already hold the formula `=ABC`."""
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([["=abc", ""]], [["@", "General"]]))
+
+    result = _update(tools, [["=ABC", None]], [["=abc", ""]])
+
+    assert result["code"] == "formula_as_text"
+    assert _patches(graph) == []
+
+
+def test_excel_update_writes_iso_dates_as_dates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _workbook([["", ""]])
+    files.store = lambda value: {"2026-11-02": 46328, "2026-11-02 09:30": 46328.395833}.get(value, value)
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [["2026-11-02", "2026-11-02 09:30"]], [["", ""]])
+
+    assert (result["verified"], files.formulas) == (True, [[46328, 46328.395833]])
+    assert _update(tools, [["2026-11-02", None]], [["", ""]])["already_applied"] is True
+    assert len(_patches(graph)) == 1
+
+
+def test_excel_update_verifies_by_reading_the_range_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PATCH response without the written properties does not decide verification."""
+    files = _workbook([["", ""]])
+    partial = httpx.Response(200, json={"address": "Budget!A1:B1"})
+    files.answer_first = lambda request: (
+        (files.range_response(request), partial)[1] if request.method == "PATCH" else None
+    )
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    assert _update(tools, [["x", 2]], [["", ""]])["verified"] is True
+
+
+def test_excel_update_sets_only_formats_when_no_value_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _workbook([[0.25, 3]])
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [[None, None]], [[0.25, 3]], number_formats=[["0%", None]])
+
+    assert _patches(graph) == [{"numberFormat": [["0%", None]]}]
+    assert (result["verified"], files.formats) == (True, [["0%", "General"]])
 
 
 def test_excel_update_skips_a_write_the_cells_already_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

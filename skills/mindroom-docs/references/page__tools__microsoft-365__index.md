@@ -128,16 +128,18 @@ Uploads never overwrite an existing file; a name that already exists returns `na
 Excel functions work on `.xlsx` workbooks in OneDrive for work or school and SharePoint.
 They take a worksheet name and an address such as `B2` or `A1:C10` without a worksheet prefix, and written values must have the shape of the address.
 A written string that starts with `=` becomes a formula, `""` empties a cell, and `null` leaves a cell unchanged.
-A read returns `values`, what the cells show, and `formulas`, what they contain: the formula of a computed cell and the value of any other.
+A read returns `values`, each cell's raw value, such as a date's serial number or a percentage as a fraction, and `formulas`, the formula of a computed cell and the raw value of any other.
 
 Writing a range takes its `formulas` from a read of the same address as `expected_formulas`, so an approval card shows each cell before and after the edit.
 The write reads the range again first and writes nothing, failing with `cells_changed` and the range's `current_formulas`, when someone changed it since that read.
 Microsoft Graph has no conditional range write, so a change in the moment between that check and the write is not caught.
-A write the range already holds, such as one repeated after a restart, is reported with `already_applied` instead of being written again.
+A write the range already holds is reported with `already_applied` and not written again.
 
 Excel parses written text as if someone typed it, so text it would store as something else, such as `0042` losing its zeros or `1/2` becoming a date, fails with `converted_text` unless the cell is formatted as text.
+Dates written as `YYYY-MM-DD`, optionally followed by a time such as `09:30`, are stored as dates.
+A formula written into a text-formatted cell would be stored as text, so it fails with `formula_as_text` unless the write also gives that cell another format.
 `number_formats` sets formats such as `0.0%`, or `@` for text, before the values are written, and `null` keeps a cell's format.
-After writing, the result reports `verified: true` when Excel stored every cell and format as written, and otherwise `verified: false` with the cells it stored differently, such as text a workbook in another language reads as a number.
+After writing, the range is read again, and the result reports `verified: true` when Excel stored every cell and format as written, and otherwise `verified: false` with the cells it stored differently.
 
 Search uses Microsoft Search, which covers work and school accounts.
 Search and folder listings return a `next_page_token` while more results exist; passing it back continues the same search or listing.
@@ -428,7 +430,8 @@ To give an agent read access only, set `write: false` on the tool.
 | `not_a_file_attachment` | The mail attachment is an attached Outlook item or a cloud link, which cannot be downloaded. |
 | `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |
 | `cells_changed` | The Excel range changed since it was read; nothing was written, and `current_formulas` shows what it holds now. |
-| `converted_text` | Excel would store the text in `cell` as a number, date, or formula; write a number, or set that cell's `number_formats` entry to `@`. |
+| `converted_text` | Excel would store the text in `cell` as a number, date, or formula; write a number or a `YYYY-MM-DD` date, or set that cell's `number_formats` entry to `@`. |
+| `formula_as_text` | `cell` is formatted as text, so Excel would keep the formula as text; set that cell's `number_formats` entry to another format, such as `General`. |
 | `locked` | The file is checked out or locked; try again later. |
 | `name_conflict` | A file with that name already exists in the folder; replace it or choose another name. |
 | `too_large` | The file, range, attachment, or message exceeds a limit above; send a OneDrive link instead of a large attachment. |

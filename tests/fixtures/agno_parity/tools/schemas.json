@@ -18048,7 +18048,7 @@
       },
       {
         "name": "microsoft_files_excel_read_range",
-        "description": "Read cell values and formulas from one worksheet of an Excel workbook, up to 10,000 cells.\nvalues holds what cells show; formulas holds what they contain, a formula for a computed cell and the\nvalue otherwise, which microsoft_files_excel_update_range takes as expected_formulas.",
+        "description": "Read cell values and formulas from one worksheet of an Excel workbook, up to 10,000 cells.\nvalues holds each cell's raw value, such as a date's serial number; formulas holds a computed cell's\nformula and any other cell's raw value, which microsoft_files_excel_update_range takes as expected_formulas.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -18095,7 +18095,7 @@
       },
       {
         "name": "microsoft_files_excel_update_range",
-        "description": "Write cell values into one worksheet range of an Excel workbook, up to 10,000 cells.\nThe write fails with target_mismatch unless expected_web_url is the workbook's web_url.\nIt writes nothing and fails with cells_changed when the range no longer holds expected_formulas, such as\nafter someone edited it in Excel; show the requester current_formulas and ask again.\nIt writes nothing and fails with converted_text for text Excel would store as a number, date, time,\nboolean, or formula, such as 0042 or 1/2; write numbers as JSON numbers, or set number_formats to @ for\ncells that keep text. The result reports verified false and lists differences when Excel stored a cell\ndifferently from what was written; tell the requester.",
+        "description": "Write cell values into one worksheet range of an Excel workbook, up to 10,000 cells.\nThe write fails with target_mismatch unless expected_web_url is the workbook's web_url.\nIt writes nothing and fails with cells_changed when the range no longer holds expected_formulas, such as\nafter someone edited it in Excel; show the requester current_formulas and ask again.\nIt writes nothing and fails with converted_text for text Excel would store as a number, date, time,\nboolean, or formula, such as 0042 or 1/2; write numbers as JSON numbers and dates as YYYY-MM-DD, or set\nnumber_formats to @ for cells that keep text. It fails with formula_as_text for a formula in a\ntext-formatted cell unless number_formats gives that cell another format, such as General. The result\nreports verified false and lists differences when Excel stored a cell differently from what was written;\ntell the requester.",
         "parameters": {
           "type": "object",
           "properties": {

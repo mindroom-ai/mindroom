@@ -83,6 +83,8 @@ _CONVERTED_TEXT = (
     re.compile(r"true|false", re.IGNORECASE),
     re.compile(r"#(?:N/A|DIV/0!|VALUE!|REF!|NAME\?|NUM!|NULL!|SPILL!|CALC!|GETTING_DATA)", re.IGNORECASE),
 )
+# Excel stores an ISO date, optionally with a time, as that date, which is how a date is written on purpose.
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?: [0-9]{2}:[0-9]{2}(?::[0-9]{2})?)?")
 # Excel reads text starting with these characters as a formula or a signed number.
 _FORMULA_PREFIXES = ("+", "-", "@")
 _FORMULA_STRING_LITERAL = re.compile(r'("(?:[^"]|"")*")')
@@ -278,16 +280,26 @@ def _formula_key(formula: str) -> str:
     )
 
 
-def _cells_equal(left: object, right: object) -> bool:
-    """Compare two cells: numbers numerically, formulas ignoring case outside literals, everything else exactly."""
-    if isinstance(left, bool) or isinstance(right, bool):
-        return type(left) is type(right) and left == right
-    if isinstance(left, int | float) and isinstance(right, int | float):
+def _same(left: object, right: object) -> bool:
+    """Return whether two cells read from Graph are equal, keeping booleans apart from the numbers 1 and 0."""
+    return isinstance(left, bool) == isinstance(right, bool) and left == right
+
+
+def _stored_as_written(held: object, written: object, *, text_cell: bool) -> bool:
+    """Return whether a cell holds what was written, as Excel stores it.
+
+    Excel uppercases a formula's names and references, stores an ISO date as its serial number, and may round a
+    number's last digit; a text-formatted cell stores written text exactly.
+    """
+    if isinstance(written, str) and not text_cell:
+        if written.startswith("=") and isinstance(held, str):
+            return _formula_key(held) == _formula_key(written)
+        if _ISO_DATE.fullmatch(written.strip()):
+            return isinstance(held, int | float) and not isinstance(held, bool)
+    if isinstance(held, int | float) and isinstance(written, int | float) and not isinstance(held, bool):
         # Only rounding in the last of a double's digits is tolerated, so distinct 15-digit values differ.
-        return math.isclose(left, right, rel_tol=1e-15, abs_tol=0.0)
-    if isinstance(left, str) and isinstance(right, str) and left.startswith("=") and right.startswith("="):
-        return _formula_key(left) == _formula_key(right)
-    return left == right
+        return not isinstance(written, bool) and math.isclose(held, written, rel_tol=1e-15, abs_tol=0.0)
+    return _same(held, written)
 
 
 def _excel_would_convert(value: object) -> bool:
@@ -296,7 +308,7 @@ def _excel_would_convert(value: object) -> bool:
     Graph parses a written cell as if it were typed, so `0042` loses its zeros and `1/2` becomes a date.
     This approximates Excel's English parser conservatively; text in a text-formatted cell stays text.
     """
-    if not isinstance(value, str) or value.startswith("="):
+    if not isinstance(value, str) or value.startswith("=") or _ISO_DATE.fullmatch(value.strip()):
         return False
     text = value.strip()
     unsigned = text[1:-1].strip() if text.startswith("(") and text.endswith(")") else text
@@ -329,8 +341,7 @@ class _RangeEdit:
         """Refuse a range that no longer holds what it held when read, such as after someone edited it."""
         formulas = current.get("formulas")
         if not all(
-            _cells_equal(_at(formulas, row, column), self.expected_formulas[row][column])
-            for row, column in self._cells()
+            _same(_at(formulas, row, column), self.expected_formulas[row][column]) for row, column in self._cells()
         ):
             msg = (
                 "The range no longer holds expected_formulas, so nothing was written; someone may have edited it. "
@@ -339,17 +350,23 @@ class _RangeEdit:
             raise MicrosoftGraphError(code="cells_changed", message=msg, current_formulas=formulas)
 
     def check_conversions(self, current: Mapping[str, Any]) -> None:
-        """Refuse text Excel would store as something else, unless its cell ends up text-formatted."""
+        """Refuse text Excel would store as something else, and formulas a text-formatted cell would keep as text."""
         for row, column in self._cells():
             value = self.values[row][column]
             requested = _at(self.number_formats, row, column)
             number_format = _at(current.get("numberFormat"), row, column) if requested is None else requested
+            cell = self.cell(row, column)
+            if number_format == _TEXT_NUMBER_FORMAT and isinstance(value, str) and value.startswith("="):
+                msg = (
+                    f"{cell} is formatted as text, so Excel would store the formula {value!r} as text and nothing "
+                    "was written. Give that cell's number_formats entry another format, such as General."
+                )
+                raise MicrosoftGraphError(code="formula_as_text", message=msg, cell=cell)
             if number_format != _TEXT_NUMBER_FORMAT and _excel_would_convert(value):
-                cell = self.cell(row, column)
                 msg = (
                     f"Excel would store the text {value!r} in {cell} as a number, date, time, boolean, or formula, "
-                    "so nothing was written. Write numbers as JSON numbers, or keep the text by setting that cell's "
-                    f"number_formats entry to '{_TEXT_NUMBER_FORMAT}'."
+                    "so nothing was written. Write numbers as JSON numbers and dates as YYYY-MM-DD, or keep the text "
+                    f"by setting that cell's number_formats entry to '{_TEXT_NUMBER_FORMAT}'."
                 )
                 raise MicrosoftGraphError(code="converted_text", message=msg, cell=cell)
 
@@ -359,10 +376,11 @@ class _RangeEdit:
         for row, column in self._cells():
             value = self.values[row][column]
             held = _at(stored.get("formulas"), row, column)
-            if value is not None and not _cells_equal(held, value):
+            held_format = _at(stored.get("numberFormat"), row, column)
+            text_cell = held_format == _TEXT_NUMBER_FORMAT
+            if value is not None and not _stored_as_written(held, value, text_cell=text_cell):
                 differences.append({"cell": self.cell(row, column), "written": value, "stored": held})
             number_format = _at(self.number_formats, row, column)
-            held_format = _at(stored.get("numberFormat"), row, column)
             if number_format is not None and held_format != number_format:
                 differences.append(
                     {
@@ -680,8 +698,8 @@ class MicrosoftFilesTools(Toolkit):
     def microsoft_files_excel_read_range(self, file: str, worksheet: str, address: str | None = None) -> str:
         """Read cell values and formulas from one worksheet of an Excel workbook, up to 10,000 cells.
 
-        values holds what cells show; formulas holds what they contain, a formula for a computed cell and the
-        value otherwise, which microsoft_files_excel_update_range takes as expected_formulas.
+        values holds each cell's raw value, such as a date's serial number; formulas holds a computed cell's
+        formula and any other cell's raw value, which microsoft_files_excel_update_range takes as expected_formulas.
 
         Args:
             file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
@@ -726,9 +744,11 @@ class MicrosoftFilesTools(Toolkit):
         It writes nothing and fails with cells_changed when the range no longer holds expected_formulas, such as
         after someone edited it in Excel; show the requester current_formulas and ask again.
         It writes nothing and fails with converted_text for text Excel would store as a number, date, time,
-        boolean, or formula, such as 0042 or 1/2; write numbers as JSON numbers, or set number_formats to @ for
-        cells that keep text. The result reports verified false and lists differences when Excel stored a cell
-        differently from what was written; tell the requester.
+        boolean, or formula, such as 0042 or 1/2; write numbers as JSON numbers and dates as YYYY-MM-DD, or set
+        number_formats to @ for cells that keep text. It fails with formula_as_text for a formula in a
+        text-formatted cell unless number_formats gives that cell another format, such as General. The result
+        reports verified false and lists differences when Excel stored a cell differently from what was written;
+        tell the requester.
 
         Args:
             file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
@@ -773,7 +793,10 @@ class MicrosoftFilesTools(Toolkit):
             if edit.number_formats is not None:
                 # Formats go first, so a text-formatted cell keeps text such as leading zeros.
                 session.json("PATCH", path, json={"numberFormat": edit.number_formats})
-            payload = session.json("PATCH", path, json={"values": edit.values})
+            if any(value is not None for row in edit.values for value in row):
+                session.json("PATCH", path, json={"values": edit.values})
+            # The range is read again rather than trusting the PATCH response to carry every property.
+            payload = session.json("GET", path, params={"$select": _RANGE_SELECT})
             differences = edit.differences(payload)
             result: dict[str, object] = {"range": _range(payload), "verified": not differences}
             if differences:
