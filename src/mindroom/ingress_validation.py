@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -18,7 +18,7 @@ from mindroom.constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
 )
-from mindroom.contacts.turns import contact_admission
+from mindroom.contacts.turns import contact_admission, contact_room
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -29,6 +29,7 @@ from mindroom.dispatch_source import (
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
+from mindroom.matrix.guarded_rooms import guarded_room
 from mindroom.requester_identity import (
     is_access_checked_requester_id,
     is_human_requester_id,
@@ -306,10 +307,16 @@ class IngressValidator:
         under the fence a configuration change waits at. A denied decision settles
         ``unanswered`` before the fence opens, so what was decided under the old
         authorization is durable before the change applies.
+
+        Every ingress hook runs inside an admitted decision, before any contact turn guards its room, so a decision in
+        a room that is or was this agent's contact room guards it: what the decision runs, those hooks included,
+        reaches that room only through a send the contact's message policy approved.
         """
         async with self.deps.runtime.admission_fence():
             if self.deps.turn_policy.can_reply_to_sender_in_room(requester_id, room_id):
-                yield True
+                contact = contact_room(self.deps.runtime.config, self.deps.runtime_paths, room_id, self.deps.agent_name)
+                with guarded_room(room_id) if contact is not None else nullcontext():
+                    yield True
                 return
             await self.deps.settle_ignored_sources(unanswered)
             yield False

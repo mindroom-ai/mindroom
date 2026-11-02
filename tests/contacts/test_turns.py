@@ -37,7 +37,16 @@ from mindroom.custom_tools import chat_ui, computer_announcement
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_entity_id
 from mindroom.final_delivery import Failed, FailureCause, Suppressed, Suppression
-from mindroom.hooks import MessageEnvelope, render_system_enrichment_block
+from mindroom.hooks import (
+    EVENT_MESSAGE_RECEIVED,
+    EVENT_REACTION_RECEIVED,
+    HookRegistry,
+    MessageEnvelope,
+    MessageReceivedContext,
+    ReactionReceivedContext,
+    hook,
+    render_system_enrichment_block,
+)
 from mindroom.hooks.context import ResponseDraft
 from mindroom.logging_config import get_logger
 from mindroom.matrix.guarded_rooms import send_refused
@@ -55,7 +64,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_backg
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, TurnPolicy, TurnPolicyDeps
-from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
+from tests.bot_helpers import _hook_plugin, dispatch_reaction_durably, make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     install_model_providers,
@@ -74,6 +83,7 @@ from tests.response_runner_helpers import streamed_answer
 from tests.runtime_fakes import ready_runtime
 from tests.test_generated_agents import BASE, CO_OWNER, OWNER, _load, _personal
 from tests.tool_job_helpers import tool_job_runtime
+from tests.turn_dispatch_helpers import dispatch_test_turn
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -768,6 +778,95 @@ async def test_a_contact_turn_reaches_its_room_only_through_the_message_policy(
     assert (sent.kwargs["room_id"], sent.kwargs["content"]["body"]) == (CONTACT_ROOM, "Bob is free on Friday.")
     assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
     assert not send_refused(CONTACT_ROOM)
+
+
+def _contact_room(paths: RuntimePaths) -> nio.MatrixRoom:
+    """Return the contact room as Bob's agent sees it, with both owners and both agents joined."""
+    room = nio.MatrixRoom(CONTACT_ROOM, _agent(paths, "mind_bob"))
+    for user_id in (OWNER, CO_OWNER, _agent(paths, "mind_alice"), _agent(paths, "mind_bob")):
+        room.add_member(user_id, user_id, None)
+    return room
+
+
+def _assert_only_the_other_room_got_the_hook_posts(bot: AgentBot, sent: list[str | None], logs: list[Any]) -> None:
+    """The hook's post into the contact room was refused, its post into another room went out, and no guard is left."""
+    assert sent[0] is None
+    assert sent[1] is not None
+    [posted] = bot.client.room_send.await_args_list
+    assert posted.kwargs["room_id"] == OTHER_ROOM
+    refused = [log["room_id"] for log in logs if log["event"] == "matrix_send_refused_in_guarded_room"]
+    assert refused == [CONTACT_ROOM]
+    assert not send_refused(CONTACT_ROOM)
+
+
+@pytest.mark.asyncio
+async def test_a_message_received_hook_reaches_the_contact_room_only_through_the_message_policy(
+    tmp_path: Path,
+) -> None:
+    """Hooks on the other side's message run before any contact turn starts, so the room refuses their posts itself."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    bot = _bot(config, paths)
+    sent: list[str | None] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def relay(ctx: MessageReceivedContext) -> None:
+        sent.append(await ctx.send_message(CONTACT_ROOM, "Bob is free on Friday."))
+        sent.append(await ctx.send_message(OTHER_ROOM, "Alice asked about Friday."))
+        ctx.suppress = True
+
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_hook_plugin("relay", [relay])])
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "Are you free on Friday?", "msgtype": "m.text"},
+            "event_id": EVENT_ID,
+            "sender": OWNER,
+            "origin_server_ts": 1,
+            "room_id": CONTACT_ROOM,
+            "type": "m.room.message",
+        },
+    )
+
+    with capture_logs() as logs:
+        await dispatch_test_turn(
+            bot._turn_dispatcher,
+            _contact_room(paths),
+            event,
+            facts=bot._ingress_validator.classify(event, room_id=CONTACT_ROOM),
+        )
+
+    _assert_only_the_other_room_got_the_hook_posts(bot, sent, logs)
+
+
+@pytest.mark.asyncio
+async def test_a_reaction_hook_reaches_the_contact_room_only_through_the_message_policy(tmp_path: Path) -> None:
+    """A reaction in the contact room starts no contact turn, so the room refuses its hooks' posts itself."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    bot = _bot(config, paths)
+    sent: list[str | None] = []
+
+    @hook(EVENT_REACTION_RECEIVED)
+    async def relay(ctx: ReactionReceivedContext) -> None:
+        sent.append(await ctx.send_message(CONTACT_ROOM, "Bob saw that."))
+        sent.append(await ctx.send_message(OTHER_ROOM, "Alice reacted."))
+
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_hook_plugin("relay", [relay])])
+    reaction = nio.ReactionEvent.from_dict(
+        {
+            "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": EVENT_ID, "key": "👍"}},
+            "event_id": "$reaction:localhost",
+            "sender": OWNER,
+            "origin_server_ts": 1,
+            "room_id": CONTACT_ROOM,
+            "type": "m.reaction",
+        },
+    )
+
+    with capture_logs() as logs:
+        await dispatch_reaction_durably(bot, _contact_room(paths), reaction)
+
+    _assert_only_the_other_room_got_the_hook_posts(bot, sent, logs)
 
 
 @pytest.mark.asyncio

@@ -3889,8 +3889,20 @@ path = "mindroom.matrix.guarded_rooms"
 depends_on = []
 visibility = [
     "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.ingress_validation",
     "mindroom.matrix.client_delivery",
     "mindroom.response_runner",
+]
+
+[[modules]]
+path = "mindroom.ingress_validation"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.contacts.turns",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.event_info",
+    "mindroom.matrix.guarded_rooms",
+    "mindroom.turn_record",
 ]
 
 [[modules]]
@@ -4748,6 +4760,7 @@ depends_on = [
     "mindroom.hooks.ingress",
     "mindroom.integrations",
     "mindroom.inbound_turn_normalizer",
+    "mindroom.ingress_validation",
     "mindroom.journal_dispatch",
     "mindroom.event_journal.legacy_turn_rows",
     "mindroom.matrix.client_room_admin",
