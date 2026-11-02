@@ -25,6 +25,7 @@ from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTE
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
+from mindroom.timing import reply_timing_binding
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.timing import ReplyTimingBinding
     from mindroom.tool_system.declarations import ToolMetadata
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.workers.backend import WorkerBackend
@@ -547,13 +549,16 @@ def view_file_from_worker(
 
 
 def _make_progress_sink(
-    pump: WorkerProgressPump,
+    pump: WorkerProgressPump | None,
     *,
+    reply_timing: ReplyTimingBinding | None,
     tool_name: str,
     function_name: str,
 ) -> ProgressSink:
     def sink(progress: WorkerReadyProgress) -> None:
-        if pump.shutdown.is_set() or pump.loop.is_closed():
+        if reply_timing is not None and progress.phase in {"ready", "failed"}:
+            reply_timing.note_worker_wait(progress.elapsed_seconds)
+        if pump is None or pump.shutdown.is_set() or pump.loop.is_closed():
             return
         event = WorkerProgressEvent(
             tool_name=tool_name,
@@ -732,14 +737,17 @@ def _call_proxy_sync(
         inert_agent=metadata is not None and function_name in metadata.worker_inert_agent_functions,
     )
     proxy_config = sandbox_proxy_config(runtime_paths)
+    # A streamed reply shows the worker's warmup; a streamed or collected reply keeps how long the call waited for it.
     pump = get_worker_progress_pump()
+    reply_timing = reply_timing_binding()
     progress_sink = (
         _make_progress_sink(
             pump,
+            reply_timing=reply_timing,
             tool_name=tool_name,
             function_name=function_name,
         )
-        if pump is not None
+        if pump is not None or reply_timing is not None
         else None
     )
     # The tool's workspace travels as the request's workspace, which the worker confines before acting in it.

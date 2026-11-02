@@ -7,6 +7,7 @@ import functools
 import inspect
 import logging
 import os
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -188,6 +189,51 @@ class DispatchPipelineTiming:
             if elapsed is not None:
                 summary[key] = elapsed
         logger.info("Dispatch pipeline timing", **summary)
+
+
+class ReplyTimingBinding:
+    """One reply's pipeline timing as its tool calls see it, until that reply's delivery ends.
+
+    A background job started during the reply keeps this binding in its copied context, so ending it here stops
+    such a job from writing into a reply that has already been delivered.
+    """
+
+    def __init__(self, timing: DispatchPipelineTiming) -> None:
+        self._timing: DispatchPipelineTiming | None = timing
+        # Sinks note from worker threads; holding the lock across the check and the write lets end() wait them out.
+        self._lock = threading.Lock()
+
+    def note_worker_wait(self, elapsed_seconds: float) -> None:
+        """Note a worker start a tool call waited for, unless the reply has been delivered."""
+        with self._lock:
+            if self._timing is not None:
+                self._timing.note_worker_wait(elapsed_seconds)
+
+    def end(self) -> None:
+        """Stop noting into the reply's timing, after any note already under way."""
+        with self._lock:
+            self._timing = None
+
+
+_REPLY_TIMING_BINDING: ContextVar[ReplyTimingBinding | None] = ContextVar("reply_timing_binding", default=None)
+
+
+@contextmanager
+def bind_reply_pipeline_timing(timing: DispatchPipelineTiming | None) -> Iterator[None]:
+    """Bind ``timing`` for the tool calls of the reply delivered in this block, streamed or whole."""
+    binding = ReplyTimingBinding(timing) if timing is not None else None
+    token = _REPLY_TIMING_BINDING.set(binding)
+    try:
+        yield
+    finally:
+        if binding is not None:
+            binding.end()
+        _REPLY_TIMING_BINDING.reset(token)
+
+
+def reply_timing_binding() -> ReplyTimingBinding | None:
+    """Return the binding of the reply whose turn runs here, None when timing is off or no reply runs."""
+    return _REPLY_TIMING_BINDING.get()
 
 
 def create_dispatch_pipeline_timing(*, event_id: str, room_id: str) -> DispatchPipelineTiming | None:
