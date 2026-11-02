@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def probe() -> str:
@@ -286,6 +287,26 @@ def _before_each_request(prepare: Callable[[LoopState], None]) -> BeforeRequestH
         return SendRequest()
 
     return before_request
+
+
+def _observed_compaction_hooks(
+    config: Config,
+    paths: RuntimePaths,
+) -> tuple[ToolRuntimeContext, list[CompactionHookContext]]:
+    """Return a runtime context whose compaction hooks record every context they see, and that record."""
+    observed: list[CompactionHookContext] = []
+
+    @hook(EVENT_COMPACTION_BEFORE)
+    async def before(ctx: CompactionHookContext) -> None:
+        observed.append(ctx)
+
+    @hook(EVENT_COMPACTION_AFTER)
+    async def after(ctx: CompactionHookContext) -> None:
+        observed.append(ctx)
+
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
+    context = _hook_runtime_context(config=config, runtime_paths=paths, registry=registry, session_id="session-1")
+    return context, observed
 
 
 def _first_compacted(model: ToolLoopModel) -> ToolLoopRequest:
@@ -1592,18 +1613,7 @@ async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path, m
 async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> None:
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
-    observed: list[CompactionHookContext] = []
-
-    @hook(EVENT_COMPACTION_BEFORE)
-    async def before(ctx: CompactionHookContext) -> None:
-        observed.append(ctx)
-
-    @hook(EVENT_COMPACTION_AFTER)
-    async def after(ctx: CompactionHookContext) -> None:
-        observed.append(ctx)
-
-    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
-    hook_context = _hook_runtime_context(config=config, runtime_paths=paths, registry=registry, session_id="session-1")
+    hook_context, observed = _observed_compaction_hooks(config, paths)
 
     with tool_runtime_context(hook_context):
         await _run(
@@ -1625,18 +1635,7 @@ async def test_a_fold_whose_summary_is_not_stored_emits_no_compaction_hooks(
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
     summary_calls.summary = "fact " * 4000
-    observed: list[str] = []
-
-    @hook(EVENT_COMPACTION_BEFORE)
-    async def before(ctx: CompactionHookContext) -> None:
-        observed.append(ctx.event_name)
-
-    @hook(EVENT_COMPACTION_AFTER)
-    async def after(ctx: CompactionHookContext) -> None:
-        observed.append(ctx.event_name)
-
-    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
-    hook_context = _hook_runtime_context(config=config, runtime_paths=paths, registry=registry, session_id="session-1")
+    hook_context, observed = _observed_compaction_hooks(config, paths)
 
     with tool_runtime_context(hook_context):
         await _run(_scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
@@ -1700,18 +1699,7 @@ async def test_mid_turn_compaction_hooks_see_who_said_each_line_without_what_min
     )
     seed_session(storage, _session("session-1", runs=[asked]))
     memory = render_enrichment_block([EnrichmentItem(key="memory", text="Alice prefers short answers.")])
-    observed: list[CompactionHookContext] = []
-
-    @hook(EVENT_COMPACTION_BEFORE)
-    async def before(ctx: CompactionHookContext) -> None:
-        observed.append(ctx)
-
-    @hook(EVENT_COMPACTION_AFTER)
-    async def after(ctx: CompactionHookContext) -> None:
-        observed.append(ctx)
-
-    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
-    hook_context = _hook_runtime_context(config=config, runtime_paths=paths, registry=registry, session_id="session-1")
+    hook_context, observed = _observed_compaction_hooks(config, paths)
 
     with tool_runtime_context(hook_context):
         await _run(

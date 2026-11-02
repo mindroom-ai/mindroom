@@ -618,6 +618,9 @@ async def compact_running_turn(
     """
     scope = owner_scope(session)
     runs = [*basis.runs, *snapshots]
+    summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
+    if (error := _summary_budget_error(summary, max_summary_tokens)) is not None:
+        raise error
     # Hooks see the folded messages themselves, not the per-call units the summarizer reads, under the running turn's
     # requester and metadata, which decide who said each message.
     folded_run = RunRecord(
@@ -627,9 +630,6 @@ async def compact_running_turn(
         metadata=fold.run.metadata,
     )
     transcript = _transcript([*basis.runs, folded_run]) if _compaction_hooks_registered() else ()
-    summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
-    if (error := _summary_budget_error(summary, max_summary_tokens)) is not None:
-        raise error
     # Like a compaction before a reply, hooks hear only of a summary that is about to be stored.
     await _emit_compaction_hook(
         event_name=EVENT_COMPACTION_BEFORE,

@@ -297,7 +297,7 @@ async def _summarize(
             messages,
             record,
             request_tokens,
-            partial(size_request, messages),
+            size_request,
             store=store,
             session=session,
             max_summary_tokens=max(0, policy.limit - kept_tokens),
@@ -319,7 +319,7 @@ async def _compact_scope(
     messages: list[Message],
     record: AnyRunRecord,
     request_tokens: int,
-    size_request: Callable[[], int],
+    size_request: Callable[[list[Message]], int],
     *,
     store: ConversationStore,
     session: ConversationSession,
@@ -362,7 +362,7 @@ async def _compact_scope(
         max_summary_tokens=max_summary_tokens,
         on_commit=on_commit,
         # The request ``on_commit`` rewrote, estimated from what it holds, since no response has reported its size.
-        rewritten_request_tokens=size_request,
+        rewritten_request_tokens=partial(size_request, messages),
     )
     if outcome is None or not summary_messages:
         return None
