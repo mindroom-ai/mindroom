@@ -826,14 +826,48 @@ def test_excel_update_never_takes_text_for_a_formula_already_written(
 
 def test_excel_update_writes_iso_dates_as_dates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _workbook([["", ""]])
-    files.store = lambda value: {"2026-11-02": 46328, "2026-11-02 09:30": 46328.395833}.get(value, value)
+    files.store = lambda value: {"2026-11-02": 46328, "2026-11-02 09:30": 46328 + 9.5 / 24}.get(value, value)
     tools, graph = _tools(tmp_path, monkeypatch, files)
 
     result = _update(tools, [["2026-11-02", "2026-11-02 09:30"]], [["", ""]])
 
-    assert (result["verified"], files.formulas) == (True, [[46328, 46328.395833]])
+    assert (result["verified"], files.formulas) == (True, [[46328, 46328 + 9.5 / 24]])
     assert _update(tools, [["2026-11-02", None]], [["", ""]])["already_applied"] is True
     assert len(_patches(graph)) == 1
+
+
+def test_excel_update_compares_iso_dates_with_their_serial_number(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another date already in the cell is not this write, and a wrong stored date is a difference."""
+    files = _workbook([[46296, ""]])
+    files.store = lambda value: {"2026-11-02": 46328, "2026-11-02 09:30": 7}.get(value, value)
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [["2026-11-02", "2026-11-02 09:30"]], [[46296, ""]])
+
+    assert _patches(graph) == [{"values": [["2026-11-02", "2026-11-02 09:30"]]}]
+    assert result["differences"] == [{"cell": "B1", "written": "2026-11-02 09:30", "stored": 7}]
+
+
+@pytest.mark.parametrize(
+    ("held", "formats"),
+    [("0042", ["General", "General"]), ("2026-11-02", ["General", "General"]), ("=abc", ["@", "General"])],
+)
+def test_excel_update_leaves_cells_given_what_they_held_unwritten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    held: str,
+    formats: list[str],
+) -> None:
+    """Rewriting a cell makes Excel parse it again, so a row written back changes only its edited cells."""
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([[held, ""]], [formats]))
+
+    result = _update(tools, [[held, "x"]], [[held, ""]])
+
+    assert _patches(graph) == [{"values": [[None, "x"]]}]
+    assert result["verified"] is True
 
 
 def test_excel_update_verifies_by_reading_the_range_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -869,7 +903,10 @@ def test_excel_update_skips_a_write_the_cells_already_hold(tmp_path: Path, monke
     assert _patches(graph) == []
 
 
-@pytest.mark.parametrize("text", ["0042", "1/2", "3-4", "Jan 5", "12:30", "TRUE", "1e5", "45%", "$1,000", "+A1", "@x"])
+@pytest.mark.parametrize(
+    "text",
+    ["0042", "1/2", "3-4", "Jan 5", "12:30", "TRUE", "1e5", "45%", "$1,000", "+A1", "@x", "2026-13-45"],
+)
 def test_excel_update_refuses_text_excel_would_convert(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -886,9 +923,9 @@ def test_excel_update_refuses_text_excel_would_convert(
 
 @pytest.mark.parametrize("text", ["Q3 plan", "SKU-0042", '=A1&"x"', "", "-", "1/2/3/4", "v1.2.3"])
 def test_excel_update_writes_text_excel_keeps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _workbook([["", ""]]))
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([["", "old"]]))
 
-    assert _update(tools, [["label", text]], [["", ""]])["status"] == "ok"
+    assert _update(tools, [["label", text]], [["", "old"]])["status"] == "ok"
     assert _patches(graph) == [{"values": [["label", text]]}]
 
 

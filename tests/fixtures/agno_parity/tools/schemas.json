@@ -18158,7 +18158,7 @@
                   ]
                 }
               },
-              "description": "The range's formulas as microsoft_files_excel_read_range returned them for this\naddress, in the same shape as values. Required."
+              "description": "The range's formulas exactly as microsoft_files_excel_read_range returned them for\nthis address, in the same shape as values; cells whose value equals them are not written. Required."
             },
             "expected_web_url": {
               "type": "string",

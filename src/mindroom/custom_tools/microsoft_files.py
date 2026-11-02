@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
@@ -85,6 +86,8 @@ _CONVERTED_TEXT = (
 )
 # Excel stores an ISO date, optionally with a time, as that date, which is how a date is written on purpose.
 _ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?: [0-9]{2}:[0-9]{2}(?::[0-9]{2})?)?")
+# Day zero of Excel's 1900 date system, from which a date's serial number counts days.
+_EXCEL_EPOCH = datetime(1899, 12, 30, tzinfo=UTC)
 # Excel reads text starting with these characters as a formula or a signed number.
 _FORMULA_PREFIXES = ("+", "-", "@")
 _FORMULA_STRING_LITERAL = re.compile(r'("(?:[^"]|"")*")')
@@ -285,17 +288,33 @@ def _same(left: object, right: object) -> bool:
     return isinstance(left, bool) == isinstance(right, bool) and left == right
 
 
+def _iso_serial(value: object) -> float | None:
+    """Return the serial number Excel stores for a written ISO date, or None for any other value."""
+    if not isinstance(value, str) or not _ISO_DATE.fullmatch(value.strip()):
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip()).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    return (moment - _EXCEL_EPOCH) / timedelta(days=1)
+
+
 def _stored_as_written(held: object, written: object, *, text_cell: bool) -> bool:
     """Return whether a cell holds what was written, as Excel stores it.
 
     Excel uppercases a formula's names and references, stores an ISO date as its serial number, and may round a
     number's last digit; a text-formatted cell stores written text exactly.
     """
+    if _same(held, written):
+        return True
     if isinstance(written, str) and not text_cell:
         if written.startswith("=") and isinstance(held, str):
             return _formula_key(held) == _formula_key(written)
-        if _ISO_DATE.fullmatch(written.strip()):
-            return isinstance(held, int | float) and not isinstance(held, bool)
+        if (serial := _iso_serial(written)) is not None:
+            # A workbook in the 1904 date system stores another serial, which is reported as a difference.
+            if isinstance(held, bool) or not isinstance(held, int | float):
+                return False
+            return math.isclose(held, serial, rel_tol=0.0, abs_tol=1e-6)
     if isinstance(held, int | float) and isinstance(written, int | float) and not isinstance(held, bool):
         # Only rounding in the last of a double's digits is tolerated, so distinct 15-digit values differ.
         return not isinstance(written, bool) and math.isclose(held, written, rel_tol=1e-15, abs_tol=0.0)
@@ -308,7 +327,7 @@ def _excel_would_convert(value: object) -> bool:
     Graph parses a written cell as if it were typed, so `0042` loses its zeros and `1/2` becomes a date.
     This approximates Excel's English parser conservatively; text in a text-formatted cell stays text.
     """
-    if not isinstance(value, str) or value.startswith("=") or _ISO_DATE.fullmatch(value.strip()):
+    if not isinstance(value, str) or value.startswith("=") or _iso_serial(value) is not None:
         return False
     text = value.strip()
     unsigned = text[1:-1].strip() if text.startswith("(") and text.endswith(")") else text
@@ -331,6 +350,18 @@ class _RangeEdit:
     expected_formulas: list[list[Any]]
     number_formats: list[list[str | None]] | None
 
+    @property
+    def writes(self) -> list[list[Any]]:
+        """Return the values with null for every cell given what it held when read.
+
+        Graph parses every written cell again, so an unchanged cell is left out rather than rewritten, where text
+        such as an ISO date would become a date; the approval card shows those cells as unchanged.
+        """
+        return [
+            [None if _same(value, before) else value for value, before in zip(row, read, strict=True)]
+            for row, read in zip(self.values, self.expected_formulas, strict=True)
+        ]
+
     def cell(self, row: int, column: int) -> str:
         return f"{_column_letters(self.first_cell[1] + column)}{self.first_cell[0] + row}"
 
@@ -351,8 +382,9 @@ class _RangeEdit:
 
     def check_conversions(self, current: Mapping[str, Any]) -> None:
         """Refuse text Excel would store as something else, and formulas a text-formatted cell would keep as text."""
+        writes = self.writes
         for row, column in self._cells():
-            value = self.values[row][column]
+            value = writes[row][column]
             requested = _at(self.number_formats, row, column)
             number_format = _at(current.get("numberFormat"), row, column) if requested is None else requested
             cell = self.cell(row, column)
@@ -756,8 +788,8 @@ class MicrosoftFilesTools(Toolkit):
             address: The range to write, such as A1:C2, matching the shape of values.
             values: Rows of cell values; a string starting with = is written as a formula, "" empties a cell, and
                 null leaves a cell unchanged.
-            expected_formulas: The range's formulas as microsoft_files_excel_read_range returned them for this
-                address, in the same shape as values. Required.
+            expected_formulas: The range's formulas exactly as microsoft_files_excel_read_range returned them for
+                this address, in the same shape as values; cells whose value equals them are not written. Required.
             expected_web_url: The workbook's web_url as microsoft_files_get_file or microsoft_files_list_folder
                 returns it; search results show a different form of it. Required.
             number_formats: Optional rows of Excel number formats, such as 0.0% or @ for text, set before the
@@ -774,7 +806,7 @@ class MicrosoftFilesTools(Toolkit):
             if number_formats is not None:
                 _checked_grid("number_formats", number_formats, target, shape)
                 if any(number_format == "" for row in number_formats for number_format in row):
-                    msg = "number_formats entries must be Excel number formats, such as 0.0% or @, or null."
+                    msg = "number_formats entries must be Excel number formats, such as 0.0%, @, or General, or null."
                     raise MicrosoftGraphError(code="invalid_argument", message=msg)
             _parse_file(file)
             _web_url(expected_web_url)
@@ -793,8 +825,9 @@ class MicrosoftFilesTools(Toolkit):
             if edit.number_formats is not None:
                 # Formats go first, so a text-formatted cell keeps text such as leading zeros.
                 session.json("PATCH", path, json={"numberFormat": edit.number_formats})
-            if any(value is not None for row in edit.values for value in row):
-                session.json("PATCH", path, json={"values": edit.values})
+            writes = edit.writes
+            if any(value is not None for row in writes for value in row):
+                session.json("PATCH", path, json={"values": writes})
             # The range is read again rather than trusting the PATCH response to carry every property.
             payload = session.json("GET", path, params={"$select": _RANGE_SELECT})
             differences = edit.differences(payload)
