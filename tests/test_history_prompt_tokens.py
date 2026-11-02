@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -124,8 +125,12 @@ def test_the_static_fingerprint_names_the_system_prompt_and_the_tools_sent() -> 
     assert fingerprint(_SYSTEM_MESSAGE, (_SEARCH_DOCS,)) == base
     assert fingerprint(Message(role="system", content="You are terse."), (_SEARCH_DOCS,)) != base
     assert fingerprint(_SYSTEM_MESSAGE, (_SEARCH_DOCS, _EXPORT_NOTES)) != base
-    # A deferred tool stays off the request until tool search loads it.
-    assert fingerprint(_SYSTEM_MESSAGE, (_SEARCH_DOCS, _EXPORT_NOTES), frozenset({"export_notes"})) == base
+    # A deferred tool counts nothing until tool search loads it, but a request that loaded it holds its current
+    # definition, so its definition and its deferral are part of what a request holds.
+    export_deferred = fingerprint(_SYSTEM_MESSAGE, (_SEARCH_DOCS, _EXPORT_NOTES), frozenset({"export_notes"}))
+    assert export_deferred not in {base, fingerprint(_SYSTEM_MESSAGE, (_SEARCH_DOCS, _EXPORT_NOTES))}
+    grown = replace(_EXPORT_NOTES, description=_EXPORT_NOTES.description + " Include every attachment.")
+    assert fingerprint(_SYSTEM_MESSAGE, (_SEARCH_DOCS, grown), frozenset({"export_notes"})) != export_deferred
 
 
 def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages() -> None:

@@ -1928,7 +1928,7 @@ def _reported_run(
 
 async def _prepare_reply(
     storage: ConversationStore,
-    session: ConversationSession,
+    session: ConversationSession | None,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
@@ -1938,7 +1938,9 @@ async def _prepare_reply(
     non_prompt_tokens: int = 400,
     lifecycle: RecordingCompactionLifecycle | None = None,
 ) -> PreparedScopeHistory:
-    """Prepare a reply of ``fake-model`` to ``session``, whose system prompt and tools ``static_fingerprint`` names.
+    """Prepare a reply of ``fake-model`` in ``session-1``, whose system prompt and tools ``static_fingerprint`` names.
+
+    ``session`` is the scope's stored session, None before its first reply is saved.
 
     They are ``non_prompt_tokens`` of the plan's 1,000 static prompt tokens, and the model counts with ``counter``, a
     quarter token per character when it is None.
@@ -1980,7 +1982,7 @@ async def _prepare_reply(
                 scope=HistoryScope(kind="agent", scope_id="test_agent"),
                 storage=storage,
                 session=session,
-                session_id=session.session_id,
+                session_id="session-1",
                 storage_factory=lambda: storage,
             ),
             pipeline_timing=None,
@@ -2088,6 +2090,38 @@ async def test_the_latest_reported_request_size_decides_compaction_before_a_repl
     assert isinstance(start, CompactionLifecycleStart)
     # A compaction nobody requested reports itself as automatic from its first notice to its outcome.
     assert (start.mode, outcome.mode) == ("auto", "auto")
+
+
+@pytest.mark.asyncio
+async def test_the_second_reply_sizes_its_history_by_the_first_reply_reported_size(tmp_path: Path) -> None:
+    """A scope's first request held no summary and no history, which is what the second reply's history held."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    first = await _prepare_reply(storage, None, config, runtime_paths, history_settings=_ALL_HISTORY_SETTINGS)
+    recorded = finalize_history_preparation(
+        prepared_scope_history=first,
+        config=config,
+        static_prompt_tokens=0,
+        pipeline_timing=None,
+    ).request_basis
+    seed_session(
+        storage,
+        _session("session-1", runs=[_reported_run("run-0", input_tokens=8_000, request_basis=recorded)]),
+    )
+
+    prepared = await _prepare_reply(
+        storage,
+        storage.load_session("session-1"),
+        config,
+        runtime_paths,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert prepared.compaction_decision.current_history_tokens == 8_000 + 500 - 400
 
 
 @pytest.mark.asyncio

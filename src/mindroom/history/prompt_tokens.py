@@ -47,7 +47,10 @@ def build_static_token_estimator(
     """
     system = system_text(system_messages)
     definitions = tool_definitions_text(tools, deferred_tool_names)
-    fingerprint = hashlib.sha256(f"{system}\0{definitions}".encode("utf-8", "surrogatepass")).hexdigest()
+    # A request whose history loaded a deferred tool holds that tool's current definition, so the fingerprint names
+    # every definition and which of them are deferred.
+    sent = stable_serialize([system, tool_definitions_text(tools, frozenset()), sorted(deferred_tool_names)])
+    fingerprint = hashlib.sha256(sent.encode("utf-8", "surrogatepass")).hexdigest()
     return _StaticTokenEstimator(counter, count(counter, system) + count(counter, definitions), fingerprint)
 
 

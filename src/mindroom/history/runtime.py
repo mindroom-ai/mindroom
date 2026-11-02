@@ -696,10 +696,13 @@ def finalize_history_preparation(
     native_history = prepared_scope_history.native_history
     counter = prepared_scope_history.counter
     if session is None:
+        # A scope's first request holds no summary and no history.
+        summary, history = None, []
         replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
         replays_persisted_history = False
         reported_history = False
     else:
+        summary, history = current_summary_text(session), prompt_visible_history(session, history_settings)
         estimate_history_tokens = partial(
             estimate_prompt_visible_history_tokens,
             session=session,
@@ -760,11 +763,9 @@ def finalize_history_preparation(
         prepared_context_tokens=prepared_context_tokens,
         request_basis=request_basis(
             static_fingerprint=prepared_scope_history.static_fingerprint,
-            summary=current_summary_text(session),
-            history=prompt_visible_history(session, history_settings),
-        )
-        if session is not None
-        else None,
+            summary=summary,
+            history=history,
+        ),
         reported_history=reported_history,
         native_history=native_history,
     )
