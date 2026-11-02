@@ -2319,11 +2319,7 @@ class DeliveryGateway:
 
             if stream_outcome.failed and stream_outcome.visible_body_state != "visible_body":
                 # The span's end notes the failure below what the reply showed, as a whole delivery's does.
-                shown = (
-                    stream_outcome.visible_body_state == "none"
-                    and request.initial_delivery_kind == "edited"
-                    and streamed_event_id is not None
-                )
+                shown = request.initial_delivery_kind == "edited" and streamed_event_id is not None
                 return FinalDeliveryOutcome(
                     ending=Failed(FailureCause.DELIVERY_FAILED),
                     event_id=streamed_event_id if shown else None,
