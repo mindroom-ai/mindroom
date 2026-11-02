@@ -1159,7 +1159,7 @@ class MCPServerManager:
                 context=Context(),
             )
         except SdkMCPError as exc:
-            # Invalid params is the server refusing the arguments; the SDK raises other codes for transport failures too.
+            # Invalid params is always the server's own answer; the SDK raises other codes for transport failures too.
             if exc.code != mcp_types.INVALID_PARAMS:
                 self._raise_runtime_exception(state.server_id, exc)
             msg = f"MCP error {exc.code}: {exc.message}"
