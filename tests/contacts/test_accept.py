@@ -388,7 +388,8 @@ async def test_a_room_that_cannot_be_set_up_is_left_and_the_request_stays_pendin
     for client in runtime.clients.values():
         client.room_leave.assert_not_awaited()
     assert _kept(paths) == set()
-    assert [stored.status for stored in _stored(paths)] == ["pending"]
+    # The last attempt replaced the room of the one before, which stays a removed contact's.
+    assert [stored.status for stored in _stored(paths)] == ["pending", "removed"]
     runtime.sent("mind_alice").assert_not_awaited()
 
 
@@ -458,7 +459,41 @@ async def test_the_contact_names_its_room_before_anyone_is_invited(tmp_path: Pat
     assert admissions
     assert set(admissions) == {_ContactAdmission(None)}
     assert accepted.room_id == CONTACT_ROOM
-    assert contact_room(config, paths, FAILED_ROOM, "mind_bob") is None
+
+
+@pytest.mark.asyncio
+async def test_a_retried_acceptance_keeps_the_room_it_replaces_as_a_removed_contacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent whose leave failed stays in the failed attempt's room, which starts no turns there and is left later."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    runtime.bots["mind_alice"].change_local_membership.side_effect = _failing_membership(fails_on="leave")
+    runtime.bots["mind_bob"].change_local_membership.side_effect = _failing_membership(fails_on="join")
+    with _matrix(FAILED_ROOM), pytest.raises(RuntimeError, match=r"^join failed$"):
+        await _accept(config, paths, runtime, record.id)
+    for name in ("mind_alice", "mind_bob"):
+        runtime.bots[name].change_local_membership.side_effect = None
+    with _matrix():
+        accepted = await _accept(config, paths, runtime, record.id)
+
+    found = contact_room(config, paths, FAILED_ROOM, "mind_alice")
+    assert found is not None
+    failed, _side = found
+    assert failed.status == "removed"
+    assert failed.id != accepted.id
+    assert [stored.id for stored in _stored(paths)] == [accepted.id, failed.id]
+    admission = contact_admission(config, paths, room_id=FAILED_ROOM, agent_name="mind_alice", sender_ids=[OWNER])
+    assert admission == _ContactAdmission(None)
+    # The agent accepted the room's invite, which would otherwise keep the room across restarts.
+    remember_invited_room(invited_rooms_path(paths, "mind_alice"), FAILED_ROOM)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(return_value=[CONTACT_ROOM, FAILED_ROOM]),
+    )
+    assert await _room_lifecycle(config, paths, "mind_alice")._rooms_to_leave() == [FAILED_ROOM]
 
 
 @pytest.mark.asyncio

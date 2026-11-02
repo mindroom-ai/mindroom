@@ -460,7 +460,8 @@ async def accept_contact(
 
     The target side keeps any rules or tools left out. Both agent parties keep the room while the contact is active.
     The pending contact names the room before anyone is invited, so the room refuses every turn until it is active.
-    A room that cannot be fully set up is left again and the request stays pending, to be replaced by the next room.
+    A room that cannot be fully set up is left again and the request stays pending, to be replaced by the next room;
+    the room it replaces stays a removed contact's, because an agent whose leave failed may still be in it.
     """
     config, paths = context.current_config, context.runtime_paths
     record = await _pending_request(context, agent_name, contact_id, "accept")
@@ -480,6 +481,9 @@ async def accept_contact(
         current = _by_id(book, contact_id)
         if current.status != "pending":
             raise ValueError(_NOT_PENDING["accept"])
+        if current.room_id is not None:
+            # A removed contact's room starts no turns and takes no messages, and its agents leave it.
+            book.contacts.append(current.model_copy(update={"id": uuid4().hex[:12], "status": "removed"}, deep=True))
         current.room_id = room_id
 
     def activate(book: ContactBook) -> ContactRecord:

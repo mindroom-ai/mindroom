@@ -64,6 +64,7 @@ Accepting creates a room that is invite-only like a personal room, with shared h
 It holds both parties and both owners, and leaves the router out, because the router would route messages there and contact turns never need approval cards.
 The target agent creates it, or the requesting agent when the target is a person, because the creator stays in the room and must therefore be a party.
 The pending contact names its room before anyone is invited, because a room the store does not know yet would run an owner's early message as a normal turn, and a setup that crashes would leave it unrecognized.
+A retried acceptance keeps the room of the attempt it replaces as a removed contact's room, because an agent whose leave failed may still be in it and would otherwise run ordinary turns there.
 Agent parties keep the room across restarts through cleanup exclusions read from the contacts store, which stays the single source of truth.
 The invited-rooms store was rejected for this, because it is not persisted for agents whose `accept_invites` is false.
 Contact rooms are also left out of the rooms an agent keeps for accepted invites, because an agent that accepts invites records the contact room's invite like any other, and would otherwise rejoin a removed contact's room at its next start.
