@@ -66,6 +66,8 @@ class _Graph:
         # The worksheet range every Excel request reads or writes, whatever its address.
         self.range_address = "Budget!A1"
         self.formulas: list[list[object]] = [[""]]
+        # What computed cells show; None shows the formulas grid, as for cells without a formula.
+        self.values: list[list[object]] | None = None
         self.formats: list[list[str]] = [["General"]]
         # How Excel stores a written value, such as text it parses as a number.
         self.store: Callable[[object], object] = lambda value: value
@@ -79,6 +81,7 @@ class _Graph:
                     for old_row, new_row in zip(self.formats, body["numberFormat"], strict=True)
                 ]
             if "values" in body:
+                self.values = None
                 self.formulas = [
                     [old if new is None else self.store(new) for old, new in zip(old_row, new_row, strict=True)]
                     for old_row, new_row in zip(self.formulas, body["values"], strict=True)
@@ -87,7 +90,7 @@ class _Graph:
             "address": self.range_address,
             "formulas": self.formulas,
             "numberFormat": self.formats,
-            "values": self.formulas,
+            "values": self.formulas if self.values is None else self.values,
         }
         return httpx.Response(200, json=payload)
 
@@ -700,10 +703,15 @@ def test_excel_read_refuses_a_range_over_the_cell_limit(tmp_path: Path, monkeypa
     assert (result["code"], result["address"]) == ("too_large", "A1:GR100")
 
 
-def _workbook(formulas: list[list[object]], formats: list[list[str]] | None = None) -> _Graph:
+def _workbook(
+    formulas: list[list[object]],
+    formats: list[list[str]] | None = None,
+    values: list[list[object]] | None = None,
+) -> _Graph:
     files = _Graph()
     files.range_address = "Budget!A1:B1"
     files.formulas = formulas
+    files.values = values
     files.formats = formats or [["General"] * len(row) for row in formulas]
     return files
 
@@ -735,7 +743,7 @@ def test_excel_update_writes_cells_that_still_hold_what_was_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    files = _workbook([["old", "=SUM(C1:C2)"]])
+    files = _workbook([["old", "=SUM(C1:C2)"]], values=[["old", 3]])
     tools, graph = _tools(tmp_path, monkeypatch, files)
 
     result = _update(tools, [["x", 2]], [["old", "=SUM(C1:C2)"]])
