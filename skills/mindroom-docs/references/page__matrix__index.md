@@ -39,6 +39,7 @@ accounts:
 MindRoom then logs in to that account instead of registering one.
 With `MATRIX_MANAGED_ACCOUNT_AUTH=appservice`, leave out `password`; the account must be inside the application service's exclusive user namespace.
 List every room the account should stay in under the agent's `rooms` by room ID, because an agent leaves joined rooms it is not configured for, except direct messages.
+Room IDs in `rooms` grant no conversation access, so admit the people in those rooms through the agent's [`access`](https://docs.mindroom.chat/authorization/#responder-access), such as `access.users`.
 Stop the other platform from using the account first, or both will answer.
 An adopted account needs no `matrix_username`, and with password auth, a `matrix_username` that names an existing account stops startup with `Matrix account collision` instead of taking it over.
 
