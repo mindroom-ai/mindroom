@@ -1983,3 +1983,29 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     assert record.metadata["mindroom_original_status"] == "error"
     assert record.metadata["mindroom_replay_state"] == "interrupted"
     assert not record.requirements
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_the_next_reply_sizes_its_first_request_from_the_previous_answer_s_reported_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply's answer records the request it answered, so the next reply's check starts from its reported size.
+
+    The first answer reports a request far larger than the text, which only an anchored size can reach; the next
+    reply's request repeats it, with the same system prompt and tools, before the new turn.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [answer("First answer.", usage(50_000, 5)), answer("Second answer.", usage(50_100, 5))],
+        context_window=128_000,
+    )
+
+    await _stream(reply, prompt="Hello", run_id="run-1")
+    await _stream(reply, prompt="And now?", run_id="run-2")
+
+    stored = _stored(reply, "run-2").metadata or {}
+    compaction = stored[AI_RUN_METADATA_KEY]["compaction"]
+    assert 50_000 < compaction["request_tokens"] < 50_500
