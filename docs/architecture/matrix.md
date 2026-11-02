@@ -14,7 +14,7 @@ Code must resolve an entity's Matrix ID through the persisted identity registry,
 ## Custom Key Namespace
 
 New custom Matrix event types, state event types, and content keys use the `io.mindroom.*` namespace.
-Existing `com.mindroom.*` names keep their names and are never migrated, because events already in room history and MindRoom Chat read them under those names.
+Existing names under other prefixes, such as the `com.mindroom.*` keys, `org.mindroom.personal_room`, and `chat.mindroom.call_failure`, keep their names and are never migrated, because events already in room history, MindRoom Chat, and documented procedures use those names.
 
 ## Room-Level Reply Relation
 
