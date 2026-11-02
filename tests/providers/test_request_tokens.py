@@ -20,6 +20,7 @@ from mindroom.llm.provider import ModelRequest, TokenCounter, ToolSpec
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_items
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
+from mindroom.token_counting.counts import count
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, plain_request_parts, route_request_tokens
 from tests.providers.anthropic_family_support import FAMILIES as CLAUDE_FAMILIES
 from tests.providers.anthropic_family_support import provider_for
@@ -264,20 +265,34 @@ def test_openrouter_counts_encrypted_reasoning_details_as_their_reported_reasoni
     assert _difference(route, encrypted, plain) == 400
 
 
+def test_openrouter_counts_reasoning_details_in_the_clear_as_their_text(tmp_path: Path) -> None:
+    """A ``reasoning_details`` item sent in the clear counts its text, not the reasoning its answer reported."""
+    route = _route("openrouter", tmp_path)
+    metrics = MessageMetrics(tokens=TokenCounts(output_tokens=420, reasoning_tokens=400))
+    plain = Message(role="assistant", content="Pack a light rain jacket.", metrics=metrics, from_history=True)
+    summarized = replace(
+        plain,
+        provider_data={"reasoning_details": [{"type": "reasoning.summary", "summary": _REASONING, "id": "rd-1"}]},
+    )
+
+    # Counted within the joined request, the summary can round a token or two apart from its own count.
+    assert abs(_difference(route, summarized, plain) - count(route.token_counter, _REASONING)) <= 2
+
+
 def test_claude_counts_replayed_thinking_by_its_answer_s_hidden_output(tmp_path: Path) -> None:
-    """Claude replays a thinking summary but bills the thinking its answer produced, which its output reports."""
+    """Claude replays a thinking summary but bills the thinking its answer produced: its output beyond the visible part."""
     route = _route("anthropic", tmp_path)
     text = {"type": "text", "text": "Pack a light rain jacket."}
     thinking = {"type": "thinking", "thinking": "Rain is likely.", "signature": "c2lnbmF0dXJl"}
     metrics = MessageMetrics(tokens=TokenCounts(output_tokens=3_000))
-    visible = route.request_tokens(ModelRequest(messages=(Message(role="user", content=text["text"]),)))
+    visible = count(route.token_counter, text["text"])
 
     added = _difference(
         route,
         _claude_answer(route, thinking, text, metrics=metrics),
         _claude_answer(route, text, metrics=metrics),
     )
-    assert added >= 3_000 - visible
+    assert added == 3_000 - visible
 
 
 def test_a_plain_route_sizes_an_answer_and_what_follows_it_alone() -> None:

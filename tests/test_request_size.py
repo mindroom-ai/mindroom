@@ -88,7 +88,7 @@ def test_a_history_copy_of_an_answer_anchors_the_next_reply(tmp_path: Path) -> N
 
 @pytest.mark.parametrize(
     "change",
-    ["system prompt", "tools", "earlier message", "another model"],
+    ["system prompt", "tools", "earlier message", "another model", "another endpoint"],
 )
 def test_a_changed_request_before_the_answer_is_sized_by_estimate(tmp_path: Path, change: str) -> None:
     model = ScriptedModel([])
@@ -102,8 +102,11 @@ def test_a_changed_request_before_the_answer_is_sized_by_estimate(tmp_path: Path
         request = replace(request, tools=(ToolSpec(name="probe", description=None, parameters={}, strict=None),))
     elif change == "earlier message":
         request = replace(request, messages=(messages[0], Message(role="user", content="Hey"), *messages[2:]))
-    else:
+    elif change == "another model":
         model = ScriptedModel([], identity=ModelIdentity(id="other-model", provider="Synthetic"))
+    else:
+        # The same model id served elsewhere may be another model, or the same one behind other request rewrites.
+        model = ScriptedModel([], identity=replace(model.identity, endpoint="http://elsewhere/v1"))
 
     assert _sized(tmp_path, model, request) == RequestSize(model.request_tokens(request), reported=False)
 
