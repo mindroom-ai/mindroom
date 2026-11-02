@@ -3397,7 +3397,6 @@ async def test_mcp_call_timings_preserve_cancellation(
         (SdkMCPError(mcp_types.INVALID_PARAMS, "private argument detail"), MCPToolCallError, "tool_error"),
         (BrokenPipeError("private transport detail"), MCPConnectionError, "connection_error"),
         (TimeoutError("private timeout detail"), MCPTimeoutError, "timeout"),
-        (SdkMCPError(mcp_types.REQUEST_TIMEOUT, "private timeout detail"), MCPTimeoutError, "timeout"),
     ],
 )
 async def test_mcp_call_timings_classify_failures_without_replaying(
@@ -3465,7 +3464,7 @@ async def test_mcp_call_timings_classify_unavailable_tools_as_protocol_errors(
         ),
         (
             SdkMCPError(mcp_types.REQUEST_TIMEOUT, "Request 'tools/call' timed out"),
-            "MCP operation timed out: Request 'tools/call' timed out",
+            "MCP operation failed: Request 'tools/call' timed out",
         ),
     ],
     ids=["transport", "connection-closed", "internal-error", "request-timeout"],

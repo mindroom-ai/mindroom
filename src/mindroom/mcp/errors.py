@@ -35,7 +35,7 @@ class MCPToolUnavailableError(MCPProtocolError):
 
 
 class MCPToolCallError(MCPError):
-    """Raised when a tool call returns an explicit MCP error result.
+    """Raised when the server answers a tool call with an MCP error result or a JSON-RPC invalid-params error.
 
     ``input_schema`` is the called tool's input schema in the catalog the call was sent with, when that is known.
     """

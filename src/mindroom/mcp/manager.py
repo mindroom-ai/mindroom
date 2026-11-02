@@ -1856,8 +1856,6 @@ class MCPServerManager:
         if isinstance(exc, MCPError):
             raise exc
         message = self._runtime_exception_message(exc)
-        if isinstance(exc, TimeoutError | asyncio.TimeoutError) or (
-            isinstance(exc, SdkMCPError) and exc.code == mcp_types.REQUEST_TIMEOUT
-        ):
+        if isinstance(exc, TimeoutError | asyncio.TimeoutError):
             raise MCPTimeoutError(server_id, f"MCP operation timed out: {message}") from exc
         raise MCPConnectionError(server_id, f"MCP operation failed: {message}") from exc
