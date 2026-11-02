@@ -53,11 +53,7 @@ from mindroom.providers.names import provider_route
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import runs_without
 from mindroom.timing import timed
-from mindroom.token_budget import (
-    CompactionEstimateKind,
-    compaction_estimate_kind,
-    estimate_compaction_input_tokens,
-)
+from mindroom.token_counting.counts import count
 from mindroom.tool_system.runtime_context import (
     current_requester_id,
     get_tool_runtime_context,
@@ -70,7 +66,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.summary_call import SummaryRetryDecision
-    from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, TokenCounter
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
@@ -332,7 +328,7 @@ async def compact_scope_history(
     threshold_tokens: int | None,
     progress: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
-    replay_estimator: PortableReplayEstimator | None,
+    counter: TokenCounter,
 ) -> CompactionOutcome | None:
     """Compact the scope owning ``session`` by appending summary rows that fold its oldest runs, chunk by chunk.
 
@@ -372,7 +368,7 @@ async def compact_scope_history(
             estimate_prompt_visible_history_tokens,
             session=working_session,
             history_settings=history_settings,
-            replay_estimator=replay_estimator,
+            counter=counter,
         )
         await progress(
             CompactionLifecycleProgress(
@@ -398,6 +394,7 @@ async def compact_scope_history(
             summarizer=summarizer,
             runs=runs,
             max_summary_tokens=max_summary_tokens,
+            counter=counter,
             before_persist=before_persist,
             after_persist=after_persist,
         )
@@ -423,7 +420,7 @@ async def compact_scope_history(
             estimate_prompt_visible_history_tokens,
             session=session,
             history_settings=history_settings,
-            replay_estimator=replay_estimator,
+            counter=counter,
         )
         outcome = CompactionOutcome(
             mode=mode,
@@ -461,13 +458,14 @@ async def _rewrite_working_session_for_compaction(
     summarizer: Summarizer,
     runs: Sequence[AnyRunRecord],
     max_summary_tokens: int | None,
+    counter: TokenCounter,
     before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
     after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
 ) -> _CompactionRewriteResult | None:
     """Fold ``runs``, oldest first, into one appended summary row per chunk.
 
-    Stops when the conversation changes or a chunk's summary exceeds ``max_summary_tokens``; with nothing stored yet,
-    either stop fails the compaction.
+    Stops when the conversation changes or a chunk's summary, as ``counter`` sizes it, exceeds ``max_summary_tokens``;
+    with nothing stored yet, either stop fails the compaction.
     """
     scope = owner_scope(persisted_session)
     summary_text: str | None = None
@@ -497,8 +495,8 @@ async def _rewrite_working_session_for_compaction(
                 summary_input_budget_tokens=summarizer.model.input_budget_tokens,
             )
             break
-        # Sized as replay planning sizes a saved summary beside the static prompt, by characters.
-        summary_tokens = estimate_summary_text_tokens(chunk.summary, replay_estimator=None)
+        # Sized as replay planning sizes a saved summary, never below it while the vocabulary loads, off the event loop.
+        summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, chunk.summary, counter, upper_bound=True)
         if (error := _summary_budget_error(summary_tokens, max_summary_tokens)) is not None:
             _stop_compaction(error, persisted_session.session_id, scope, compacted_run_count)
             break
@@ -604,7 +602,7 @@ async def compact_running_turn(
     threshold_tokens: int | None,
     available_history_budget: int | None,
     max_summary_tokens: int,
-    replay_estimator: PortableReplayEstimator | None,
+    counter: TokenCounter,
     on_commit: Callable[[str], None],
     rewritten_request_tokens: Callable[[], int],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
@@ -616,14 +614,20 @@ async def compact_running_turn(
     is cancelled meanwhile, so the turn's in-memory state always matches the log and a stored fold never reads as
     failed. ``before_tokens`` sizes the request that triggered the fold, and ``rewritten_request_tokens`` sizes it
     after ``on_commit`` rewrote it, so the report compares one request before and after. Raises, writing nothing,
-    when the summary, sized by the reply's ``replay_estimator``, exceeds ``max_summary_tokens`` or the conversation
+    when the summary, sized by the reply's ``counter``, exceeds ``max_summary_tokens`` or the conversation
     changed since ``basis`` was read.
     """
     scope = owner_scope(session)
     runs = [*basis.runs, *snapshots]
     summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
     # Sized as the rewritten request is, so a stored summary keeps it within the limit; sizing stays off the loop.
-    summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, summary, replay_estimator=replay_estimator)
+    summary_tokens = await asyncio.to_thread(
+        estimate_summary_text_tokens,
+        summary,
+        counter,
+        as_request=True,
+        upper_bound=True,
+    )
     if (error := _summary_budget_error(summary_tokens, max_summary_tokens)) is not None:
         raise error
     # Hooks see the folded messages themselves, not the per-call units the summarizer reads, under the running turn's
@@ -710,17 +714,9 @@ async def _report_committed(
     return await complete(outcome)
 
 
-def _compaction_sizing(summary_model: ModelProvider) -> tuple[Callable[[str], int], CompactionEstimateKind]:
-    """Resolve one estimator together with the kind describing its arithmetic."""
-    model_id = summary_model.identity.id
-    conservative_fallback = summary_model.capabilities.conservative_token_estimates
-    estimator = partial(
-        estimate_compaction_input_tokens,
-        model_id=model_id,
-        conservative_fallback=conservative_fallback,
-    )
-    kind = compaction_estimate_kind(model_id, conservative_fallback=conservative_fallback)
-    return estimator, kind
+def _summary_input_tokens(summary_model: ModelProvider) -> Callable[[str], int]:
+    """Return the summary model's count of summary input text, an upper bound: an input that undercounts fails."""
+    return partial(count, summary_model.token_counter, upper_bound=True)
 
 
 def _after_native_checkpoint(previous_summary: str | None, runs: Sequence[AnyRunRecord]) -> _SummarySource | None:
@@ -758,7 +754,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
     summary_model = summarizer.model
     fallback_model = summarizer.fallback
     shrunk_budget = summarizer.shrunk_budget_tokens
-    token_estimator, estimate_kind = _compaction_sizing(summary_model.model)
+    token_estimator = _summary_input_tokens(summary_model.model)
     original = _SummarySource([], previous_summary, list(runs))
     sources = [source for source in (_after_native_checkpoint(previous_summary, runs), original) if source is not None]
 
@@ -813,7 +809,6 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
             "candidate_runs": len(source.runs),
             "included_runs": len(included_runs),
             "summary_input_estimate": summary_input_estimate,
-            "summary_input_estimate_kind": estimate_kind,
             "summary_input_budget_tokens": budget,
             "timeout_seconds": summarizer.timeout_seconds,
         }
@@ -843,7 +838,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 and attempt < retry_policy.max_attempts
                 and isinstance(exc, ModelSafeguardRefusal)
             ):
-                fallback_token_estimator, fallback_estimate_kind = _compaction_sizing(fallback_model.model)
+                fallback_token_estimator = _summary_input_tokens(fallback_model.model)
                 fits_fallback = (
                     await asyncio.to_thread(fallback_token_estimator, summary_input)
                     <= fallback_model.input_budget_tokens
@@ -871,7 +866,6 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 budget = fallback_model.input_budget_tokens
                 shrunk_budget = None
                 token_estimator = fallback_token_estimator
-                estimate_kind = fallback_estimate_kind
                 fallback_model = None
                 attempt += 1
                 continue

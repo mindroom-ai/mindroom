@@ -33,6 +33,7 @@ from mindroom.providers import registry as provider_registry
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
+from mindroom.token_counting.counts import count, fit_text
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.tool_schema import validated_entrypoint
@@ -45,7 +46,8 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import LoopState, RequestDecision
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider, ModelRequest, ToolSpec
+    from mindroom.history.conversation_text import Utterance
+    from mindroom.llm.provider import ModelProvider, ModelRequest, TokenCounter, ToolSpec
     from mindroom.llm.usage import MessageMetrics
     from mindroom.skill_learning.capture import CapturedRequest
     from mindroom.skill_learning.tools import ReviewProgress
@@ -59,10 +61,11 @@ _REVIEW_MAX_TOOL_CALLS = 16
 _INPUT_CONTEXT_FRACTION = 0.75
 _MAX_INPUT_TOKENS = 600_000
 _FALLBACK_INPUT_TOKENS = 120_000
-_CHARS_PER_TOKEN = 4
 # Each request of a review resends the conversation, whether a fork's full request or a digest replay's transcript,
 # and fork compaction is absent, so the conversation may use a quarter of the budget to leave room for more requests.
 _CONVERSATION_BUDGET_SHARE = 4
+# Renders of a replayed review's transcript, each with a character budget shrunk by the last one's overshoot.
+_TRANSCRIPT_FIT_PASSES = 4
 # The skill tools a review runs, as the review prompt describes them, in the order it lists them.
 _SKILL_TOOL_LINES = {
     "skill_manage": 'skill_manage(action, name, ...): action "create" (full SKILL.md in content), "patch" '
@@ -91,6 +94,42 @@ class _ReviewRequest:
     tools: PreparedTools
     settings: ModelRequest
     forked: bool
+
+
+def _transcript_budget_chars(counter: TokenCounter, messages: Sequence[Sequence[Utterance]], budget_tokens: int) -> int:
+    """Return how many characters of this conversation fit ``budget_tokens``, as the review model counts them."""
+    text = "\n".join(part.unredacted for message in messages for part in message)
+    tokens = count(counter, text)
+    return budget_tokens * len(text) // tokens if tokens else budget_tokens
+
+
+def _review_transcript(
+    messages: Sequence[Sequence[Utterance]],
+    summary: str | None,
+    counter: TokenCounter,
+    budget_tokens: int,
+) -> str:
+    """Render the transcript within ``budget_tokens`` as the review model counts the rendered text.
+
+    The rendered text keeps the newest messages whole and digests older ones, so its rate of characters per token
+    differs from the conversation's; each pass shrinks the character budget by how far the last one overshot.
+    """
+    budget_chars = _transcript_budget_chars(counter, messages, budget_tokens)
+    for _ in range(_TRANSCRIPT_FIT_PASSES):
+        transcript = render_transcript(messages, summary=summary, budget_chars=budget_chars)
+        tokens = count(counter, transcript)
+        if tokens <= budget_tokens:
+            return transcript
+        budget_chars = budget_chars * budget_tokens // tokens
+    # The renderer keeps whole recent messages up to a floor, which a small budget can be below; the newest text is
+    # the evidence a review needs most, so the start gives way.
+    return fit_text(
+        transcript,
+        budget_tokens,
+        lambda text: count(counter, text),
+        notice="[Earlier transcript omitted to fit the review budget.]\n",
+        keep="end",
+    )
 
 
 def _review_input_budget_tokens(config: Config, model_name: str) -> int:
@@ -262,12 +301,14 @@ async def _replay(
     )
     if session is None:
         return None
+    model = provider_registry.build_model_provider(config, runtime_paths, model_name, execution_identity=identity)
     messages = await asyncio.to_thread(conversation_messages, session)
     transcript = await asyncio.to_thread(
-        render_transcript,
+        _review_transcript,
         messages,
-        summary=session.summary.text if session.summary is not None else None,
-        budget_chars=_review_input_budget_tokens(config, model_name) * _CHARS_PER_TOKEN // _CONVERSATION_BUDGET_SHARE,
+        session.summary.text if session.summary is not None else None,
+        model.token_counter,
+        _review_input_budget_tokens(config, model_name) // _CONVERSATION_BUDGET_SHARE,
     )
     definitions = await asyncio.to_thread(
         _agent_skill_definitions,
@@ -283,7 +324,7 @@ async def _replay(
         f"<conversation>\n{transcript}\n</conversation>"
     )
     return _ReviewRequest(
-        model=provider_registry.build_model_provider(config, runtime_paths, model_name, execution_identity=identity),
+        model=model,
         model_name=model_name,
         messages=[Message(role="user", content=f"{evidence}\n\n{_review_prompt(config, catalog, runnable)}")],
         definitions=definitions,

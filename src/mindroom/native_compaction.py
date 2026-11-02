@@ -12,11 +12,13 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.logging_config import get_logger
+from mindroom.token_counting.counts import count, opaque_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.llm.messages import Message
+    from mindroom.llm.provider import TokenCounter
     from mindroom.llm.runs import AnyRunRecord
 
 logger = get_logger(__name__)
@@ -58,7 +60,7 @@ def native_checkpoint_state(
         logger.info(
             "Native compaction checkpoint",
             threshold_tokens=settings.threshold,
-            checkpoint_tokens=checkpoint_estimated_tokens([items[last]]),
+            checkpoint_chars=len(_serialized([items[last]])),
         )
     return state
 
@@ -167,10 +169,16 @@ def native_replay_messages(messages: Sequence[Message], route: str | None) -> li
     return [message for index, message in enumerate(messages) if index >= last or message.role == "system"]
 
 
-def checkpoint_estimated_tokens(items: Sequence[dict[str, Any]]) -> int:
-    """Conservatively size the replay payload, including opaque checkpoint bytes.
+def checkpoint_estimated_tokens(items: Sequence[dict[str, Any]], counter: TokenCounter) -> int:
+    """Conservatively size the replay payload: its readable fields as ``counter`` counts them, its ciphertext by length.
 
-    Ciphertext size is a guard estimate, not provider token usage. Never use the
-    response's billed input count: it can include the pre-compaction transcript.
+    The ciphertext guard is not provider token usage. Never use the response's billed input
+    count: it can include the pre-compaction transcript.
     """
-    return (len(json.dumps(items, ensure_ascii=False)) + 3) // 4
+    readable = [{key: value for key, value in item.items() if key != "encrypted_content"} for item in items]
+    ciphertext = sum(len(str(item.get("encrypted_content") or "")) for item in items)
+    return count(counter, _serialized(readable)) + opaque_tokens(ciphertext)
+
+
+def _serialized(items: Sequence[dict[str, Any]]) -> str:
+    return json.dumps(items, ensure_ascii=False)
