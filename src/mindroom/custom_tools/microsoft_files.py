@@ -277,10 +277,10 @@ def _at(grid: object, row: int, column: int) -> object:
     return cells[column] if isinstance(cells, list) and column < len(cells) else None
 
 
-def _formula_key(formula: str) -> str:
-    """Return a formula with case folded outside string literals, since Excel uppercases names and references."""
+def _case_key(text: str) -> str:
+    """Return a formula or number format uppercased outside its quoted literals, whose case Excel keeps."""
     return "".join(
-        part if index % 2 else part.upper() for index, part in enumerate(_FORMULA_STRING_LITERAL.split(formula))
+        part if index % 2 else part.upper() for index, part in enumerate(_FORMULA_STRING_LITERAL.split(text))
     )
 
 
@@ -323,7 +323,7 @@ def _stored_as_written(held: object, written: object, *, text_cell: bool) -> boo
     """
     if isinstance(written, str) and not text_cell:
         if written.startswith("=") and isinstance(held, str):
-            return _formula_key(held) == _formula_key(written)
+            return _case_key(held) == _case_key(written)
         if (serial := _iso_serial(written)) is not None:
             # A workbook in the 1904 date system stores another serial, which is reported as a difference.
             if isinstance(held, bool) or not isinstance(held, int | float):
@@ -434,8 +434,8 @@ class _RangeEdit:
             if value is not None and not _stored_as_written(held, value, text_cell=text_cell):
                 differences.append({"cell": self.cell(row, column), "written": value, "stored": held})
             number_format = _at(self.number_formats, row, column)
-            # Excel may change a format code's case, such as general to General.
-            if isinstance(number_format, str) and str(held_format).casefold() != number_format.casefold():
+            # Excel may change a format code's case, such as general to General, but not inside quoted text.
+            if isinstance(number_format, str) and _case_key(str(held_format)) != _case_key(number_format):
                 differences.append(
                     {
                         "cell": self.cell(row, column),

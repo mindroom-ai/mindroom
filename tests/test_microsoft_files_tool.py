@@ -927,6 +927,26 @@ def test_excel_update_verifies_number_formats_regardless_of_case(
     assert _update(tools, [[1, None]], [["", ""]], number_formats=[["general", None]])["verified"] is True
 
 
+def test_excel_update_reports_a_format_whose_quoted_text_changed_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = _workbook([["", ""]])
+
+    def lowercase(request: httpx.Request) -> httpx.Response | None:
+        if request.method == "PATCH" and b"numberFormat" in request.content:
+            files.formats = [['0"usd"', "General"]]
+            return httpx.Response(200, json={"address": "Budget!A1:B1"})
+        return None
+
+    files.answer_first = lowercase
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    result = _update(tools, [[1, None]], [["", ""]], number_formats=[['0"USD"', None]])
+
+    assert result["differences"] == [{"cell": "A1", "number_format": '0"USD"', "stored_number_format": '0"usd"'}]
+
+
 def test_excel_update_sends_no_format_patch_for_formats_that_are_all_null(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

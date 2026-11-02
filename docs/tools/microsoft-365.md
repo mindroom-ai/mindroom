@@ -145,6 +145,7 @@ This check approximates Excel's English parsing; any other conversion shows up i
 Dates written as `YYYY-MM-DD`, optionally followed by a time such as `09:30`, are stored as dates, except in a text-formatted cell, where they stay text.
 A formula written into a text-formatted cell would be stored as text, so it fails with `formula_as_text` unless the write also gives that cell another format.
 `number_formats` sets formats such as `0.0%`, or `@` for text, before the values are written, and `null` keeps a cell's format.
+If writing the values fails after the formats were set, the formats stay, and writing again finishes the edit.
 After writing, the range is read again, and the result reports `verified: true` when Excel stored every written cell and format as written, and otherwise `verified: false` with the cells it stored differently.
 
 Search uses Microsoft Search, which covers work and school accounts.
@@ -436,7 +437,7 @@ To give an agent read access only, set `write: false` on the tool.
 | `not_a_file_attachment` | The mail attachment is an attached Outlook item or a cloud link, which cannot be downloaded. |
 | `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |
 | `cells_changed` | The Excel range changed since it was read; nothing was written, and `current_formulas` shows what it holds now. |
-| `converted_text` | Excel would store the text in `cell` as a number, date, or formula; write a number or a `YYYY-MM-DD` date, or set that cell's `number_formats` entry to `@`. |
+| `converted_text` | Excel would store the text in `cell` as a number, date, time, boolean, error value, or formula; write a number or a `YYYY-MM-DD` date, or set that cell's `number_formats` entry to `@`. |
 | `ambiguous_change` | `cell` would change only between a number and the same text, which approval cards show alike; write the type the cell holds, or `null`. |
 | `formula_as_text` | `cell` is formatted as text, so Excel would keep the formula as text; set that cell's `number_formats` entry to another format, such as `General`. |
 | `locked` | The file is checked out or locked; try again later. |
