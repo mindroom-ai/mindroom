@@ -1694,6 +1694,38 @@ async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_st
     assert await principal.replies.supersede_replay(("$elsewhere",), now_ns=110) is None
 
 
+async def test_a_coalesced_turn_s_replay_is_superseded_only_once_its_other_messages_settled(
+    journal_store: EventJournalStore,
+) -> None:
+    """While the turn's newer message waits to replay, superseding the older one leaves both to the reply."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await admit(principal, "$other")
+    await principal.replies.write_generation("gen-1")
+    # The turn is driven by its newer message, ``$other``.
+    sources = ResponseSources(pending_event_ids=("$other", "$source"), logical_source_event_ids=("$source", "$other"))
+    claim = (
+        await principal.replies.claim(replace(_request(), delivery_id=sources.delivery_id, sources=sources))
+    ).transition
+    assert claim.claimed is not None
+    # A restart lost the span; both messages wait for their replay.
+    await principal.replies.write_generation("gen-2")
+    assert len(await principal.replies.owner_lost("gen-2", now_ns=80)) == 1
+
+    kept = await principal.replies.supersede_replay(("$source",), now_ns=90)
+    assert kept is not None
+    assert kept.transition.outcome is rl.Outcome.DEFERRED
+    assert await principal.is_pending("$source")
+    assert await principal.is_pending("$other")
+
+    # Once the newer message settled without a turn, nothing else replays, and the older one's replay ends the reply.
+    assert await principal.settle("$other") == ()
+    superseded = await principal.replies.supersede_replay(("$source",), now_ns=100)
+    assert superseded is not None
+    assert superseded.transition.outcome is rl.Outcome.APPLIED
+    assert not await principal.is_pending("$source")
+
+
 async def test_a_removed_entitys_open_replies_end_without_writing(journal_store: EventJournalStore) -> None:
     """The removed entity's running reply fails with its span lost, owing nothing; other entities are untouched."""
     principal = journal_store.principal(PRINCIPAL)

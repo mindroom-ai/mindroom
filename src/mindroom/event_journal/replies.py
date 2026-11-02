@@ -480,8 +480,19 @@ def _supersede_replay(
             reply,
             last,
             durable_write_debt=has_unresolved_rows(transaction, principal_id, reply.reply_id),
+            # The superseded sources are pending until this settles them.
+            sources_pending=_sources_pending(transaction, principal_id, last, besides=source_event_ids),
             now_ns=now_ns,
         ),
+    )
+
+
+def _sources_pending(transaction: Transaction, principal_id: str, span: Span, *, besides: tuple[str, ...] = ()) -> bool:
+    """Return whether any of the span's sources, other than ``besides``, still waits in the journal for its replay."""
+    return any(
+        journal.is_pending(transaction, principal_id, event_id)
+        for event_id in span.sources.pending_event_ids
+        if event_id not in besides
     )
 
 
@@ -501,13 +512,15 @@ def drop_replays(
         assert reply is not None
         last = reply_spans.load(transaction, principal_id, reply.last_span_id)
         assert last is not None
-        sources_pending = any(
-            journal.is_pending(transaction, principal_id, source) for source in last.sources.pending_event_ids
-        )
         applied = apply(
             transaction,
             principal_id,
-            rl.replay_dropped(reply, last, sources_pending=sources_pending, now_ns=now_ns),
+            rl.replay_dropped(
+                reply,
+                last,
+                sources_pending=_sources_pending(transaction, principal_id, last),
+                now_ns=now_ns,
+            ),
         )
         if applied.transition.applied:
             ended.append(reply_id)
@@ -549,9 +562,7 @@ def _owner_lost(
         assert last is not None
         facts = rl.OwnerLostFacts(
             active_generation=active_generation,
-            sources_pending=any(
-                journal.is_pending(transaction, principal_id, event_id) for event_id in last.sources.pending_event_ids
-            ),
+            sources_pending=_sources_pending(transaction, principal_id, last),
         )
         transition = rl.owner_lost(reply, last, facts, now_ns=now_ns)
         if transition.applied:

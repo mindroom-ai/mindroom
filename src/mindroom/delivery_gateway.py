@@ -474,10 +474,12 @@ class StreamingDeliveryRequest:
     target: MessageTarget
     response_stream: AsyncIterator[StreamInputChunk]
     # The visible response this stream is. Required, because every stream is
-    # some turn's answer: the gateway reads the causing event from it to key
-    # the durable terminal delivery, and the final-answer transform from it to
-    # shape the text before that payload is frozen rather than as a second edit
-    # after it was delivered.
+    # some turn's answer. The gateway reads from it the causing event, which
+    # gates the stream's edits on that turn's membership and names the
+    # interactive source; the requester the reply acts for; and the final-answer
+    # transform, which shapes the text before the terminal payload is frozen
+    # rather than as a second edit after it was delivered. The span's sources,
+    # not this identity, name the reply's rows.
     identity: ResponseIdentity
     existing_event_id: str | None = None
     adopt_existing_placeholder: bool = False
