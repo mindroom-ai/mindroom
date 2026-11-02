@@ -110,10 +110,10 @@ def add_to_packs(
     return changed, skipped
 
 
-def _matrix(client: httpx.Client, method: str, path: str, **kwargs: Any) -> httpx.Response:  # noqa: ANN401
-    """Send a Matrix request, again after the wait a rate limit asks for, and fail on any other error."""
+def _matrix(client: httpx.Client, method: str, path: str, *, retry: bool = True, **kwargs: Any) -> httpx.Response:  # noqa: ANN401
+    """Send a Matrix request, again after the wait a rate limit asks for when ``retry``, and fail on any other error."""
     response = client.request(method, path, **kwargs)
-    for _ in range(MAX_ATTEMPTS - 1):
+    for _ in range(MAX_ATTEMPTS - 1 if retry else 0):
         if response.status_code != 429:
             break
         try:
@@ -169,7 +169,9 @@ def _write(matrix: httpx.Client, room_path: str, entries: Mapping[str, dict[str,
     packs = _read_packs(matrix, room_path)
     changed, skipped = add_to_packs(packs, entries)
     for key in changed:
-        _matrix(matrix, "PUT", f"{room_path}/state/{EMOJI_PACK_EVENT}/{quote(key, safe='')}", json=packs[key])
+        # Resending after a wait could drop an emoji added meanwhile; a re-run reads the packs again instead.
+        path = f"{room_path}/state/{EMOJI_PACK_EVENT}/{quote(key, safe='')}"
+        _matrix(matrix, "PUT", path, retry=False, json=packs[key])
     return skipped
 
 

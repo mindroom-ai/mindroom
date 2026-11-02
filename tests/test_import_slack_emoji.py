@@ -210,7 +210,7 @@ class Servers:
     def upload(self, request: httpx.Request) -> httpx.Response:
         """Keep an uploaded image, while someone may be adding emoji in MindRoom Chat."""
         if self.rate_limited("upload"):
-            return httpx.Response(429, json=RATE_LIMITED)
+            return self.rate_limit_answer()
         self.packs[""]["images"].update(self.added_in_chat_during_upload)
         self.uploads.append((request.headers["Content-Type"], request.content))
         return httpx.Response(200, json={"content_uri": f"mxc://example.com/{len(self.uploads)}"})
@@ -220,15 +220,19 @@ class Servers:
         if self.refuse_writes:
             return httpx.Response(403, json={"errcode": "M_FORBIDDEN", "error": "Not allowed to change emoji"})
         if self.rate_limited("write"):
-            if self.rate_limit_page is not None:
-                return httpx.Response(429, text=self.rate_limit_page)
-            return httpx.Response(429, json=RATE_LIMITED)
+            return self.rate_limit_answer()
         event = {"content": content, "unsigned": {"prev_content": self.packs.get(state_key, {})}}
         if len(json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode()) > EVENT_CONTENT_LIMIT_BYTES:
             return httpx.Response(413, json={"errcode": "M_TOO_LARGE", "error": "PDU is larger than maximum"})
         self.packs[state_key] = content
         self.writes.append(state_key)
         return httpx.Response(200, json={"event_id": "$pack"})
+
+    def rate_limit_answer(self) -> httpx.Response:
+        """A 429 as the homeserver sends it, or as a page from a proxy in front of it."""
+        if self.rate_limit_page is not None:
+            return httpx.Response(429, text=self.rate_limit_page)
+        return httpx.Response(429, json=RATE_LIMITED)
 
     def rate_limited(self, kind: str) -> bool:
         """Whether to answer this request of the kind with a rate limit; only the first one gets it."""
@@ -354,33 +358,48 @@ def test_a_failed_download_is_counted_and_the_run_continues(
     assert "download answered 200 with text/html" in err
 
 
-def test_rate_limited_upload_and_write_are_retried(
+def test_a_rate_limited_upload_is_retried(
     servers: Servers,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The script waits as long as the homeserver asks and sends the upload and the pack write again."""
+    """The script waits as long as the homeserver asks and sends the upload again."""
     waits: list[float] = []
     monkeypatch.setattr(time, "sleep", waits.append)
-    servers.rate_limit_once = {"upload", "write"}
+    servers.rate_limit_once = {"upload"}
     assert main(HOMESERVER) == 0
-    assert waits == [0.001, 0.001]
+    assert waits == [0.001]
     assert servers.uploads == [("image/gif", GIF), ("image/png", PNG)]
     assert sorted(servers.packs[""]["images"]) == ["party-parrot", "pp", "shipit"]
     assert capsys.readouterr().out == "Imported 2 emoji and 1 aliases; skipped 0 taken, 1 unusable, 0 failed.\n"
 
 
-def test_a_rate_limit_page_without_json_stops_with_its_status(
+def test_a_rate_limited_write_stops_instead_of_resending_old_content(
     servers: Servers,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A proxy's rate limit carries no retry_after_ms, so the run stops and names the status instead of a JSON error."""
+    """A pack read before the wait could miss an emoji added meanwhile, so the run stops and a re-run reads it again."""
     waits: list[float] = []
     monkeypatch.setattr(time, "sleep", waits.append)
     servers.rate_limit_once = {"write"}
-    servers.rate_limit_page = "<html>Too many requests</html>"
     assert main(HOMESERVER) == 1
+    assert "answered 429" in capsys.readouterr().err
+    assert waits == []
+    assert servers.writes == []
+
+
+def test_a_rate_limit_page_without_json_names_its_status(
+    servers: Servers,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy's rate limit carries no retry_after_ms, so the upload fails with its status instead of a JSON error."""
+    waits: list[float] = []
+    monkeypatch.setattr(time, "sleep", waits.append)
+    servers.rate_limit_once = {"upload"}
+    servers.rate_limit_page = "<html>Too many requests</html>"
+    assert main(HOMESERVER) == 0
     err = capsys.readouterr().err
     assert "answered 429" in err
     assert "Expecting value" not in err
