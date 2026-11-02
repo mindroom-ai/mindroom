@@ -123,6 +123,10 @@ def test_agent_matrix_username_must_be_a_matrix_localpart(matrix_username: str) 
     """An agent's matrix_username is a bare localpart, checked by the rule every requested MindRoom account follows."""
     with pytest.raises(ValidationError, match="matrix_username must be a Matrix localpart"):
         AgentConfig(display_name="Jarvis", matrix_username=matrix_username)
+
+
+def test_agent_matrix_username_accepts_a_localpart() -> None:
+    """A localpart of lowercase letters, digits, and ._=/- is kept as written."""
     assert AgentConfig(display_name="Jarvis", matrix_username="jarvis.home-1").matrix_username == "jarvis.home-1"
 
 

@@ -31,6 +31,7 @@ from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -81,6 +82,24 @@ def _persist_account(paths: RuntimePaths, entity_name: str, localpart: str) -> N
 async def _existing_user(_homeserver: str, entity_name: str, display_name: str, **_kwargs: object) -> AgentMatrixUser:
     """Stand in for `create_agent_user` loading an account that is already persisted."""
     return _matrix_user(entity_name, f"actual_{entity_name}", display_name)
+
+
+def _recording_user(paths: RuntimePaths, requested: dict[str, str | None]) -> Callable[..., Awaitable[AgentMatrixUser]]:
+    """Stand in for `create_agent_user` registering each account under its requested username, recorded in ``requested``."""
+
+    async def record_user(
+        _homeserver: str,
+        entity_name: str,
+        display_name: str,
+        *,
+        username: str | None = None,
+        **_kwargs: object,
+    ) -> AgentMatrixUser:
+        requested[entity_name] = username
+        _persist_account(paths, entity_name, username or f"actual_{entity_name}")
+        return _matrix_user(entity_name, username or f"actual_{entity_name}", display_name)
+
+    return record_user
 
 
 def _created(create: AsyncMock) -> list[str]:
@@ -139,19 +158,7 @@ async def test_account_preparation_requests_personal_agent_username(tmp_path: Pa
     config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
     requested: dict[str, str | None] = {}
 
-    async def record_user(
-        _homeserver: str,
-        entity_name: str,
-        display_name: str,
-        *,
-        username: str | None = None,
-        **_kwargs: object,
-    ) -> AgentMatrixUser:
-        requested[entity_name] = username
-        _persist_account(paths, entity_name, username or f"actual_{entity_name}")
-        return _matrix_user(entity_name, username or f"actual_{entity_name}", display_name)
-
-    with patch("mindroom.orchestration.accounts.create_agent_user", new=record_user):
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, requested)):
         await _prepare(config, [ROUTER_AGENT_NAME, "mind_alice_smith"], paths)
 
     assert requested == {ROUTER_AGENT_NAME: None, "mind_alice_smith": "alice.mind"}
@@ -179,19 +186,7 @@ async def test_account_preparation_requests_an_agents_configured_matrix_username
     )
     requested: dict[str, str | None] = {}
 
-    async def record_user(
-        _homeserver: str,
-        entity_name: str,
-        display_name: str,
-        *,
-        username: str | None = None,
-        **_kwargs: object,
-    ) -> AgentMatrixUser:
-        requested[entity_name] = username
-        _persist_account(paths, entity_name, username or f"actual_{entity_name}")
-        return _matrix_user(entity_name, username or f"actual_{entity_name}", display_name)
-
-    with patch("mindroom.orchestration.accounts.create_agent_user", new=record_user):
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=_recording_user(paths, requested)):
         await _prepare(config, [ROUTER_AGENT_NAME, "general", "crew"], paths)
 
     assert requested == {ROUTER_AGENT_NAME: None, "general": "jarvis", "crew": None}

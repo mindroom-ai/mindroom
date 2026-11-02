@@ -164,9 +164,13 @@ def test_text_edits_replace_the_base_values(tmp_path: Path) -> None:
 
 
 def test_a_created_agent_replaces_identity_fields(tmp_path: Path) -> None:
-    """A created agent is its owners' and cannot create, delegate or self-configure; credentials stay the creator's."""
+    """A created agent is its owners' and cannot create, delegate or self-configure; credentials stay the creator's.
+
+    It registers its own default account, so it never requests the Matrix localpart its creator chose.
+    """
     raw = deepcopy(BASE)
     raw["agents"]["creator"]["credential_managers"] = ["@carol:localhost"]
+    raw["agents"]["creator"]["matrix_username"] = "jarvis"
     config = Config.validate_with_runtime(raw, test_runtime_paths(tmp_path))
     data, _ = _generated_agent_data(config, "creator", _created().edits, created=_created())
     owners = [OWNER, CO_OWNER]
@@ -178,6 +182,7 @@ def test_a_created_agent_replaces_identity_fields(tmp_path: Path) -> None:
     assert data["delegate_to"] == []
     assert data["allow_self_config"] is False
     assert data["created_agents_per_owner"] == 0
+    assert data["matrix_username"] is None
     assert data["display_name"] == "Research"
     assert data["model"] == "default"
     assert data["worker_tools"] == ["shell"]
@@ -314,15 +319,6 @@ def test_a_created_agent_loads_from_its_creator(tmp_path: Path) -> None:
     assert config.generated_agent("creator") is None
     assert config.tool_ceiling("creator_research") == ("calculator", "shell")
     assert config.tool_ceiling("creator") == ("calculator", "shell")
-
-
-def test_a_created_agent_does_not_take_its_creators_matrix_username(tmp_path: Path) -> None:
-    """A created agent registers its own default account, so it never requests the localpart its creator chose."""
-    data = deepcopy(BASE)
-    data["agents"]["creator"]["matrix_username"] = "jarvis"
-    config = _load(tmp_path, data, created=[_created()])
-    assert config.agents["creator"].matrix_username == "jarvis"
-    assert config.agents["creator_research"].matrix_username is None
 
 
 def test_personal_agent_edits_apply_at_load(tmp_path: Path) -> None:

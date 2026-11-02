@@ -515,15 +515,17 @@ def _direct_token_registration_error(
     return None
 
 
-# An account without a recorded request counts its stored username as the request: one added by hand to adopt an
-# existing Matrix account, as docs/matrix.md describes, or one saved before v2026.5.161 recorded requests.
 def _validate_existing_account_request(
     *,
     agent_name: str,
     requested_username: str | None,
     existing_account: MatrixAccount,
 ) -> None:
-    """Refuse a configured username that differs from the one the stored account was created with."""
+    """Refuse a configured username that differs from the one the stored account was created with.
+
+    An account without a recorded request counts its stored username as the request: one added by hand to adopt an
+    existing Matrix account, as docs/matrix.md describes, or one saved before v2026.5.161 recorded requests.
+    """
     if requested_username is None:
         return
     stored_request = existing_account.requested_username or existing_account.username

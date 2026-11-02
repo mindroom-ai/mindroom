@@ -44,10 +44,8 @@ def _entity_request(config: Config, entity_name: str) -> ManagedAccountProvision
     Both are exact localparts, so a new namespace from pairing again or a wiped matrix_state requests the same ID.
     """
     instance = config.personal_agent_instance(entity_name)
-    if instance is not None:
-        return ManagedAccountProvisioningRequest(entity_name, username=instance.matrix_username)
-    agent = config.agents.get(entity_name)
-    return ManagedAccountProvisioningRequest(entity_name, username=None if agent is None else agent.matrix_username)
+    source = instance if instance is not None else config.agents.get(entity_name)
+    return ManagedAccountProvisioningRequest(entity_name, username=None if source is None else source.matrix_username)
 
 
 async def _prepare_internal_user(
