@@ -9549,5 +9549,5 @@ depends_on = [
     "mindroom.contacts.policy",
     "mindroom.contacts.store",
     "mindroom.hooks",
-    "mindroom.tool_system.registry",
+    "mindroom.tool_system.plugins",
 ]

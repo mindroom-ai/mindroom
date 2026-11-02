@@ -18,7 +18,7 @@ from mindroom.contacts.store import contact_room_ids, read_contacts
 from mindroom.hooks import EnrichmentItem
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.session_ids import session_in_room
-from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.contacts.store import ContactRecord, SideName
+    from mindroom.tool_system.registry import ToolRegistry
 
 
 def contact_room(
@@ -96,21 +97,28 @@ def contact_session_check(config: Config, runtime_paths: RuntimePaths, agent_nam
     return lambda session_id: any(session_in_room(session_id, room_id) for room_id in rooms)
 
 
-def _refused_tool(name: str) -> bool:
+def _refused_tool(name: str, registry: ToolRegistry) -> bool:
     """Return whether a contact never offers this tool: a control tool, or a Matrix room tool other than matrix_message."""
     if name in CONTACT_CONTROL_TOOLS:
         return True
-    metadata = builtin_tool_registry().get(name)
+    metadata = registry.get(name)
     return name != "matrix_message" and metadata is not None and metadata.requires_room_context
 
 
-def contact_tool_choices(config: Config, agent_name: str) -> list[str]:
-    """Return the agent's own tools that a contact may offer."""
+def contact_tool_choices(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> list[str]:
+    """Return the agent's own tools that a contact may offer, judging plugin tools like built-in ones."""
+    registry = config_plugins(config, runtime_paths).tools
     authored = config.expand_tool_names([entry.name for entry in authored_tool_entries(config, agent_name)])
-    return [name for name in authored if not config.is_tool_preset(name) and not _refused_tool(name)]
+    return [name for name in authored if not config.is_tool_preset(name) and not _refused_tool(name, registry)]
 
 
-def contact_turn_tools(config: Config, agent_name: str, record: ContactRecord, side: SideName) -> tuple[str, ...]:
+def contact_turn_tools(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    record: ContactRecord,
+    side: SideName,
+) -> tuple[str, ...]:
     """Return the tools a contact turn offers: its owner's choice, else the configured default, plus matrix_message.
 
     A chosen tool the agent no longer has, or one a contact may never offer, is left out until the agent has it again.
@@ -118,7 +126,7 @@ def contact_turn_tools(config: Config, agent_name: str, record: ContactRecord, s
     contacts = config.agents[agent_name].contacts
     contact_side = record.side(side)
     chosen = contact_side.tools if contact_side.tools is not None else (contacts.tools if contacts is not None else [])
-    allowed = set(contact_tool_choices(config, agent_name))
+    allowed = set(contact_tool_choices(config, runtime_paths, agent_name))
     return tuple(dict.fromkeys([*(name for name in chosen if name in allowed), "matrix_message"]))
 
 

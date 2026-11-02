@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -19,6 +20,7 @@ from mindroom.contacts.turns import (
     contact_admission,
     contact_room,
     contact_session_check,
+    contact_tool_choices,
     contact_turn_instructions,
     contact_turn_tools,
 )
@@ -48,6 +50,7 @@ from tests.conftest import (
     make_matrix_client_mock,
     message_origin,
     patch_response_runner_module,
+    publish_test_plugins,
     test_runtime_paths,
 )
 from tests.contacts.test_tools import _setup as setup_without_contacts
@@ -88,11 +91,13 @@ def _setup(
     personal_rooms: bool = False,
     memory_backend: str = "none",
     access: dict[str, Any] | None = None,
+    plugins: tuple[str, ...] = (),
 ) -> tuple[Config, RuntimePaths]:
     """Personal agents of Alice, Bob, and Carol with contacts and skill learning; ``sleep`` always needs approval."""
     data: dict[str, Any] = {
         **BASE,
         "memory": {"backend": memory_backend},
+        "plugins": list(plugins),
         "tool_approval": {"rules": [{"match": "sleep", "action": "require_approval"}]},
         "personal_agents": {
             "mind": {
@@ -195,24 +200,55 @@ def test_an_agent_whose_contacts_is_removed_treats_its_active_contacts_as_remove
     assert contact_room(config, paths, CONTACT_ROOM, "mind_alice") == (record, "requester")
 
 
-def _tools(config: Config, side: ContactSide) -> tuple[str, ...]:
+def _tools(config: Config, paths: RuntimePaths, side: ContactSide) -> tuple[str, ...]:
     """Return the tools Bob's agent's contact turns offer when Bob chose ``side``."""
-    return contact_turn_tools(config, "mind_bob", _record(target_side=side), "target")
+    return contact_turn_tools(config, paths, "mind_bob", _record(target_side=side), "target")
 
 
 def test_a_contact_turn_offers_the_chosen_tools_the_agent_still_has_plus_matrix_message(tmp_path: Path) -> None:
     """The owner's list replaces the default; lost and refused tools drop out, and matrix_message is always offered."""
-    config, _paths = _setup(tmp_path)
+    config, paths = _setup(tmp_path)
 
     # The default from config, without the room tool a contact may never use.
-    assert _tools(config, ContactSide()) == ("calculator", "sleep", "matrix_message")
-    assert _tools(config, ContactSide(tools=["sleep", "duckduckgo"])) == ("sleep", "matrix_message")
-    assert _tools(config, ContactSide(tools=[])) == ("matrix_message",)
+    assert _tools(config, paths, ContactSide()) == ("calculator", "sleep", "matrix_message")
+    assert _tools(config, paths, ContactSide(tools=["sleep", "duckduckgo"])) == ("sleep", "matrix_message")
+    assert _tools(config, paths, ContactSide(tools=[])) == ("matrix_message",)
 
-    lost_config, _ = _setup(tmp_path / "lost", tools=("sleep",))
-    assert _tools(lost_config, ContactSide(tools=["calculator"])) == ("matrix_message",)
-    regained_config, _ = _setup(tmp_path / "regained")
-    assert _tools(regained_config, ContactSide(tools=["calculator"])) == ("calculator", "matrix_message")
+    lost_config, lost_paths = _setup(tmp_path / "lost", tools=("sleep",))
+    assert _tools(lost_config, lost_paths, ContactSide(tools=["calculator"])) == ("matrix_message",)
+    regained_config, regained_paths = _setup(tmp_path / "regained")
+    assert _tools(regained_config, regained_paths, ContactSide(tools=["calculator"])) == (
+        "calculator",
+        "matrix_message",
+    )
+
+
+def test_a_plugin_tool_that_needs_a_room_is_never_offered_in_a_contact_turn(tmp_path: Path) -> None:
+    """A plugin's room tool could post into the contact room without the policy, like a built-in room tool."""
+    plugin = tmp_path / "plugins" / "room_poster"
+    plugin.mkdir(parents=True)
+    (plugin / "mindroom.plugin.json").write_text(json.dumps({"name": "room_poster", "tools_module": "tools.py"}))
+    (plugin / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='room_poster',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        "    requires_room_context=True,\n"
+        "    display_name='Room Poster',\n"
+        "    description='Posts into the current room',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def room_poster_tools():\n"
+        "    return Toolkit\n",
+    )
+    config, paths = _setup(tmp_path, tools=("calculator", "room_poster"), plugins=("./plugins/room_poster",))
+    publish_test_plugins(config, paths)
+
+    assert "room_poster" not in contact_tool_choices(config, paths, "mind_bob")
+    assert _tools(config, paths, ContactSide(tools=["calculator", "room_poster"])) == ("calculator", "matrix_message")
 
 
 _ANSWER = "Answer the other side only by calling matrix_message to send into this room"

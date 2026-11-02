@@ -1002,7 +1002,12 @@ class ResponseRunner:
         tool_names = (
             None
             if request.contact is None
-            else contact_turn_tools(self.deps.runtime.config, self.deps.agent_name, *request.contact)
+            else contact_turn_tools(
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                self.deps.agent_name,
+                *request.contact,
+            )
         )
         state_root = resolve_agent_storage(
             self.deps.agent_name,
