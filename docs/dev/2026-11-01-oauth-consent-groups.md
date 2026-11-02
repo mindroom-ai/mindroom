@@ -19,7 +19,7 @@ Assumptions:
 
 - **Providers opt in with a consent group.**
   `OAuthProvider` gains an optional consent group with a key and a display name.
-  The built-in Google providers, Google Cloud included, form the `google` group; each [additional Google workspace](../plugins.md#additional-google-workspaces) forms its own group named after the workspace, so its account picker and hosted-domain rule stay separate from the built-in connection; the Microsoft 365 providers form the `microsoft` group.
+  The built-in Google providers, Google Cloud included, form the `google` group; each [additional Google workspace](../plugins.md#additional-google-workspaces) forms its own group named after the workspace, so its account picker and hosted-domain rule stay separate from the built-in connection; the Microsoft 365 providers form the `microsoft` group, except Teams Meetings and People, whose `OnlineMeetingTranscript.Read.All` and `User.Read.All` scopes need admin consent.
   Plugin providers may declare a group too.
   Grouping is never inferred from a shared OAuth client, because copying one refresh token into several connections is safe only for providers whose old refresh tokens stay valid after use (see External constraints).
 - **The server picks the members.**
@@ -45,6 +45,7 @@ Assumptions:
 - Google does not rotate refresh tokens, and lets users grant only part of a multi-scope request ("users may not grant your app access to all of them"), so granted scopes are checked per member after the exchange.
 - Microsoft Entra issues a new refresh token on every use but "doesn't revoke old refresh tokens when used to fetch new access tokens" ([Refresh tokens in the Microsoft identity platform](https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens)), so each copy refreshes independently.
 - MindRoom never revokes tokens at the provider when a connection is disconnected, so disconnecting one member leaves the other copies working.
+- Microsoft Entra refuses a whole request when one scope needs admin consent the tenant has not given, which is why the admin-consent providers stay out of the `microsoft` group.
 
 ## Security
 
@@ -53,6 +54,10 @@ Assumptions:
   The difference reaches agent code only through an Agent Keys allowance for one of those services, which then acts with the whole grant on the hosts that service allows; users who want narrow tokens keep connecting services one by one.
   `docs/architecture/security-posture.md` records this beside the Agent Keys entries.
 - Tokens stay in the primary runtime as before; no worker sees them.
+
+## Accepted limitations
+
+- When the provider refuses the whole request because of one member, such as a Google scope the OAuth app is not verified for, the sign-in connects nothing; that member's own **Connect** button fails the same way, and the others still connect one by one.
 
 ## Rejected alternatives
 
