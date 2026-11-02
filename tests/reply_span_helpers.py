@@ -127,7 +127,6 @@ async def reply_span(
         )
     async with runtime.span_scope() as slot:
         handle = await runtime.claim(
-            delivery_id=source_event_id,
             sources=sources,
             room_id=room_id,
             thread_id=thread_id,

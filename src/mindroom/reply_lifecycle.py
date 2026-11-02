@@ -549,7 +549,7 @@ class ClaimRequest:
     sources: ResponseSources
     bot_generation: str
     now_ns: int
-    # The membership the claim's delivery was admitted in, which a new or regenerated reply writes in.
+    # The membership the claim's driving message was admitted in, which a new or regenerated reply writes in.
     membership_epoch: int
     # Used only when the claim creates a reply.
     new_reply_id: str

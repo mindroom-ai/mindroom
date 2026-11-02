@@ -1243,10 +1243,8 @@ async def _blocked_stream(
     return response
 
 
-@pytest.mark.parametrize("interruption", ["superseded", "restart"])
-async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path: Path, interruption: str) -> None:
-    """A retry that splits a coalesced turn continues its reply for the first message and answers the second anew."""
-    bot = await _streaming_bot(tmp_path)
+async def _coalesced_turn(bot: AgentBot) -> ResponseRequest:
+    """Admit ``$event2`` after ``$event`` and return the turn that answers both, driven by the newer one."""
     await bot.journal_principal().admit(
         InboundEvent(
             event_id="$event2",
@@ -1259,10 +1257,17 @@ async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path
             source={},
         ),
     )
-    coalesced = replace(
+    return replace(
         _plain_request(_target(reply_to_event_id="$event2"), source_event_id="$event2"),
         sources=ResponseSources(("$event2", "$event"), ("$event", "$event2")),
     )
+
+
+@pytest.mark.parametrize("interruption", ["superseded", "restart"])
+async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path: Path, interruption: str) -> None:
+    """A retry that splits a coalesced turn continues its reply for the first message and answers the second anew."""
+    bot = await _streaming_bot(tmp_path)
+    coalesced = await _coalesced_turn(bot)
     response = None
     first_answer = "Answer one."
     if interruption == "superseded":
@@ -1278,17 +1283,43 @@ async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path
         bot = _bot(tmp_path)
         unique_room_send_responses(bot.client)
         await bot._take_over_replies()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    async def second_answer(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "Second partial"
+        # The second answer's first text is shown before the rest of it arrives.
+        await _wait_until_sent(bot, "Second partial")
+        yield " and the rest of it."
+
     try:
         # With the conversation idle, the retry dispatches each text message as its own turn.
         assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="Answer one.")) == Owned()
+        sent_before_second = len(_sent_bodies(bot))
         second = _plain_request(_target(reply_to_event_id="$event2"), source_event_id="$event2")
-        assert await _answer(bot, second, AsyncMock(return_value="Answer two.")) == Owned()
+        with patch_response_runner_module(
+            stream_agent_response=second_answer,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ):
+            assert await asyncio.wait_for(runner.generate_response(second), timeout=SETTLE_TIMEOUT_SECONDS) == Owned()
     finally:
         if response is not None:
             response.cancel()
             with suppress(asyncio.CancelledError):
                 await response
-    assert _sent_bodies(bot)[-2:] == [first_answer, "Answer two."]
+    first_reply = await _reply(bot)
+    second_reply = await bot._reply_runtime.store.replies.for_sources(("$event2",))
+    assert second_reply is not None
+    assert second_reply.reply_id != first_reply.reply_id
+    assert second_reply.state is rl.ReplyState.COMPLETED
+    assert second_reply.event_id not in {None, first_reply.event_id}
+    # The second answer is its own message; the first answer's message is never rewritten.
+    second_sends = [call.kwargs["content"] for call in bot.client.room_send.await_args_list[sent_before_second:]]
+    assert [content.get("m.relates_to", {}).get("event_id") for content in second_sends[1:]] == [
+        second_reply.event_id,
+    ] * (len(second_sends) - 1)
+    assert _sent_bodies(bot)[sent_before_second - 1] == first_answer
+    assert _sent_bodies(bot)[-1] == "Second partial and the rest of it."
     assert not await bot._reply_runtime.store.is_pending("$event2")
 
 

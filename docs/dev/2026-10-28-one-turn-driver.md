@@ -39,7 +39,7 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
 ## Rejected alternatives
 
 - Deriving every hook-facing outcome from the reply records (`outcome_of`).
-  Review found fields the records cannot give today without new recorded facts: `delivery_kind` (the placeholder is sent after the claim), the rendered body of an interactive answer, interactive option values (rendering drops them), an owed FINAL's status (streamed and whole deliveries report it differently), and a cancellation the records show as CANCELLED without a Stop (source deletion).
+  Review found fields the records cannot give today without new recorded facts: `delivery_kind` (the placeholder is sent after the claim), the rendered body of an interactive answer, interactive option values (rendering drops them), and a cancellation the records show as CANCELLED without a Stop (source deletion).
   The success outcomes stay built where they are delivered.
 - A typed `TurnFailed` stream ending.
   It needed every consumer (Matrix streamer, collector, API first-event status, approval collection, voice, children) and changes error replies from answers to cancellations; it stays a follow-up of #3119.

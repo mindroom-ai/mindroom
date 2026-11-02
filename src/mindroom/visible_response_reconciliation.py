@@ -251,7 +251,6 @@ class VisibleResponseReconciler:
                 # It echoes the member's selected value, which may name agents.
                 skip_mentions=True,
                 reply_write=await replies.acknowledgement(
-                    delivery_id=delivery_turn_id,
                     pending=tuple(dict.fromkeys((delivery_turn_id, *handled_turn.source_event_ids))),
                     logical=handled_turn.source_event_ids,
                     discovery=handled_turn.discovery_event_ids,

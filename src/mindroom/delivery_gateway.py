@@ -204,6 +204,11 @@ def _segment_transaction_id(base_transaction_id: str, index: int) -> str:
     return str(uuid5(NAMESPACE_URL, f"mindroom-matrix-segment:{base_transaction_id}:{index}"))
 
 
+def _answer_owed(handle: SpanHandle | None) -> bool:
+    """Return whether the span recorded its answer as its terminal row, which the outbox owns from then on."""
+    return handle is not None and handle.span.outcome is rl.SpanOutcome.COMPLETED
+
+
 def _refused_reply_outcome(
     refused: ReplyWriteRefusedError | None,
     request: FinalDeliveryRequest,
@@ -1709,7 +1714,7 @@ class DeliveryGateway:
         except ReplyWriteRefusedError as refused:
             return _refused_reply_outcome(refused, request, draft.tool_trace, draft.extra_content)
         if event_id is None:
-            if handle.exited:
+            if _answer_owed(handle):
                 # The answer's row is recorded but not in the room yet: its sources went with the row, recovery sends
                 # it, and only a permanent refusal changes the reply.
                 return FinalDeliveryOutcome(ending=Owed())
@@ -2272,12 +2277,16 @@ class DeliveryGateway:
         with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
             return await self._finalize_streamed_response(request)
 
-    async def _finalize_streamed_response(
+    async def _finalize_streamed_response(  # noqa: PLR0911
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
         """Resolve how a finished stream ended from its transport facts, sending a final-only body as a whole answer."""
         stream_outcome = request.stream_transport_outcome
+        if stream_outcome.failed and _answer_owed(current_span()):
+            # The stream's terminal update failed after it recorded the answer, which the outbox owns, as whole
+            # delivery's does.
+            return FinalDeliveryOutcome(ending=Owed())
         try:
             streamed_event_id = stream_outcome.last_physical_stream_event_id
             visible_stream_event_id = stream_outcome.visible_event_id

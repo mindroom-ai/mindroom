@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -39,6 +40,20 @@ class ResponseSources:
         _validate_event_ids("pending_event_ids", self.pending_event_ids, required=True)
         _validate_event_ids("logical_source_event_ids", self.logical_source_event_ids, required=True)
         _validate_event_ids("discovery_event_ids", self.discovery_event_ids, required=False)
+
+    @property
+    def delivery_id(self) -> str:
+        """Return the name of the reply rows the turn of these sources writes.
+
+        A one-message turn's rows carry its message's event ID. A coalesced turn's carry its newest message's ID and
+        a digest of all its messages: a retry can answer those messages one by one, each turn writing rows of its
+        own, and the outbox keys rows by this name, so it stays short however many messages coalesced.
+        """
+        newest, *older = self.pending_event_ids
+        if not older:
+            return newest
+        digest = hashlib.sha256("\n".join(self.pending_event_ids).encode()).hexdigest()[:32]
+        return f"{newest}+{digest}"
 
 
 class UnclaimedReason(StrEnum):

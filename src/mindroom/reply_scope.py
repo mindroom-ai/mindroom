@@ -473,7 +473,6 @@ class ReplyRuntime:
     async def claim(
         self,
         *,
-        delivery_id: str,
         sources: ResponseSources,
         room_id: str,
         thread_id: str | None,
@@ -483,10 +482,9 @@ class ReplyRuntime:
         existing_event_id: str | None = None,
         interactive_span_id: str | None = None,
     ) -> SpanHandle | ClaimRefused:
-        """Claim the reply one span answers, or say why no span opened."""
+        """Claim the reply one span answers, its rows named by its sources, or say why no span opened."""
         empty = Presentation(placeholder=placeholder, show_tool_calls=show_tool_calls)
         request = await self._new_request(
-            delivery_id=delivery_id,
             sources=sources,
             room_id=room_id,
             thread_id=thread_id,
@@ -550,7 +548,6 @@ class ReplyRuntime:
     async def _new_request(
         self,
         *,
-        delivery_id: str,
         sources: ResponseSources,
         room_id: str,
         thread_id: str | None,
@@ -560,7 +557,7 @@ class ReplyRuntime:
     ) -> rl.ClaimRequest:
         return rl.ClaimRequest(
             span_id=_new_id(),
-            delivery_id=delivery_id,
+            delivery_id=sources.delivery_id,
             sources=sources,
             bot_generation=self.generation,
             now_ns=time.time_ns(),
@@ -586,12 +583,15 @@ class ReplyRuntime:
         earlier writes are unresolved, which retry the sources once they resolve.
         """
         empty = Presentation(placeholder=placeholder, show_tool_calls=continuation.show_tool_calls)
-        claim = await self._new_request(
+        # A resume writes the run's final answer under its paused span's name, where the continuation looks for it.
+        claim = replace(
+            await self._new_request(
+                sources=continuation.sources,
+                room_id=continuation.room_id,
+                thread_id=continuation.thread_id,
+                empty=empty,
+            ),
             delivery_id=continuation.final_delivery_id,
-            sources=continuation.sources,
-            room_id=continuation.room_id,
-            thread_id=continuation.thread_id,
-            empty=empty,
         )
         with self._expecting((claim.span_id,)):
             claimed, applied = await self.store.approvals.claim_approval_resume(continuation.approval_id, claim=claim)
@@ -617,7 +617,6 @@ class ReplyRuntime:
     async def acknowledgement(
         self,
         *,
-        delivery_id: str,
         pending: tuple[str, ...],
         logical: tuple[str, ...],
         discovery: tuple[str, ...],
@@ -630,7 +629,6 @@ class ReplyRuntime:
         No task runs for its span until the selection's answer claims it, which a Stop or departure before then refuses.
         """
         claim = await self._new_request(
-            delivery_id=delivery_id,
             sources=ResponseSources(pending, logical, discovery),
             room_id=room_id,
             thread_id=thread_id,

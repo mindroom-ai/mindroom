@@ -154,6 +154,8 @@ class _Homeserver:
     release: asyncio.Event = field(default_factory=asyncio.Event)
     # Text whose first write the server fails, as an unreachable homeserver does.
     fail_text: str | None = None
+    # How many writes that end a reply (``completed`` status) the server fails next, as an unreachable homeserver does.
+    fail_completed: int = 0
 
     async def room_send(
         self,
@@ -167,6 +169,9 @@ class _Homeserver:
         """Accept one send, collapsing a repeated transaction ID onto one event."""
         if message_type == "m.room.message" and self.fail_text is not None and self.fail_text in _body(content):
             self.fail_text = None
+            return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
+        if message_type == "m.room.message" and self.fail_completed and content.get(STREAM_STATUS_KEY) == "completed":
+            self.fail_completed -= 1
             return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
         event_id = self.events.setdefault(tx_id or f"anon-{len(self.events)}", f"$sent{len(self.events)}")
         if message_type == "m.room.message":
@@ -955,16 +960,19 @@ async def test_a_run_whose_reply_a_hook_suppressed_still_counts_as_succeeded(
     assert outcome.run_succeeded is True
 
 
-async def test_an_answer_the_homeserver_did_not_take_yet_applies_its_run_s_effects_once(
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
+async def test_an_answer_whose_final_write_the_homeserver_refused_twice_is_owed_not_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
 ) -> None:
-    """An answer left for the outbox to send finished its run, so memory and skill review take it as it settles.
+    """A recorded answer the homeserver refused, its immediate retry included, is owed to recovery in both modes.
 
-    No delivery hook fires for it, and its sources go to the outbox with the answer.
+    Its run finished, so memory and skill review take it as it settles; no delivery hook fires for it, its sources go
+    to the outbox with it, and recovery delivers it.
     """
-    turn = await _turn(tmp_path, monkeypatch, streaming=False, scripts={"default": [answer("Owed answer.")]})
-    turn.homeserver.fail_text = "Owed answer."
+    turn = await _turn(tmp_path, monkeypatch, streaming=streaming, scripts={"default": [answer("Owed answer.")]})
+    turn.homeserver.fail_completed = 2
     effects = AsyncMock(return_value=None)
     monkeypatch.setattr("mindroom.response_lifecycle.apply_post_response_effects", effects)
 
@@ -973,8 +981,13 @@ async def test_an_answer_the_homeserver_did_not_take_yet_applies_its_run_s_effec
     effects.assert_awaited_once()
     final, outcome, _deps = effects.await_args.args
     assert (final.ending, outcome.run_succeeded) == (Owed(), True)
-    assert turn.hooks.names == ["before"]
+    # Only the hook that shapes the answer before it is recorded fires: no delivery hook, no cancellation.
+    assert turn.hooks.names == (["transform"] if streaming else ["before"])
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
     assert not await turn.pending()
+    turn.homeserver.fail_completed = 0
+    assert (await turn.bot._delivery_gateway.recover_deliveries()).complete
+    assert (turn.homeserver.bodies[-1], turn.homeserver.statuses[-1]) == ("Owed answer.", "completed")
 
 
 async def test_a_before_response_hook_that_suppresses_a_whole_reply_removes_its_placeholder(
