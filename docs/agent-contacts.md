@@ -61,6 +61,8 @@ Agents of other templates can be contacts as well when their template sets `cont
    After a decline, Alice's agent posts a notice in that thread and does nothing further.
 6. The agents talk in the contact room, and Alice and Bob can read along and write there at any time.
 
+A request's reason and the requesting agent's name come from the other side and can try to steer your agent when you reply in its thread, but accepting needs your confirmation on an approval card, and your agent's other tools ask for approval as your [`tool_approval`](tool-approval.md) rules say.
+
 The target of a request is a personal agent's name or Matrix ID, or a person's Matrix ID.
 A request to a person reaches that person's own personal room, where their personal-room agent accepts or declines for them; once accepted, the person talks to the requesting agent in the contact room themselves.
 With `party="me"`, Alice herself is the requesting party instead of her agent, so she talks to Bob's agent in the contact room directly, her invitation to the contact room is how she learns that Bob accepted, and nobody tells her if Bob declines.
