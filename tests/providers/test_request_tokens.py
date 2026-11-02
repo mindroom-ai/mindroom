@@ -253,6 +253,18 @@ def test_gemini_counts_a_replayed_thought_signature_as_its_reported_reasoning(tm
     assert _difference(route, replace(signed, from_history=True), replace(plain, from_history=True)) == 300
 
 
+def test_gemini_counts_a_signed_function_call_as_its_call_and_reported_reasoning(tmp_path: Path) -> None:
+    """A function call Gemini signed replays its signature too, which costs the reasoning, not the ciphertext's length."""
+    route = _route("gemini", tmp_path)
+    provenance = model_provenance(route.identity.id, route.identity.provider)
+    metrics = MessageMetrics(tokens=TokenCounts(output_tokens=320, reasoning_tokens=300))
+    call = {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": '{"city": "Paris"}'}}
+    plain = Message(role="assistant", tool_calls=[call], provider_data=provenance, metrics=metrics)
+    signed = replace(plain, tool_calls=[{**call, "thought_signature": "c2lnbmF0dXJl" * 400}])
+
+    assert _difference(route, signed, plain) == 300
+
+
 def test_openrouter_counts_encrypted_reasoning_details_as_their_reported_reasoning(tmp_path: Path) -> None:
     """OpenRouter sends each answer's ``reasoning_details`` back; encrypted ones cost what their answer reported."""
     route = _route("openrouter", tmp_path)
