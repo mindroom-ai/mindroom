@@ -1925,13 +1925,15 @@ async def test_shutdown_waits_for_a_close_the_idle_sweep_started(
         await disconnect()
 
     monkeypatch.setattr(client, "disconnect", disconnect_slowly)
-    session.last_used_at -= session.ttl_seconds + 1
-    await _until(session.close_requested.is_set)
+    try:
+        session.last_used_at -= session.ttl_seconds + 1
+        await _until(session.close_requested.is_set)
 
-    shutdown = asyncio.create_task(run_process_shutdown_closers())
-    done, _pending = await asyncio.wait({shutdown}, timeout=0.2)
-    assert not done
-    release.set()
+        shutdown = asyncio.create_task(run_process_shutdown_closers())
+        done, _pending = await asyncio.wait({shutdown}, timeout=0.2)
+        assert not done
+    finally:
+        release.set()
     await asyncio.wait_for(shutdown, timeout=5)
     assert not client.connected
     assert not [task for task in asyncio.all_tasks() if task.get_name() == "claude_session_close"]
