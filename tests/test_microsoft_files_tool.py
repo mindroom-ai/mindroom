@@ -998,6 +998,8 @@ def test_excel_update_sets_only_formats_when_no_value_changes(tmp_path: Path, mo
         ([["x", 2]], ["General", "General"], [["x", 2]], [["old", 1]]),
         # Someone typed the formula's text into a text-formatted cell meanwhile.
         ([["=1+1", ""]], ["@", "General"], [["=1+1", None]], [["", ""]]),
+        # Someone edited a cell this write leaves alone.
+        ([["x", "edited"]], ["General", "General"], [["y", None]], [["x", ""]]),
     ],
 )
 def test_excel_update_writes_only_over_what_was_read(
@@ -1016,7 +1018,10 @@ def test_excel_update_writes_only_over_what_was_read(
 
 @pytest.mark.parametrize(
     "text",
-    ["0042", "1/2", "3-4", "Jan 5", "12:30", "TRUE", "1e5", "45%", "$1,000", "+A1", "@x", "2026-13-45"],
+    [
+        *["0042", "1/2", "3-4", "Jan 5", "12:30", "TRUE", "1e5", "45%", "$1,000", "+A1", "@x", "2026-13-45"],
+        *["16:9", "3:1", "1:2:3", "1:23.5", "100:00", "5 pm", "5 a"],
+    ],
 )
 def test_excel_update_refuses_text_excel_would_convert(
     tmp_path: Path,

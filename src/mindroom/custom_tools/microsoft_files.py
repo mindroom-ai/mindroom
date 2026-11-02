@@ -71,9 +71,8 @@ _MONTH = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
     r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?"
 )
-_TIME = (
-    r"[0-9]{1,2}(?::[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?)?\s*[ap]\.?m\.?|[0-9]{1,2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?"
-)
+# Times and durations, such as 9:30, 16:9, 1:23.5, 100:00, 5 pm, or 5 a, with one or more digits per part.
+_TIME = r"[0-9]+(?::[0-9]+){0,2}(?:\.[0-9]+)?\s*[ap](?:\.?m\.?)?|[0-9]+(?::[0-9]+){1,2}(?:\.[0-9]+)?"
 _NUMERIC_DATE = r"[0-9]{1,4}\s*[-/.]\s*[0-9]{1,2}(?:\s*[-/.]\s*[0-9]{1,4})?|[0-9]{1,2}\s*[-/.]\s*[0-9]{4}"
 # Text Excel stores as a date, time, fraction, boolean, or error value, as it does when the text is typed.
 _CONVERTED_TEXT = (
@@ -417,13 +416,15 @@ class _RangeEdit:
             if number_format == _TEXT_NUMBER_FORMAT and isinstance(value, str) and value.startswith("="):
                 msg = (
                     f"{cell} is formatted as text, so Excel would store the formula {value!r} as text and nothing "
-                    "was written. Give that cell's number_formats entry another format, such as General."
+                    "was written. Give that cell's number_formats entry another format, such as General, or write null to "
+                    "leave the cell as it is."
                 )
                 raise MicrosoftGraphError(code="formula_as_text", message=msg, cell=cell)
             if number_format != _TEXT_NUMBER_FORMAT and _excel_would_convert(value):
                 msg = (
                     f"Excel would store the text {value!r} in {cell} as a number, date, time, boolean, or formula, "
-                    "so nothing was written. Write numbers as JSON numbers and dates as YYYY-MM-DD, or keep the text "
+                    "so nothing was written. Write numbers as JSON numbers and dates as YYYY-MM-DD or YYYY-MM-DD HH:MM, "
+                    "or keep the text "
                     f"by setting that cell's number_formats entry to '{_TEXT_NUMBER_FORMAT}'."
                 )
                 raise MicrosoftGraphError(code="converted_text", message=msg, cell=cell)
