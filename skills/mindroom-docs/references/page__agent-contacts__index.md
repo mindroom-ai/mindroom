@@ -95,7 +95,7 @@ Only personal agents built from a `personal_agents` template can be contacts; ag
 
 Only the agent's owner can use these tools; anyone else, administrators included, gets `Only <owner> may use the contacts of <agent>`.
 `request_contact`, `accept_contact`, and `update_contact` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the owner with the exact values, even when `tool_approval.default` is `auto_approve`, and only the owner's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
-A request is accepted only through the target owner's personal-room agent, usually by replying in the request's thread.
+A request is accepted or declined only through the target owner's personal-room agent, usually by replying in the request's thread.
 `list_contacts` shows every other owner's personal agents that have contacts, together with their owners' Matrix IDs.
 Scripts and workflow participants cannot call these tools, and `contacts` cannot be deferred.
 
@@ -201,7 +201,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `A contact needs an agent on one side` | `party="me"` was used with a person as the target; ask through your agent instead, or target the person's agent |
 | `<owner> declined this contact; they can remove it to allow a new request` | The pair was declined; only the owner who declined can call `remove_contact` on it |
 | `Contact <id> with <party> already exists and is <status>; change your side's rules or tools with update_contact` | A request repeated `rules` or `tools` for an existing contact; call `update_contact` with that contact ID instead |
-| `Only <agent>, the agent of <owner>'s personal room, may accept this contact` | Accept by replying in the request's thread in your personal room |
+| `Only <agent>, the agent of <owner>'s personal room, may accept this contact` (or `decline`) | Accept or decline by replying in the request's thread in your personal room |
 | `<agent> is not running, so the contact room cannot be set up; accept again later` | One agent of the contact is stopped; accept again once it runs |
 | `Error: in a contact conversation you can only write to this room or to your owner's personal room` | A contact turn tried another room |
 | `Error: in a contact conversation you can only send a plain message to your owner's personal room` | A contact turn tried to read, edit, react, or name a recipient in the owner's personal room |

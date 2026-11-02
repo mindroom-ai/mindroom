@@ -514,6 +514,28 @@ async def test_decline_by_target_owner_only_and_notifies_origin(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_only_the_personal_room_agent_declines(tmp_path: Path) -> None:
+    """Requests reach an owner through their personal room's agent, so another agent of theirs cannot decline one."""
+    config, paths = _setup(tmp_path, work=True)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime, target="work_bob")
+    refusal = rf"^Only mind_bob, the agent of {CO_OWNER}'s personal room, may decline this contact$"
+
+    with pytest.raises(ValueError, match=refusal):
+        await flow.decline_contact(_context(config, paths, "work_bob", CO_OWNER, runtime), "work_bob", record.id)
+    assert _stored(paths)[0].status == "pending"
+    with _delivered():
+        declined = await flow.decline_contact(
+            _context(config, paths, "mind_bob", CO_OWNER, runtime),
+            "mind_bob",
+            record.id,
+        )
+
+    assert declined.status == "declined"
+    assert _stored(paths) == [declined]
+
+
+@pytest.mark.asyncio
 async def test_a_person_requester_is_told_nothing_on_decline(tmp_path: Path) -> None:
     """A person who asked has no agent to post the decline, so only the stored status changes."""
     config, paths = _setup(tmp_path)

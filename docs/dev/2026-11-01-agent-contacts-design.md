@@ -55,7 +55,7 @@ The contacts tools therefore refuse every other requester, administrators includ
 
 ### Where a request is asked and accepted
 
-The request notice is posted, and later accepted, by the agent of the target owner's personal room, not by the target agent.
+The request notice is posted, and later accepted or declined, by the agent of the target owner's personal room, not by the target agent.
 A target agent from another template is not a member of that room, while the personal-room agent is the one the owner already talks to there.
 That agent must have `contacts` itself, because it needs the contacts tools to accept; a request whose target owner's personal-room agent lacks them is refused before anything is stored.
 A person target is asked the same way, in their own personal room, so a person needs a personal room on this deployment to be contacted.

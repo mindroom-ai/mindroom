@@ -53,10 +53,15 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+type _Decision = Literal["accept", "decline"]
+
 _CONTACT_REQUEST_KEY = "io.mindroom.contact_request"
 _SOURCE_HOOK = "native:contacts"
 _PERSON_HAS_NO_SIDE = "A person has no rules or tools; only an agent's side can have them"
-_NOT_PENDING = "Only a pending contact can be accepted"
+_NOT_PENDING: dict[_Decision, str] = {
+    "accept": "Only a pending contact can be accepted",
+    "decline": "Only a pending contact can be declined",
+}
 # Invite-only like a personal room; a member who joins later still reads the whole conversation.
 _CONTACT_ROOM_STATE = [
     {"type": "m.room.join_rules", "state_key": "", "content": {"join_rule": "invite"}},
@@ -387,6 +392,32 @@ async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecor
     )
 
 
+async def _pending_request(
+    context: ToolRuntimeContext,
+    agent_name: str,
+    contact_id: str,
+    decision: _Decision,
+) -> tuple[ContactRecord, str]:
+    """Return a pending request to the caller's owner and the agent of their personal room, the only one that decides it.
+
+    The request asked the owner in their personal room, so no other agent of theirs accepts or declines it.
+    """
+    config, paths = context.current_config, context.runtime_paths
+    own = _own_party(context, agent_name)
+    book = await run_blocking_until_complete(read_contacts, paths)
+    record, side = _owned(book, contact_id, own.owner)
+    if side != "target":
+        msg = f"Only {record.target.owner} may {decision} this contact"
+        raise ValueError(msg)
+    if record.status != "pending":
+        raise ValueError(_NOT_PENDING[decision])
+    poster, _ = _request_poster(config, paths, own.owner)
+    if agent_name != poster:
+        msg = f"Only {poster}, the agent of {own.owner}'s personal room, may {decision} this contact"
+        raise ValueError(msg)
+    return record, poster
+
+
 async def accept_contact(
     context: ToolRuntimeContext,
     agent_name: str,
@@ -397,23 +428,11 @@ async def accept_contact(
 ) -> ContactRecord:
     """Accept a pending request for its target owner: open the contact room, seat both parties, and tell the requester.
 
-    Only the agent of the target owner's personal room, which asked them there, accepts. The target side keeps any
-    rules or tools left out. Both agent parties keep the room while the contact is active. A room that cannot be fully
-    set up is left again and the request stays pending.
+    The target side keeps any rules or tools left out. Both agent parties keep the room while the contact is active.
+    A room that cannot be fully set up is left again and the request stays pending.
     """
     config, paths = context.current_config, context.runtime_paths
-    own = _own_party(context, agent_name)
-    book = await run_blocking_until_complete(read_contacts, paths)
-    record, side = _owned(book, contact_id, own.owner)
-    if side != "target":
-        msg = f"Only {record.target.owner} may accept this contact"
-        raise ValueError(msg)
-    if record.status != "pending":
-        raise ValueError(_NOT_PENDING)
-    poster, _ = _request_poster(config, paths, own.owner)
-    if agent_name != poster:
-        msg = f"Only {poster}, the agent of {own.owner}'s personal room, may accept this contact"
-        raise ValueError(msg)
+    record, poster = await _pending_request(context, agent_name, contact_id, "accept")
     target = record.target
     if target.kind == "person" and (rules is not None or tools is not None):
         raise ValueError(_PERSON_HAS_NO_SIDE)
@@ -429,7 +448,7 @@ async def accept_contact(
     def activate(book: ContactBook) -> ContactRecord:
         current = _by_id(book, contact_id)
         if current.status != "pending":
-            raise ValueError(_NOT_PENDING)
+            raise ValueError(_NOT_PENDING["accept"])
         current.status = "active"
         current.room_id = room_id
         _change_side(current.target_side, rules, checked)
@@ -447,16 +466,12 @@ async def accept_contact(
 
 async def decline_contact(context: ToolRuntimeContext, agent_name: str, contact_id: str) -> ContactRecord:
     """Decline a pending request for its target owner and tell the thread it came from."""
-    own = _own_party(context, agent_name)
+    await _pending_request(context, agent_name, contact_id, "decline")
 
     def decline(book: ContactBook) -> ContactRecord:
-        record, side = _owned(book, contact_id, own.owner)
-        if side != "target":
-            msg = f"Only {record.target.owner} may decline this contact"
-            raise ValueError(msg)
+        record = _by_id(book, contact_id)
         if record.status != "pending":
-            msg = "Only a pending contact can be declined"
-            raise ValueError(msg)
+            raise ValueError(_NOT_PENDING["decline"])
         record.status = "declined"
         return record.model_copy(deep=True)
 
