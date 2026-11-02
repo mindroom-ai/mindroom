@@ -515,13 +515,8 @@ def _direct_token_registration_error(
     return None
 
 
-# LEGACY_COMPAT: Persisted Matrix accounts without the requested username.
-# Legacy format: Persisted Matrix accounts omitted requested_username.
-# Last legacy release: v2026.5.160; replacement: v2026.5.161 persisted the immutable creation request.
-# Handling: Use the actual stored username as the original request only when the dedicated field is absent,
-# which an account added by hand to adopt an existing Matrix account also leaves out.
-# Coverage: tests/test_matrix_agent_manager.py::TestAgentUserCreation::test_create_internal_user_legacy_state_uses_actual_username_as_original_request,
-# tests/test_matrix_agent_manager.py::TestAgentUserCreation::test_create_agent_user_reuses_a_stored_account_matching_its_matrix_username.
+# An account without a recorded request counts its stored username as the request: one added by hand to adopt an
+# existing Matrix account, as docs/matrix.md describes, or one saved before v2026.5.161 recorded requests.
 def _validate_existing_account_request(
     *,
     agent_name: str,
@@ -534,18 +529,15 @@ def _validate_existing_account_request(
     stored_request = existing_account.requested_username or existing_account.username
     if stored_request == requested_username:
         return
-    mismatch = (
-        f"Configured username {requested_username!r} does not match the original requested username {stored_request!r}."
-    )
     if agent_name == INTERNAL_USER_AGENT_NAME:
-        msg = f"mindroom_user.username cannot be changed after the internal Matrix account has been created. {mismatch}"
+        setting, account = "mindroom_user.username", "internal Matrix account"
     else:
-        # A new MINDROOM_NAMESPACE from pairing again also changes the request; removing the setting keeps the account.
-        setting = f"agents.{agent_name}.matrix_username"
-        msg = (
-            f"{setting} cannot be changed after the agent's Matrix account has been created. {mismatch} "
-            f"Remove {setting} to keep the existing account."
-        )
+        setting, account = f"agents.{agent_name}.matrix_username", "agent's Matrix account"
+    msg = (
+        f"{setting} cannot be changed after the {account} has been created. "
+        f"Configured username {requested_username!r} does not match the original requested username "
+        f"{stored_request!r}."
+    )
     raise matrix_startup_error(msg, permanent=True)
 
 

@@ -3112,7 +3112,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.users",
-    "mindroom.matrix_identifiers",
     "mindroom.orchestration.runtime",
 ]
 visibility = ["mindroom.orchestrator"]

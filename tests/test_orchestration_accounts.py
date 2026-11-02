@@ -158,13 +158,12 @@ async def test_account_preparation_requests_personal_agent_username(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("namespace", "localpart"), [("", "jarvis"), ("home1", "jarvis_home1")])
+@pytest.mark.parametrize("namespace", ["", "home1"])
 async def test_account_preparation_requests_an_agents_configured_matrix_username(
     tmp_path: Path,
     namespace: str,
-    localpart: str,
 ) -> None:
-    """An agent's matrix_username names its new account, with the installation namespace appended as to the default."""
+    """An agent's matrix_username is the exact localpart of its new account, so a new namespace never changes it."""
     paths = resolve_runtime_paths(
         config_path=test_runtime_paths(tmp_path).config_path,
         storage_path=tmp_path / "mindroom_data",
@@ -195,7 +194,7 @@ async def test_account_preparation_requests_an_agents_configured_matrix_username
     with patch("mindroom.orchestration.accounts.create_agent_user", new=record_user):
         await _prepare(config, [ROUTER_AGENT_NAME, "general", "crew"], paths)
 
-    assert requested == {ROUTER_AGENT_NAME: None, "general": localpart, "crew": None}
+    assert requested == {ROUTER_AGENT_NAME: None, "general": "jarvis", "crew": None}
 
 
 @pytest.mark.asyncio

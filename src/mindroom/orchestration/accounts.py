@@ -18,7 +18,6 @@ from mindroom.matrix.users import (
     create_agent_user,
     preflight_managed_account_provisioning,
 )
-from mindroom.matrix_identifiers import namespaced_username_localpart
 from mindroom.orchestration.runtime import is_permanent_startup_error, run_with_retry
 from mindroom.startup_errors import PermanentStartupError
 
@@ -39,24 +38,16 @@ def validate_entity_accounts(config: Config, runtime_paths: constants.RuntimePat
         raise PermanentStartupError(str(exc)) from exc
 
 
-def _entity_request(
-    config: Config,
-    entity_name: str,
-    runtime_paths: constants.RuntimePaths,
-) -> ManagedAccountProvisioningRequest:
+def _entity_request(config: Config, entity_name: str) -> ManagedAccountProvisioningRequest:
     """Request an agent's configured Matrix username, or a generated agent's stored one.
 
-    A generated agent's stored username already carries the namespace, so a wiped matrix_state recreates the same ID.
+    Both are exact localparts, so a new namespace from pairing again or a wiped matrix_state requests the same ID.
     """
     instance = config.personal_agent_instance(entity_name)
-    agent = config.agents.get(entity_name)
     if instance is not None:
-        username = instance.matrix_username
-    elif agent is not None and agent.matrix_username is not None:
-        username = namespaced_username_localpart(agent.matrix_username, runtime_paths)
-    else:
-        username = None
-    return ManagedAccountProvisioningRequest(entity_name, username=username)
+        return ManagedAccountProvisioningRequest(entity_name, username=instance.matrix_username)
+    agent = config.agents.get(entity_name)
+    return ManagedAccountProvisioningRequest(entity_name, username=None if agent is None else agent.matrix_username)
 
 
 async def _prepare_internal_user(
@@ -100,7 +91,7 @@ async def prepare_managed_accounts(
     Without entities, the configured identities are validated once; otherwise creation and validation retry together,
     so a transient failure validates again.
     """
-    requests = [_entity_request(config, entity_name, runtime_paths) for entity_name in entity_names]
+    requests = [_entity_request(config, entity_name) for entity_name in entity_names]
     display_names = {request.entity_name: config.entity_display_name(request.entity_name) for request in requests}
     homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
     mindroom_user = config.mindroom_user if include_internal_user else None
