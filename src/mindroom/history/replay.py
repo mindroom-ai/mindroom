@@ -240,15 +240,19 @@ def plan_replay_that_fits(
     current_history_tokens: int,
     counter: TokenCounter,
 ) -> ResolvedReplayPlan:
-    """Return the safest plan for replaying the persisted history of the scope owning ``session`` within the budget."""
-    summary_tokens = estimate_summary_tokens(session, counter)
-    if summary_tokens > available_history_budget:
-        raise HistorySummaryBudgetError(summary_tokens=summary_tokens, available_tokens=available_history_budget)
+    """Return the safest plan for replaying the persisted history of the scope owning ``session`` within the budget.
+
+    ``current_history_tokens`` holds the summary, so a history that fits replays whole even when the summary's estimate,
+    padded by its margin, would not fit.
+    """
     if current_history_tokens <= available_history_budget:
         return configured_replay_plan(
             history_settings=history_settings,
             estimated_tokens=current_history_tokens,
         )
+    summary_tokens = estimate_summary_tokens(session, counter)
+    if summary_tokens > available_history_budget:
+        raise HistorySummaryBudgetError(summary_tokens=summary_tokens, available_tokens=available_history_budget)
 
     limit_mode, max_limit = _context_window_guard_limit_bounds(session=session, history_settings=history_settings)
     fitting_limit, fitting_tokens = _find_fitting_history_limit_for_budget(

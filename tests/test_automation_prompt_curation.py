@@ -120,6 +120,28 @@ def test_curation_keeps_the_stand_in_while_the_model_s_own_encoding_loads() -> N
     assert count(stable, "abcdefgh") == 2
 
 
+def test_curation_counts_with_the_model_s_own_encoding_before_any_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An older OpenAI model counts with cl100k_base, which curation loads rather than plan on the stand-in's bytes.
+
+    Its background load may have started on an earlier count and not finished.
+    """
+
+    class _OneTokenPerCharacter:
+        def encode(self, text: str, *, disallowed_special: tuple[str, ...]) -> list[str]:  # noqa: ARG002
+            return list(text)
+
+    real_get_encoding = tiktoken.get_encoding
+    monkeypatch.setitem(families._encoders, "cl100k_base", families._Encoder(started=True))
+    monkeypatch.setattr(
+        tiktoken,
+        "get_encoding",
+        lambda name: _OneTokenPerCharacter() if name == "cl100k_base" else real_get_encoding(name),
+    )
+    counter = counter_for_model(ModelIdentity(id="gpt-4", provider="openai"), local_encoder=True)
+
+    assert count(_stable_counter(counter), "hello world") == 11
+
+
 def test_files_under_the_trigger_ask_for_nothing(tmp_path: Path) -> None:
     """Small prompt files post no prompt."""
     config, automation, root = _setup(tmp_path)

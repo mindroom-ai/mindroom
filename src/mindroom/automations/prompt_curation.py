@@ -26,7 +26,7 @@ from mindroom.memory import entrypoint_tokens, entrypoint_withholds_lines, read_
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.providers.registry import model_token_counter
 from mindroom.token_counting.counts import count
-from mindroom.token_counting.families import load_o200k
+from mindroom.token_counting.families import finish_loading
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -245,11 +245,12 @@ def _curation_notice(config: Config, plan: _CurationPlan, result: _CurationResul
 def _stable_counter(counter: TokenCounter) -> TokenCounter:
     """Return ``counter`` once it counts with a loaded vocabulary, else the stand-in, so verify counts as the plan did.
 
-    Without network access and a cached vocabulary, loading fails on every run, and an older OpenAI model's own
-    encoding may still be loading in the background.
+    Its first count starts loading the vocabulary it counts with, such as cl100k_base for an older OpenAI model, which
+    this waits for. Without network access and a cached vocabulary, loading fails on every run.
     """
     with suppress(OSError, ValueError):
-        load_o200k()
+        counter.estimate("a")
+        finish_loading()
     if counter.estimate("a") is None:
         return replace(counter, estimate=lambda _text: None)
     return counter

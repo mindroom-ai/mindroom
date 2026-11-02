@@ -23,7 +23,7 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from mindroom.llm.provider import PortableReplayEstimator
 
-__all__ = ["counter_for_model", "load_o200k", "openai_model_counter", "start_loading_o200k"]
+__all__ = ["counter_for_model", "finish_loading", "load_o200k", "openai_model_counter", "start_loading_o200k"]
 
 logger = get_logger(__name__)
 
@@ -75,6 +75,13 @@ def _load(name: str) -> tiktoken.Encoding:
 def load_o200k() -> tiktoken.Encoding:
     """Return the o200k_base encoder, loading it first; this blocks, and the first load may download its vocabulary."""
     return _load(_O200K)
+
+
+def finish_loading() -> None:
+    """Block until every encoder whose background load started has loaded; a failed load raises its error."""
+    for name, encoder in list(_encoders.items()):
+        if encoder.started:
+            _load(name)
 
 
 def start_loading_o200k() -> None:

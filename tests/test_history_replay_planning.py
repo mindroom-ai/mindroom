@@ -1419,6 +1419,22 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     assert state.force_compact_before_next_run is False
 
 
+def test_a_history_size_that_fits_replays_even_where_the_summary_estimate_does_not() -> None:
+    """A reported history size holds the summary as the provider counted it, below an estimate padded by its margin."""
+    session = _session("summary-only", runs=[])
+    session.summary = ScopeSummary(text="Project fact. " * 2000, updated_at=datetime.now(UTC))
+
+    plan = plan_replay_that_fits(
+        session=session,
+        history_settings=replay_settings(),
+        available_history_budget=5_000,
+        current_history_tokens=4_000,
+        counter=fake_token_counter(),
+    )
+
+    assert (plan.mode, plan.estimated_tokens) == ("configured", 4_000)
+
+
 def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_history() -> None:
     """A summary-only session must fail explicitly instead of returning an oversized replay plan."""
     summary = ScopeSummary(text="Project fact. " * 2000, updated_at=datetime.now(UTC))
