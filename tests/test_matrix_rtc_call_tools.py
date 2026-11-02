@@ -282,6 +282,32 @@ def _tool_support(config: Config, runtime_paths: object) -> SimpleNamespace:
     )
 
 
+def _chat_build(config: Config, runtime_paths: RuntimePaths, context: ToolRuntimeContext) -> AgentBuild:
+    """Return the build a text-chat reply in the call's room runs for the call's requester."""
+    return create_agent(
+        AGENT,
+        config,
+        runtime_paths,
+        context.execution_identity,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, AGENT),
+        plugins=config_plugins(config, runtime_paths),
+    )
+
+
+def _cached_call_build(config: Config, runtime_paths: RuntimePaths, context: ToolRuntimeContext) -> AgentBuild:
+    """Return the build a cascaded or Live call's cache makes for its turns."""
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        context=context,
+        active_model_name=None,
+    )
+    return cache._build(knowledge=None, refresh_scheduler=None)
+
+
 @pytest.mark.asyncio
 async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() -> None:
     """A realtime provider cannot invoke a tool after current call access is denied."""
@@ -337,24 +363,8 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
         runtime_paths,
     )
     context = _runtime_context(config=config, runtime_paths=runtime_paths, target=_room_target())
-    cache = _CallAgentCache(
-        agent_name=AGENT,
-        config=config,
-        runtime_paths=runtime_paths,
-        context=context,
-        active_model_name=None,
-    )
-    call_build = cache._build(knowledge=None, refresh_scheduler=None)
-    chat_build = create_agent(
-        AGENT,
-        config,
-        runtime_paths,
-        context.execution_identity,
-        supports_native_tool_approval=True,
-        knowledge=None,
-        model=turn_model(config, runtime_paths, AGENT),
-        plugins=config_plugins(config, runtime_paths),
-    )
+    call_build = _cached_call_build(config, runtime_paths, context)
+    chat_build = _chat_build(config, runtime_paths, context)
     call_functions = _functions(call_build)
     chat_functions = _functions(chat_build)
 
@@ -431,16 +441,7 @@ async def test_a_call_s_agent_is_not_offered_background_subagent_waits(tmp_path:
     register_background_runtime(runtime_paths, runtime)
     try:
         context = _runtime_context(config=config, runtime_paths=runtime_paths, target=_room_target())
-        chat_build = create_agent(
-            AGENT,
-            config,
-            runtime_paths,
-            context.execution_identity,
-            supports_native_tool_approval=True,
-            knowledge=None,
-            model=turn_model(config, runtime_paths, AGENT),
-            plugins=config_plugins(config, runtime_paths),
-        )
+        chat_build = _chat_build(config, runtime_paths, context)
         if realtime:
             tooling = await build_call_tools(
                 agent_name=AGENT,
@@ -458,14 +459,7 @@ async def test_a_call_s_agent_is_not_offered_background_subagent_waits(tmp_path:
             ]
             instructions = tooling.instructions
         else:
-            cache = _CallAgentCache(
-                agent_name=AGENT,
-                config=config,
-                runtime_paths=runtime_paths,
-                context=context,
-                active_model_name=None,
-            )
-            call_build = cache._build(knowledge=None, refresh_scheduler=None)
+            call_build = _cached_call_build(config, runtime_paths, context)
             description = _functions(call_build)["run_subagent"].description
             instructions = _call_instructions(call_build)
     finally:
