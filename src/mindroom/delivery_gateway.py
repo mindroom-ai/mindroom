@@ -1689,7 +1689,7 @@ class DeliveryGateway:
             state=ReplyState.COMPLETED,
         )
         if reply_write.placeholder_only:
-            # Nothing to show: the span's end notes that the turn finished without a reply, as a stream's does.
+            # Nothing to show: the span's end notes that the turn ended, as a stream's does.
             return FinalDeliveryOutcome(
                 ending=Failed(FailureCause.NOTHING_TO_SHOW),
                 tool_trace=tuple(draft.tool_trace or ()),
@@ -2330,8 +2330,8 @@ class DeliveryGateway:
                 )
 
             if stream_outcome.visible_body_state != "visible_body":
-                # The span's end notes that the turn finished without a reply, or keeps the answer a regeneration
-                # that wrote nothing was replacing, as a whole delivery's does.
+                # The span's end notes that the turn ended, or keeps the answer a regeneration that wrote nothing
+                # was replacing, as a whole delivery's does.
                 return FinalDeliveryOutcome(
                     ending=Failed(FailureCause.NOTHING_TO_SHOW),
                     tool_trace=tuple(request.tool_trace or ()),
