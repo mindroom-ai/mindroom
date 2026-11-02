@@ -53,6 +53,7 @@ EVENT_ID = "$event:localhost"
 DESTINATION_ERROR = "Error: in a contact conversation you can only write to this room or to your owner's personal room"
 OWNER_ROOM_ERROR = "Error: in a contact conversation you can only send a plain message to your owner's personal room"
 OWNER_ROOM_KEY_ERROR = "Error: in a contact conversation you cannot use idempotency_key in your owner's personal room"
+CONTACT_ROOM_KEY_ERROR = "Error: idempotency_key cannot be used in a contact room"
 OWNER_ROOM_THREAD_ERROR = (
     "Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread"
 )
@@ -187,8 +188,6 @@ def _recorder(seen: list[str], effect: str = "none") -> object:
             ctx.revise("Leave out the budget.")
         elif effect == "deny":
             ctx.deny("Not allowed.")
-        elif effect == "budget" and "budget" in ctx.text:
-            ctx.revise("Leave out the budget.")
 
     return policy
 
@@ -507,23 +506,14 @@ async def test_room_tools_refuse_a_contact_room_that_matrix_message_may_use(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-@pytest.mark.parametrize("idempotency_key", [None, "report-1"])
-async def test_normal_turn_sends_into_its_contact_room_for_an_owner_who_only_was_invited(
-    tmp_path: Path,
-    idempotency_key: str | None,
-) -> None:
+async def test_normal_turn_sends_into_its_contact_room_for_an_owner_who_only_was_invited(tmp_path: Path) -> None:
     """The agent speaks for its owner in its contact room, so the owner need not have joined it, and the policy runs."""
     config, paths = _setup(tmp_path)
     _contact(paths)
     seen: list[str] = []
     context = _context(config, paths, _recorder(seen), room_id=PERSONAL_ROOM)
 
-    payload = await _call(
-        context,
-        message="Alice is free on Friday.",
-        room_id=CONTACT_ROOM,
-        idempotency_key=idempotency_key,
-    )
+    payload = await _call(context, message="Alice is free on Friday.", room_id=CONTACT_ROOM)
 
     assert payload["status"] == "ok"
     assert payload["room_id"] == CONTACT_ROOM
@@ -576,29 +566,41 @@ async def test_a_contact_turn_cannot_write_into_its_room_once_the_contact_is_rem
 
 
 @pytest.mark.asyncio
-async def test_a_keyed_send_prepared_before_removal_is_never_delivered_after_it(tmp_path: Path) -> None:
-    """A keyed send stored while the contact was active is refused on retry once it is removed, and nothing is left."""
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("room_id", [CONTACT_ROOM, PERSONAL_ROOM])
+@pytest.mark.parametrize("status", ["active", "removed"])
+async def test_no_send_into_a_contact_room_takes_an_idempotency_key(
+    tmp_path: Path,
+    room_id: str,
+    status: _ContactStatus,
+) -> None:
+    """A keyed retry would deliver a message prepared under the contact's earlier rules, so no key is accepted there."""
     config, paths = _setup(tmp_path)
     _contact(paths)
-    context = _context(config, paths)
+    seen: list[str] = []
+    context = _context(config, paths, _recorder(seen), room_id=room_id)
+    # A send prepared before the owner changed the contact's rules or removed it.
     async with claim_matrix_message_send(context, CONTACT_ROOM, "answer-1") as claim:
         await claim.prepare(
-            {"msgtype": "m.text", "body": "Dinner at eight?"},
+            {"msgtype": "m.text", "body": "The budget is 500."},
             recipient=None,
             recipient_user_id=None,
             thread_id=THREAD_ID,
             starts_thread=False,
         )
-    _remove(paths)
+    if status == "removed":
+        _remove(paths)
 
-    refused = await _call(context, message="Dinner at eight?", idempotency_key="answer-1")
-    retried = await _call(context, message="Dinner at eight?", idempotency_key="answer-1")
+    payload = await _call(context, message="Dinner at eight?", room_id=CONTACT_ROOM, idempotency_key="answer-1")
 
-    assert (refused["status"], refused["message"]) == ("error", REMOVED_ERROR)
-    assert (retried["status"], retried["message"]) == ("error", REMOVED_ERROR)
+    assert payload == {
+        "status": "error",
+        "tool": "matrix_message",
+        "room_id": CONTACT_ROOM,
+        "message": CONTACT_ROOM_KEY_ERROR,
+    }
+    assert seen == []
     assert _sent(context) == []
-    async with claim_matrix_message_send(context, CONTACT_ROOM, "answer-1") as claim:
-        assert claim.intent is None
 
 
 @pytest.mark.asyncio
@@ -615,26 +617,6 @@ async def test_no_turn_writes_into_a_removed_contacts_room(tmp_path: Path, call:
     assert (payload["status"], payload["message"]) == ("error", REMOVED_ERROR)
     assert _sent(context) == []
     assert not await room_access_allowed(context, CONTACT_ROOM)
-
-
-@pytest.mark.asyncio
-async def test_keyed_send_the_policy_stopped_stores_nothing_to_replay(tmp_path: Path) -> None:
-    """A retry with the same key after a revise sends the revised text, not the stopped one."""
-    config, paths = _setup(tmp_path)
-    _contact(paths)
-    seen: list[str] = []
-    context = _context(config, paths, _recorder(seen, "budget"))
-
-    stopped = await _call(context, message="The budget is 500.", idempotency_key="answer-1")
-    revised = await _call(context, message="Dinner at eight?", idempotency_key="answer-1")
-    replayed = await _call(context, message="Something else.", idempotency_key="answer-1")
-
-    assert stopped["status"] == "error"
-    assert stopped["message"] == "Not sent: Leave out the budget. Revise the message and send it again."
-    assert revised["status"] == "ok"
-    assert replayed == revised
-    assert seen == ["The budget is 500.", "Dinner at eight?"]
-    assert [content["body"] for content in _sent(context)] == ["Dinner at eight?"]
 
 
 def _received(paths: RuntimePaths, sender: str, content: dict[str, Any]) -> nio.RoomMessageText:

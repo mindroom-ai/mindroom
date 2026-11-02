@@ -164,6 +164,8 @@ Every `matrix_message` send, edit, or reaction by an agent party into its contac
 
 Reactions pass the policy like edits, because a reaction key is free text.
 A rewritten message's tool result carries the text that was actually sent, so the agent knows what the other side read.
+A send into a contact room cannot carry an `idempotency_key`, because a retry delivers the payload stored when the key was first used, which the contact's rules may no longer allow.
+Running the policy again on a stored payload was rejected, because a rewrite or a revise would deliver something other than what the key stands for.
 
 Outcomes:
 

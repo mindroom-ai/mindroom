@@ -87,12 +87,6 @@ class _MessageSendState:
     newly_registered_attachment_ids: list[str] = field(default_factory=list)
 
 
-def _removed_contact_error(context: ToolRuntimeContext, room_id: str) -> str | None:
-    """Return why nothing may be sent into ``room_id`` when it is the room of a removed contact of this agent."""
-    contact = contact_room(context.current_config, context.runtime_paths, room_id, context.agent_name)
-    return None if contact is None else _removed_error(contact[0])
-
-
 def _removed_error(record: ContactRecord) -> str | None:
     """Return why nothing may be sent into the room of ``record`` once it is removed, or None while it is active."""
     if record.status == "active":
@@ -298,10 +292,6 @@ class MatrixMessageOperations:
         recipient_name: str | None = None,
     ) -> MatrixMessageOperationResult:
         if send_claim is not None and send_claim.intent is not None:
-            # A send prepared while its contact was active is never delivered once the contact is removed.
-            if send_claim.intent.event_id is None and (removed := _removed_contact_error(context, room_id)) is not None:
-                await send_claim.discard()
-                return self._result("error", action="send", room_id=room_id, message=removed)
             event_id, resolved_thread_id = await send_claim.deliver()
             return self._result(
                 "ok",

@@ -208,6 +208,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `Error: in a contact conversation you cannot use idempotency_key in your owner's personal room` | A contact turn sent to the owner's personal room with `idempotency_key`; send the message without it |
 | `Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread` | A contact turn named an existing thread of the owner's personal room; send to the timeline or a new thread |
 | `Error: contact rooms accept text only` | Attachments and collapsible sections cannot go into a contact room |
+| `Error: idempotency_key cannot be used in a contact room` | A send into a contact room used `idempotency_key`; send the message without it |
 | `Error: contact <id> was removed, so nothing more can be sent into its room` | The contact was removed; ask for a new contact to talk again |
 | `Not sent: The conversation already has <n> agent messages in a row; wait for a person to write.` | The agents reached `defaults.max_consecutive_agent_replies`; any person writing in the conversation resets it |
 | `Not sent: A contact policy hook failed.` | A `contact:before_send` hook raised or timed out; check the plugin's logs |

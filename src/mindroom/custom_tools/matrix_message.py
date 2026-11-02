@@ -47,9 +47,10 @@ _CONTACT_OWNER_ROOM_KEY_ERROR = (
 _CONTACT_OWNER_ROOM_THREAD_ERROR = (
     "Error: in a contact conversation you can only write to your owner's personal room in its timeline or a new thread"
 )
+_CONTACT_ROOM_KEY_ERROR = "Error: idempotency_key cannot be used in a contact room"
 
 
-def _contact_turn_target_error(
+def _contact_target_error(
     context: ToolRuntimeContext,
     room_id: str,
     *,
@@ -60,6 +61,8 @@ def _contact_turn_target_error(
 ) -> str | None:
     """Return why this turn may not act in ``room_id`` this way, or None when it may.
 
+    No turn sends into a room that is or was the agent's contact room with an ``idempotency_key``, because a retry
+    would deliver the message it prepared without the contact's current rules.
     A turn in a room that is or was the agent's contact room is a contact turn here, even after a removal mid-turn.
     A contact turn acts only in its own room, apart from a plain message to its owner in their personal room with it,
     in that room's timeline or a new thread, never in one of the owner's own threads.
@@ -68,6 +71,11 @@ def _contact_turn_target_error(
     prepared, such as a pending request to an agent, instead of the contact turn's message.
     """
     config = context.current_config
+    keyed_into_contact_room = idempotency_key is not None and (
+        contact_room(config, context.runtime_paths, room_id, context.agent_name) is not None
+    )
+    if keyed_into_contact_room:
+        return _CONTACT_ROOM_KEY_ERROR
     contact = contact_room(config, context.runtime_paths, context.room_id, context.agent_name)
     if contact is None or room_id == context.room_id:
         return None
@@ -208,7 +216,7 @@ class MatrixMessageTools(Toolkit):
         resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
-        target_error = _contact_turn_target_error(
+        target_error = _contact_target_error(
             context,
             resolved_room_id,
             action=action,
