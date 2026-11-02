@@ -121,7 +121,7 @@ from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy
-from mindroom.turn_record import TurnRecord
+from mindroom.turn_record import PreparedVoiceSource, TurnRecord
 from mindroom.turn_store import (
     ClaimContended,
     ClaimRefused,
@@ -160,7 +160,7 @@ from tests.runtime_fakes import ready_runtime
 from tests.turn_dispatch_helpers import make_test_turn, nothing_else_queued
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Iterable
+    from collections.abc import Awaitable, Callable, Collection, Coroutine, Iterable
     from pathlib import Path
 
     from mindroom.coalescing.ingress_ticket import IngressTicket
@@ -1036,18 +1036,8 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
     The dispatch replay guard must consume the exact callback obligation without
     recording a turn, evaluating policy, or sending anything.
     """
-    newer_history = thread_history_result(
-        [
-            make_visible_message(
-                sender=_SENDER,
-                body="newer follow-up from the same requester",
-                event_id="$newer:localhost",
-                timestamp=2_000_000,
-            ),
-        ],
-        is_full_history=True,
-    )
-    harness = _build_harness(config, tmp_path, thread_history=newer_history)
+    harness = _build_harness(config, tmp_path)
+    await _serve_newer_requester_message(harness, config)
     room = _room_with_members(config, "general")
     event = _text_event("older superseded message", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
 
@@ -1060,38 +1050,70 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("history_degraded", [False, True])
-@pytest.mark.parametrize(("newer_mentions", "answered"), [("research", True), ("general", False)])
-async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_turn(
-    config: Config,
-    tmp_path: Path,
-    newer_mentions: str,
-    answered: bool,
-    history_degraded: bool,
-) -> None:
-    """A newer requester message for another agent does not supersede the older turn.
+def _thread_upload_event(msgtype: str, *, event_id: str, origin_server_ts: int) -> nio.Event:
+    """Return one upload in the thread as it arrives, mentioning nobody: a voice note for ``m.audio``."""
+    event = nio.Event.parse_event(
+        {
+            "content": {
+                "body": "upload",
+                "msgtype": msgtype,
+                "url": "mxc://localhost/upload",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
+            },
+            "event_id": event_id,
+            "sender": _SENDER,
+            "origin_server_ts": origin_server_ts,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
 
-    This agent ignores that message and records no turn for it, so after a
-    restart nothing would ever answer the older message it supersedes. The
-    thread history and, when that read may have missed messages, the journal's
-    pending events must agree.
+
+async def _serve_newer_requester_message(
+    harness: _Harness,
+    config: Config,
+    *,
+    mentions: str | None = None,
+    voice: bool = False,
+    history_degraded: bool = False,
+    transcribed: bool = True,
+    upload_before: bool = False,
+) -> nio.Event:
+    """Admit one newer requester message to the journal and serve it as this thread's history.
+
+    ``mentions`` names the one entity it mentions, or None for nobody. A voice
+    note mentions nobody itself; the transcript ingress stored for it names
+    whom it addresses. ``upload_before`` puts an image that mentions nobody
+    just before the message, as its caption. A degraded read lets only the
+    journal prove the newer messages exist.
     """
-    newer = _text_event(
-        "newer message from the same requester",
-        event_id="$newer:localhost",
-        thread_id=_THREAD_ROOT,
-        origin_server_ts=2_000_000,
-    )
-    newer.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, newer_mentions)]}
-    visible_newer = make_visible_message(
-        sender=_SENDER,
-        body=newer.body,
-        event_id=newer.event_id,
-        timestamp=newer.server_timestamp,
-        content=newer.source["content"],
-    )
-    harness = _build_harness(config, tmp_path)
+    content: dict[str, Any] = {
+        "body": "what do you think?" if mentions is None else f"@{mentions} what do you think?",
+        "msgtype": "m.text",
+        "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
+    }
+    if mentions is not None:
+        content["m.mentions"] = {"user_ids": [_entity_user_id(config, mentions)]}
+    newer: nio.Event
+    if voice:
+        newer = _thread_upload_event("m.audio", event_id="$newer:localhost", origin_server_ts=2_000_000)
+        if transcribed:
+            await harness.turn_store.record_prepared_voice(
+                _ROOM_ID,
+                newer.event_id,
+                PreparedVoiceSource.from_content(content["body"], content, thread_id=_THREAD_ROOT),
+            )
+    else:
+        newer = _text_event("", event_id="$newer:localhost", thread_id=_THREAD_ROOT, origin_server_ts=2_000_000)
+        newer.source["content"] = content
+    events = [newer]
+    if upload_before:
+        events.insert(0, _thread_upload_event("m.image", event_id="$upload:localhost", origin_server_ts=1_500_000))
+    for event in events:
+        kind = EventKind.MESSAGE if isinstance(event, nio.RoomMessageText) else EventKind.MEDIA
+        await harness.journal_principal.admit(_inbound_event(_ROOM_ID, event, kind, EventClass.ACTIONABLE))
     if history_degraded:
         # A read that must still refetch a revision cannot prove that no newer message exists.
         reader = harness.ingress.deps.resolver.deps.conversation_reader
@@ -1102,11 +1124,63 @@ async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_tur
             ),
             next_cursor=None,
         )
-        await harness.journal_principal.admit(
-            _inbound_event(_ROOM_ID, newer, EventKind.MESSAGE, EventClass.ACTIONABLE),
-        )
     else:
-        _serve_conversation(harness, [visible_newer])
+        _serve_conversation(
+            harness,
+            [
+                make_visible_message(
+                    sender=_SENDER,
+                    body=event.source["content"]["body"],
+                    event_id=event.event_id,
+                    timestamp=event.server_timestamp,
+                    content=event.source["content"],
+                )
+                for event in events
+            ],
+        )
+    return newer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history_degraded", [False, True])
+@pytest.mark.parametrize(
+    ("newer", "answered"),
+    [
+        pytest.param({"mentions": "research"}, True, id="text-for-another-agent"),
+        pytest.param({"mentions": "general"}, False, id="text-for-this-agent"),
+        pytest.param({"mentions": "research", "voice": True}, True, id="voice-for-another-agent"),
+        pytest.param({"mentions": "general", "voice": True}, False, id="voice-for-this-agent"),
+        pytest.param(
+            {"mentions": "general", "voice": True, "transcribed": False},
+            True,
+            id="voice-not-transcribed-yet",
+        ),
+        pytest.param(
+            {"mentions": "research", "upload_before": True},
+            True,
+            id="upload-before-caption-for-another-agent",
+        ),
+    ],
+)
+async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_turn(
+    config: Config,
+    tmp_path: Path,
+    newer: dict[str, Any],
+    answered: bool,
+    history_degraded: bool,
+) -> None:
+    """Only a newer requester message known to be for this agent supersedes the older turn.
+
+    This agent ignores a message for another agent and records no turn for it,
+    so after a restart nothing would ever answer the older message it
+    superseded. A voice note counts by its transcript, and one whose
+    transcription a restart stopped could be for anyone. An upload that
+    mentions nobody takes whom it addresses from the caption coalescing batches
+    it with. The thread history and, when that read may have missed messages,
+    the journal's pending events must agree.
+    """
+    harness = _build_harness(config, tmp_path)
+    await _serve_newer_requester_message(harness, config, history_degraded=history_degraded, **newer)
     room = _room_with_members(config, "general", "research")
     event = _text_event("older message for general", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
     event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
@@ -1115,6 +1189,68 @@ async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_tur
 
     assert len(harness.runner.requests) == (1 if answered else 0)
     assert harness.ignored_dispatch_sources == ([] if answered else [(event.event_id,)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_read", ["prepared_voice_for_source", "handled_among"])
+async def test_a_newer_message_that_cannot_be_judged_does_not_supersede_on_degraded_history(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_read: str,
+) -> None:
+    """A degraded-history replay acts only on proof, so a newer message whose transcript or outcome cannot be read lets the older turn run."""
+    harness = _build_harness(config, tmp_path)
+    newer = await _serve_newer_requester_message(harness, config, mentions="general", voice=True, history_degraded=True)
+    read = getattr(harness.turn_store, failing_read)
+
+    async def fail_for_newer(*args: object) -> object:
+        if newer.event_id in cast("Collection[str]", args[-1]):
+            msg = "disk I/O error"
+            raise OSError(msg)
+        return await read(*args)
+
+    monkeypatch.setattr(harness.turn_store, failing_read, fail_for_newer)
+    room = _room_with_members(config, "general", "research")
+    event = _text_event("older message for general", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
+    event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    assert harness.ignored_dispatch_sources == []
+    assert harness.retried_dispatch_sources == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("voice", "mentions"), [(True, "research"), (False, None)])
+async def test_a_newer_message_this_agent_already_settled_never_supersedes(
+    config: Config,
+    tmp_path: Path,
+    voice: bool,
+    mentions: str | None,
+) -> None:
+    """A newer message this agent already settled without answering cannot answer the older turn.
+
+    A graceful restart settles a queued voice note for another agent as ignored
+    before the older turn replays, and turn retention then drops its transcript,
+    so the note no longer says whom it addresses. A message that mentions nobody
+    but that this agent skipped, as when another agent is chosen to answer it,
+    looks like a message for this agent; only the journal knows it is settled.
+    """
+    harness = _build_harness(config, tmp_path)
+    newer = await _serve_newer_requester_message(harness, config, mentions=mentions, voice=voice)
+    await harness.journal_principal.settle(newer.event_id)
+    await harness.turn_store.cleanup(unsettled_source_event_ids=frozenset())
+    assert await harness.turn_store.prepared_voice_for_source(newer.event_id) is None
+    room = _room_with_members(config, "general", "research")
+    event = _text_event("older message for general", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
+    event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    assert harness.ignored_dispatch_sources == []
 
 
 @pytest.mark.asyncio

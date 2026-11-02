@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 type _Classify = Callable[[str, Mapping[str, object]], IngressFacts]
 # Which of these events already have a terminal outcome, answered or redacted in the turn's room.
 type _HandledLookup = Callable[[Collection[str]], Awaitable[frozenset[str]]]
-# Whether a stored message mentions only other agents or people, so this agent ignores it.
-type _ForAnotherParticipant = Callable[[Mapping[str, object]], bool]
+# Whether a stored message, by event ID and Matrix source, may be for other agents or people only.
+type _ForAnotherParticipant = Callable[[str, Mapping[str, object]], Awaitable[bool]]
 
 
 async def has_newer_unresponded_in_thread(
@@ -30,12 +30,18 @@ async def has_newer_unresponded_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
     may_be_superseded_by_newer_requester_turn: bool,
+    pending_turns: PendingTurnView,
     classify: _Classify,
     is_handled: _HandledLookup,
     for_another_participant: _ForAnotherParticipant,
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
-    """Return True when full thread history proves a newer unhandled requester turn exists."""
+    """Return True when full thread history proves a newer unhandled requester turn exists.
+
+    Only a message the journal still owes work can become that turn: one this
+    agent already settled without answering, such as a voice note it ignored as
+    addressed to another agent, never will.
+    """
     if not may_be_superseded_by_newer_requester_turn:
         return False
     event_ts = event.server_timestamp
@@ -46,9 +52,11 @@ async def has_newer_unresponded_in_thread(
         for message in thread_history
         if message.timestamp is not None and message.timestamp > event_ts and message.event_id != event.event_id
     ]
+    pending = await pending_turns.pending_among([message.event_id for message in newer])
+    newer = [message for message in newer if message.event_id in pending]
     handled = await is_handled([message.event_id for message in newer]) if newer else frozenset()
     for message in newer:
-        if not _is_unresponded_requester_event(
+        if not await _is_unresponded_requester_event(
             message,
             source={"content": message.content},
             body=message.body,
@@ -67,7 +75,7 @@ async def has_newer_unresponded_in_thread(
     return False
 
 
-def _is_unresponded_requester_event(
+async def _is_unresponded_requester_event(
     event: JournalEvent | ResolvedVisibleMessage,
     *,
     source: Mapping[str, object],
@@ -81,10 +89,11 @@ def _is_unresponded_requester_event(
 
     The filters SQL cannot express. Whose turn an event really is depends on
     trusted relay metadata inside its content, a router transcript echo is a
-    display artifact rather than a turn, this agent ignores a message for
-    another participant without ever answering it, and a command exits dispatch
-    long before a response would be owed -- so none of the four can be decided
-    from a column.
+    display artifact rather than a turn, a message that may be for another
+    participant -- one mentioning only others, or an upload or untranscribed
+    voice message whose addressee is not known yet -- may never become this
+    agent's turn, and a command exits dispatch long before a response would be
+    owed -- so none of the four can be decided from a column.
 
     ``handled`` stays even though a pending row is the journal's own answer
     to "unfinished". The two records settle at different moments: a source is
@@ -97,7 +106,7 @@ def _is_unresponded_requester_event(
     content = source.get("content")
     if is_router_voice_echo(facts, content) or facts.lane_requester_id != requester_user_id:
         return False
-    if event.event_id in handled or for_another_participant(source):
+    if event.event_id in handled or await for_another_participant(event.event_id, source):
         return False
     if not isinstance(body, str):
         return True
@@ -136,6 +145,7 @@ async def has_newer_unresponded_journal_thread_event(
             after_origin_server_ts=int(event.server_timestamp),
             excluding_event_id=event.event_id,
         )
+        handled = await is_handled([candidate.event_id for candidate in candidates]) if candidates else frozenset()
     except Exception as exc:
         logger.warning(
             "Failed to read pending thread events for degraded thread replay guard",
@@ -146,19 +156,29 @@ async def has_newer_unresponded_journal_thread_event(
         )
         return False
 
-    handled = await is_handled([candidate.event_id for candidate in candidates]) if candidates else frozenset()
     for candidate in candidates:
         content = candidate.source.get("content")
         body = cast("Mapping[str, object]", content).get("body") if isinstance(content, Mapping) else None
-        if _is_unresponded_requester_event(
-            candidate,
-            source=candidate.source,
-            body=body,
-            requester_user_id=requester_user_id,
-            classify=classify,
-            handled=handled,
-            for_another_participant=for_another_participant,
-        ):
+        try:
+            unresponded = await _is_unresponded_requester_event(
+                candidate,
+                source=candidate.source,
+                body=body,
+                requester_user_id=requester_user_id,
+                classify=classify,
+                handled=handled,
+                for_another_participant=for_another_participant,
+            )
+        except Exception:
+            # A candidate that cannot be judged, such as one whose transcript cannot be read, proves nothing.
+            logger.exception(
+                "Failed to judge a pending journal event for degraded thread replay guard",
+                event_id=event.event_id,
+                candidate_event_id=candidate.event_id,
+                thread_id=thread_id,
+            )
+            continue
+        if unresponded:
             logger.info(
                 "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",
                 skipped_event_id=event.event_id,

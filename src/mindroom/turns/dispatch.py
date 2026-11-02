@@ -6,7 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.authorization import is_requester_joined_to_room
@@ -31,7 +31,7 @@ from mindroom.dispatch_source import (
 from mindroom.hooks import MessageEnvelope, hook_ingress_policy
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.media import is_matrix_media_dispatch_event
+from mindroom.matrix.media import is_matrix_media_dispatch_event, is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -409,8 +409,8 @@ class TurnDispatcher:
             # requester, or this requester's message for another participant, a
             # newer message from this requester may only be answered after it, so
             # letting it absorb this turn would answer out of receipt order or not at all.
-            # The guards below read a text message's mentions themselves, but a voice
-            # message's mentions live in its transcript, not in the stored audio event.
+            # The guards below judge whom a message addresses themselves, but only the
+            # queue sees an edit that readdresses a queued message after their history was read.
             and not prepared.turn.queues_other_run(requester_user_id)
         )
         thread_history = prepared.dispatch.context.thread_history
@@ -602,22 +602,35 @@ class TurnDispatcher:
             requester_user_id,
             thread_history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
+            pending_turns=self.deps.pending_turns,
             classify=self.deps.ingress.classify_source,
             is_handled=partial(self.deps.turn_store.handled_among, room.room_id),
             for_another_participant=partial(self._for_another_participant, room),
             logger=self.deps.logger,
         )
 
-    def _for_another_participant(self, room: nio.MatrixRoom, source: Mapping[str, object]) -> bool:
-        """Return whether a message mentions only other agents or people, so this agent ignores it."""
+    async def _for_another_participant(self, room: nio.MatrixRoom, event_id: str, source: Mapping[str, object]) -> bool:
+        """Return whether a message may be for other agents or people only, so this agent may never answer it.
+
+        A voice message is judged by the transcript ingress stored for this agent;
+        one not transcribed yet could be for anyone. An upload that mentions nobody
+        takes whom it addresses from the caption coalescing batches it with, so by
+        itself it could be for anyone too.
+        """
+        voice = await self.deps.turn_store.prepared_voice_for_source(event_id)
+        content = voice.to_content() if voice is not None else source.get("content")
         mentions = mentions_another_participant(
-            dict(source),
+            {**source, "content": content},
             self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
             room=room,
         )
-        return mentions is True
+        if mentions is None:
+            return isinstance(content, dict) and is_matrix_media_msgtype(
+                cast("dict[str, object]", content).get("msgtype"),
+            )
+        return mentions
 
     async def _agent_mention_may_wake(
         self,
