@@ -54,8 +54,9 @@ def resolve_target(config: Config, runtime_paths: RuntimePaths, target: str) -> 
 
 
 def party_name(config: Config, party: ContactParty) -> str:
-    """Return how people see a party named: an agent's display name, or a person's Matrix ID."""
-    return party.id if party.kind == "person" else config.agents[party.id].display_name
+    """Return how people see a party named: an agent's display name, or the ID of a person or of a removed agent."""
+    agent = config.agents.get(party.id) if party.kind == "agent" else None
+    return party.id if agent is None else agent.display_name
 
 
 def party_label(config: Config, party: ContactParty) -> str:

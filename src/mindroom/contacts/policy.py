@@ -19,7 +19,6 @@ from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_jud
 if TYPE_CHECKING:
     from mindroom.config.judgment import JudgmentConfig
     from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
     from mindroom.contacts.store import ContactRecord, ContactSide, SideName
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -103,7 +102,6 @@ async def check_contact_message(
     if context.hooks.registry.has_hooks(EVENT_CONTACT_BEFORE_SEND):
         hooked = await _run_hooks(
             context,
-            config,
             record,
             side,
             rules=rules,
@@ -120,12 +118,10 @@ async def check_contact_message(
     contacts = config.agents[sender.id].contacts
     if contacts is not None and contacts.judge is not None:
         refusal = await _judge_refusal(
+            context,
+            record,
+            side,
             contacts.judge,
-            config,
-            context.runtime_paths,
-            _contact_rules_question(config, record, side),
-            agent_name=sender.id,
-            owner=sender.owner,
             rules=rules or NO_CONTACT_RULES,
             text=final_text,
         )
@@ -136,7 +132,6 @@ async def check_contact_message(
 
 async def _run_hooks(
     context: ToolRuntimeContext,
-    config: Config,
     record: ContactRecord,
     side: SideName,
     *,
@@ -146,8 +141,8 @@ async def _run_hooks(
     text: str,
 ) -> ContactBeforeSendContext:
     """Run the ``contact:before_send`` hooks and return their context with the text and verdict they left."""
+    config = context.current_config
     counterparty = record.counterparty(side)
-    counterparty_agent = config.agents.get(counterparty.id) if counterparty.kind == "agent" else None
     hook_context = ContactBeforeSendContext(
         **context.hooks.context_kwargs(
             EVENT_CONTACT_BEFORE_SEND,
@@ -161,7 +156,7 @@ async def _run_hooks(
         requester_id=context.requester_id,
         contact_id=record.id,
         counterparty_id=counterparty.id,
-        counterparty_name=counterparty.id if counterparty_agent is None else counterparty_agent.display_name,
+        counterparty_name=party_name(config, counterparty),
         rules=rules,
         text=text,
         message_received_depth=context.message_received_depth,
@@ -171,17 +166,18 @@ async def _run_hooks(
 
 
 async def _judge_refusal(
+    context: ToolRuntimeContext,
+    record: ContactRecord,
+    side: SideName,
     judge: JudgmentConfig,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    question: JudgmentQuestion,
     *,
-    agent_name: str,
-    owner: str,
     rules: str,
     text: str,
 ) -> tuple[Literal["revise", "deny"], str] | None:
-    """Return why the judge keeps ``text`` from being sent, or None when it follows the rules."""
+    """Return why the judge keeps ``text`` of ``side``'s agent from being sent, or None when it follows the rules."""
+    config, runtime_paths = context.current_config, context.runtime_paths
+    sender = record.party(side)
+    question = _contact_rules_question(config, record, side)
     request = build_judgment_request(question, (JudgmentMessage("user", text),), instructions=rules)
     if not request.complete:
         return "deny", f"The message cannot be checked ({request.incomplete_reason})."
@@ -189,7 +185,7 @@ async def _judge_refusal(
         judge,
         config,
         runtime_paths,
-        owner=f"{runtime_paths.storage_root}:{agent_name}",
+        owner=f"{runtime_paths.storage_root}:{sender.id}",
         question_id=_CONTACT_RULES_QUESTION_ID,
     )
     if evaluate is None:
@@ -201,5 +197,5 @@ async def _judge_refusal(
         return None
     return (
         "revise",
-        f"This message may break {owner}'s rules for this contact:\n{rules}\nRewrite it so it follows them.",
+        f"This message may break {sender.owner}'s rules for this contact:\n{rules}\nRewrite it so it follows them.",
     )
