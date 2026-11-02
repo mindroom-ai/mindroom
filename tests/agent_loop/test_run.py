@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
     from agno.run import RunContext as AgnoRunContext
 
+    from mindroom.tool_system.invocation import ToolCall, ToolNext
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolkitClose
 
 
@@ -770,6 +771,38 @@ async def test_an_approved_call_resumes_into_a_completed_run_with_its_result() -
     # The resume request repeats the paused request, system message first.
     assert [message.role for message in model.requests[0].messages] == ["system", "user", "assistant", "tool"]
     assert model.requests[0].messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
+
+
+@pytest.mark.asyncio
+async def test_an_approved_call_runs_with_the_decision_it_resumes_with_whatever_its_function_asks_now() -> None:
+    """A call approved on a paused reply's card is not asked about again, even once its function asks as its job.
+
+    Background jobs turned on while the reply waited, as an upgrade that turns them on by default does, gate the
+    function as a job's first phase; the decision the resume carries already covers the call.
+    """
+    paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$conversation", "run-paused-approval"))
+    gated_as_job = replace(
+        _gated_calculator(),
+        functions=tuple(
+            replace(function, gate=ToolGate.JOB) if function.gate is ToolGate.POLICY else function
+            for function in _gated_calculator().functions
+        ),
+    )
+    gates: list[ToolGate | None] = []
+
+    async def observe(call: ToolCall, call_next: ToolNext) -> object:
+        gates.append(call.function.gate)
+        return await call_next(call.arguments)
+
+    _, record, _ = await _resume(
+        _agent(_model("code-model", answer("6 x 7 = 42.")), [gated_as_job]),
+        paused,
+        approved=[_approval("call-multiply", "multiply", {"a": 6, "b": 7})],
+        hooks=replace(NO_HOOKS, tool_middleware=(observe,)),
+    )
+
+    assert gates == [None]
+    assert record.status is RunStatus.completed
 
 
 @pytest.mark.asyncio
