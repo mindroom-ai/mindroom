@@ -418,16 +418,17 @@ egress_broker:
 ```
 
 - The repositories all belong to the account the App is installed on, and the installation must include them.
-- `read` lets the agent clone, fetch, and read issues and pull requests; `read_write` also lets it push and create or update issues and pull requests.
+- `read` lets the agent clone, fetch, and read issues, pull requests, and their CI results; `read_write` also lets it push and create or update issues and pull requests.
 - The tokens ask for these App permissions, so the App needs at least them:
 
-  | Access | `contents` | `issues` | `pull_requests` | `metadata` |
-  |--------|------------|----------|-----------------|------------|
-  | `read` | read | read | read | read |
-  | `read_write` | write | write | write | read |
+  | Access | `contents` | `issues` | `pull_requests` | `checks` | `statuses` | `metadata` |
+  |--------|------------|----------|-----------------|----------|------------|------------|
+  | `read` | read | read | read | read | read | read |
+  | `read_write` | write | write | write | read | read | read |
 
 - Pushing changes to workflow files under `.github/workflows` needs a permission the tokens do not ask for, so GitHub refuses such pushes.
 - A request for a repository the service does not list, a public one included, gets 403 `repository_not_allowed` and no token.
+  To let agents fetch other public repositories, such as a `pip install git+https://github.com/<owner>/<repository>` dependency, write the service's rules yourself instead of `preset: github`, limited to the App's owner (`path_prefix: /repos/acme/` on `api.github.com` and `uploads.github.com`, `/acme/` on `github.com`, plus `/graphql` on `api.github.com`), so other repositories match no rule and go out without credentials.
 - A request that names no repository in its path, such as GraphQL, which `gh pr create` and `gh pr view` use, gets read access to every listed repository, or read and write when every listed repository is `read_write`.
   In a service that mixes the two, `gh` commands that write through GraphQL therefore fail; `gh api repos/<owner>/<repository>/...` and git work at each repository's own access.
 - GitHub refuses a token anything private outside its repositories and anything its permissions do not allow, so that holds even for requests whose path names no repository.

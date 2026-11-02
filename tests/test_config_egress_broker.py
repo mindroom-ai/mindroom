@@ -647,6 +647,7 @@ def test_github_app_access_ignores_case_as_github_does() -> None:
         ({"acme": "read"}, "github_app repository 'acme' must be owner/repository"),
         ({"acme/api/extra": "read"}, "github_app repository 'acme/api/extra' must be owner/repository"),
         ({"acme/a b": "read"}, "github_app repository 'acme/a b' must be owner/repository"),
+        ({"acme/api.git": "read"}, "github_app repository 'acme/api.git' must be listed without .git"),
         ({"acme/api": "read", "other/api": "read"}, "must all belong to one owner"),
         ({"acme/api": "read", "Acme/API": "read_write"}, "lists a repository twice"),
         ({"acme/api": "write"}, "Input should be 'read' or 'read_write'"),

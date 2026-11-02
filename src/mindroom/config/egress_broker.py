@@ -240,13 +240,16 @@ class EgressGitHubApp(BaseModel):
     @field_validator("repositories")
     @classmethod
     def validate_repositories(cls, value: dict[str, GitHubRepositoryAccess]) -> dict[str, GitHubRepositoryAccess]:
-        """Require at least one `owner/repository`, all of one owner, each listed once whatever its case."""
+        """Require at least one `owner/repository` without `.git`, all of one owner, each listed once whatever its case."""
         if not value:
             msg = "github_app needs at least one repository"
             raise ValueError(msg)
         for repository in value:
             if not _GITHUB_REPOSITORY_PATTERN.fullmatch(repository):
                 msg = f"github_app repository '{repository}' must be owner/repository"
+                raise ValueError(msg)
+            if repository.endswith(".git"):
+                msg = f"github_app repository '{repository}' must be listed without .git"
                 raise ValueError(msg)
         if len({repository.split("/")[0].casefold() for repository in value}) > 1:
             msg = "github_app repositories must all belong to one owner, the account the App is installed on"

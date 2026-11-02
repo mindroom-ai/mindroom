@@ -31,6 +31,7 @@ from mindroom.egress_broker import oauth_source, service, user_services
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import apply_runner_ca_bundle
+from mindroom.egress_broker.github_app import GITHUB_APP_PERMISSIONS
 from mindroom.egress_broker.secrets import (
     Secret,
     SecretMissing,
@@ -1746,7 +1747,7 @@ async def test_a_github_app_service_injects_its_minted_token_and_never_a_stored_
     assert mints == [
         {
             "repositories": ["api"],
-            "permissions": {"contents": "read", "metadata": "read", "issues": "read", "pull_requests": "read"},
+            "permissions": dict(GITHUB_APP_PERMISSIONS["read"]),
         },
     ]
 

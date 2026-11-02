@@ -65,31 +65,39 @@ def test_request_repository_reads_github_repository_paths(host: str, path: str, 
 
 
 def test_read_write_permissions_can_push_and_write_pull_requests() -> None:
-    """The documented permission mapping: reads for `read`, writes for `read_write`, metadata read for both."""
+    """The documented mapping: reads for `read`, writes for `read_write`, and metadata and CI results read for both."""
     assert GITHUB_APP_PERMISSIONS["read"] == {
         "contents": "read",
         "metadata": "read",
         "issues": "read",
         "pull_requests": "read",
+        "checks": "read",
+        "statuses": "read",
     }
     assert GITHUB_APP_PERMISSIONS["read_write"] == {
         "contents": "write",
         "metadata": "read",
         "issues": "write",
         "pull_requests": "write",
+        "checks": "read",
+        "statuses": "read",
     }
 
 
 class _GitHub:
-    """A fake token endpoint that records each mint and answers with a numbered token, or a fixed status."""
+    """A fake token endpoint that records each mint and answers with a numbered token, a fixed status, or no answer."""
 
     def __init__(self) -> None:
         self.mints: list[dict[str, object]] = []
         self.status = 201
+        self.unreachable = False
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         assert request.url == "https://api.github.com/app/installations/67890/access_tokens"
         self.mints.append(json.loads(request.read()))
+        if self.unreachable:
+            msg = "connection refused"
+            raise httpx.ConnectError(msg, request=request)
         if self.status != 201:
             return httpx.Response(self.status, json={"message": "nope"})
         return httpx.Response(
@@ -245,6 +253,23 @@ async def test_a_failed_mint_is_unavailable_and_logged_without_the_response(
     assert log["service"] == "acme"
     assert "HTTP 422" in log["error"]
     assert "nope" not in repr(logs)
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_token_endpoint_is_unavailable_and_logged(
+    manager: CredentialsManager,
+    github: tuple[_GitHub, GitHubAppTokenProvider],
+) -> None:
+    """A network failure reaching GitHub is the same retryable failure, logged with the error's type."""
+    fake, tokens = github
+    fake.unreachable = True
+
+    with capture_logs() as logs:
+        result = await _resolver(manager, tokens)("api.github.com", "/repos/acme/api")
+
+    assert result == SecretGitHubAppUnavailable()
+    [log] = [entry for entry in logs if entry["event"] == "egress_broker_github_app_token_failed"]
+    assert log["error_type"] == "ConnectError"
 
 
 @pytest.mark.asyncio
