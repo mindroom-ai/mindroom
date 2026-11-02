@@ -97,6 +97,7 @@ _MICROSOFT_PROVIDERS = {
             "User.Read.All",
         ),
         status_capabilities=("read and send Teams channel and chat messages, start chats, and read presence",),
+        admin_consent=True,
     ),
     # `OnlineMeetingTranscript.Read.All` needs admin consent.
     "microsoft_meetings": _MicrosoftProviderSpec(

@@ -147,10 +147,13 @@ def test_each_provider_declares_a_requester_scoped_graph_contract(
 
 
 def test_microsoft_admin_consent_providers_stay_out_of_the_group() -> None:
-    groups = {p.id: p.consent_group for p in microsoft_oauth_providers()}
-    assert groups["microsoft_meetings"] is None
-    assert groups["microsoft_people"] is None
-    assert groups["outlook_mail"] == OAuthConsentGroup("microsoft", "Microsoft 365")
+    providers = microsoft_oauth_providers()
+    assert {p.id for p in providers if p.consent_group is None} == {
+        "microsoft_meetings",
+        "microsoft_people",
+        "microsoft_teams",
+    }
+    assert {p.id: p.consent_group for p in providers}["outlook_mail"] == OAuthConsentGroup("microsoft", "Microsoft 365")
 
 
 def test_endpoints_default_to_the_organizations_tenant(tmp_path: Path) -> None:
