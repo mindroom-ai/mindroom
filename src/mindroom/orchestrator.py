@@ -216,7 +216,7 @@ def _raise_orchestrator_exit(*, reason: str) -> NoReturn:
 
 
 class _SignalAwareUvicornServer(uvicorn.Server):
-    """Uvicorn server that marks the shared shutdown event on signal exit."""
+    """Uvicorn server that marks the shared shutdown event on signal exit and stops once that event is set."""
 
     def __init__(
         self,
@@ -260,6 +260,10 @@ class _SignalAwareUvicornServer(uvicorn.Server):
             self.force_exit = True
             return
         self.should_exit = True
+
+    async def on_tick(self, counter: int) -> bool:
+        """End the main loop on every runtime shutdown request, not only a signal, always through Uvicorn's shutdown."""
+        return self._shutdown_requested.is_set() or await super().on_tick(counter)
 
 
 @dataclass
@@ -1785,6 +1789,8 @@ async def _await_api_task_graceful_shutdown(
         **api_server.log_context(),
         timeout_seconds=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS,
     )
+    # Its window is spent, so runtime cleanup does not wait for it a second time.
+    await _cancel_task_if_pending(api_task)
 
 
 async def _cancel_task_if_pending(task: asyncio.Task | None) -> None:
@@ -1807,6 +1813,9 @@ async def _finish_runtime_shutdown(
 ) -> None:
     """Finish one runtime cleanup sequence without duplicating partial teardown."""
     await _cancel_task_if_pending(shutdown_wait_task)
+    if api_task is not None:
+        # Every exit has set shutdown_requested, which stops the server, so a failed run's API gets a signal's window.
+        await asyncio.wait({api_task}, timeout=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS)
     await _cancel_task_if_pending(api_task)
     try:
         try:

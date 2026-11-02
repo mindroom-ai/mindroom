@@ -497,6 +497,42 @@ async def test_mindroom_run_publishes_its_first_config_load_before_the_api_serve
 
 
 @pytest.mark.asyncio
+async def test_a_failed_start_lets_the_dashboard_api_finish_its_own_shutdown(tmp_path: Path) -> None:
+    """A startup error stops the served dashboard API as a signal does, so the app's shutdown runs before exit.
+
+    Cancelling the server instead skips the app's shutdown, and the process then ends with a traceback after the error.
+    """
+    reset_runtime_state()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+
+    async def account_collision(**_kwargs: object) -> None:
+        await _await_until(lambda: get_api_server_address() is not None)
+        msg = "Matrix account collision"
+        raise PermanentStartupError(msg)
+
+    async def blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    with (
+        patch("mindroom.orchestrator.setup_logging"),
+        patch("mindroom.orchestration.storage_preparation.retire_state_root_worker_mounts"),
+        patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=account_collision),
+        patch("mindroom.orchestrator._run_auxiliary_task_forever", new=blocked_auxiliary_task),
+        # The app's lifespan calls this last, once uvicorn has delivered its shutdown.
+        patch("mindroom.api.main.close_usage_export_runner") as app_shutdown_finished,
+        pytest.raises(PermanentStartupError, match="Matrix account collision"),
+    ):
+        await asyncio.wait_for(
+            main(log_level="INFO", runtime_paths=runtime_paths, api=True, api_host="127.0.0.1", api_port=0),
+            timeout=10,
+        )
+
+    app_shutdown_finished.assert_called_once_with(api_main.app)
+
+
+@pytest.mark.asyncio
 async def test_probes_see_a_live_process_that_is_not_ready_while_conversation_storage_converts(tmp_path: Path) -> None:
     """The first start after an upgrade converts before the API binds; probes answer meanwhile and stop when it ends.
 
@@ -1330,9 +1366,10 @@ class TestAgentBot(AgentBotTestBase):
         self,
         tmp_path: Path,
     ) -> None:
-        """Shutdown should wait for API grace timeout before cancelling a stuck API task."""
+        """Shutdown waits one grace window for a stuck API task, then cancels it before runtime cleanup starts."""
         reset_runtime_state()
         events: list[str] = []
+        finish_runtime_shutdown = orchestrator_module._finish_runtime_shutdown
         orchestrator_cancelled = asyncio.Event()
         api_cancelled = asyncio.Event()
         mock_orchestrator = _mock_runtime_orchestrator()
@@ -1367,6 +1404,10 @@ class TestAgentBot(AgentBotTestBase):
         def _record_warning(*_args: object, **_kwargs: object) -> None:
             events.append("timeout_logged")
 
+        async def _record_cleanup(**kwargs: Any) -> None:  # noqa: ANN401
+            events.append("cleanup_started")
+            await finish_runtime_shutdown(**kwargs)
+
         mock_orchestrator.start = AsyncMock(side_effect=_start)
 
         with (
@@ -1377,6 +1418,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_and_blocks),
             patch("mindroom.orchestrator.logger.warning", side_effect=_record_warning) as mock_warning,
+            patch("mindroom.orchestrator._finish_runtime_shutdown", side_effect=_record_cleanup),
             patch("mindroom.orchestrator._EMBEDDED_API_SHUTDOWN_GRACE_SECONDS", 0.01),
         ):
             await asyncio.wait_for(
@@ -1390,7 +1432,8 @@ class TestAgentBot(AgentBotTestBase):
                 timeout=1,
             )
 
-        assert events[:2] == ["timeout_logged", "api_cancelled"]
+        # Cleanup would otherwise give the stuck task a second window.
+        assert events[:3] == ["timeout_logged", "api_cancelled", "cleanup_started"]
         assert orchestrator_cancelled.is_set()
         assert api_cancelled.is_set()
         mock_warning.assert_called_once_with(
