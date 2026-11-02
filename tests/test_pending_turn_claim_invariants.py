@@ -28,10 +28,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, ClaimRefused, TurnClaim
-from tests.conftest import bind_runtime_paths, make_visible_message, test_runtime_paths
+from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.test_turns_focused import (
     _ROOM_ID,
     _SENDER,
@@ -41,6 +40,7 @@ from tests.test_turns_focused import (
     _image_event,
     _replace_harness_deps,
     _room_with_members,
+    _serve_newer_requester_message,
     _text_event,
 )
 
@@ -447,18 +447,8 @@ async def test_superseded_turn_releases_every_claim(
     releases that claim itself because the replay guard settles the turn as
     ignored before any response takes it.
     """
-    newer_history = thread_history_result(
-        [
-            make_visible_message(
-                sender=_SENDER,
-                body="newer follow-up from the same requester",
-                event_id="$newer:localhost",
-                timestamp=2_000_000,
-            ),
-        ],
-        is_full_history=True,
-    )
-    harness = _build_harness(config, tmp_path, thread_history=newer_history)
+    harness = _build_harness(config, tmp_path)
+    await _serve_newer_requester_message(harness, config, mentions=None, voice=False, history_degraded=False)
     ledger = _install_claim_ledger(monkeypatch, harness.turn_store)
     room = _room_with_members(config, "general")
     event = _text_event("older superseded message", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)

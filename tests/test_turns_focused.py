@@ -1036,25 +1036,8 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
     The dispatch replay guard must consume the exact callback obligation without
     recording a turn, evaluating policy, or sending anything.
     """
-    newer_history = thread_history_result(
-        [
-            make_visible_message(
-                sender=_SENDER,
-                body="newer follow-up from the same requester",
-                event_id="$newer:localhost",
-                timestamp=2_000_000,
-            ),
-        ],
-        is_full_history=True,
-    )
-    harness = _build_harness(config, tmp_path, thread_history=newer_history)
-    newer = _text_event(
-        "newer follow-up from the same requester",
-        event_id="$newer:localhost",
-        thread_id=_THREAD_ROOT,
-        origin_server_ts=2_000_000,
-    )
-    await harness.journal_principal.admit(_inbound_event(_ROOM_ID, newer, EventKind.MESSAGE, EventClass.ACTIONABLE))
+    harness = _build_harness(config, tmp_path)
+    await _serve_newer_requester_message(harness, config, mentions=None, voice=False, history_degraded=False)
     room = _room_with_members(config, "general")
     event = _text_event("older superseded message", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
 
@@ -1093,23 +1076,25 @@ async def _serve_newer_requester_message(
     harness: _Harness,
     config: Config,
     *,
-    mentions: str,
+    mentions: str | None,
     voice: bool,
     history_degraded: bool,
     transcribed: bool = True,
 ) -> nio.Event:
     """Admit one newer requester message to the journal and serve it as this thread's history.
 
-    A voice note mentions nobody itself; the transcript ingress stored for it
-    names whom it addresses. A degraded read lets only the journal prove the
-    newer message exists.
+    ``mentions`` names the one entity it mentions, or None for nobody. A voice
+    note mentions nobody itself; the transcript ingress stored for it names
+    whom it addresses. A degraded read lets only the journal prove the newer
+    message exists.
     """
     content: dict[str, Any] = {
-        "body": f"@{mentions} what do you think?",
+        "body": "what do you think?" if mentions is None else f"@{mentions} what do you think?",
         "msgtype": "m.text",
-        "m.mentions": {"user_ids": [_entity_user_id(config, mentions)]},
         "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
     }
+    if mentions is not None:
+        content["m.mentions"] = {"user_ids": [_entity_user_id(config, mentions)]}
     newer: nio.Event
     if voice:
         newer = _voice_note_event(event_id="$newer:localhost", thread_id=_THREAD_ROOT, origin_server_ts=2_000_000)
@@ -1221,19 +1206,27 @@ async def test_a_voice_note_not_transcribed_yet_never_supersedes(
 
 
 @pytest.mark.asyncio
-async def test_a_newer_message_this_agent_already_settled_never_supersedes(config: Config, tmp_path: Path) -> None:
-    """A newer voice note this agent already ignored cannot answer the older turn.
+@pytest.mark.parametrize(("voice", "mentions"), [(True, "research"), (False, None)])
+async def test_a_newer_message_this_agent_already_settled_never_supersedes(
+    config: Config,
+    tmp_path: Path,
+    voice: bool,
+    mentions: str | None,
+) -> None:
+    """A newer message this agent already settled without answering cannot answer the older turn.
 
     A graceful restart settles a queued voice note for another agent as ignored
-    before the older turn replays, and turn retention then drops its transcript,
-    so only the journal still knows that this agent owes the note nothing.
+    before the older turn replays, and turn retention then drops its transcript.
+    A message that mentions nobody but that this agent skipped, as when another
+    agent is chosen to answer it, likewise never becomes this agent's turn.
+    Only the journal still knows that this agent owes either message nothing.
     """
     harness = _build_harness(config, tmp_path)
     newer = await _serve_newer_requester_message(
         harness,
         config,
-        mentions="research",
-        voice=True,
+        mentions=mentions,
+        voice=voice,
         history_degraded=False,
     )
     await harness.journal_principal.settle(newer.event_id)
