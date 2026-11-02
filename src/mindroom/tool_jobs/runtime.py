@@ -671,7 +671,7 @@ class ToolJobRuntime:
             entries.sort(key=lambda entry: entry.job.status in TERMINAL_STATUSES)
             return [await self._snapshot(entry) for entry in entries[offset : offset + limit]]
 
-    async def wait(
+    async def wait(  # noqa: C901
         self,
         job_id: str,
         *,
@@ -732,6 +732,10 @@ class ToolJobRuntime:
                 message.cancel()
             if not retained:
                 await self.release_wait(job_id, claim)
+            if message is not None:
+                # The message waiter, and any judgment it awaits, ends with the wait; awaited after the release, which a
+                # second cancellation must not skip.
+                await asyncio.gather(message, return_exceptions=True)
 
     def hold_inline(self, job_id: str, claim: JobClaim) -> None:
         """Treat a claimed outcome as the result of the call that started the job while that call's reply runs."""
