@@ -495,8 +495,8 @@ async def _rewrite_working_session_for_compaction(
                 summary_input_budget_tokens=summarizer.model.input_budget_tokens,
             )
             break
-        # Sized as replay planning sizes a saved summary beside the static prompt; encoding stays off the event loop.
-        summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, chunk.summary, counter)
+        # Sized as replay planning sizes a saved summary, never below it while the vocabulary loads, off the event loop.
+        summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, chunk.summary, counter, upper_bound=True)
         if (error := _summary_budget_error(summary_tokens, max_summary_tokens)) is not None:
             _stop_compaction(error, persisted_session.session_id, scope, compacted_run_count)
             break
@@ -621,7 +621,13 @@ async def compact_running_turn(
     runs = [*basis.runs, *snapshots]
     summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
     # Sized as the rewritten request is, so a stored summary keeps it within the limit; sizing stays off the loop.
-    summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, summary, counter, as_request=True)
+    summary_tokens = await asyncio.to_thread(
+        estimate_summary_text_tokens,
+        summary,
+        counter,
+        as_request=True,
+        upper_bound=True,
+    )
     if (error := _summary_budget_error(summary_tokens, max_summary_tokens)) is not None:
         raise error
     # Hooks see the folded messages themselves, not the per-call units the summarizer reads, under the running turn's

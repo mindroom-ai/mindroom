@@ -941,6 +941,17 @@ async def test_a_fold_whose_summary_the_next_reply_cannot_replay_is_not_stored(
     assert next_reply.compaction_reply_outcome == "failed"
 
 
+class _DenseTextRoute:
+    """A route whose own estimate counts each CJK character as a token, which a quarter token per character undercounts."""
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
+        texts = [str(message.content) for message in messages]
+        return sum(-(-len(text) // 4) + sum(character >= "\u3000" for character in text) for text in texts)
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        return False
+
+
 @pytest.mark.asyncio
 async def test_a_fold_sizes_its_summary_as_the_route_sizes_the_request(
     tmp_path: Path,
@@ -953,9 +964,9 @@ async def test_a_fold_sizes_its_summary_as_the_route_sizes_the_request(
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
     model = ToolLoopModel(tool_rounds=5)
-    model.token_counter = responses_adapter(tmp_path, "gpt-6-luna", store=False).token_counter
+    model.token_counter = fake_token_counter(replay=_DenseTextRoute())
     summary_calls.summary = "事实" * 5000
-    assert estimate_summary_text_tokens(summary_calls.summary, fake_token_counter()) < 3000
+    assert estimate_summary_text_tokens(summary_calls.summary, model.token_counter) < 3000
     assert estimate_summary_text_tokens(summary_calls.summary, model.token_counter, as_request=True) > 3500
     lifecycle = RecordingCompactionLifecycle()
 

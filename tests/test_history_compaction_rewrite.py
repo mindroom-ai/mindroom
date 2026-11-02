@@ -1276,6 +1276,42 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
 
 
 @pytest.mark.asyncio
+async def test_a_summary_is_never_stored_on_a_count_that_undercounts_it_while_the_vocabulary_loads(
+    tmp_path: Path,
+) -> None:
+    """Every later reply replays a stored summary, so the check before storing it counts its bytes until o200k_base loads.
+
+    A quarter token per character counts this text at a fraction of its tokens.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_filler_run("run-1", words=200)])
+    seed_session(storage, session)
+    summary = "要点" * 500
+    loading = TokenCounter(estimate=lambda _text: None)
+    stand_in = estimate_summary_text_tokens(summary, loading)
+    assert stand_in < 2_000 < estimate_summary_text_tokens(summary, loading, upper_bound=True)
+
+    with pytest.raises(RuntimeError, match="The summary exceeds the history budget"):
+        await compact_scope_history(
+            storage=storage,
+            session=session,
+            state=HistoryScopeState(),
+            summarizer=_summarizer(summary_model(summary), 50_000),
+            available_history_budget=1,
+            max_summary_tokens=2_000,
+            before_tokens=2,
+            replay_window_tokens=16_000,
+            threshold_tokens=1,
+            progress=None,
+            complete=_reported,
+            counter=loading,
+        )
+
+    assert summary_rows_of(storage, "agent:test_agent") == []
+
+
+@pytest.mark.asyncio
 async def test_compact_scope_history_keeps_earlier_chunks_when_a_later_summary_exceeds_the_budget(
     tmp_path: Path,
 ) -> None:

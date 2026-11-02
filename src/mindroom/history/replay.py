@@ -193,16 +193,22 @@ def estimate_summary_tokens(session: ConversationSession, counter: TokenCounter)
     return estimate_summary_text_tokens(summary, counter)
 
 
-def estimate_summary_text_tokens(summary: str, counter: TokenCounter, *, as_request: bool = False) -> int:
+def estimate_summary_text_tokens(
+    summary: str,
+    counter: TokenCounter,
+    *,
+    as_request: bool = False,
+    upper_bound: bool = False,
+) -> int:
     """Estimate the tokens the summary message holding ``summary`` adds to a request ``counter`` sizes.
 
-    Replay planning counts its text; ``as_request`` sizes it as a rewritten request's messages are sized, by the
-    route's request estimate, never below that count.
+    Replay planning counts its text. ``as_request`` sizes it as a rewritten request's messages are sized, by the
+    route's request estimate, never below that count. ``upper_bound`` keeps the count from undercounting while the
+    vocabulary loads, as a check before storing a summary, which every later reply replays, needs.
     """
     message = compaction_summary_message(summary, run_local=False)
-    if as_request:
-        return estimate_request_messages_tokens([message], counter=counter)
-    return count(counter, str(message.content))
+    tokens = count(counter, str(message.content), upper_bound=upper_bound)
+    return max(tokens, estimate_request_messages_tokens([message], counter=counter)) if as_request else tokens
 
 
 def scope_visible_runs(session: ConversationSession) -> list[AnyRunRecord]:
