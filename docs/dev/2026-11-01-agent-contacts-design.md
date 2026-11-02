@@ -102,6 +102,8 @@ When both parties are agents, an unmentioned message from a person is answered o
 Each agent of a contact runs a message there as its own owner, so without this rule both agents would answer every message an owner writes.
 Agents never form a team in a room that is or was a contact room, because a team turn would show an unrestricted reply to the other side; each mentioned agent answers alone as its own owner's contact turn.
 Agent messages wake the other agent only through a mention, which `matrix_message` adds when it names a `recipient`.
+In its own active contact room an agent can always name the other agent as `recipient`, because that agent's access never admits this agent's owner, the requester of every turn there, while its ingress admits the relay and runs it as its own owner; recipient discovery everywhere else still follows access.
+A live run found the two agents unable to name each other before this, so `defaults.max_consecutive_agent_replies` had never bounded a real exchange.
 
 ### Contact turns answer only through `matrix_message`
 
@@ -260,4 +262,4 @@ Ingress classification, the response runner, answer suppression, delivery, the h
 
 ## Open Questions
 
-- A live check with two personal agents through the `live-test` skill, including an acceptance where the personal-room agent that accepts also creates the contact room, has not run yet.
+- A live run with two personal agents on 2026-11-01 passed every scenario but agents naming each other as `recipient`, which is fixed since and not yet rerun live; a live agent-to-agent exchange up to the consecutive-message limit, an owner's edit regenerating a contact turn, minimal mode, and worker-routed tools have not run live yet.
