@@ -72,13 +72,15 @@ _MONTH = (
     r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?"
 )
 # Times and durations, such as 9:30, 16:9, 1:23.5, 100:00, 5 pm, or 5 a, with one or more digits per part.
-_TIME = r"[0-9]+(?::[0-9]+){0,2}(?:\.[0-9]+)?\s*[ap](?:\.?m\.?)?|[0-9]+(?::[0-9]+){1,2}(?:\.[0-9]+)?"
+_TIME = r"[0-9]{1,2}(?::[0-9]+(?::[0-9]+(?:\.[0-9]+)?)?)?\s*[ap](?:\.?m\.?)?|[0-9]+(?::[0-9]+){1,2}(?:\.[0-9]+)?"
 _NUMERIC_DATE = r"[0-9]{1,4}\s*[-/.]\s*[0-9]{1,2}(?:\s*[-/.]\s*[0-9]{1,4})?|[0-9]{1,2}\s*[-/.]\s*[0-9]{4}"
 # Text Excel stores as a date, time, fraction, boolean, or error value, as it does when the text is typed.
 _CONVERTED_TEXT = (
     re.compile(rf"(?:{_NUMERIC_DATE})(?:\s+(?:{_TIME}))?", re.IGNORECASE),
-    re.compile(rf"[0-9]{{1,2}}[-\s/]{_MONTH}(?:[-\s,/]+[0-9]{{1,4}})?", re.IGNORECASE),
-    re.compile(rf"{_MONTH}[-\s,/.]+[0-9]{{1,4}}(?:[-\s,]+[0-9]{{1,4}})?", re.IGNORECASE),
+    re.compile(rf"[0-9]{{1,2}}[-\s/]{_MONTH}(?:[-\s,/]+[0-9]{{1,4}})?(?:\s+(?:{_TIME}))?", re.IGNORECASE),
+    re.compile(rf"{_MONTH}[-\s,/.]+[0-9]{{1,4}}(?:[-\s,]+[0-9]{{1,4}})?(?:\s+(?:{_TIME}))?", re.IGNORECASE),
+    # A time before its date.
+    re.compile(rf"(?:{_TIME})\s+(?:{_NUMERIC_DATE})", re.IGNORECASE),
     re.compile(_TIME, re.IGNORECASE),
     re.compile(r"[0-9]+\s+[0-9]+/[0-9]+"),
     re.compile(r"true|false", re.IGNORECASE),
@@ -417,7 +419,7 @@ class _RangeEdit:
                 msg = (
                     f"{cell} is formatted as text, so Excel would store the formula {value!r} as text and nothing "
                     "was written. Give that cell's number_formats entry another format, such as General, or write null to "
-                    "leave the cell as it is."
+                    "keep its value."
                 )
                 raise MicrosoftGraphError(code="formula_as_text", message=msg, cell=cell)
             if number_format != _TEXT_NUMBER_FORMAT and _excel_would_convert(value):
@@ -805,12 +807,12 @@ class MicrosoftFilesTools(Toolkit):
         It writes nothing and fails with cells_changed when the range no longer holds expected_formulas, such as
         after someone edited it in Excel; show the requester current_formulas and ask again.
         It writes nothing and fails with converted_text for text Excel would store as a number, date, time,
-        boolean, or formula, such as 0042 or 1/2; write numbers as JSON numbers and dates as YYYY-MM-DD, or set
-        number_formats to @ for cells that keep text. It fails with ambiguous_change for a cell that would change
-        only between a number and the same text, which approval cards show alike. It fails with formula_as_text
-        for a formula in a text-formatted cell unless number_formats gives that cell another format, such as
-        General. The result reports verified false and lists differences when Excel stored a cell differently from
-        what was written; tell the requester.
+        boolean, or formula, such as 0042 or 1/2; write numbers as JSON numbers and dates as YYYY-MM-DD or
+        YYYY-MM-DD HH:MM, or set number_formats to @ for cells that keep text. It fails with ambiguous_change for a
+        cell that would change only between a number and the same text, which approval cards show alike. It fails
+        with formula_as_text for a formula in a text-formatted cell unless number_formats gives that cell another
+        format, such as General, or the value is null. The result reports verified false and lists differences when
+        Excel stored a cell differently from what was written; tell the requester.
 
         Args:
             file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.

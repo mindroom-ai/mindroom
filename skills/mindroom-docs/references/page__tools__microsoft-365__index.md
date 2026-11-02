@@ -434,7 +434,7 @@ To give an agent read access only, set `write: false` on the tool.
 | `not_a_file_attachment` | The mail attachment is an attached Outlook item or a cloud link, which cannot be downloaded. |
 | `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |
 | `cells_changed` | A cell's value or formula differs from what was read; nothing was written, and `current_formulas` shows what the range holds now. |
-| `converted_text` | Excel would store the text in `cell` as a number, date, time, boolean, error value, or formula; write a number or a `YYYY-MM-DD` date, or set that cell's `number_formats` entry to `@`. |
+| `converted_text` | Excel would store the text in `cell` as a number, date, time, boolean, error value, or formula; write a number or a `YYYY-MM-DD` or `YYYY-MM-DD HH:MM` date, or set that cell's `number_formats` entry to `@`. |
 | `ambiguous_change` | `cell` would change only between a number and the same text, which approval cards show alike; write the type the cell holds, or `null`. |
 | `formula_as_text` | `cell` is formatted as text, so Excel would keep the formula as text; set that cell's `number_formats` entry to another format, such as `General`. |
 | `locked` | The file is checked out or locked; try again later. |

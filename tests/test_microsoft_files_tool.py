@@ -1020,7 +1020,7 @@ def test_excel_update_writes_only_over_what_was_read(
     "text",
     [
         *["0042", "1/2", "3-4", "Jan 5", "12:30", "TRUE", "1e5", "45%", "$1,000", "+A1", "@x", "2026-13-45"],
-        *["16:9", "3:1", "1:2:3", "1:23.5", "100:00", "5 pm", "5 a"],
+        *["16:9", "3:1", "1:2:3", "1:23.5", "100:00", "5 pm", "5 a", "Jan 5 2026 10:30", "10:30 1/2/2026"],
     ],
 )
 def test_excel_update_refuses_text_excel_would_convert(
@@ -1037,7 +1037,10 @@ def test_excel_update_refuses_text_excel_would_convert(
     assert _patches(graph) == []
 
 
-@pytest.mark.parametrize("text", ["Q3 plan", "SKU-0042", '=A1&"x"', "", "-", "1/2/3/4", "v1.2.3"])
+@pytest.mark.parametrize(
+    "text",
+    ["Q3 plan", "SKU-0042", '=A1&"x"', "", "-", "1/2/3/4", "v1.2.3", "101A", "1.0a", "John 3:16", "16:9 ratio"],
+)
 def test_excel_update_writes_text_excel_keeps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _workbook([["", "old"]]))
 
