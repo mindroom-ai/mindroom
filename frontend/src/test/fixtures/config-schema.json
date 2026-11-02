@@ -9,6 +9,19 @@
           "title": "Display Name",
           "type": "string"
         },
+        "matrix_username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Matrix localpart for the account MindRoom creates for this agent, instead of mindroom_<agent key>; set it before the agent's first start",
+          "title": "Matrix Username"
+        },
         "role": {
           "default": "",
           "description": "Description of the agent's purpose",
