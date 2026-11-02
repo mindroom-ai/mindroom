@@ -18,6 +18,7 @@ from mindroom.llm.media import Image
 from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import ModelRequest, TokenCounter, ToolSpec
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.native_compaction import checkpoint_items
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, plain_request_parts, route_request_tokens
 from tests.providers.anthropic_family_support import FAMILIES as CLAUDE_FAMILIES
@@ -139,19 +140,23 @@ def test_a_route_sizes_every_text_its_body_sends(path: Path, tmp_path: Path, mon
 
 
 @pytest.mark.parametrize("path", GOLDENS, ids=golden_id)
-def test_an_answer_and_what_follows_it_add_no_more_than_their_own_size(path: Path, tmp_path: Path) -> None:
-    """A request sized from an answer on is never more than the request before it plus that tail."""
+def test_an_answer_and_what_follows_it_add_their_own_size(path: Path, tmp_path: Path) -> None:
+    """A request sized from an answer on is the request before it plus that tail, never less and barely more.
+
+    The tail counts nothing the request before it held; counted apart, the two can split a token or a JSON list where
+    they join. Only answers after the latest native checkpoint anchor, since the checkpoint replaces what precedes it.
+    """
     golden = load_golden(path)
     adapter = _adapter(path, tmp_path)
     request = golden_request(golden["input"], native=adapter.native_history_route)
+    route = request.native_compaction.route if request.native_compaction is not None else None
+    checkpoints = [index for index, message in enumerate(request.messages) if checkpoint_items(message, route)]
+    whole = adapter.request_tokens(request)
     for index, message in enumerate(request.messages):
-        if message.role != "assistant" or index == 0:
+        if message.role != "assistant" or index == 0 or index <= max(checkpoints, default=-1):
             continue
         prefix = replace(request, messages=request.messages[:index])
-        assert adapter.request_tokens(request) <= adapter.request_tokens(prefix) + adapter.request_tokens(
-            request,
-            start=index,
-        )
+        assert whole <= adapter.request_tokens(prefix) + adapter.request_tokens(request, start=index) <= whole + 4
 
 
 @pytest.mark.parametrize("path", GOLDENS, ids=golden_id)
