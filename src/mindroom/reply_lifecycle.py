@@ -1518,9 +1518,8 @@ def replay_superseded(
 
     A reply that still owes Matrix a write is never superseded, because its
     replay is what resolves that write; nor is one ``replay_dropped`` keeps,
-    such as a coalesced turn's reply whose newer message, the one that
-    superseded this replay, still waits to replay: ``sources_pending`` says
-    whether any of ``last``'s sources besides the superseded ones still waits.
+    such as a coalesced turn's reply while another of its messages, besides
+    the superseded ones, still waits to replay (``sources_pending``).
     """
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
