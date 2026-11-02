@@ -117,9 +117,13 @@ class _FakeClaudeSDKClient:
 
     async def _reply(self) -> list[Message]:
         """Return the messages Claude Code sends for the newest prompt."""
+        return self._answer(f"Echo: {self.queries[-1]}")
+
+    def _answer(self, text: str) -> list[Message]:
+        """Return the newest prompt's echo, then ``text`` as its answer, and the turn's result."""
         return [
             self._echo(),
-            AssistantMessage(content=[TextBlock(text=f"Echo: {self.queries[-1]}")], model="claude-sonnet"),
+            AssistantMessage(content=[TextBlock(text=text)], model="claude-sonnet"),
             ResultMessage(
                 subtype="success",
                 duration_ms=1,
@@ -472,19 +476,7 @@ class _GatewayProbeClaudeSDKClient(_FakeClaudeSDKClient):
                 if isinstance(block, dict) and block.get("type") == "text":
                     text = str(block.get("text", ""))
                     break
-        return [
-            self._echo(),
-            AssistantMessage(content=[TextBlock(text=text or "gateway-empty")], model="claude-probe"),
-            ResultMessage(
-                subtype="success",
-                duration_ms=1,
-                duration_api_ms=1,
-                is_error=False,
-                num_turns=1,
-                session_id=str(payload.get("id", "gateway-session-unknown")),
-                total_cost_usd=0.001,
-            ),
-        ]
+        return self._answer(text or "gateway-empty")
 
 
 async def _in_call[T](context: ToolCallContext, call: Awaitable[T]) -> T:
@@ -1726,10 +1718,6 @@ async def test_claude_turns_read_by_a_stopped_call_still_count(
     ]
 
 
-async def _end_session(manager: claude_agent_module._ClaudeSessionManager, session_key: str) -> None:
-    await manager.close(session_key)
-
-
 async def _expire(manager: claude_agent_module._ClaudeSessionManager, session_key: str) -> None:
     session = manager._sessions[session_key]
     session.last_used_at -= session.ttl_seconds + 1
@@ -1746,8 +1734,12 @@ async def _evict(manager: claude_agent_module._ClaudeSessionManager, session_key
 @pytest.mark.parametrize(
     ("close", "stopped"),
     [
-        pytest.param(_end_session, False, id="end-session"),
-        pytest.param(_end_session, True, id="end-session-stopped-while-disconnecting"),
+        pytest.param(claude_agent_module._ClaudeSessionManager.close, False, id="end-session"),
+        pytest.param(
+            claude_agent_module._ClaudeSessionManager.close,
+            True,
+            id="end-session-stopped-while-disconnecting",
+        ),
         pytest.param(_expire, False, id="expiry"),
         pytest.param(_evict, False, id="eviction"),
     ],
@@ -1756,7 +1748,7 @@ async def test_unread_turns_count_when_their_session_closes(
     tmp_path: Path,
     fake_manager: claude_agent_module._ClaudeSessionManager,
     monkeypatch: pytest.MonkeyPatch,
-    close: Callable[[claude_agent_module._ClaudeSessionManager, str], Awaitable[None]],
+    close: Callable[[claude_agent_module._ClaudeSessionManager, str], Awaitable[object]],
     stopped: bool,
 ) -> None:
     """Complete turns no call read, such as a stopped call's answer, count toward its requester at session close."""

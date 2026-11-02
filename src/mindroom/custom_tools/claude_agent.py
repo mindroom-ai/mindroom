@@ -278,12 +278,23 @@ class _ClaudeSessionManager:
 
 
 async def _close(session: _ClaudeSessionState) -> None:
-    """Stop the session's client once no call reads it, then count the complete turns no call read."""
+    """Stop the session's client once no call reads it, then count the complete turns no call read.
+
+    Such a turn is, for example, a stopped call's answer.
+    """
     async with session.lock:
         session.close_requested.set()
         with suppress(Exception):
             await session.owner
-        await _record_unread_turns(session)
+        turn = _ClaudeTurn()
+        while not session.messages.empty():
+            message = session.messages.get_nowait()
+            if isinstance(message, AssistantMessage):
+                _add_response(turn, message)
+            elif isinstance(message, ResultMessage):
+                turn.result = message
+                await _record_turn_usage(turn, session.model, session.usage_owner, session.requester_id)
+                turn = _ClaudeTurn()
 
 
 async def _queue_messages(client: ClaudeSDKClient, messages: asyncio.Queue[Message | Exception]) -> None:
@@ -380,19 +391,6 @@ async def _record_turn_usage(
     except Exception as error:
         # Claude has already done the work, so a usage write failure must not hide its reply.
         logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
-
-
-async def _record_unread_turns(session: _ClaudeSessionState) -> None:
-    """Count the complete turns no call read, such as a stopped call's answer, as their session closes."""
-    turn = _ClaudeTurn()
-    while not session.messages.empty():
-        message = session.messages.get_nowait()
-        if isinstance(message, AssistantMessage):
-            _add_response(turn, message)
-        elif isinstance(message, ResultMessage):
-            turn.result = message
-            await _record_turn_usage(turn, session.model, session.usage_owner, session.requester_id)
-            turn = _ClaudeTurn()
 
 
 async def _prompt_message(prompt: str, prompt_id: str) -> AsyncIterator[dict[str, typing.Any]]:
@@ -745,20 +743,18 @@ class ClaudeAgentTools(Toolkit):
                 session.claude_session_id = message.session_id
                 await _record_turn_usage(turn, session.model, session.usage_owner, session.requester_id)
                 if answered or not _self_started(message):
-                    break
+                    text = "\n".join(filter(None, map(_turn_text, turns))) or _NO_TEXT
+                    return self._format_response_output(text, tool_names, message)
                 turns.append(_ClaudeTurn())
-
-        text = "\n".join(filter(None, map(_turn_text, turns))) or _NO_TEXT
-        return self._format_response_output(text, tool_names, turns[-1].result)
 
     def _format_response_output(
         self,
         response_text: str,
         tool_names: list[str],
-        result: ResultMessage | None,
+        result: ResultMessage,
     ) -> str:
         lines = [response_text]
-        if result is not None and result.total_cost_usd is not None:
+        if result.total_cost_usd is not None:
             lines.append(f"[Claude session cost: ${result.total_cost_usd:.4f}]")
         if tool_names:
             unique_tools = ", ".join(sorted(set(tool_names)))
