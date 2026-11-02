@@ -714,7 +714,6 @@ class ClaudeAgentTools(Toolkit):
                 prompt_id = str(uuid4())
                 await session.client.query(_prompt_message(trimmed_prompt, prompt_id))
                 response = await self._collect_response(session, prompt_id)
-                session.last_used_at = monotonic()
             except Exception as exc:
                 # Any failure leaves the session unusable, such as a control request Claude Code never answered.
                 session_error = self._format_session_error(
@@ -725,6 +724,9 @@ class ClaudeAgentTools(Toolkit):
                     fork_session=fork_session,
                     stderr_lines=session.stderr_lines,
                 )
+            finally:
+                # The session is idle from the end of the call, however it ends, such as a stopped one.
+                session.last_used_at = monotonic()
 
         if session_error is not None:
             await self._session_manager.close_session(session)

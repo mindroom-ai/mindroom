@@ -849,6 +849,41 @@ async def test_claude_send_does_not_expire_active_session_during_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_a_stopped_call_starts_its_sessions_idle_time_when_it_stops(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call stopped after running past the TTL leaves Claude Code working, so the sweep counts idle time from then."""
+    clock = {"now": 0.0}
+    _BlockingPromptFakeClaudeSDKClient.instances = []
+    _BlockingPromptFakeClaudeSDKClient.blocked_prompt = "hold"
+    _BlockingPromptFakeClaudeSDKClient.blocked_query_started = asyncio.Event()
+    _BlockingPromptFakeClaudeSDKClient.release_blocked_query = asyncio.Event()
+    monkeypatch.setattr(claude_agent_module, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _BlockingPromptFakeClaudeSDKClient)
+    monkeypatch.setattr(claude_agent_module, "_SWEEP_INTERVAL_SECONDS", 0)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", session_ttl_minutes=1)
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+
+    stopped = asyncio.create_task(_in_call(run_context, tools.claude_send("hold", session_label="long")))
+    try:
+        await asyncio.wait_for(_BlockingPromptFakeClaudeSDKClient.blocked_query_started.wait(), timeout=5)
+        clock["now"] = 61.0
+        stopped.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopped
+    finally:
+        _BlockingPromptFakeClaudeSDKClient.release_blocked_query.set()
+
+    # Once the sweep has closed another session idle past its TTL, it has also seen the stopped call's session.
+    await _in_call(run_context, tools.claude_send("quick", session_label="probe"))
+    probe = fake_manager._sessions["mindroom:session-1:probe"]
+    probe.last_used_at -= probe.ttl_seconds + 1
+    await _until(lambda: probe.key not in fake_manager._sessions)
+    assert "mindroom:session-1:long" in fake_manager._sessions
+
+
+@pytest.mark.asyncio
 async def test_claude_send_same_session_is_serialized_by_lock(
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
