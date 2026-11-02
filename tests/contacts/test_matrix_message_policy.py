@@ -563,6 +563,24 @@ async def test_a_contact_turn_cannot_write_into_its_room_once_the_contact_is_rem
 
 
 @pytest.mark.asyncio
+async def test_a_removal_while_the_policy_runs_stops_the_message(tmp_path: Path) -> None:
+    """The policy can take seconds, so a contact removed meanwhile receives nothing, even what the policy let through."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+
+    @hook(EVENT_CONTACT_BEFORE_SEND)
+    async def removed_meanwhile(_ctx: ContactBeforeSendContext) -> None:
+        _remove(paths)
+
+    context = _context(config, paths, removed_meanwhile)
+
+    payload = await _call(context, message="Dinner at eight?")
+
+    assert (payload["status"], payload["message"]) == ("error", REMOVED_ERROR)
+    assert _sent(context) == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("room_id", [CONTACT_ROOM, PERSONAL_ROOM])
 @pytest.mark.parametrize("status", ["active", "removed"])

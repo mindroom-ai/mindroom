@@ -128,15 +128,21 @@ class MatrixMessageOperations:
         """Run the contact policy on a message into a contact room of this agent, before anything is sent or stored.
 
         Return None for any other room, the verdict whose text to send, or the result that stops the message.
-        A removed contact's room takes nothing more, even from a turn that started before the removal.
+        A removed contact's room takes nothing more, even from a turn that started before the removal or a message
+        whose policy check was still running.
         """
         contact = contact_room(context.current_config, context.runtime_paths, room_id, context.agent_name)
         if contact is None:
             return None
         record, side = contact
+        removed = self._result(
+            "error",
+            action=action,
+            room_id=room_id,
+            message=f"Error: contact {record.id} was removed, so nothing more can be sent into its room",
+        )
         if record.status != "active":
-            removed = f"Error: contact {record.id} was removed, so nothing more can be sent into its room"
-            return self._result("error", action=action, room_id=room_id, message=removed)
+            return removed
         if text is None or not text_only:
             return self._result("error", action=action, room_id=room_id, message=_CONTACT_TEXT_ONLY_ERROR)
         verdict = await check_contact_message(
@@ -148,6 +154,9 @@ class MatrixMessageOperations:
             text=text,
             adds_message=action == "send",
         )
+        current = contact_room(context.current_config, context.runtime_paths, room_id, context.agent_name)
+        if current is None or current[0].status != "active":
+            return removed
         if verdict.action == "send":
             return verdict
         retry = " Revise the message and send it again." if verdict.action == "revise" else ""
