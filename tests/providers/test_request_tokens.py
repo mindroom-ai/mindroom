@@ -16,7 +16,7 @@ import pytest
 
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message, model_provenance
-from mindroom.llm.provider import ModelRequest, TokenCounter, ToolSpec
+from mindroom.llm.provider import DeferredTools, ModelRequest, TokenCounter, ToolSpec
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_items
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
@@ -312,6 +312,51 @@ def test_claude_counts_a_web_search_result_s_page_ciphertext_a_quarter_token_per
         return _claude_answer(route, search, found, text)
 
     assert _difference(route, answer("Q" * 8_000), answer("Q" * 4)) == opaque_tokens(8_000) - opaque_tokens(4)
+
+
+@pytest.mark.parametrize("searched", ["before", "after"])
+def test_claude_counts_a_deferred_tool_in_the_tail_only_when_the_tail_loads_it(tmp_path: Path, searched: str) -> None:
+    """A tool search before the answer a request is sized from loaded its tool into what that answer reported."""
+    route = _route("anthropic", tmp_path)
+    lookup = ToolSpec(
+        name="lookup_order",
+        description="Look up an order by its id.",
+        parameters={"type": "object", "properties": {"order_id": {"type": "string"}}},
+        strict=None,
+    )
+    search = {
+        "type": "server_tool_use",
+        "id": "srvtoolu_1",
+        "name": "tool_search_tool_regex",
+        "input": {"pattern": "order"},
+    }
+    found = {
+        "type": "tool_search_tool_result",
+        "tool_use_id": "srvtoolu_1",
+        "content": {
+            "type": "tool_search_tool_search_result",
+            "tool_references": [{"type": "tool_reference", "tool_name": "lookup_order"}],
+        },
+    }
+    searching = _claude_answer(route, search, found, {"type": "text", "text": "Found the order tool."})
+    plain = _claude_answer(route, {"type": "text", "text": "Pack a light rain jacket."})
+    first, second = (searching, plain) if searched == "before" else (plain, searching)
+    request = ModelRequest(
+        messages=(
+            Message(role="user", content="Where is my order?"),
+            first,
+            Message(role="user", content="And the weather?"),
+            second,
+            Message(role="user", content="Thanks."),
+        ),
+        tools=(lookup,),
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"})),
+    )
+
+    tail = route.request_tokens(request, start=3)
+    without_the_tool = route.request_tokens(replace(request, tools=()), start=3)
+
+    assert tail == without_the_tool if searched == "before" else tail > without_the_tool
 
 
 def test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks(tmp_path: Path) -> None:
