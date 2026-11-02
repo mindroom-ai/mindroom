@@ -21,6 +21,7 @@ from unittest.mock import patch
 import mcp.types as mcp_types
 import pytest
 from authlib.integrations.base_client.errors import OAuthError
+from mcp import MCPError as SdkMCPError
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
 import mindroom.matrix.state as matrix_state_module
@@ -2476,6 +2477,55 @@ async def test_oauth_mcp_bridge_gives_the_cached_input_schema_when_the_arguments
 
 
 @pytest.mark.asyncio
+async def test_mcp_invalid_params_error_gives_the_server_message_and_schema_without_reconnecting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A JSON-RPC invalid-params error is the server's refusal of the arguments, not an unknown remote outcome.
+
+    Through the bridge and through a typed function, the model gets the server's message and the input schema the call
+    was sent against, and the session neither reconnects nor lists its tools again.
+    """
+    _patch_manager(monkeypatch)
+    schema = {"type": "object", "properties": {"url": {"type": "string", "format": "uri"}}, "required": ["url"]}
+    _FakeClientSession.tool_list = [Tool(name="fetch", description="Fetch one URL", input_schema=schema)]
+    refusal = "'url' must be an absolute URL"
+    _FakeClientSession.planned_tool_results = [SdkMCPError(mcp_types.INVALID_PARAMS, refusal) for _ in range(2)]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    server_config = _oauth_mcp_config()
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": server_config}))
+
+    def toolkit() -> MindRoomMCPToolkit:
+        return MindRoomMCPToolkit(
+            server_id="demo",
+            manager=manager,
+            catalog=None,
+            server_config=server_config,
+            runtime_paths=runtime_paths,
+            credentials_manager=get_runtime_credentials_manager(runtime_paths),
+            worker_target=worker_target,
+        )
+
+    try:
+        with pytest.raises(MCPToolCallError) as bridge_failure:
+            await toolkit().functions["demo_call_tool"](tool_name="fetch", arguments={"url": "example"})
+        # The bridge call cached the catalog, so a toolkit built now also has the typed function.
+        with pytest.raises(MCPToolCallError) as typed_failure:
+            await toolkit().functions["demo_fetch"](url="example")
+    finally:
+        await manager.shutdown()
+
+    expected = f"MCP error -32602: {refusal}\n\nInput schema of 'fetch': {json.dumps(schema)}"
+    assert [str(bridge_failure.value), str(typed_failure.value)] == [expected, expected]
+    assert _FakeClientSession.call_tool_arguments == [{"url": "example"}, {"url": "example"}]
+    assert len(_FakeClientSession.sessions) == 1
+    assert _FakeClientSession.listed_cursors == [None]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
 async def test_requestless_scoped_oauth_mcp_toolkit_keeps_bridge_surface(
     tmp_path: Path,
@@ -3344,6 +3394,7 @@ async def test_mcp_call_timings_preserve_cancellation(
             MCPToolCallError,
             "tool_error",
         ),
+        (SdkMCPError(mcp_types.INVALID_PARAMS, "private argument detail"), MCPToolCallError, "tool_error"),
         (BrokenPipeError("private transport detail"), MCPConnectionError, "connection_error"),
         (TimeoutError("private timeout detail"), MCPTimeoutError, "timeout"),
     ],
@@ -3401,22 +3452,36 @@ async def test_mcp_call_timings_classify_unavailable_tools_as_protocol_errors(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "dispatch_error",
+    [
+        BrokenPipeError("transport closed"),
+        # The SDK raises these codes for transport failures too, so they stay ambiguous.
+        SdkMCPError(mcp_types.CONNECTION_CLOSED, "Connection closed"),
+        SdkMCPError(mcp_types.INTERNAL_ERROR, "Server returned an error response"),
+        SdkMCPError(mcp_types.REQUEST_TIMEOUT, "Request 'tools/call' timed out"),
+    ],
+    ids=["transport", "connection-closed", "internal-error", "request-timeout"],
+)
 async def test_mcp_manager_reconnects_for_future_calls_without_replaying_ambiguous_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    dispatch_error: Exception,
 ) -> None:
-    """Reconnect the transport but require an explicit retry after ambiguous dispatch."""
+    """Reconnect the transport but require an explicit retry after ambiguous dispatch, saying what failed."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     _FakeClientSession.planned_tool_results = [
-        BrokenPipeError("transport closed"),
+        dispatch_error,
         CallToolResult(content=[mcp_types.TextContent(type="text", text="pong")]),
     ]
     manager = MCPServerManager(_runtime_paths(tmp_path))
     config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
     await manager.sync_servers(config)
-    with pytest.raises(MCPConnectionError, match="outcome is unknown; retry manually"):
+    with pytest.raises(MCPConnectionError) as raised:
         await manager.call_tool("demo", "echo", {"value": "ping"})
+    reason = f"MCP operation failed: {dispatch_error}"
+    assert str(raised.value) == f"MCP server 'demo' remote call outcome is unknown; retry manually ({reason})"
     assert _FakeClientSession.call_tool_invocation_count == 1
     assert len(_FakeClientSession.sessions) == 2
 
