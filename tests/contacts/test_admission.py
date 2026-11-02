@@ -376,6 +376,8 @@ async def test_a_contact_turn_is_superseded_only_by_its_own_speaker(tmp_path: Pa
             may_be_superseded_by_newer_requester_turn=True,
             classify=partial(validator.classify_source, room_id=CONTACT_ROOM),
             is_handled=AsyncMock(return_value=frozenset()),
+            # No message is for another participant, so only the speaker keeps the senders apart.
+            for_another_participant=lambda _source: False,
             logger=get_logger(__name__),
         )
 

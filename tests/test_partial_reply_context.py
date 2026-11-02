@@ -541,7 +541,7 @@ class TestUnseenMessagesPartialReplies:
         stream_status: str,
         placeholder: str,
     ) -> None:
-        """A placeholder that ends empty is redacted, so recording it as consumed would let that remove real history."""
+        """A placeholder whose answer is suppressed is redacted; recording it as consumed would let that remove history."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
 
