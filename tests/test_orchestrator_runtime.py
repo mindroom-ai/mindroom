@@ -1650,6 +1650,26 @@ class TestAgentBot(AgentBotTestBase):
         orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_runtime_shutdown_cancels_an_api_task_that_outlives_its_grace(self) -> None:
+        """A failed run's API that cannot finish stopping is cancelled after one grace window, so cleanup never hangs."""
+        api_task = asyncio.create_task(asyncio.Event().wait(), name="api_server")
+
+        with patch("mindroom.orchestrator._EMBEDDED_API_SHUTDOWN_GRACE_SECONDS", 0.01):
+            await asyncio.wait_for(
+                _finish_runtime_shutdown(
+                    shutdown_wait_task=None,
+                    api_task=api_task,
+                    orchestrator_task=None,
+                    auxiliary_tasks=[],
+                    orchestrator=None,
+                    stall_detector=None,
+                ),
+                timeout=5,
+            )
+
+        assert api_task.cancelled()
+
+    @pytest.mark.asyncio
     async def test_runtime_shutdown_runs_every_process_closer_when_one_fails(
         self,
         monkeypatch: pytest.MonkeyPatch,
