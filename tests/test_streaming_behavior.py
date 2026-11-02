@@ -129,19 +129,6 @@ def _make_matrix_client_mock() -> AsyncMock:
     return make_matrix_client_mock(user_id="@mindroom_streaming:localhost")
 
 
-class _ImmediateStreamingResponse(StreamingResponse):
-    """A stream that sends every update at once, without throttling by time or size."""
-
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)
-        self.update_interval = 0.0
-        self.min_update_interval = 0.0
-        self.progress_update_interval = 0.0
-        self.min_char_update_interval = 0.0
-        self.update_char_threshold = 1
-        self.min_update_char_threshold = 1
-
-
 @asynccontextmanager
 async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
     yield

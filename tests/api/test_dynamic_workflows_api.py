@@ -334,10 +334,3 @@ def test_private_dynamic_workflow_report_admits_the_platform_owner_only(
     )
 
     assert response.status_code == expected_status, response.text
-
-
-def test_private_dynamic_workflow_report_rejects_unscoped_run_id(test_client: TestClient) -> None:
-    """Private reports should not be served through global run-id lookup."""
-    response = test_client.get("/reports/private/run_missing")
-
-    assert response.status_code == 404

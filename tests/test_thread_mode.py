@@ -483,7 +483,7 @@ class TestRouterHandoffThreadMode:
                 requester_user_id="@user:localhost",
             )
         mock_get_latest.assert_not_called()
-        assert captured_content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$user_event"}}
+        assert captured_content["m.relates_to"] == {"io.mindroom.in_reply_to": {"event_id": "$user_event"}}
 
     @pytest.mark.asyncio
     async def test_router_handoff_uses_suggested_thread_mode(
@@ -1141,8 +1141,8 @@ class TestStreamingResponseRoomMode:
         assert sr.room_mode is False
 
     @pytest.mark.asyncio
-    async def test_room_mode_keeps_plain_reply_relation(self, streaming_config: Config) -> None:
-        """In room mode, _send_or_edit_message should emit a plain reply relation only."""
+    async def test_room_mode_sends_an_unquoted_reply_relation(self, streaming_config: Config) -> None:
+        """In room mode, the reply names its source only where clients do not quote it."""
         captured: dict = {}
 
         async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
@@ -1163,7 +1163,7 @@ class TestStreamingResponseRoomMode:
         client = AsyncMock()
         await sr.finalize(client)
 
-        assert captured["m.relates_to"] == {"m.in_reply_to": {"event_id": "$event123"}}
+        assert captured["m.relates_to"] == {"io.mindroom.in_reply_to": {"event_id": "$event123"}}
 
     @pytest.mark.asyncio
     async def test_thread_mode_has_relations(self, streaming_config: Config) -> None:
@@ -1241,7 +1241,7 @@ class TestSendStreamingResponseRoomMode:
             )
 
         assert captured["m.relates_to"] == {
-            "m.in_reply_to": {
+            "io.mindroom.in_reply_to": {
                 "event_id": "$event123",
             },
         }
