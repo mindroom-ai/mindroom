@@ -18,7 +18,7 @@ from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.history.native import configure_native_history, restore_native_history, with_native_history
-from mindroom.history.replay import compaction_marker
+from mindroom.history.replay import compaction_marker, request_basis
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.runtime import (
     _ScopeCompactionLifecycleResult,
@@ -148,6 +148,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,
+        static_fingerprint="static",
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
@@ -300,6 +301,7 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
+        static_fingerprint="static",
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
@@ -341,15 +343,17 @@ async def _prepare_after_native_answer(
     assert settings is not None
     answer = Message(role="assistant", content="Ready", metrics=MessageMetrics(tokens=TokenCounts(input_tokens=30000)))
     record_native_checkpoint(answer, _CHECKPOINT if checkpoint else [], settings)
-    stamp_model(answer, model.identity)
+    answered_by = replace(model.identity, id="another-model") if answered_by_another_model else model.identity
+    stamp_model(answer, answered_by)
     run = _completed_run("old", messages=[Message(role="user", content="old transcript " * 20000), answer])
-    run.model = "another-model" if answered_by_another_model else model.identity.id
-    run.model_provider = model.identity.provider
+    run.model = answered_by.id
+    run.model_provider = answered_by.provider
     run.metadata = build_prepared_history_metadata_content(
         PreparedHistoryState(
             replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=0, add_history_to_context=True),
             prepared_context_tokens=1_000,
-            non_prompt_tokens=100,
+            # The request held no earlier history, under the system prompt and tools this reply carries.
+            request_basis=request_basis(static_fingerprint="static", summary=None, history=[]),
             native_history=None,
         ),
     )
@@ -360,6 +364,7 @@ async def _prepare_after_native_answer(
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=100,
+        static_fingerprint="static",
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
@@ -443,6 +448,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
+        static_fingerprint="static",
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
@@ -531,6 +537,7 @@ async def test_native_activation_respects_history_policy(
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
+        static_fingerprint="static",
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
@@ -562,6 +569,7 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
+        static_fingerprint="static",
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
@@ -656,6 +664,7 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,
+        static_fingerprint="static",
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
@@ -713,6 +722,7 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         model=leader,
         resolved_inputs=_inputs(config, "team"),
         non_prompt_tokens=0,
+        static_fingerprint="static",
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(

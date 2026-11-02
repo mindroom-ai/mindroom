@@ -773,6 +773,7 @@ async def prepare_history_for_run_for_test(
         "model": model,
         "resolved_inputs": resolved_inputs,
         "non_prompt_tokens": static_token_estimator.non_prompt_tokens,
+        "static_fingerprint": static_token_estimator.fingerprint,
         "runtime_paths": runtime_paths,
         "config": config,
         "compaction_lifecycle": compaction_lifecycle,

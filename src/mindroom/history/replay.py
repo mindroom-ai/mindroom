@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
@@ -66,17 +67,36 @@ def estimate_prompt_visible_history_tokens(
     The history is the selection a request under ``history_settings`` sends, so the estimate counts exactly what the
     model will read. Stale Anthropic replay fields are left in place because the canonical count never reads them.
     """
+    history_messages = prompt_visible_history(session, history_settings)
+    tokens, has_checkpoint = _route_tokens(history_messages, counter=counter, native_route=native_route)
+    # A checkpoint covers the summary message before it, which native projection drops.
+    return tokens if has_checkpoint else estimate_summary_tokens(session, counter) + tokens
+
+
+def prompt_visible_history(session: ConversationSession, history_settings: ResolvedHistorySettings) -> list[Message]:
+    """Return the stored history a request under ``history_settings`` replays for the scope owning ``session``."""
     policy = history_settings.policy
-    history_messages = scope_history_messages(
+    return scope_history_messages(
         session.runs,
         scope=owner_scope(session),
         num_history_runs=policy.num_history_runs,
         num_history_messages=policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
     )
-    tokens, has_checkpoint = _route_tokens(history_messages, counter=counter, native_route=native_route)
-    # A checkpoint covers the summary message before it, which native projection drops.
-    return tokens if has_checkpoint else estimate_summary_tokens(session, counter) + tokens
+
+
+def request_basis(*, static_fingerprint: str, summary: str | None, history: Sequence[Message]) -> str:
+    """Identify what a request holds before its turn: its system prompt and tools, the summary, and the history.
+
+    ``static_fingerprint`` identifies the system prompt and tools. Two requests with one basis hold the same content up
+    to their turns, so the size a model reported for one sizes the other's history on that model. Any change, such as
+    an edited system prompt, a new summary, or a replay limit that dropped a run, changes the basis.
+    """
+    digest = hashlib.sha256()
+    for part in (static_fingerprint, summary or "", *(stable_serialize(message.to_dict()) for message in history)):
+        digest.update(part.encode("utf-8", "surrogatepass"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _route_tokens(

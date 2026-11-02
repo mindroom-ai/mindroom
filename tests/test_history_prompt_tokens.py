@@ -113,6 +113,21 @@ def test_static_estimate_leaves_deferred_tools_out() -> None:
     assert all_deferred.non_prompt_tokens == quarter_tokens(str(_SYSTEM_MESSAGE.content))
 
 
+def test_the_static_fingerprint_names_the_system_prompt_and_the_tools_sent() -> None:
+    """A request records it, so the next reply can tell whether its system prompt or tools changed since."""
+    counter = fake_token_counter()
+
+    def fingerprint(system: Message, tools: tuple[ToolSpec, ...], deferred: frozenset[str] = frozenset()) -> str:
+        return build_static_token_estimator(counter, (system,), tools, deferred).fingerprint
+
+    base = fingerprint(_SYSTEM_MESSAGE, (_SEARCH_DOCS,))
+    assert fingerprint(_SYSTEM_MESSAGE, (_SEARCH_DOCS,)) == base
+    assert fingerprint(Message(role="system", content="You are terse."), (_SEARCH_DOCS,)) != base
+    assert fingerprint(_SYSTEM_MESSAGE, (_SEARCH_DOCS, _EXPORT_NOTES)) != base
+    # A deferred tool stays off the request until tool search loads it.
+    assert fingerprint(_SYSTEM_MESSAGE, (_SEARCH_DOCS, _EXPORT_NOTES), frozenset({"export_notes"})) == base
+
+
 def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages() -> None:
     """The estimation path reads persisted messages without copying; pin that it never mutates them."""
     session = _session(

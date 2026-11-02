@@ -615,6 +615,7 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
         model=pipeline_provider(adapter),
         resolved_inputs=inputs,
         non_prompt_tokens=0,
+        static_fingerprint="static",
         runtime_paths=runtime_paths,
         config=config,
         scope_context=ScopeSessionContext(

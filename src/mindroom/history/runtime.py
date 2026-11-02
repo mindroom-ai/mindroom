@@ -27,12 +27,15 @@ from mindroom.history.policy import (
 )
 from mindroom.history.replay import (
     configured_replay_plan,
+    current_summary_text,
     estimate_prompt_visible_history_tokens,
     estimate_request_messages_tokens,
     estimate_summary_tokens,
     has_effective_persisted_replay,
     log_replay_plan,
     plan_replay_that_fits,
+    prompt_visible_history,
+    request_basis,
     scope_visible_runs,
 )
 from mindroom.history.storage import (
@@ -56,7 +59,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     owner_scope,
 )
-from mindroom.llm.messages import is_own_model_message
+from mindroom.llm.messages import ModelProvenance, is_own_model_message, read_model_provenance
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import message_context_tokens
 from mindroom.native_compaction import native_checkpoint_id
@@ -141,8 +144,8 @@ class PreparedScopeHistory:
     native_history: NativeHistory | None
     # How the route the run's requests go to counts tokens, which the final replay plan sizes with.
     counter: TokenCounter
-    # The system prompt and tools tokens the run's requests are sized with.
-    non_prompt_tokens: int
+    # Identifies the system prompt and tools the run's requests carry (``StaticTokenEstimator.fingerprint``).
+    static_fingerprint: str
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     # The history size the provider reported for the scope's latest request, when it still describes the history the
     # run replays; the final replay plan sizes with it as the compaction check did.
@@ -155,6 +158,7 @@ async def prepare_scope_history(
     model: ModelProvider,
     resolved_inputs: HistoryPreparationInputs,
     non_prompt_tokens: int,
+    static_fingerprint: str,
     runtime_paths: RuntimePaths,
     config: Config,
     scope_context: ScopeSessionContext | None,
@@ -162,7 +166,10 @@ async def prepare_scope_history(
     pipeline_timing: DispatchPipelineTiming | None,
     allow_native_compaction: bool,
 ) -> PreparedScopeHistory:
-    """Prepare durable scope history before final replay planning; ``model`` is the provider the run's requests go to."""
+    """Prepare durable scope history before final replay planning; ``model`` is the provider the run's requests go to.
+
+    ``non_prompt_tokens`` and ``static_fingerprint`` are the tokens and identity of the run's system prompt and tools.
+    """
     counter = model.token_counter
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
@@ -178,7 +185,7 @@ async def prepare_scope_history(
                 runs=(),
             ),
             counter=counter,
-            non_prompt_tokens=non_prompt_tokens,
+            static_fingerprint=static_fingerprint,
         )
 
     execution_plan = resolved_inputs.execution_plan
@@ -222,6 +229,7 @@ async def prepare_scope_history(
                 config=config,
                 model=model,
                 non_prompt_tokens=non_prompt_tokens,
+                static_fingerprint=static_fingerprint,
             ),
         )
         if visible_runs
@@ -321,7 +329,7 @@ async def prepare_scope_history(
         compaction_reply_outcome=compaction_reply_outcome,
         native_history=native_history,
         counter=counter,
-        non_prompt_tokens=non_prompt_tokens,
+        static_fingerprint=static_fingerprint,
         # A compaction rewrote the history that request held.
         reported_history_tokens=reported_history_tokens if compaction_decision.mode != "required" else None,
     )
@@ -335,45 +343,40 @@ def _reported_history_tokens(
     config: Config,
     model: ModelProvider,
     non_prompt_tokens: int,
+    static_fingerprint: str,
 ) -> int | None:
     """Size history from the request the provider reported for the scope's latest answer, or None when stale.
 
-    That request held the system prompt and tools its run records it was sized with, and all the history this reply
-    replays except the answer. The replay budgets are what the window leaves after today's static estimate, whose
-    system prompt and tools are ``non_prompt_tokens``, so the smaller of the two is taken off: a system prompt grown
-    since then counts in today's estimate rather than as history that shrank, and one that shrank stays counted.
+    That request held its system prompt and tools, the history before its run, and its run up to the answer. It sizes
+    this reply's history only when this reply's model answered it and it recorded the basis this reply has without
+    that run: the same system prompt, tools, summary, and earlier history. Its system prompt and tools are then
+    today's, ``non_prompt_tokens``, which the replay budgets also take off the window.
     """
     latest_run = visible_runs[-1]
-    if (
-        # Replay limits drop the oldest content as runs accrue, so that request held more than will replay.
-        not resolved_inputs.history_settings.replays_whole_history
-        # Another model counts with another tokenizer.
-        or (latest_run.model, latest_run.model_provider) != (model.identity.id, model.identity.provider)
-    ):
-        return None
-    # Only a request that replayed the whole history records the system prompt and tools it was sized with.
-    recorded = _recorded_non_prompt_tokens(latest_run)
-    if recorded is None:
-        return None
     messages = latest_run.messages
     anchor = next(
         (index for index in range(len(messages) - 1, -1, -1) if is_own_model_message(messages[index])),
         None,
     )
-    # History replay drops or bounds media that request carried in full. A native checkpoint stands in for the transcript
-    # before it on its own route only, and the response that created it was billed for that transcript, so a request
-    # sizes this reply's history only while no checkpoint exists.
+    # History replay drops or bounds media that request carried in full, and a native checkpoint replaces the transcript
+    # before it in a way the basis does not track.
     if (
         anchor is None
         or any(message.images or message.audio or message.videos or message.files for message in messages)
         or any(native_checkpoint_id(message) for run in visible_runs for message in run.messages)
     ):
         return None
+    latest_ids = {message.id for message in messages}
+    earlier = [
+        message
+        for message in prompt_visible_history(session, resolved_inputs.history_settings)
+        if message.id not in latest_ids
+    ]
+    basis = request_basis(static_fingerprint=static_fingerprint, summary=current_summary_text(session), history=earlier)
     answer = messages[anchor]
-    summary = session.summary
-    # A summary written after that request started folded runs it held. Both stamps are whole seconds, which cannot
-    # order a summary written in the same second, so a tie counts as later too.
-    if summary is not None and (summary.updated_at is None or summary.updated_at.timestamp() >= answer.created_at):
+    # Another model, such as a fallback that answered, counts with another tokenizer.
+    this_model = ModelProvenance(model_id=model.identity.id, provider=model.identity.provider)
+    if _recorded_request_basis(latest_run) != basis or read_model_provenance(answer.provider_data) != this_model:
         return None
     reported = reported_context_tokens(answer, model=model, config=config, model_name=resolved_inputs.active_model_name)
     if reported is None:
@@ -382,15 +385,15 @@ def _reported_history_tokens(
     replayed = [replace(message, from_history=True) for message in messages[anchor:]]
     newer_tokens = estimate_request_messages_tokens(replayed, counter=model.token_counter)
     # The padded estimate of a large system prompt can exceed a short conversation's whole reported request.
-    return max(0, reported + newer_tokens - min(recorded, non_prompt_tokens))
+    return max(0, reported + newer_tokens - non_prompt_tokens)
 
 
-def _recorded_non_prompt_tokens(run: AnyRunRecord) -> int | None:
-    """Return the system prompt and tools tokens the run's published metadata records, or None when it records none."""
+def _recorded_request_basis(run: AnyRunRecord) -> str | None:
+    """Return the request basis the run's published metadata records, or None when it records none."""
     ai_run = (run.metadata or {}).get(AI_RUN_METADATA_KEY)
     prepared_context = ai_run.get("prepared_context") if isinstance(ai_run, dict) else None
-    tokens = prepared_context.get("non_prompt_tokens") if isinstance(prepared_context, dict) else None
-    return tokens if isinstance(tokens, int) else None
+    basis = prepared_context.get("request_basis") if isinstance(prepared_context, dict) else None
+    return basis if isinstance(basis, str) else None
 
 
 def reported_context_tokens(message: Message, *, model: ModelProvider, config: Config, model_name: str) -> int | None:
@@ -755,7 +758,13 @@ def finalize_history_preparation(
         compaction_decision=prepared_scope_history.compaction_decision,
         compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
         prepared_context_tokens=prepared_context_tokens,
-        non_prompt_tokens=prepared_scope_history.non_prompt_tokens if history_settings.replays_whole_history else None,
+        request_basis=request_basis(
+            static_fingerprint=prepared_scope_history.static_fingerprint,
+            summary=current_summary_text(session),
+            history=prompt_visible_history(session, history_settings),
+        )
+        if session is not None
+        else None,
         reported_history=reported_history,
         native_history=native_history,
     )

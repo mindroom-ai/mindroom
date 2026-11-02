@@ -80,7 +80,11 @@ from tests.history_helpers import (
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.llm.runs import RunRecord, TeamRunRecord
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
 
 
 def _included_run_count(
@@ -833,6 +837,7 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
             model=estimate_only_model(),
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=0,
+            static_fingerprint="static",
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(
@@ -931,6 +936,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
             model=_native_model() if native_model else estimate_only_model(),
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=0,
+            static_fingerprint="static",
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(
@@ -1867,35 +1873,27 @@ _REPORTED_USAGE_PLAN = ResolvedHistoryExecutionPlan(
 )
 
 
-_SUMMARY_WRITTEN_AT = 2_000_000_000
-
-
 def _reported_run(
     run_id: str,
     *,
     input_tokens: int = 0,
     model: str = "fake-model",
-    created_at: int = _SUMMARY_WRITTEN_AT + 1,
     images: list[Image] | None = None,
     reasoning_tokens: int | None = None,
     plan_mode: Literal["configured", "limited"] = "configured",
     native_checkpoint: bool = False,
-    non_prompt_tokens: int | None = 400,
+    request_basis: str | None = None,
 ) -> RunRecord:
-    """Return a completed run whose answer carries the request size its provider reported and the model's stamp.
+    """Return a completed run whose answer ``model`` stamped with the request size its provider reported.
 
-    The run publishes the replay plan ``plan_mode`` its request was sent with and, when not None, the
-    ``non_prompt_tokens`` of system prompt and tools it was sized with, which a run records only when its request
-    replayed the whole history; with ``native_checkpoint`` the answer holds a native compaction checkpoint.
-    By default the answer's request starts the second after any summary a test writes. With ``reasoning_tokens``
-    the answer also stores one encrypted reasoning item, as a Responses route records it, and reports that much
-    reasoning.
+    The run publishes the replay plan ``plan_mode`` its request was sent with and the ``request_basis`` it recorded;
+    with ``native_checkpoint`` the answer holds a native compaction checkpoint. With ``reasoning_tokens`` the answer
+    also stores one encrypted reasoning item, as a Responses route records it, and reports that much reasoning.
     """
     answer = Message(
         role="assistant",
         content="a" * 2_000,
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=input_tokens, reasoning_tokens=reasoning_tokens or 0)),
-        created_at=created_at,
     )
     if reasoning_tokens is not None:
         answer.provider_data = {
@@ -1921,47 +1919,30 @@ def _reported_run(
         PreparedHistoryState(
             replay_plan=ResolvedReplayPlan(mode=plan_mode, estimated_tokens=600, add_history_to_context=True),
             prepared_context_tokens=1_000,
-            non_prompt_tokens=non_prompt_tokens,
+            request_basis=request_basis,
             native_history=None,
         ),
     )
     return run
 
 
-async def _prepare_with_reported_usage(
-    tmp_path: Path,
-    latest: dict[str, object],
+async def _prepare_reply(
+    storage: ConversationStore,
+    session: ConversationSession,
+    config: Config,
+    runtime_paths: RuntimePaths,
     *,
-    history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
-    folded_run_ids: tuple[str, ...] = (),
+    history_settings: ResolvedHistorySettings,
+    static_fingerprint: str = "static",
     counter: TokenCounter | None = None,
     non_prompt_tokens: int = 400,
-) -> tuple[PreparedScopeHistory, int, RecordingCompactionLifecycle]:
-    """Prepare a reply after three runs; return it, the chars / 4 history estimate, and the compaction notices.
+    lifecycle: RecordingCompactionLifecycle | None = None,
+) -> PreparedScopeHistory:
+    """Prepare a reply of ``fake-model`` to ``session``, whose system prompt and tools ``static_fingerprint`` names.
 
-    ``latest`` configures the newest run, and a summary folding ``folded_run_ids`` is stored as written at
-    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, ``non_prompt_tokens`` are today's system prompt
-    and tools, while each run records the 400 its request was sized with. The answering model counts with
-    ``counter``, a quarter token per character when it is None.
+    They are ``non_prompt_tokens`` of the plan's 1,000 static prompt tokens, and the model counts with ``counter``, a
+    quarter token per character when it is None.
     """
-    counter = counter or fake_token_counter()
-    runs = [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", **latest)]
-    config, runtime_paths = _make_config(
-        tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True),
-        context_window=64_000,
-    )
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = seed_session(storage, _session("session-1", runs=runs))
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    if folded_run_ids:
-        with patch("mindroom.session_storage.summary_rows.time", return_value=_SUMMARY_WRITTEN_AT):
-            compact_runs(storage, session, list(folded_run_ids), "Earlier summary")
-    estimate = estimate_prompt_visible_history_tokens(
-        session=session,
-        history_settings=history_settings,
-        counter=fake_token_counter(),
-    )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
             history_settings=history_settings,
@@ -1973,7 +1954,6 @@ async def _prepare_with_reported_usage(
         ),
         execution_plan=_REPORTED_USAGE_PLAN,
     )
-    lifecycle = RecordingCompactionLifecycle()
     with (
         patch(
             "mindroom.providers.registry.build_model_provider",
@@ -1984,46 +1964,116 @@ async def _prepare_with_reported_usage(
             new=AsyncMock(return_value="short summary"),
         ),
     ):
-        prepared = await prepare_scope_history(
+        return await prepare_scope_history(
             compaction_lifecycle=lifecycle,
-            # The model that answered the stored runs, so its reported request sizes apply.
             model=ScriptedModel(
                 [],
                 identity=ModelIdentity(id="fake-model", provider="fake"),
-                token_counter=counter,
+                token_counter=counter or fake_token_counter(),
             ),
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=non_prompt_tokens,
+            static_fingerprint=static_fingerprint,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(
-                scope=scope,
+                scope=HistoryScope(kind="agent", scope_id="test_agent"),
                 storage=storage,
                 session=session,
-                session_id="session-1",
+                session_id=session.session_id,
                 storage_factory=lambda: storage,
             ),
             pipeline_timing=None,
             allow_native_compaction=True,
         )
+
+
+async def _prepare_with_reported_usage(
+    tmp_path: Path,
+    latest: dict[str, object],
+    *,
+    history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
+    summary: Literal["before", "after"] | None = None,
+    recorded_prompt: str = "static",
+    runs_seen: int = 2,
+    counter: TokenCounter | None = None,
+    non_prompt_tokens: int = 400,
+) -> tuple[PreparedScopeHistory, int, RecordingCompactionLifecycle]:
+    """Prepare a reply after three runs; return it, the chars / 4 history estimate, and the compaction notices.
+
+    ``latest`` configures the newest run, whose request was prepared after the first ``runs_seen`` runs under the
+    system prompt and tools ``recorded_prompt`` names, and recorded the basis its preparation gave. A summary folding the
+    first run is written ``before`` or ``after`` that request. This reply's system prompt and tools are named
+    ``static`` and are ``non_prompt_tokens``; its model counts with ``counter``.
+    """
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    earlier = [_reported_run("run-0"), _reported_run("run-1")]
+    session = seed_session(storage, _session("session-1", runs=earlier[:runs_seen]))
+    if summary == "before":
+        compact_runs(storage, session, ["run-0"], "Earlier summary")
+    request = await _prepare_reply(
+        storage,
+        session,
+        config,
+        runtime_paths,
+        history_settings=history_settings,
+        static_fingerprint=recorded_prompt,
+    )
+    recorded = finalize_history_preparation(
+        prepared_scope_history=request,
+        config=config,
+        static_prompt_tokens=0,
+        pipeline_timing=None,
+    ).request_basis
+    for run in [*earlier[runs_seen:], _reported_run("run-2", request_basis=recorded, **latest)]:
+        storage.save_run(session, run, record_usage=False)
+    if summary == "after":
+        compact_runs(storage, session, ["run-0"], "Earlier summary")
+    session = storage.load_session("session-1")
+    assert session is not None
+    estimate = estimate_prompt_visible_history_tokens(
+        session=session,
+        history_settings=history_settings,
+        counter=fake_token_counter(),
+    )
+    lifecycle = RecordingCompactionLifecycle()
+    prepared = await _prepare_reply(
+        storage,
+        session,
+        config,
+        runtime_paths,
+        history_settings=history_settings,
+        counter=counter,
+        non_prompt_tokens=non_prompt_tokens,
+        lifecycle=lifecycle,
+    )
     return prepared, estimate, lifecycle
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "folded_run_ids",
-    [pytest.param((), id="no-summary"), pytest.param(("run-0",), id="summary-before-the-request")],
+    "setup",
+    [
+        pytest.param({}, id="no-summary"),
+        pytest.param({"summary": "before"}, id="summary-before-the-request"),
+        # A replay limit that has dropped nothing yet replays all the history that request held.
+        pytest.param(
+            {"history_settings": replace(_ALL_HISTORY_SETTINGS, policy=HistoryPolicy(mode="runs", limit=3))},
+            id="run-limit-not-reached",
+        ),
+    ],
 )
 async def test_the_latest_reported_request_size_decides_compaction_before_a_reply(
     tmp_path: Path,
-    folded_run_ids: tuple[str, ...],
+    setup: dict[str, object],
 ) -> None:
     """Chars / 4 undercounts real tokenizers (Qwen by about 1.3x), so the provider's count of the last request wins."""
-    prepared, estimate, lifecycle = await _prepare_with_reported_usage(
-        tmp_path,
-        {"input_tokens": 8_000},
-        folded_run_ids=folded_run_ids,
-    )
+    prepared, estimate, lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 8_000}, **setup)
 
     assert estimate < 4_000  # The trigger budget.
     # That request held the system prompt, tools, and all history but its own 500-token answer.
@@ -2067,7 +2117,7 @@ async def test_history_preparation_counts_off_the_event_loop(tmp_path: Path) -> 
     await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 8_000},
-        folded_run_ids=("run-0",),
+        summary="before",
         counter=TokenCounter(estimate=estimate),
     )
 
@@ -2166,42 +2216,11 @@ async def test_the_replay_plan_trims_by_the_reported_size_over_the_final_budget(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("today", "taken_off"),
-    [
-        # Minus today's 7,000, history would show 1,500 tokens, under the 4,000-token trigger, as does the estimate.
-        pytest.param(7_000, 400, id="grown"),
-        pytest.param(100, 100, id="shrunk"),
-    ],
-)
-async def test_the_reported_request_size_takes_off_the_smaller_system_prompt(
-    tmp_path: Path,
-    today: int,
-    taken_off: int,
-) -> None:
-    """The reported request carried the 400-token system prompt and tools its run recorded, not today's.
-
-    A prompt grown since, such as after more tools or longer context files, counts in today's static estimate, not as
-    history that shrank. A prompt that shrank stays counted as history until the next run records it, because taking
-    off an estimate's margin with it could undercount the history.
-    """
-    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
-        tmp_path,
-        {"input_tokens": 8_000},
-        non_prompt_tokens=today,
-    )
-
-    assert estimate < 4_000
-    assert prepared.compaction_decision.current_history_tokens == 8_000 + 500 - taken_off
-    assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
-
-
-@pytest.mark.asyncio
 async def test_history_never_sizes_below_zero(tmp_path: Path) -> None:
     """A short conversation's reported request can be smaller than the padded estimate of its system prompt and tools."""
     prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
         tmp_path,
-        {"input_tokens": 200, "non_prompt_tokens": 5_000},
+        {"input_tokens": 200},
         non_prompt_tokens=5_000,
     )
 
@@ -2271,11 +2290,12 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
         pytest.param({}, {}, id="no-reported-usage"),
         # A request whose replay plan cut the history reported the size of the part it sent.
         pytest.param({"input_tokens": 8_000, "plan_mode": "limited"}, {}, id="partial-replay"),
-        # A request under an authored replay limit, since removed, records nothing to take off its size.
-        pytest.param({"input_tokens": 8_000, "non_prompt_tokens": None}, {}, id="authored-limit-since-removed"),
         # A native checkpoint replays differently on each route, and its response was billed for the transcript it replaced.
         pytest.param({"input_tokens": 8_000, "native_checkpoint": True}, {}, id="native-checkpoint"),
+        # Another model, such as a fallback, counts with another tokenizer.
         pytest.param({"input_tokens": 8_000, "model": "other-model"}, {}, id="another-model-answered"),
+        # A system prompt or tools changed since that request hold another number of tokens.
+        pytest.param({"input_tokens": 8_000}, {"recorded_prompt": "edited"}, id="system-prompt-changed"),
         pytest.param(
             {"input_tokens": 8_000, "images": [Image(url="https://example.com/chart.png")]},
             {},
@@ -2287,22 +2307,10 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
             {"history_settings": replace(_ALL_HISTORY_SETTINGS, policy=HistoryPolicy(mode="runs", limit=2))},
             id="run-limit",
         ),
-        pytest.param(
-            {"input_tokens": 8_000},
-            {"history_settings": replace(_ALL_HISTORY_SETTINGS, max_tool_calls_from_history=1)},
-            id="tool-call-limit",
-        ),
-        # A compaction after that request folded runs it held; whole-second stamps cannot order a same-second one.
-        pytest.param(
-            {"input_tokens": 8_000, "created_at": _SUMMARY_WRITTEN_AT - 1},
-            {"folded_run_ids": ("run-0",)},
-            id="summary-after-the-request",
-        ),
-        pytest.param(
-            {"input_tokens": 8_000, "created_at": _SUMMARY_WRITTEN_AT},
-            {"folded_run_ids": ("run-0",)},
-            id="summary-in-the-same-second",
-        ),
+        # A compaction after that request folded runs it held.
+        pytest.param({"input_tokens": 8_000}, {"summary": "after"}, id="summary-after-the-request"),
+        # A run that finished while that request waited, such as on a tool approval, was not in it.
+        pytest.param({"input_tokens": 8_000}, {"runs_seen": 1}, id="interleaved-run"),
     ],
 )
 async def test_history_keeps_its_estimate_without_a_usable_reported_size(

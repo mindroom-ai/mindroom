@@ -664,9 +664,9 @@ async def test_the_reply_metadata_and_timing_carry_the_prepared_context_and_comp
     ai_run = collector[AI_RUN_METADATA_KEY]
     prepared_context = ai_run["prepared_context"]
     assert prepared_context["tokens"] == timing.metadata["prepared_context_tokens"]
-    # The leader's request replayed the whole history, so the reply publishes the system prompt and tools it was sized
-    # with, which the next reply takes off the request size the provider reports.
-    assert 0 < prepared_context["non_prompt_tokens"] < prepared_context["tokens"]
+    # The leader's request replayed the whole history, so the reply publishes what that request held before its turn,
+    # which tells the next reply whether the request size the provider reports describes its history.
+    assert isinstance(prepared_context["request_basis"], str)
     compaction = ai_run["compaction"]
     assert (compaction["decision"], compaction["outcome"], compaction["reason"]) == (
         timing.metadata["compaction_decision"],

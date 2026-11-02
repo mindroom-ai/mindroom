@@ -355,6 +355,7 @@ class _TextOnlyEstimator:
 
     counter = fake_token_counter()
     non_prompt_tokens = 0
+    fingerprint = "static"
 
     def __init__(self, *_args: object) -> None:
         pass

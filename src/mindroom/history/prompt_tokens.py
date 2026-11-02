@@ -6,6 +6,7 @@ requests through the same estimator.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,8 @@ class _StaticTokenEstimator:
     counter: TokenCounter
     # The system messages' and tool definitions' tokens, which do not depend on the prompt text.
     non_prompt_tokens: int
+    # Identifies that system text and those definitions, so a request can tell whether another carried the same.
+    fingerprint: str
 
     def estimate(self, full_prompt: str) -> int:
         """Count the prompt text's tokens plus the non-prompt cost."""
@@ -42,8 +45,10 @@ def build_static_token_estimator(
 
     Deferred tools stay off the request until tool search loads them, so they are left out.
     """
+    system = system_text(system_messages)
     definitions = tool_definitions_text(tools, deferred_tool_names)
-    return _StaticTokenEstimator(counter, count(counter, system_text(system_messages)) + count(counter, definitions))
+    fingerprint = hashlib.sha256(f"{system}\0{definitions}".encode("utf-8", "surrogatepass")).hexdigest()
+    return _StaticTokenEstimator(counter, count(counter, system) + count(counter, definitions), fingerprint)
 
 
 def tool_definitions_text(tools: Sequence[ToolSpec], deferred_tool_names: frozenset[str]) -> str:

@@ -385,10 +385,10 @@ class PreparedHistoryState:
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     prepared_context_tokens: int | None = None
-    # The system prompt and tools tokens the run's requests were sized with, when its settings replay the scope's whole
-    # history; a run whose final plan replays all of it publishes them, so a later reply can take them off the request
-    # size the provider reports.
-    non_prompt_tokens: int | None = None
+    # What the run's requests hold before their turn (``history.replay.request_basis``); a run whose final plan replays
+    # the history its settings select publishes it, so a later reply can tell whether the request size the provider
+    # reported for this run describes its own history.
+    request_basis: str | None = None
     # Whether the replayed history was sized from the provider's reported request size, which already holds the tool
     # definitions tool search loaded.
     reported_history: bool = False

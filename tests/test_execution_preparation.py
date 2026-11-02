@@ -234,7 +234,7 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         compaction_decision=CompactionDecision(mode="none", reason="auto_disabled"),
         native_history=None,
         counter=fake_token_counter(),
-        non_prompt_tokens=0,
+        static_fingerprint="static",
     )
 
 
@@ -565,20 +565,20 @@ def test_a_scheduled_limit_leaves_nothing_to_size_the_next_reply_by(limit: int) 
         replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=500, add_history_to_context=True),
         replays_persisted_history=True,
         prepared_context_tokens=1_500,
-        non_prompt_tokens=1_000,
+        request_basis="basis",
         native_history=None,
     )
     published = build_prepared_history_metadata_content(prepared)[AI_RUN_METADATA_KEY]["prepared_context"]
-    assert published["non_prompt_tokens"] == 1_000
+    assert published["request_basis"] == "basis"
 
     capped = _prepared_history_with_scheduled_limit(prepared, limit)
 
-    # The run records no system prompt and tools, even over metadata seeded from a paused run that recorded some, so
-    # the next reply sizes its history by estimate.
+    # The run records no request basis, even over metadata seeded from a paused run that recorded one, so the next
+    # reply sizes its history by estimate.
     seed = build_prepared_history_metadata_content(prepared)
     merged = deep_merge_metadata(without_run_usage(seed), build_prepared_history_metadata_content(capped))
     assert merged is not None
-    assert "non_prompt_tokens" not in merged[AI_RUN_METADATA_KEY]["prepared_context"]
+    assert "request_basis" not in merged[AI_RUN_METADATA_KEY]["prepared_context"]
 
 
 def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:
@@ -905,6 +905,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
     )
     assert prepare_scope_history.await_count == 1
     assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens
+    assert prepare_scope_history.await_args.kwargs["static_fingerprint"] == estimator.fingerprint
     assert (
         estimator.non_prompt_tokens
         > build_static_token_estimator(counter, system_messages, (), frozenset()).non_prompt_tokens
