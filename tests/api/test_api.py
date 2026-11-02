@@ -1845,8 +1845,8 @@ def test_get_tools_non_requester_oauth_keeps_non_authoritative_shared_preview(
         session_id=None,
     )
     oauth_target = resolve_worker_target("user", "general", execution_identity=identity)
-    save_scoped_credentials(
-        "google_drive_oauth",
+    publish_oauth_credentials(
+        google_oauth_provider("google_drive"),
         {
             "token": "drive-token",
             "refresh_token": "drive-refresh-token",

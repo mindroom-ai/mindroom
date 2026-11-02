@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -233,11 +233,24 @@ def _google_tool(tool_name: str) -> dict[str, Any]:
     return tool
 
 
+def _google_token(provider: OAuthProvider) -> dict[str, Any]:
+    return {
+        "token": "access-token",
+        "refresh_token": "refresh-token",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "client-id",
+        "expires_at": 4_102_444_800.0,
+        "scopes": list(provider.scopes),
+        "_source": "oauth",
+        "_oauth_provider": provider.id,
+    }
+
+
 def _connect_google(
     provider: OAuthProvider,
     connection: str,
     tmp_path: Path,
-    target: ResolvedWorkerTarget,
+    target: ResolvedWorkerTarget | None,
 ) -> tuple[RuntimePaths, CredentialsManager]:
     """Return a runtime whose Google provider is connected through OAuth or the service account file."""
     process_env = (
@@ -256,21 +269,7 @@ def _connect_google(
             "google_oauth_client",
             {"client_id": "client-id", "client_secret": "client-secret", "_source": "ui"},
         )
-        publish_oauth_credentials(
-            provider,
-            {
-                "token": "access-token",
-                "refresh_token": "refresh-token",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "client_id": "client-id",
-                "expires_at": 4_102_444_800.0,
-                "scopes": list(provider.scopes),
-                "_source": "oauth",
-                "_oauth_provider": provider.id,
-            },
-            credentials_manager=manager,
-            worker_target=target,
-        )
+        publish_oauth_credentials(provider, _google_token(provider), credentials_manager=manager, worker_target=target)
     return runtime_paths, manager
 
 
@@ -360,3 +359,69 @@ async def test_connected_oauth_tool_without_required_settings_is_available(tmp_p
     await tools_api._update_tools_statuses([tool], _provider_context(provider, runtime_paths, manager, target))
 
     assert tool["status"] == "available"
+
+
+def _preview_context(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager,
+    execution_scope: WorkerScope | None,
+    agent_name: str | None,
+) -> tools_api._ResolvedToolAvailabilityContext:
+    """Return the context of a draft or requester-scope preview, which has no request target."""
+    return tools_api._ResolvedToolAvailabilityContext(
+        execution_scope=execution_scope,
+        agent_name=agent_name,
+        status_authoritative=False,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        allowed_shared_services=None,
+        oauth_providers={provider.id: provider},
+        runtime_paths=runtime_paths,
+        tools=builtin_tool_registry(),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("execution_scope", "agent_name"),
+    [(None, None), ("shared", "code")],
+    ids=["new-agent-draft", "shared-scope-draft"],
+)
+async def test_preview_reads_the_oauth_connection_the_runtime_reads(
+    tmp_path: Path,
+    execution_scope: WorkerScope | None,
+    agent_name: str | None,
+) -> None:
+    provider = google_oauth_provider("google_tasks")
+    target = (
+        None if execution_scope is None else resolve_worker_target(execution_scope, agent_name, execution_identity=None)
+    )
+    runtime_paths, manager = _connect_google(provider, "oauth", tmp_path, target)
+    tool = _google_tool("google_tasks")
+
+    await tools_api._update_tools_statuses(
+        [tool],
+        _preview_context(provider, runtime_paths, manager, execution_scope, agent_name),
+    )
+
+    assert tool["status"] == "available"
+
+
+@pytest.mark.asyncio
+async def test_preview_ignores_a_retired_oauth_json_file(tmp_path: Path) -> None:
+    provider = google_oauth_provider("google_tasks")
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("google_oauth_client", {"client_id": "client-id", "client_secret": "client-secret"})
+    save_scoped_credentials(
+        provider.credential_service,
+        _google_token(provider),
+        credentials_manager=manager,
+        worker_target=None,
+    )
+    tool = _google_tool("google_tasks")
+
+    await tools_api._update_tools_statuses([tool], _preview_context(provider, runtime_paths, manager, None, None))
+
+    assert tool["status"] == "requires_config"
