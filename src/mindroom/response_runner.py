@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
@@ -40,6 +40,7 @@ from mindroom.final_delivery import (
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
+from mindroom.matrix.guarded_rooms import guarded_room
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
@@ -549,32 +550,38 @@ class ResponseRunner:
             )
 
         try:
-            async with self.deps.replies.span_scope():
-                fate = await self.lifecycle_coordinator.run_locked_response(
-                    target=request.response_envelope.target,
-                    response_envelope=request.response_envelope,
-                    pipeline_timing=request.pipeline_timing,
-                    mid_turn_gate=_mid_turn_for_request(
-                        request,
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                        # A contact turn shows nothing, not even a reaction on the other side's message.
-                        on_defer=None if request.contact is not None else acknowledge_deferred,
-                    ),
-                    locked_operation=lambda target: self._run_locked_ending_span(
-                        request,
-                        target=target,
-                        locked_operation=locked_operation,
-                    ),
-                    signal_queued_message=signal_queued_message and not request.quiet,
-                )
-                handle = current_span()
-                if handle is not None and not handle.exited:
-                    # Every exit path is meant to end its span; one that did not is a bug,
-                    # and releasing keeps the reply's sources for a retry.
-                    self.deps.logger.error("reply_span_left_unended", span_id=handle.span_id, reply_id=handle.reply_id)
-                    await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
-                return fate
+            # A contact turn reaches its contact room only through sends its message policy approved.
+            with guarded_room(request.room_id) if request.contact is not None else nullcontext():
+                async with self.deps.replies.span_scope():
+                    fate = await self.lifecycle_coordinator.run_locked_response(
+                        target=request.response_envelope.target,
+                        response_envelope=request.response_envelope,
+                        pipeline_timing=request.pipeline_timing,
+                        mid_turn_gate=_mid_turn_for_request(
+                            request,
+                            self.deps.runtime.config,
+                            self.deps.runtime_paths,
+                            # A contact turn shows nothing, not even a reaction on the other side's message.
+                            on_defer=None if request.contact is not None else acknowledge_deferred,
+                        ),
+                        locked_operation=lambda target: self._run_locked_ending_span(
+                            request,
+                            target=target,
+                            locked_operation=locked_operation,
+                        ),
+                        signal_queued_message=signal_queued_message and not request.quiet,
+                    )
+                    handle = current_span()
+                    if handle is not None and not handle.exited:
+                        # Every exit path is meant to end its span; one that did not is a bug,
+                        # and releasing keeps the reply's sources for a retry.
+                        self.deps.logger.error(
+                            "reply_span_left_unended",
+                            span_id=handle.span_id,
+                            reply_id=handle.reply_id,
+                        )
+                        await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
+                    return fate
         finally:
             gate.response_identities.remove(identity)
             self._in_flight_response_count -= 1

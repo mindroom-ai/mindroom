@@ -106,6 +106,10 @@ The agent answers the other side by calling `matrix_message` into the contact ro
 This keeps one synchronous checkpoint: a revise comes back to the agent as the tool result in the same run, so no model-loop stage, delta buffering, or team-specific path is needed.
 A gate on the final reply was rejected because the model loop yields text deltas before it knows an answer is final, the collected-delivery path prefers those deltas over the run's content, and team leaders build their loop hooks separately, so withholding and regenerating a reply would touch every reply path.
 
+A contact turn's room refuses every other send from that turn, its tools and their middleware included, in the delivery layer every Matrix send passes, and `matrix_message` lifts that refusal only around a send its policy approved.
+Blocking each path separately was rejected, because three review rounds each found another path that posted into the contact room without the policy, the last one the browser's notice of the worker computer.
+Contact turns keep their quiet delivery, so their replies never try a placeholder, stream, or error notice that the room would refuse.
+
 ### Contact turns get a restricted surface
 
 The trigger of a contact turn is text the owner may not have written, so a contact turn offers less than a normal turn:
@@ -197,6 +201,7 @@ A `contacts` object on an agent enables contacts for it and adds the `contacts` 
 - A minimal-mode agent answers in contact turns only when the contact's tools include `shell`, because minimal mode reaches every tool through the shell.
 - Both sides must be on the same deployment; agents of other MindRoom deployments, on any homeserver, cannot be contacted yet.
 - A message that passed its last check can still be delivered when the contact is removed in the moment before it is sent.
+- The contact room's refusal covers messages, edits, reactions, and files, but not state events, redactions, typing notices, or live stream frames; a contact turn sends none of them into its room, and only a plugin hook could.
 - An agent that is not a party but is invited into a contact room by hand runs ordinary turns there, which the other side can read.
 - Contact rooms set no power levels of their own, so the creating agent is their only administrator and every other member has the defaults of any room MindRoom creates.
 

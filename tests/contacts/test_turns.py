@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import agents as agents_module
 from mindroom import ai
@@ -25,12 +26,14 @@ from mindroom.contacts.turns import (
     contact_turn_tools,
 )
 from mindroom.conversation_resolver import MessageContext
+from mindroom.custom_tools import chat_ui, computer_announcement
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_entity_id
 from mindroom.final_delivery import Failed, FailureCause, Suppressed, Suppression
 from mindroom.hooks import MessageEnvelope, render_system_enrichment_block
 from mindroom.hooks.context import ResponseDraft
 from mindroom.logging_config import get_logger
+from mindroom.matrix.guarded_rooms import send_refused
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -41,6 +44,7 @@ from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_lifecycle import answer_suppression
 from mindroom.response_sources import ResponseSources
 from mindroom.skill_learning.runner import SkillReviewRunner
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, TurnPolicy, TurnPolicyDeps
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
@@ -54,7 +58,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.contacts.test_tools import _setup as setup_without_contacts
-from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import streamed_answer
@@ -660,6 +664,61 @@ async def test_the_same_agent_answers_visibly_outside_its_contact_room(
     assert [on_defer is not None for on_defer in turn.on_defer] == [True]
     assert context.tool_names is None
     assert (context.supports_native_tool_approval, context.include_interactive_questions) == (True, True)
+
+
+@pytest.mark.asyncio
+async def test_a_contact_turn_reaches_its_room_only_through_the_message_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The browser's notice of the worker computer would skip the policy, so the contact room refuses it.
+
+    The turn goes on: the browser call still runs, and the policy-approved matrix_message send is the only event the
+    room gets. The room is guarded only while the turn runs.
+    """
+    config, paths = _setup(tmp_path, tools=("browser", "chat_ui"))
+    _contact(paths, _record(target_side=ContactSide(tools=["browser"])))
+    browsed: list[str] = []
+
+    async def browser_control(action: str) -> str:
+        """Drive the browser of the worker computer."""
+        browsed.append(action)
+        return "Opened the calendar."
+
+    build = agents_module.build_agent_toolkit
+
+    def build_with_fake_browser(tool_name: str, **kwargs: Any) -> object:  # noqa: ANN401
+        if tool_name == "browser":
+            return Toolkit(name="browser", tools=[browser_control])
+        return build(tool_name, **kwargs)
+
+    # The agent's browser gives it a worker computer, which its first browser call announces in MindRoom Chat.
+    monkeypatch.setattr(computer_announcement, "worker_computer_provider", lambda *_args: "browser")
+    monkeypatch.setattr(chat_ui, "_SHOWN_COMPUTERS", {})
+    model = ScriptedModel(
+        [
+            calls(tool_call("browser_control", "call-1", action="navigate")),
+            calls(tool_call("matrix_message", "call-2", message="Bob is free on Friday.")),
+            answer("Told Alice's agent Bob is free."),
+        ],
+    )
+    install_model_providers(monkeypatch, {"default": model})
+    bot = _bot(config, paths)
+
+    with (
+        patch.object(agents_module, "build_agent_toolkit", side_effect=build_with_fake_browser),
+        capture_logs() as logs,
+    ):
+        [delivery] = (await _run(bot, CONTACT_ROOM)).ended
+
+    refused = [log for log in logs if log["event"] == "matrix_send_refused_in_guarded_room"]
+    assert [(log["room_id"], log["operation"]) for log in refused] == [(CONTACT_ROOM, "chat_ui_action")]
+    assert browsed == ["navigate"]
+    assert len(model.requests) == 3
+    [sent] = bot.client.room_send.await_args_list
+    assert (sent.kwargs["room_id"], sent.kwargs["content"]["body"]) == (CONTACT_ROOM, "Bob is free on Friday.")
+    assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
+    assert not send_refused(CONTACT_ROOM)
 
 
 @pytest.mark.asyncio

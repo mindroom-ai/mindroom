@@ -2476,6 +2476,7 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_reads",
+    "mindroom.matrix.guarded_rooms",
     "mindroom.tool_system.events",
 ]
 visibility = [
@@ -3281,6 +3282,7 @@ depends_on = [
     "mindroom.history.storage",
     "mindroom.history.turn_recorder",
     "mindroom.judgment.cold_cache",
+    "mindroom.matrix.guarded_rooms",
     "mindroom.mid_turn_judgment",
     "mindroom.orchestration.runtime",
     "mindroom.participation",
@@ -3882,8 +3884,17 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.matrix.client_delivery"
+path = "mindroom.matrix.guarded_rooms"
 depends_on = []
+visibility = [
+    "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.matrix.client_delivery",
+    "mindroom.response_runner",
+]
+
+[[modules]]
+path = "mindroom.matrix.client_delivery"
+depends_on = ["mindroom.matrix.guarded_rooms"]
 visibility = [
     "mindroom.custom_tools.thread_move",
     "mindroom.matrix.personal_rooms",

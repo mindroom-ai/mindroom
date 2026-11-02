@@ -16,6 +16,7 @@ from nio.api import Api
 from nio.exceptions import OlmTrustError
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.guarded_rooms import send_refused
 from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
 from mindroom.matrix.media import prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_thread_relation
@@ -94,7 +95,7 @@ def _log_matrix_delivery_exception(
     )
 
 
-async def _send_prepared_room_message(
+async def _send_prepared_room_message(  # noqa: PLR0911
     client: nio.AsyncClient,
     room_id: str,
     content_sent: dict[str, Any],
@@ -105,7 +106,14 @@ async def _send_prepared_room_message(
     transaction_id: str | None = None,
     write_allowed: Callable[[], bool] | None = None,
 ) -> object | None:
-    """Send one prepared Matrix room message and normalize local delivery exceptions."""
+    """Send one prepared Matrix room message and normalize local delivery exceptions.
+
+    Every message, edit, reaction, and file sent to a room passes here, so a send into the room this context guards
+    is refused here as a failed one.
+    """
+    if send_refused(room_id):
+        logger.warning("matrix_send_refused_in_guarded_room", room_id=room_id, operation=operation)
+        return None
     try:
         if write_allowed is not None and not write_allowed():
             return None

@@ -18,6 +18,7 @@ from mindroom.custom_tools.matrix_message_idempotency import claim_matrix_messag
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.hooks import EVENT_CONTACT_BEFORE_SEND, ContactBeforeSendContext, HookBindings, HookRegistry, hook
+from mindroom.matrix.guarded_rooms import guarded_room
 from mindroom.matrix.message_extras import MatrixMessageExtra
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.message_target import MessageTarget
@@ -226,6 +227,33 @@ async def test_send_into_contact_room_follows_the_verdict(
     assert {key: payload.get(key) for key in outcome} == outcome
     assert ("note" in payload) == ("sent_text" in payload) == (effect == "rewrite")
     assert [content["body"] for content in _sent(context)] == ([] if sent_body is None else [sent_body])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        {"message": "Dinner at eight?"},
+        {"action": "edit", "event_id": "$mine:localhost", "message": "Dinner at eight?"},
+        {"action": "react", "event_id": "$theirs:localhost", "message": "🎉"},
+    ],
+)
+async def test_the_room_a_contact_turn_guards_still_takes_what_the_policy_approved(
+    tmp_path: Path,
+    call: dict[str, str],
+) -> None:
+    """A contact turn's room refuses every send but the message, edit, or reaction matrix_message's policy approved."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    seen: list[str] = []
+    context = _context(config, paths, _recorder(seen))
+
+    with guarded_room(CONTACT_ROOM):
+        payload = await _call(context, **call)
+
+    assert seen == [call["message"]]
+    assert payload["status"] == "ok"
+    assert len(_sent(context)) == 1
 
 
 @pytest.mark.asyncio
