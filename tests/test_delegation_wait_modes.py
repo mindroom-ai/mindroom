@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("initially_excluded", [False, True])
 @pytest.mark.parametrize("team", [False, True])
-async def test_delegate_policy_approval_follows_exclusions_current_at_resume(
+async def test_an_approved_subagent_call_resumes_on_the_path_it_paused_on(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     initially_excluded: bool,
