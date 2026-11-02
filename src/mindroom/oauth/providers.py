@@ -12,7 +12,7 @@ import secrets
 import time
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
@@ -599,6 +599,21 @@ class OAuthLegacyCredentials:
 
 
 @dataclass(frozen=True, slots=True)
+class OAuthConsentGroup:
+    """Providers sharing one OAuth app and account that can be connected together with one sign-in."""
+
+    key: str
+    display_name: str
+
+    def __post_init__(self) -> None:
+        """Validate the group key and name."""
+        validate_service_name(self.key)
+        if not self.display_name.strip():
+            msg = f"OAuth consent group '{self.key}' must have a display name"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
 class OAuthProvider:
     """Provider definition registered by core or a plugin."""
 
@@ -634,6 +649,8 @@ class OAuthProvider:
     # exception is caught and logged by its type only) leaves the connection without them.
     account_claims_reader: _OAuthAccountClaimsReader | None = None
     legacy_credentials: OAuthLegacyCredentials | None = None
+    # Set only when this provider's refresh tokens stay valid after use, so one sign-in can connect every member.
+    consent_group: OAuthConsentGroup | None = None
 
     def __post_init__(self) -> None:
         """Validate provider identifiers and redirect path shape."""
@@ -1197,3 +1214,15 @@ class OAuthProvider:
             claims=dict(result.claims),
             claims_verified=result.claims_verified,
         )
+
+
+def oauth_consent_group_provider(members: Sequence[OAuthProvider]) -> OAuthProvider:
+    """Return the first member as the lead provider, asking for every member's scopes once, in member order."""
+    if not members:
+        msg = "An OAuth consent group needs at least one provider"
+        raise OAuthProviderError(msg)
+    group_keys = {member.consent_group.key if member.consent_group else None for member in members}
+    if len(group_keys) != 1 or None in group_keys:
+        msg = "OAuth consent group members must all belong to the same consent group"
+        raise OAuthProviderError(msg)
+    return replace(members[0], scopes=tuple(dict.fromkeys(scope for member in members for scope in member.scopes)))

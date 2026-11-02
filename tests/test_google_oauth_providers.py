@@ -22,14 +22,17 @@ from mindroom.oauth.google import (
     _google_runtime_bootstrapper,
     _google_token_parser,
     google_oauth_provider,
+    google_oauth_providers,
 )
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthClientConfig,
     OAuthConnectionRequired,
+    OAuthConsentGroup,
     OAuthProviderError,
     is_terminal_oauth_refresh_error_code,
     oauth_connection_required_payload,
+    oauth_consent_group_provider,
 )
 from mindroom.oauth.service import build_oauth_connect_instruction, build_oauth_reconnect_instruction
 from tests.oauth_test_utils import oauth_authorization_url
@@ -183,6 +186,42 @@ def test_each_google_provider_declares_its_service_on_the_shared_google_contract
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.runtime_bootstrapper is _google_runtime_bootstrapper
     assert provider.token_parser is _google_token_parser
+
+
+def test_every_builtin_google_provider_joins_the_google_consent_group() -> None:
+    """Google Cloud included, every built-in Google provider connects together."""
+    assert {p.consent_group for p in google_oauth_providers()} == {OAuthConsentGroup("google", "Google")}
+
+
+def test_consent_group_provider_asks_for_every_member_scope_once() -> None:
+    """One sign-in asks for every member's scopes, without repeating a shared scope."""
+    gmail, calendar = google_oauth_provider("google_gmail"), google_oauth_provider("google_calendar")
+    lead = oauth_consent_group_provider((gmail, calendar))
+    assert lead.id == "google_gmail"
+    assert lead.scopes == (*gmail.scopes, *[s for s in calendar.scopes if s not in gmail.scopes])
+    assert len(lead.scopes) == len(set(lead.scopes))
+
+
+def test_consent_group_provider_refuses_mixed_groups() -> None:
+    """A lead provider is built only from a non-empty list of members in one consent group."""
+    gmail = google_oauth_provider("google_gmail")
+    other = replace(gmail, id="other", consent_group=OAuthConsentGroup("other", "Other"))
+    with pytest.raises(OAuthProviderError):
+        oauth_consent_group_provider((gmail, other))
+    with pytest.raises(OAuthProviderError):
+        oauth_consent_group_provider(())
+    with pytest.raises(OAuthProviderError):
+        oauth_consent_group_provider((gmail, replace(gmail, id="ungrouped", consent_group=None)))
+
+
+@pytest.mark.parametrize(
+    ("key", "display_name", "message"),
+    [("Not A Service", "Google", "Service name can only include"), ("google", "  ", "must have a display name")],
+)
+def test_consent_group_rejects_an_invalid_key_or_blank_name(key: str, display_name: str, message: str) -> None:
+    """A consent group needs a valid key and a visible name."""
+    with pytest.raises(ValueError, match=message):
+        OAuthConsentGroup(key, display_name)
 
 
 def test_a_blank_exported_domain_restriction_does_not_hide_the_env_file_one(tmp_path: Path) -> None:

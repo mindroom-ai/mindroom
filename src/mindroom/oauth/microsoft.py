@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints
+from mindroom.oauth.providers import OAuthConsentGroup, OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -33,6 +33,7 @@ _IDENTITY_SCOPES = ("User.Read", "offline_access")
 # A tenant is a GUID, a verified domain, or organizations, common, or consumers; it becomes a URL path segment.
 _TENANT = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}")
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+")
+_CONSENT_GROUP = OAuthConsentGroup("microsoft", "Microsoft 365")
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,8 @@ class _MicrosoftProviderSpec:
     # Requested before `_IDENTITY_SCOPES`.
     service_scopes: tuple[str, ...]
     status_capabilities: tuple[str, ...]
+    # Entra refuses a whole request when one scope needs admin consent the tenant has not given.
+    admin_consent: bool = False
 
 
 _MICROSOFT_PROVIDERS = {
@@ -100,6 +103,7 @@ _MICROSOFT_PROVIDERS = {
         display_name="Microsoft Teams Meetings",
         service_scopes=("OnlineMeetings.Read", "OnlineMeetingTranscript.Read.All"),
         status_capabilities=("find Teams meetings and read their transcripts",),
+        admin_consent=True,
     ),
     "microsoft_onenote": _MicrosoftProviderSpec(
         display_name="Microsoft OneNote",
@@ -110,6 +114,7 @@ _MICROSOFT_PROVIDERS = {
         display_name="Microsoft 365 People",
         service_scopes=("User.Read.All",),
         status_capabilities=("look up people, their managers, and their direct reports in the directory",),
+        admin_consent=True,
     ),
 }
 
@@ -184,6 +189,7 @@ def microsoft_oauth_provider(provider_id: str) -> OAuthProvider:
         token_url=_endpoint(_DEFAULT_TENANT, "token"),
         scopes=(*spec.service_scopes, *_IDENTITY_SCOPES),
         credential_service=f"{provider_id}_oauth",
+        consent_group=None if spec.admin_consent else _CONSENT_GROUP,
         tool_config_service=provider_id,
         client_config_services=(f"{provider_id}_oauth_client",),
         shared_client_config_services=(_CLIENT_CONFIG_SERVICE,),
