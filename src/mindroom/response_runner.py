@@ -420,11 +420,11 @@ class ResponseRunner:
         """Stop the conversation's running review, and return a person's response's skill-review handoff.
 
         Like Hermes, a response starting in a conversation stops its running review. The returned runtime records the
-        response's final request for the review to fork.
+        response's final request for the review to fork. A contact turn, which the other side drives, skips reviews.
         """
         config = self.deps.runtime.config
         agent = config.agents.get(self.deps.agent_name)
-        if agent is None or not agent.skill_learning.enabled:
+        if agent is None or not agent.skill_learning.enabled or request.contact is not None:
             return None, runtime
         reviews = self.deps.runtime.orchestrator.skill_reviews
         agent_name = self.deps.agent_name
@@ -648,7 +648,7 @@ class ResponseRunner:
         target: MessageTarget,
         contact_turn: bool,
     ) -> None:
-        """End a span whose locked response raised before ending it; a contact turn's failure stays unshown."""
+        """End a span whose locked response raised before ending it."""
         gateway = self.deps.delivery_gateway
         if isinstance(error, asyncio.CancelledError):
             await gateway.end_interrupted_span(
@@ -2053,10 +2053,7 @@ class ResponseRunner:
         )
 
     async def generate_response(self, request: ResponseRequest) -> SourceFate:
-        """Generate and send/edit an agent response with lifecycle locking; return what it did with its sources.
-
-        Whether it is a contact turn is read here once, and the whole turn follows it.
-        """
+        """Generate and send/edit an agent response with lifecycle locking; return what it did with its sources."""
         request = self.locked.with_contact(request)
         return await self._run_locked_response_lifecycle(
             request,
@@ -2186,12 +2183,11 @@ class ResponseRunner:
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        if request.contact is not None:
-            # The other side drives a contact turn, so it writes no long-term memory and teaches the agent no skill.
-            queue_memory_persistence = None
-            queue_skill_review = None
-        else:
-            queue_memory_persistence = self.locked.memory_persistence(
+        # The other side drives a contact turn, so it writes no long-term memory.
+        queue_memory_persistence = (
+            None
+            if request.contact is not None
+            else self.locked.memory_persistence(
                 agent_name=self.deps.agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
@@ -2201,12 +2197,13 @@ class ResponseRunner:
                 hook_source=request.response_envelope.hook_source,
                 origin=request.response_envelope.origin,
             )
-            queue_skill_review, runtime = self._response_skill_review(
-                request,
-                runtime,
-                session_id=session_id,
-                execution_identity=execution_identity,
-            )
+        )
+        queue_skill_review, runtime = self._response_skill_review(
+            request,
+            runtime,
+            session_id=session_id,
+            execution_identity=execution_identity,
+        )
         persist_response_event_id = self.locked.build_persist_response_event_id_effect(
             session_id=session_id,
             scope=history_scope,
