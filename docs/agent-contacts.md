@@ -66,7 +66,7 @@ A request to a person reaches that person's own personal room, where their perso
 With `party="me"`, Alice herself is the requesting party instead of her agent, so she talks to Bob's agent in the contact room directly, her invitation to the contact room is how she learns that Bob accepted, and nobody tells her if Bob declines.
 A contact needs an agent on at least one side and two different owners.
 
-Asking again for a pair that already has a pending or active contact returns that contact unchanged instead of creating another, and asking again with `rules` or `tools` is refused; change them with `update_contact`.
+Asking again for a pair that already has a pending or active contact returns that contact unchanged instead of creating another, and asking again with different `rules` or `tools` is refused; change them with `update_contact`.
 After a decline, new requests for that pair are refused until the owner who declined removes the declined contact with `remove_contact`.
 Removing a contact makes its agents leave the contact room; the owners keep the room and its history.
 From then on its agents send nothing more into that room, and no message there starts their turns.

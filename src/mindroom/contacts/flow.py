@@ -216,9 +216,13 @@ def _existing_contact(
     requester: ContactParty,
     target: ContactParty,
     *,
-    sets_side: bool,
+    rules: str | None,
+    tools: list[str] | None,
 ) -> ContactRecord | None:
-    """Return the pending or active contact of this pair, refusing a declined pair and a request that sets a side."""
+    """Return the pending or active contact of this pair, refusing a declined pair and a request that changes a side.
+
+    Rules or tools equal to the requester's stored side make a repeat, as when the first request's notice failed.
+    """
     pair = {(party.kind, party.id) for party in (requester, target)}
     for existing in book.contacts:
         ends = {(party.kind, party.id) for party in (existing.requester, existing.target)}
@@ -227,7 +231,10 @@ def _existing_contact(
         if existing.status == "declined":
             msg = f"{existing.target.owner} declined this contact; they can remove it to allow a new request"
             raise ValueError(msg)
-        if sets_side:
+        stored = existing.side("requester" if existing.requester.id == requester.id else "target")
+        asked = stored.model_copy(deep=True)
+        _change_side(asked, rules, tools)
+        if asked != stored:
             msg = (
                 f"Contact {existing.id} with {target.id} already exists and is {existing.status}; "
                 "change your side's rules or tools with update_contact"
@@ -251,7 +258,7 @@ async def request_contact(
 
     The flag says whether this call posted a request notice. A pending or active contact between the same two parties,
     in either direction, is returned unchanged instead, and its request notice is posted when it never landed. Asking
-    again with rules or tools is refused, because only ``update_contact`` changes them.
+    again with other rules or tools is refused, because only ``update_contact`` changes them.
     """
     config, paths = context.current_config, context.runtime_paths
     own = _own_party(context, agent_name)
@@ -274,7 +281,7 @@ async def request_contact(
         raise ValueError(msg)
 
     def create(book: ContactBook) -> ContactRecord:
-        existing = _existing_contact(book, requester, target_party, sets_side=rules is not None or tools is not None)
+        existing = _existing_contact(book, requester, target_party, rules=rules, tools=tools)
         if existing is not None:
             return existing.model_copy(deep=True)
         record = ContactRecord(

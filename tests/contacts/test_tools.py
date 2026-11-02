@@ -370,8 +370,27 @@ async def test_repeat_request_returns_existing_and_reposts_missing_notice(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_asking_again_with_rules_or_tools_is_refused_and_changes_nothing(tmp_path: Path) -> None:
-    """Rules or tools on a repeated request would be lost, so the request is refused and points to update_contact."""
+async def test_asking_again_with_the_same_rules_and_tools_posts_a_notice_that_never_landed(tmp_path: Path) -> None:
+    """A failed notice says to ask again, and the same call with its rules and tools is a repeat that posts it."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    terms: dict[str, Any] = {"rules": "Be brief", "tools": ["calculator"]}
+    with _delivered(None), pytest.raises(ValueError, match=r"could not be posted"):
+        await _request(config, paths, runtime, **terms)
+
+    with _delivered("$late") as send:
+        again = await _request(config, paths, runtime, **terms)
+        only_rules = await _request(config, paths, runtime, rules=" Be brief ")
+
+    (stored,) = _stored(paths)
+    assert (again.id, again.notice_event_id) == (stored.id, "$late")
+    assert only_rules == stored
+    send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_asking_again_with_other_rules_or_tools_is_refused_and_changes_nothing(tmp_path: Path) -> None:
+    """Other rules or tools on a repeated request would be lost, so the request is refused and points to update_contact."""
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     record = await _pending(config, paths, runtime, rules="Be brief", tools=["calculator"])

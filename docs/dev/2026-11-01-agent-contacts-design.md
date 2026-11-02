@@ -167,7 +167,7 @@ A separate secret scan without a judge was not added, because the judgment layer
 
 ### Requests and removal
 
-A repeated request that sets rules or tools for a pending or active contact is refused in favor of `update_contact`, so a request never claims values it did not store.
+A repeated request whose rules or tools differ from those stored for a pending or active contact is refused in favor of `update_contact`, so a request never claims values it did not store, while one with the same values is a repeat, so retrying a request whose notice failed posts it.
 Only the target owner may remove a declined contact, so the requester cannot undo a decline by removing it.
 `remove_contact` has no approval card, because it only takes access away.
 
