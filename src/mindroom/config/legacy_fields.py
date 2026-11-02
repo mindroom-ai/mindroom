@@ -163,11 +163,23 @@ _REJECTED_TOOL_OVERRIDES = {
     "restrict_to_base_dir": "use agents.<name>.file_access or defaults.file_access",
     "add_instructions": "a toolkit's instructions always reach the prompt, so remove the setting",
 }
+# LEGACY_COMPAT: Retired per-tool file_access override of the script tool.
+# Legacy format: a script tool entry authored `file_access: unconfined`, the only value its unconfined class accepted.
+# Last legacy release: v2026.11.71; replacement: unreleased; the next release declares script with no file access,
+#   because it reads only its workspace source and runs its scripts on the script backend.
+# Handling: Reject the key on script entries, saying to remove it.
+# Coverage: tests/test_tools_metadata.py::test_script_file_access_override_is_rejected_with_removal_hint.
+_REJECTED_TOOL_OVERRIDES_BY_TOOL = {
+    "script": {
+        "file_access": "script reads only its workspace source and declares no file access, so remove the setting",
+    },
+}
 
 
-def retired_tool_override(overrides: Mapping[str, object]) -> tuple[str, str] | None:
-    """Return the first rejected retired field an entry authors, and its replacement guidance."""
-    return next(((field, guidance) for field, guidance in _REJECTED_TOOL_OVERRIDES.items() if field in overrides), None)
+def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
+    rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
+    return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)
 
 
 # LEGACY_COMPAT: Retired max_retries setting of OpenAI-family models.

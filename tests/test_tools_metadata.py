@@ -1859,7 +1859,7 @@ def test_a_config_s_plugin_view_does_not_outlive_the_config(tmp_path: Path) -> N
 
 def test_code_execution_tools_declare_unconfined_file_access() -> None:
     """Tools that run arbitrary programs cannot be confined in-process."""
-    for name in ("shell", "python", "docker", "script", "claude_agent"):
+    for name in ("shell", "python", "docker", "claude_agent"):
         assert _BUILTINS.entries[name].file_access is ToolFileAccess.UNCONFINED, name
         assert _BUILTINS.entries[name].executes_code, name
 
@@ -2057,6 +2057,28 @@ def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
                 config_path_prefix="agents.a.tools",
                 tool_metadata=builtin_tool_registry().entries,
             )
+
+
+def test_script_file_access_override_is_rejected_with_removal_hint(tmp_path: Path) -> None:
+    """A config that still marks script unconfined fails to load and is told to remove the key."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
+                "agents": {
+                    "watcher": {"display_name": "Watcher", "tools": [{"script": {"file_access": "unconfined"}}]},
+                },
+            },
+            runtime_paths,
+        )
+
+    expected = (
+        "agents.watcher.tools[0].script.file_access was removed; script reads only its workspace source and declares"
+        " no file access, so remove the setting."
+    )
+    assert expected in str(exc_info.value)
 
 
 @pytest.mark.parametrize("tool_name", ["reasoning", "zep", "daytona"])

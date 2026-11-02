@@ -3111,6 +3111,16 @@ defaults:
     replay_window_tokens: 200000  # Keep replayed history around a smaller operational window
 ```
 
+### How tokens are counted
+
+Every token limit, including `context_window`, the compaction thresholds, and `memory.file.max_entrypoint_tokens`, is counted as the model that receives the text counts tokens.
+OpenAI models with a known tokenizer, such as GPT-4o, count exactly on OpenAI's own endpoints, Codex, and OpenRouter, and on Azure when the deployment is named after the model.
+Other models use an estimate that is deliberately high, by up to about three quarters for Claude and two thirds for Gemini, so limits act early rather than late.
+Conversation history is sized from the request size the provider reported for the previous reply; without one, such as after a history limit dropped older messages, another model answered, or the agent's system prompt or tools changed (including on the first reply of each day, because the system prompt names the date), or once native compaction has condensed part of it, it uses the estimate.
+Estimates need the `o200k_base` vocabulary, and older OpenAI models such as GPT-4 on OpenAI's own routes need `cl100k_base`; each downloads on first use, so without network access set `TIKTOKEN_CACHE_DIR` to a directory that already holds them, or the log shows `o200k_base did not load` and estimates fall back to a quarter token per character, while the `MEMORY.md` preload, compaction input, and a compaction summary before it is saved count UTF-8 bytes, which preloads about a third as much and can refuse a summary that would fit.
+To fill that directory, run MindRoom once with network access and `TIKTOKEN_CACHE_DIR` set, then copy the directory; tiktoken names each cached file after its download URL, so a vocabulary file downloaded by hand is not found.
+No reply waits for a token count.
+
 ## Agent Compaction Settings
 
 Compaction is enabled by default through `defaults.compaction`.
@@ -3190,7 +3200,7 @@ An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/sc
 Native checkpoints survive restarts and are tied to their provider, model, and endpoint; after a model switch, the conversation is rebuilt from its full stored history.
 When that history then needs text compaction, it starts from the latest Claude checkpoint's summary instead of summarizing everything that checkpoint covers again, as long as the summary and turns before it are still the ones its request replayed and leave room for its turn; OpenAI checkpoints are encrypted, so they are skipped.
 If a reply's request still would not fit, for example after a very large tool result, native compaction stays off for the rest of that reply and it [compacts as text](#compaction-during-a-reply).
-A completed response that carries a provider checkpoint logs a `Native compaction checkpoint` event with the trigger (`threshold_tokens`, `null` for an authored policy) and the checkpoint's conservative size estimate (`checkpoint_tokens`, from byte length for OpenAI's encrypted checkpoints).
+A completed response that carries a provider checkpoint logs a `Native compaction checkpoint` event with the trigger (`threshold_tokens`, `null` for an authored policy) and the checkpoint's serialized size in characters (`checkpoint_chars`).
 The `Compaction summary chunk` events and the `compaction_*` fields of `Dispatch pipeline timing` cover text compaction only.
 
 ### Manual compaction
@@ -3423,7 +3433,7 @@ For a single agent, the file backend writes memory only when the agent uses the 
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
 An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without replies, its history is compacted, or MindRoom restarts; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
-`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
+`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their size in the turn model's tokens ([how tokens are counted](https://docs.mindroom.chat/configuration/history/#how-tokens-are-counted)).
 Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
 Only whole lines are inlined, never part of a line.
 When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
@@ -4839,7 +4849,7 @@ For conditions that need your own code, write a [plugin automation](https://docs
 Agents append to `MEMORY.md` and their `context_files` far more often than they condense them, and every model call re-sends those files.
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
-1. The check measures `MEMORY.md` plus the agent's `context_files` with the estimate behind `static_prompt_tokens` (characters / 4); for a private agent these are `MEMORY.md` and `private.context_files` in the requester's private root, because agent-level `context_files` load from the workspace every requester shares.
+1. The check measures `MEMORY.md` plus the agent's `context_files` by the token estimate of the agent's configured model, not of a room or thread model override, which may count high ([how tokens are counted](https://docs.mindroom.chat/configuration/history/#how-tokens-are-counted)); for a private agent these are `MEMORY.md` and `private.context_files` in the requester's private root, because agent-level `context_files` load from the workspace every requester shares.
 2. Above `trigger_tokens`, or when the preload has to withhold part of `MEMORY.md` because it passes `memory.file.max_entrypoint_lines` (default `200`) or `memory.file.max_entrypoint_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 19800 tokens in total, but not below 18700", a cut between `min_reduction` and `max_reduction` (10 to 15%).
 3. The prompt asks the agent to commit the files to git first, take lines out of a `MEMORY.md` over either preload cap first (the prompt shows its line and token counts against both caps), fold each later correction into the entry it corrects, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and otherwise never invent facts or change their meaning.
 4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
@@ -8599,6 +8609,7 @@ Scripts also need a worker backend or explicit local execution; see [Worker And 
 | `max_runtime_hours` | `24` | Maximum lifetime of one run in hours, positive and finite; the deadline holds even while the primary runtime is offline |
 
 Each run keeps the limits and `allowed_tools` value in effect when it started.
+`file_access` is not accepted on a `script` entry, since the tool reads only its source file from the agent workspace; an entry that still sets `file_access: unconfined` fails config validation with an error that says to remove it.
 
 ### Which tools a script can call and when it needs approval
 
@@ -14811,6 +14822,8 @@ The tool exposes four functions:
   `dry_run=True` validates a patch without saving it.
   The receipt lists the changed paths without echoing their values.
   When `config.yaml` uses `!include`, inspection works but patching is refused; edit the source files instead.
+  An agent generated from a `personal_agents` template has no `agents` entry, so `get_info("agent_config")` and inspecting `/agents/<name>` return its template at `/personal_agents/<template>`, naming the template and the agent's owner, and inspecting `/agents/<name>/<field>` returns `/personal_agents/<template>/agent/<field>`.
+  Patches under `/agents/<name>` are refused with a pointer to the template while the patched configuration still has that template.
 - **`manage_agent(operation, agent_name, ...)`**: `operation` is `create`, `update`, or `validate`, and the optional fields are `display_name`, `role`, `tools`, `instructions`, `model`, `rooms`, `knowledge_bases`, `include_default_tools`, and `markdown`.
   Creating requires `display_name`, takes a lowercase name of letters, digits, and underscores, defaults `model` to `default`, and defaults `include_default_tools` to `true`.
   Tool names and knowledge base IDs must exist.
@@ -16486,16 +16499,17 @@ Every tool, including plugin tools, must declare one of these file access classe
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `microsoft_files`, `outlook_mail` attachments, `slack` uploads, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, edits, deletes, and every file a `file` content search reads refuse replaced workspace roots and swapped files, while listing and the other searches walk by path, as the known gap below describes |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
 
 [`browser_mcp`](https://docs.mindroom.chat/tools/worker-computer/#native-playwright-mcp-provider) runs only in a worker and confines its upload, drop, screenshot, and PDF paths to the worker workspace whatever the agent's `file_access`.
 
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
-Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
+Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above and `script` carry it.
 A worker isolates the unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`).
-The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, and `stdio` MCP servers), so enable them only for agents trusted with everything the primary runtime can reach.
-MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
+The rest require the primary runtime and cannot run in a worker (`claude_agent`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, and `stdio` MCP servers), so enable them only for agents trusted with everything the primary runtime can reach.
+`script` also runs in the primary process, but there it only reads the one source file it launches, from the agent workspace through no-follow descriptors whatever the agent's `file_access`, so it declares no file access; its scripts run on the worker backend.
+MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools, path tools under `file_access: unrestricted`, or `script` under a local `MINDROOM_SANDBOX_EXECUTION_MODE`, which runs scripts in the primary process, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
 
 ## Connections portal sign-in

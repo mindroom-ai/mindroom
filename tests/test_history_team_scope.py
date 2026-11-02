@@ -26,7 +26,7 @@ from mindroom.history.session_context import (
 from mindroom.history.types import (
     PreparedHistoryState,
 )
-from mindroom.llm.messages import Message, system_text
+from mindroom.llm.messages import Message, stable_serialize, system_text
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import (
@@ -37,7 +37,7 @@ from mindroom.teams.members import (
 from mindroom.teams.runtime import leader_tool_specs
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.token_counting.counts import count
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
@@ -63,7 +63,7 @@ from tests.teams.squad import start_team
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from mindroom.llm.provider import ModelRequest
+    from mindroom.llm.provider import ModelRequest, TokenCounter
 
 _PAIR = TeamConfig(
     display_name="Pair",
@@ -130,8 +130,8 @@ def _leader_non_prompt_tokens(built: BuiltTeam) -> int:
         {key: value for key, value in asdict(tool).items() if value is not None}
         for tool in leader_tool_specs(built.spec)
     ]
-    system_content = system_text(built.spec.leader.system_messages)
-    return estimate_text_tokens(system_content) + len(stable_serialize(payloads)) // 4
+    counter = built.spec.leader.model.token_counter
+    return count(counter, system_text(built.spec.leader.system_messages)) + count(counter, stable_serialize(payloads))
 
 
 @pytest.mark.asyncio
@@ -189,7 +189,8 @@ async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
     non_prompt_tokens = _leader_non_prompt_tokens(built)
     assert kwargs["non_prompt_tokens"] == non_prompt_tokens
     sent_prompt = render_prepared_messages_text(prepared.turn.in_request_order())
-    assert resolved_inputs.execution_plan.static_prompt_tokens == estimate_text_tokens(sent_prompt) + non_prompt_tokens
+    sent_tokens = count(built.spec.leader.model.token_counter, sent_prompt)
+    assert resolved_inputs.execution_plan.static_prompt_tokens == sent_tokens + non_prompt_tokens
 
 
 @pytest.mark.asyncio
@@ -205,12 +206,13 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
     real_estimator = execution_preparation.build_static_token_estimator
 
     def capture_estimator(
+        counter: TokenCounter,
         system_messages: tuple[Message, ...],
         tools: Any,  # noqa: ANN401
         deferred_tool_names: frozenset[str],
     ) -> Any:  # noqa: ANN401
         sized["system_messages"], sized["tools"] = system_messages, list(tools)
-        return real_estimator(system_messages, tools, deferred_tool_names)
+        return real_estimator(counter, system_messages, tools, deferred_tool_names)
 
     monkeypatch.setattr(execution_preparation, "build_static_token_estimator", capture_estimator)
 

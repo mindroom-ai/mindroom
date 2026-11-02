@@ -117,8 +117,7 @@ def is_configured_room(
     room_aliases: Iterable[str] = (),
 ) -> bool:
     """Return whether one Matrix room is present in the configured room set."""
-    room_identifiers = _room_reference_identifiers(room_id, runtime_paths, room_aliases=room_aliases)
-    return _room_refs_match(list(config.get_all_configured_rooms()), room_identifiers, runtime_paths)
+    return bool(_configured_refs_naming_room(config, room_id, runtime_paths, room_aliases=room_aliases))
 
 
 def configured_routable_entity_names_for_room(
@@ -129,32 +128,38 @@ def configured_routable_entity_names_for_room(
     room_aliases: Iterable[str] = (),
 ) -> list[str]:
     """Return non-router agent and team names statically configured for one room."""
-    room_identifiers = _room_reference_identifiers(room_id, runtime_paths, room_aliases=room_aliases)
+    room_refs = _configured_refs_naming_room(config, room_id, runtime_paths, room_aliases=room_aliases)
     configured_names: list[str] = []
 
     for agent_name, agent_config in config.agents.items():
         if agent_name == ROUTER_AGENT_NAME:
             continue
-        if _room_refs_match(agent_config.rooms, room_identifiers, runtime_paths):
+        if not room_refs.isdisjoint(agent_config.rooms):
             configured_names.append(agent_name)
 
     for team_name, team_config in config.teams.items():
-        if _room_refs_match(team_config.rooms, room_identifiers, runtime_paths):
+        if not room_refs.isdisjoint(team_config.rooms):
             configured_names.append(team_name)
 
     return configured_names
 
 
-def _room_refs_match(
-    configured_room_refs: list[str],
-    room_identifiers: set[str],
+def _configured_refs_naming_room(
+    config: Config,
+    room_id: str,
     runtime_paths: RuntimePaths,
-) -> bool:
-    """Return whether authored room refs match any known identifier for a live room."""
-    if room_identifiers.intersection(configured_room_refs):
-        return True
-    resolved_refs = matrix_state.resolve_room_aliases(configured_room_refs, runtime_paths)
-    return bool(room_identifiers.intersection(resolved_refs))
+    *,
+    room_aliases: Iterable[str] = (),
+) -> set[str]:
+    """Return the authored room refs that name a live room, mapping all of them through MindRoom's record at once."""
+    room_identifiers = _room_reference_identifiers(room_id, runtime_paths, room_aliases=room_aliases)
+    configured_refs = list(config.get_all_configured_rooms())
+    resolved_refs = matrix_state.resolve_room_aliases(configured_refs, runtime_paths)
+    return {
+        ref
+        for ref, resolved_ref in zip(configured_refs, resolved_refs, strict=True)
+        if ref in room_identifiers or resolved_ref in room_identifiers
+    }
 
 
 def _room_reference_identifiers(
@@ -166,7 +171,7 @@ def _room_reference_identifiers(
     """Return room ID, alias, and managed key identifiers for one live room.
 
     An alias names a managed room key only when it is exactly the alias MindRoom gives that room.
-    ``_room_refs_match`` maps configured refs through MindRoom's record, so a recorded room matches by its room ID.
+    ``_configured_refs_naming_room`` maps configured refs through MindRoom's record, so a recorded room matches by its room ID.
     """
     domain = runtime_matrix_domain(runtime_paths)
     room_refs = (room_id, *room_aliases)

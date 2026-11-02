@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
@@ -21,6 +22,7 @@ from mindroom.history.types import (
     owner_scope,
     replayed_summary_text,
 )
+from mindroom.llm.messages import stable_serialize
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import (
     checkpoint_estimated_tokens,
@@ -28,13 +30,13 @@ from mindroom.native_compaction import (
     native_checkpoint_id,
     native_replay_messages,
 )
-from mindroom.token_budget import estimate_char_tokens, stable_serialize
+from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import PortableReplayEstimator
+    from mindroom.llm.provider import TokenCounter
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
 
@@ -57,35 +59,50 @@ def estimate_prompt_visible_history_tokens(
     *,
     session: ConversationSession,
     history_settings: ResolvedHistorySettings,
-    replay_estimator: PortableReplayEstimator | None,
+    counter: TokenCounter,
     native_route: str | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history of the scope owning ``session`` for one run.
 
     The history is the selection a request under ``history_settings`` sends, so the estimate counts exactly what the
-    model will read. Stale Anthropic replay fields are left in place because the char estimate never counts them.
+    model will read. Stale Anthropic replay fields are left in place because the canonical count never reads them.
     """
+    history_messages = prompt_visible_history(session, history_settings)
+    tokens, has_checkpoint = _route_tokens(history_messages, counter=counter, native_route=native_route)
+    # A checkpoint covers the summary message before it, which native projection drops.
+    return tokens if has_checkpoint else estimate_summary_tokens(session, counter) + tokens
+
+
+def prompt_visible_history(session: ConversationSession, history_settings: ResolvedHistorySettings) -> list[Message]:
+    """Return the stored history a request under ``history_settings`` replays for the scope owning ``session``."""
     policy = history_settings.policy
-    history_messages = scope_history_messages(
+    return scope_history_messages(
         session.runs,
         scope=owner_scope(session),
         num_history_runs=policy.num_history_runs,
         num_history_messages=policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
     )
-    tokens, has_checkpoint = _route_tokens(
-        history_messages,
-        replay_estimator=replay_estimator,
-        native_route=native_route,
-    )
-    # A checkpoint covers the summary message before it, which native projection drops.
-    return tokens if has_checkpoint else estimate_summary_tokens(session) + tokens
+
+
+def request_basis(*, static_fingerprint: str, summary: str | None, history: Sequence[Message]) -> str:
+    """Identify what a request holds before its turn: its system prompt and tools, the summary, and the history.
+
+    ``static_fingerprint`` identifies the system prompt and tools. Two requests with one basis hold the same content up
+    to their turns, so the size a model reported for one sizes the other's history on that model. Any change, such as
+    an edited system prompt, a new summary, or a replay limit that dropped a run, changes the basis.
+    """
+    digest = hashlib.sha256()
+    for part in (static_fingerprint, summary or "", *(stable_serialize(message.to_dict()) for message in history)):
+        digest.update(part.encode("utf-8", "surrogatepass"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _route_tokens(
     messages: list[Message],
     *,
-    replay_estimator: PortableReplayEstimator | None,
+    counter: TokenCounter,
     native_route: str | None,
 ) -> tuple[int, bool]:
     """Estimate messages as a route replays them, and report whether a native checkpoint replaced their prefix."""
@@ -95,29 +112,30 @@ def _route_tokens(
         messages = []
         for message in projected:
             if items := checkpoint_items(message, native_route):
-                checkpoint_tokens += checkpoint_estimated_tokens(items)
+                checkpoint_tokens += checkpoint_estimated_tokens(items, counter)
             else:
                 messages.append(message)
-    tokens = _estimate_messages_tokens(messages, replay_estimator=replay_estimator, native_route=native_route)
+    tokens = _estimate_messages_tokens(messages, counter=counter, native_route=native_route)
     return checkpoint_tokens + tokens, checkpoint_tokens > 0
 
 
 def estimate_request_messages_tokens(
     messages: Sequence[Message],
     *,
-    replay_estimator: PortableReplayEstimator | None,
+    counter: TokenCounter,
     native_route: str | None = None,
 ) -> int:
     """Estimate one provider request's messages the way replay planning estimates history."""
-    return _route_tokens(list(messages), replay_estimator=replay_estimator, native_route=native_route)[0]
+    return _route_tokens(list(messages), counter=counter, native_route=native_route)[0]
 
 
 def _estimate_messages_tokens(
     history_messages: list[Message],
     *,
-    replay_estimator: PortableReplayEstimator | None,
+    counter: TokenCounter,
     native_route: str | None,
 ) -> int:
+    replay_estimator = counter.replay
     uses_visual_tokens = replay_estimator is not None and replay_estimator.portable_replay_uses_visual_tokens()
     attachment_tokens = _attachment_fallback_tokens(history_messages)
     history_messages = [_without_attachments(message) for message in history_messages]
@@ -132,11 +150,11 @@ def _estimate_messages_tokens(
         else None
     )
     provider_accounts_for_images = uses_visual_tokens and provider_estimate is not None
-    canonical_messages = [
-        _without_image_transport(message, strip_content_blocks=provider_accounts_for_images)
+    canonical_text = "".join(
+        _estimated_message_text(_without_image_transport(message, strip_content_blocks=provider_accounts_for_images))
         for message in history_messages
-    ]
-    canonical_tokens = estimate_char_tokens(sum(_estimated_message_chars(message) for message in canonical_messages))
+    )
+    canonical_tokens = count(counter, canonical_text)
     image_fallback_tokens = 0 if provider_accounts_for_images else _image_fallback_tokens(history_messages)
     return max(canonical_tokens, provider_estimate or 0) + image_fallback_tokens + attachment_tokens
 
@@ -167,20 +185,30 @@ def _without_image_transport(message: Message, *, strip_content_blocks: bool) ->
     return replace(message, **updates) if updates else message
 
 
-def estimate_summary_tokens(session: ConversationSession) -> int:
+def estimate_summary_tokens(session: ConversationSession, counter: TokenCounter) -> int:
     """Estimate the tokens the scope's summary message adds to a request."""
     summary = current_summary_text(session)
     if summary is None:
         return 0
-    return estimate_summary_text_tokens(summary, replay_estimator=None)
+    return estimate_summary_text_tokens(summary, counter)
 
 
-def estimate_summary_text_tokens(summary: str, *, replay_estimator: PortableReplayEstimator | None) -> int:
-    """Estimate the tokens the summary message holding ``summary`` adds to a request ``replay_estimator`` sizes."""
-    return estimate_request_messages_tokens(
-        [compaction_summary_message(summary, run_local=False)],
-        replay_estimator=replay_estimator,
-    )
+def estimate_summary_text_tokens(
+    summary: str,
+    counter: TokenCounter,
+    *,
+    as_request: bool = False,
+    upper_bound: bool = False,
+) -> int:
+    """Estimate the tokens the summary message holding ``summary`` adds to a request ``counter`` sizes.
+
+    Replay planning counts its text. ``as_request`` sizes it as a rewritten request's messages are sized, by the
+    route's request estimate, never below that count. ``upper_bound`` keeps the count from undercounting while the
+    vocabulary loads, as a check before storing a summary, which every later reply replays, needs.
+    """
+    message = compaction_summary_message(summary, run_local=False)
+    tokens = count(counter, str(message.content), upper_bound=upper_bound)
+    return max(tokens, estimate_request_messages_tokens([message], counter=counter)) if as_request else tokens
 
 
 def scope_visible_runs(session: ConversationSession) -> list[AnyRunRecord]:
@@ -211,11 +239,10 @@ def compaction_marker(session: ConversationSession) -> tuple[str | None, str | N
     return current_summary_text(session), checkpoint
 
 
-def _estimated_message_chars(message: Message) -> int:
-    """Count a message's text and tool calls; estimation charges its media separately, by bounded allowances."""
-    content_chars = len(render_message_content(message))
-    tool_call_chars = len(stable_serialize(message.tool_calls)) if message.tool_calls else 0
-    return content_chars + tool_call_chars
+def _estimated_message_text(message: Message) -> str:
+    """Return a message's text and tool calls; estimation charges its media separately, by bounded allowances."""
+    tool_calls = stable_serialize(message.tool_calls) if message.tool_calls else ""
+    return render_message_content(message) + tool_calls
 
 
 def _image_fallback_tokens(messages: list[Message]) -> int:
@@ -229,17 +256,21 @@ def plan_replay_that_fits(
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     current_history_tokens: int,
-    replay_estimator: PortableReplayEstimator | None,
+    counter: TokenCounter,
 ) -> ResolvedReplayPlan:
-    """Return the safest plan for replaying the persisted history of the scope owning ``session`` within the budget."""
-    summary_tokens = estimate_summary_tokens(session)
-    if summary_tokens > available_history_budget:
-        raise HistorySummaryBudgetError(summary_tokens=summary_tokens, available_tokens=available_history_budget)
+    """Return the safest plan for replaying the persisted history of the scope owning ``session`` within the budget.
+
+    ``current_history_tokens`` holds the summary, so a history that fits replays whole even when the summary's estimate,
+    padded by its margin, would not fit.
+    """
     if current_history_tokens <= available_history_budget:
         return configured_replay_plan(
             history_settings=history_settings,
             estimated_tokens=current_history_tokens,
         )
+    summary_tokens = estimate_summary_tokens(session, counter)
+    if summary_tokens > available_history_budget:
+        raise HistorySummaryBudgetError(summary_tokens=summary_tokens, available_tokens=available_history_budget)
 
     limit_mode, max_limit = _context_window_guard_limit_bounds(session=session, history_settings=history_settings)
     fitting_limit, fitting_tokens = _find_fitting_history_limit_for_budget(
@@ -248,7 +279,7 @@ def plan_replay_that_fits(
         available_history_budget=available_history_budget,
         limit_mode=limit_mode,
         max_limit=max_limit,
-        replay_estimator=replay_estimator,
+        counter=counter,
     )
     if fitting_limit > 0:
         policy = HistoryPolicy(mode=limit_mode, limit=fitting_limit)
@@ -288,7 +319,7 @@ def _find_fitting_history_limit_for_budget(
     available_history_budget: int,
     limit_mode: Literal["runs", "messages"],
     max_limit: int,
-    replay_estimator: PortableReplayEstimator | None,
+    counter: TokenCounter,
 ) -> tuple[int, int]:
     if max_limit <= 0 or available_history_budget <= 0:
         return 0, 0
@@ -302,7 +333,7 @@ def _find_fitting_history_limit_for_budget(
         candidate_tokens = estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=replace(history_settings, policy=HistoryPolicy(mode=limit_mode, limit=mid)),
-            replay_estimator=replay_estimator,
+            counter=counter,
         )
         if candidate_tokens <= available_history_budget:
             best = mid

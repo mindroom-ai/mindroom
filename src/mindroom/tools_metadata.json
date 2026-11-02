@@ -6464,7 +6464,7 @@
       "display_name": "Background Scripts",
       "docs_url": "https://docs.mindroom.chat/tools/background-scripts/",
       "executes_code": true,
-      "file_access": "unconfined",
+      "file_access": "none",
       "function_names": [
         "start_script",
         "get_script_resource_profiles",
