@@ -405,9 +405,12 @@ class TurnDispatcher:
             prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
             and prepared.handled_turn.sources_all_from_requester(requester_user_id)
             # While another run still waits in the queue, whether another
-            # requester's follow-ups or an entity's reply written for this
-            # requester, a newer message from this requester may only be answered
-            # after it, so letting it absorb this turn would answer out of receipt order.
+            # requester's follow-ups, an entity's reply written for this
+            # requester, or this requester's message for another participant, a
+            # newer message from this requester may only be answered after it, so
+            # letting it absorb this turn would answer out of receipt order or not at all.
+            # The guards below judge whom a message addresses themselves, but only the
+            # queue sees an edit that readdresses a queued message after their history was read.
             and not prepared.turn.queues_other_run(requester_user_id)
         )
         thread_history = prepared.dispatch.context.thread_history
