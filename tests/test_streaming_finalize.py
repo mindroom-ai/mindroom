@@ -469,6 +469,67 @@ async def test_refused_final_edit_stays_owed_until_recovery(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("shown", ["visible_body", "placeholder_only"])
+async def test_a_stream_whose_recorded_answer_was_refused_is_owed_like_a_whole_answer(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    shown: str,
+) -> None:
+    """A stream whose terminal update recorded its answer before Matrix refused it leaves the answer owed to recovery.
+
+    This holds whether the stream had shown its text or only its placeholder.
+    """
+    principal = journal_store.principal("code@alice")
+    gateway = _delivery_gateway(tmp_path, principal)
+    identity = ResponseIdentity(
+        response_kind="ai",
+        response_envelope=_envelope(),
+        correlation_id="corr-refused-stream-final",
+        sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
+    )
+    target = MessageTarget.resolve("!room:localhost", None, "$reply")
+    refused = AsyncMock(
+        return_value=MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "homeserver hiccup"),
+    )
+    with patch("mindroom.delivery_gateway.send_message_outcome", new=refused):
+        async with _reply_span(principal, placeholder_event_id="$placeholder"):
+            # The terminal update records the answer as the span's FINAL row before Matrix refuses it.
+            recorded = await gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=target,
+                    existing_event_id="$placeholder",
+                    response_text="final answer",
+                    identity=identity,
+                    tool_trace=None,
+                    extra_content=None,
+                ),
+            )
+            assert recorded.ending == Owed()
+            outcome = await gateway.finalize_streamed_response(
+                FinalizeStreamedResponseRequest(
+                    target=target,
+                    stream_transport_outcome=StreamTransportOutcome(
+                        last_physical_stream_event_id="$placeholder",
+                        rendered_body="final answer" if shown == "visible_body" else "Thinking...",
+                        visible_body_state=shown,
+                        canonical_final_body_candidate="final answer",
+                        failed=True,
+                    ),
+                    initial_delivery_kind="edited",
+                    identity=identity,
+                    tool_trace=None,
+                    extra_content=None,
+                ),
+            )
+
+    assert outcome.ending == Owed()
+    owed = await principal.load_matrix_delivery(delivery_id="$reply", stage=DeliveryStage.FINAL)
+    assert owed is not None
+    assert owed.acknowledged_event_id is None
+    assert not owed.permanently_failed
+
+
+@pytest.mark.asyncio
 async def test_refused_final_send_stays_owed(
     tmp_path: Path,
     journal_store: EventJournalStore,

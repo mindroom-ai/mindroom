@@ -35,7 +35,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import STREAM_STATUS_KEY
+from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import Owed, Suppressed, Suppression
@@ -975,6 +975,50 @@ async def test_an_answer_the_homeserver_did_not_take_yet_applies_its_run_s_effec
     assert (final.ending, outcome.run_succeeded) == (Owed(), True)
     assert turn.hooks.names == ["before"]
     assert not await turn.pending()
+
+
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
+async def test_an_answer_whose_final_write_the_homeserver_refused_twice_is_owed_not_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """A recorded answer the homeserver refused, its immediate retry included, is owed to recovery in both modes.
+
+    No ``message:cancelled`` fires for it, its run's effects apply, and recovery delivers it.
+    """
+    turn = await _turn(tmp_path, monkeypatch, streaming=streaming, scripts={"default": [answer("Owed answer.")]})
+    refusals = 2
+    accept = turn.homeserver.room_send
+
+    async def refuse_the_final_write(
+        *,
+        room_id: str,
+        message_type: str,
+        content: dict[str, Any],
+        tx_id: str | None = None,
+        **_kwargs: object,
+    ) -> nio.RoomSendResponse | nio.RoomSendError:
+        nonlocal refusals
+        if refusals and content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED:
+            refusals -= 1
+            return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
+        return await accept(room_id=room_id, message_type=message_type, content=content, tx_id=tx_id)
+
+    turn.bot.client.room_send = AsyncMock(side_effect=refuse_the_final_write)
+    effects = AsyncMock(return_value=None)
+    monkeypatch.setattr("mindroom.response_lifecycle.apply_post_response_effects", effects)
+
+    assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+
+    final, outcome, _deps = effects.await_args.args
+    assert (final.ending, outcome.run_succeeded) == (Owed(), True)
+    assert "cancelled" not in turn.hooks.names
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    assert not await turn.pending()
+    refusals = 0
+    assert (await turn.bot._delivery_gateway.recover_deliveries()).complete
+    assert (turn.homeserver.bodies[-1], turn.homeserver.statuses[-1]) == ("Owed answer.", STREAM_STATUS_COMPLETED)
 
 
 async def test_a_before_response_hook_that_suppresses_a_whole_reply_removes_its_placeholder(
