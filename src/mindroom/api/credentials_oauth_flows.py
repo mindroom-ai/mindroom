@@ -90,7 +90,8 @@ def issue_pending_oauth_state(
             "token_url": token_url or "",
             "opener_origin": opener_origin or "",
             "credential_service": credential_service or "",
-            "group_members": [dict(member) for member in group_members],
+            # Only a consent group sign-in records members.
+            **({"group_members": [dict(member) for member in group_members]} if group_members else {}),
         },
     )
 
@@ -136,17 +137,16 @@ def _string_mapping(value: object) -> dict[str, str] | None:
 
 
 def _group_members(value: object) -> tuple[dict[str, str], ...]:
-    """Return every member a pending state stores, none for a state without members.
+    """Return every member a consent group sign-in's pending state stores, none for any other sign-in's state.
 
     A malformed member list refuses the callback, so a consent group sign-in never stores its grant for fewer services.
     """
     if value is None:
         return ()
-    members = [_string_mapping(member) for member in value] if isinstance(value, list) else []
-    valid_members = tuple(member for member in members if member is not None)
-    if not isinstance(value, list) or len(valid_members) != len(value):
+    members = tuple(_string_mapping(member) for member in value) if isinstance(value, list) else ()
+    if not members or None in members:
         raise HTTPException(status_code=400, detail="OAuth state does not record its consent group members correctly")
-    return valid_members
+    return cast("tuple[dict[str, str], ...]", members)
 
 
 def consume_pending_oauth_request(request: Request, service: str, state: str) -> _PendingOAuthState:

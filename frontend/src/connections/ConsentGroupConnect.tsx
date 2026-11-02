@@ -59,7 +59,6 @@ function ConsentGroupRow({
   const operation = useRef<AbortController | null>(null);
   useEffect(() => () => operation.current?.abort(), []);
   const agentPath = `/api/connections/agents/${encodeURIComponent(agent.agent_name)}`;
-  const lead = candidates[0];
 
   /** One abandoned by leaving the page or by Cancel changes nothing; any other end reloads the statuses. */
   const connect = async () => {
@@ -69,8 +68,9 @@ function ConsentGroupRow({
     setBusy(true);
     setError(null);
     try {
+      // The server picks the leading service, which the page may not know yet.
       await connectWithPopup(
-        lead.provider,
+        null,
         () =>
           requestConnection<OAuthAuthorization>(
             `${agentPath}/consent-groups/${encodeURIComponent(group.key)}/connect`,
@@ -79,10 +79,10 @@ function ConsentGroupRow({
           ),
         signal,
         // A popup that closed after connecting is a connection, not a cancel.
-        async () =>
+        async (lead) =>
           (
             await requestConnection<ConnectionStatus>(
-              `${agentPath}/${encodeURIComponent(lead.provider)}/status`,
+              `${agentPath}/${encodeURIComponent(lead)}/status`,
               signal,
             )
           ).connected,

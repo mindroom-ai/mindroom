@@ -274,7 +274,7 @@ def _agent(context: _Connections, agent_name: str) -> AgentConnections:
     for agent in context.catalog.agents:
         if agent.agent_name == agent_name:
             return agent
-    raise HTTPException(404, "Connection is not available", headers=CONNECTIONS_HEADERS)
+    raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
 
 
 def _service(context: _Connections, agent_name: str, provider_id: str) -> ConnectionService:
@@ -425,9 +425,7 @@ async def agent_state(agent_name: str, request: Request, context: _ConnectionsCo
     read is shown as not connectable. Reading it skips the token refresh; resolving the OAuth client of an egress
     service's provider can still bootstrap it over the network once when none is stored.
     """
-    agent = next((agent for agent in context.catalog.agents if agent.agent_name == agent_name), None)
-    if agent is None:
-        raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
+    agent = _agent(context, agent_name)
     egress_services, connected = await asyncio.gather(
         _egress_services(request, context, agent_name),
         asyncio.gather(*(_service_connected(request, context, agent_name, service) for service in agent.services)),

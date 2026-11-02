@@ -53,7 +53,7 @@ The portal groups OAuth services by agent, covering every agent the user may use
 Services come from each agent's tools, including deferred tools and plugin or MCP OAuth providers; tools that need no browser sign-in are listed too, and room-dependent tools are marked **MindRoom only**.
 The agent list shows at once, and each agent's counts of connected accounts and set keys fill in as they load.
 Each service's status loads independently, so one failing or unconnected service does not block the others.
-When an agent has two or more unconnected services of Google, of an additional Google workspace, or of Microsoft 365 (except Teams, Teams Meetings, and People), a **Connect all** button above its tools, such as **Connect all Google services**, connects them with one sign-in.
+When an agent has two or more unconnected services of Google, of an additional Google workspace, or of Microsoft 365 (except Teams, Teams Meetings, and People, which need administrator consent), a **Connect all** button above its tools, such as **Connect all Google services**, connects them with one sign-in.
 Services whose access the user does not grant on the consent screen stay unconnected, and the result page names them.
 Using an agent requires a matching `access.users` grant, administrator authority, or membership in a configured grant room; `access.current_room_members` does not apply because browser requests have no current room.
 Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.

@@ -241,12 +241,12 @@ describe("Connect all", () => {
       const path = String(input);
       if (path === GROUP_PATH)
         return json({
-          provider: "google_drive",
+          provider: "google_sheets",
           auth_url: "https://auth.example.com/start",
           completion_origin: window.location.origin,
         });
-      if (path === "/api/connections/agents/personal/google_drive/status")
-        return json({ ...unconnected("google_drive"), connected: true });
+      if (path === "/api/connections/agents/personal/google_sheets/status")
+        return json({ ...unconnected("google_sheets"), connected: true });
       throw new Error(`Unexpected request: ${path}`);
     });
     const { onConnectionChange } = renderGroup(
@@ -262,7 +262,7 @@ describe("Connect all", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("shows the start error and reloads statuses when the server picks another first service", async () => {
+  it("follows the service the server picks to lead the sign-in", async () => {
     const window_ = popup();
     vi.spyOn(window, "open").mockReturnValue(window_ as unknown as Window);
     fetchMock.mockImplementation(async (input) => {
@@ -279,12 +279,14 @@ describe("Connect all", () => {
       statusesFor("google_drive", "google_sheets"),
     );
     fireEvent.click(connectAll());
-    expect(
-      await screen.findByText("Could not start the connection. Try again."),
-    ).toBeVisible();
-    expect(window_.location.href).toBe("about:blank");
-    expect(onConnectionChange).toHaveBeenCalledOnce();
-    expect(connectAll()).toBeEnabled();
+    await waitFor(() =>
+      expect(window_.location.href).toBe("https://auth.example.com/start"),
+    );
+    answer(window_, "google_drive", "connected");
+    expect(onConnectionChange).not.toHaveBeenCalled();
+    answer(window_, "google_sheets", "connected");
+    await waitFor(() => expect(onConnectionChange).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("shows the server's refusal and reloads statuses", async () => {

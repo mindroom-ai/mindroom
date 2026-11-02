@@ -1,5 +1,6 @@
 interface OAuthCompletionOptions {
-  provider: string;
+  /** The provider whose answer counts; none counts while it is null. */
+  provider: () => string | null;
   expectedOrigin: () => string | null;
   pollIntervalMs: number;
   /** What a popup that was closed or answered `cancelled` reports. */
@@ -30,10 +31,11 @@ const OUTCOMES: readonly unknown[] = ["connected", "cancelled", "error"];
 function readOutcome(
   event: MessageEvent,
   popup: Window,
-  provider: string,
+  provider: string | null,
   expectedOrigin: string | null,
 ): Outcome | null {
   if (
+    provider === null ||
     expectedOrigin === null ||
     event.origin !== expectedOrigin ||
     event.source !== popup ||
@@ -65,7 +67,7 @@ export function watchOAuthCompletion(
     const outcome = readOutcome(
       event,
       popup,
-      options.provider,
+      options.provider(),
       options.expectedOrigin(),
     );
     if (outcome === null) return;

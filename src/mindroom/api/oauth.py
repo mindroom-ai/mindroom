@@ -387,7 +387,7 @@ async def _authorization_response(
     runtime_paths: RuntimePaths,
     *,
     agent_name: str | None,
-    payload: dict[str, str],
+    payload: dict[str, str] | None,
     browser_user_required: bool = True,
     credential_service: str | None = None,
     group_members: Sequence[Mapping[str, str]] = (),
@@ -923,7 +923,7 @@ async def start_group_connect(
             lead,
             runtime_paths,
             agent_name=agent_name,
-            payload=group_members[0],
+            payload=None,
             group_members=group_members,
         )
 
