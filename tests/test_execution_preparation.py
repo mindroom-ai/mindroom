@@ -6,8 +6,9 @@ import asyncio
 import threading
 from dataclasses import replace
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -36,7 +37,6 @@ from mindroom.dispatch_source import (
 from mindroom.entity_resolution import current_entity_id
 from mindroom.execution_preparation import (
     _build_thread_history_messages,
-    _fallback_static_token_budget,
     _messages_with_current_prompt,
     _prepare_execution_context_common,
     _prepared_history_with_scheduled_limit,
@@ -46,7 +46,6 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
-from mindroom.history import runtime as history_runtime
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.request_size import RequestFrame, request_sizer
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
@@ -78,8 +77,7 @@ from tests.history_helpers import replay_settings
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
-    from pathlib import Path
+    from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.history.request_messages import TurnMessages
@@ -106,12 +104,32 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 _MODEL = ScriptedModel([])
 
 
-def _sizing() -> dict[str, Any]:
-    """Return the request frame and sizer of a reply with no system prompt and no tools, for ``_prepare_execution_context_common``."""
-    return {
-        "frame": partial(RequestFrame, ModelRequest(messages=()), ()),
-        "sizer": request_sizer(_MODEL, _config(), "default"),
-    }
+async def _prepare_common(
+    prepare: Callable[[TurnMessages], Awaitable[PreparedScopeHistory]],
+    ctx: ResponseTurnContext,
+    **kwargs: Any,  # noqa: ANN401
+) -> _PreparedExecutionContext:
+    """Run ``_prepare_execution_context_common`` for a reply with no system prompt and no tools.
+
+    ``prepare`` stands in for scope-history preparation, given the provisional turn; a fallback thread replay may take
+    100 tokens.
+    """
+
+    async def scope_history(*, frame: RequestFrame, **_kwargs: object) -> PreparedScopeHistory:
+        return await prepare(frame.turn)
+
+    resolved_inputs = _prepared_scope_with_persisted_replay().resolved_inputs
+    plan = replace(resolved_inputs.execution_plan, limit_tokens=100)
+    with patch.object(execution_preparation, "prepare_scope_history", scope_history):
+        return await _prepare_execution_context_common(
+            ctx,
+            frame=partial(RequestFrame, ModelRequest(messages=()), ()),
+            sizer=request_sizer(_MODEL, _config(), "default"),
+            runtime_paths=_runtime_paths(Path("/nonexistent")),
+            resolved_inputs=replace(resolved_inputs, execution_plan=plan),
+            compaction_lifecycle=None,
+            **kwargs,
+        )
 
 
 def _text_tokens(estimate: Callable[[str], int]) -> Callable[[TurnMessages], int]:
@@ -278,41 +296,17 @@ def test_thread_fallback_finds_the_newest_messages_that_fit_in_few_counts() -> N
     assert "message 399" in render_prepared_messages_text(turn.in_request_order())
 
 
-def test_fallback_static_token_budget_preserves_context_window_bounds() -> None:
-    """Fallback static budgeting should keep missing and reserve-clamped bounds."""
-    assert _fallback_static_token_budget(context_window=None, replay_window_tokens=None, reserve_tokens=100) is None
-    assert _fallback_static_token_budget(context_window=0, replay_window_tokens=None, reserve_tokens=100) is None
-    assert _fallback_static_token_budget(context_window=1_000, replay_window_tokens=None, reserve_tokens=800) == 500
-    assert _fallback_static_token_budget(context_window=1_000, replay_window_tokens=None, reserve_tokens=100) == 900
-
-
-def test_fallback_static_token_budget_uses_the_persisted_replay_window() -> None:
-    """Fallback thread replay should stop at the same window as persisted replay."""
-    assert (
-        _fallback_static_token_budget(
-            context_window=1_000_000,
-            replay_window_tokens=500_000,
-            reserve_tokens=16_384,
-        )
-        == 483_616
-    )
-    assert _fallback_static_token_budget(context_window=None, replay_window_tokens=4_000, reserve_tokens=0) == 4_000
-    assert _fallback_static_token_budget(context_window=3_000, replay_window_tokens=4_000, reserve_tokens=0) == 3_000
-
-
 @pytest.mark.asyncio
 async def test_prepare_agent_execution_context_uses_supplied_runtime_model_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """History preparation should use the same runtime-model snapshot as agent construction."""
+    """History preparation should use the window of the runtime-model snapshot agent construction used, not the config's."""
     config, runtime_paths = _bound_agent_config(tmp_path)
     snapshot = TurnModel(model_name="default", requested_model_name="default", context_window=6_000, overridden=False)
     prepared = MagicMock()
     prepare_common = AsyncMock(return_value=prepared)
-    re_resolve = MagicMock(side_effect=AssertionError("runtime model was re-resolved"))
     build = _build(config, runtime_paths)
-    monkeypatch.setattr(history_runtime, "resolve_turn_model", re_resolve)
     monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
 
     result = await _prepare_agent_execution_context_for_test(
@@ -329,8 +323,9 @@ async def test_prepare_agent_execution_context_uses_supplied_runtime_model_snaps
     )
 
     assert result is prepared
-    re_resolve.assert_not_called()
-    assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 6_000
+    resolved_inputs = prepare_common.await_args.kwargs["resolved_inputs"]
+    assert resolved_inputs.active_context_window == 6_000
+    assert resolved_inputs.execution_plan.limit_tokens == 6_000
 
 
 @pytest.mark.asyncio
@@ -373,7 +368,7 @@ async def test_prepare_agent_execution_context_caps_fallback_at_replay_window(
         include_openai_compat_guidance=True,
     )
 
-    assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 4_000
+    assert prepare_common.await_args.kwargs["resolved_inputs"].execution_plan.limit_tokens == 4_000
 
 
 @pytest.mark.asyncio
@@ -413,7 +408,7 @@ async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_wi
         active_context_window=6_000,
     )
 
-    assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 3_500
+    assert prepare_common.await_args.kwargs["resolved_inputs"].execution_plan.limit_tokens == 3_500
 
 
 @pytest.mark.asyncio
@@ -431,7 +426,8 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
 
     monkeypatch.setattr(execution_preparation, "_build_thread_history_messages", fail_if_fallback_context_is_built)
 
-    prepared = await _prepare_execution_context_common(
+    prepared = await _prepare_common(
+        prepare_scope_history,
         make_turn_context(reply_to_event_id="$current", active_event_ids=frozenset()),
         scope_context=None,
         prompt="Current request",
@@ -443,9 +439,6 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
         current_sender_id="@alice:localhost",
         config=_config(),
         timezone="UTC",
-        prepare_scope_history_fn=prepare_scope_history,
-        **_sizing(),
-        fallback_static_token_budget=100,
     )
 
     assert prepared.prepared_history.replays_persisted_history is True
@@ -487,7 +480,8 @@ async def test_interactive_selection_keeps_context_after_question(
                 make_visible_message(sender="@bob:localhost", body="Later message", event_id="$later"),
             ],
         )
-    prepared = await _prepare_execution_context_common(
+    prepared = await _prepare_common(
+        prepare_scope_history,
         replace(make_turn_context(reply_to_event_id="$question"), history_boundary_event_id="$selection"),
         scope_context=None,
         prompt="The user selected: Deploy",
@@ -497,9 +491,6 @@ async def test_interactive_selection_keeps_context_after_question(
         current_event_id="$question",
         config=_config(),
         timezone="UTC",
-        prepare_scope_history_fn=prepare_scope_history,
-        **_sizing(),
-        fallback_static_token_budget=100,
     )
 
     assert prepared.prepared_history.replays_persisted_history is persisted_replay
@@ -604,7 +595,8 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
         content="Retrieved memory for this turn",
         add_to_agent_memory=False,
     )
-    prepared = await _prepare_execution_context_common(
+    prepared = await _prepare_common(
+        prepare_scope_history,
         make_turn_context(
             reply_to_event_id="$current",
             scheduled_history_budget=ScheduledHistoryBudget(limit=3, source_event_id="$current"),
@@ -620,9 +612,6 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
         current_sender_id="@alice:localhost",
         config=_config(),
         timezone="UTC",
-        prepare_scope_history_fn=prepare_scope_history,
-        **_sizing(),
-        fallback_static_token_budget=100,
     )
 
     replay_plan = prepared.prepared_history.replay_plan
@@ -646,7 +635,8 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
     async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
 
-    prepared = await _prepare_execution_context_common(
+    prepared = await _prepare_common(
+        prepare_scope_history,
         make_turn_context(
             reply_to_event_id="$current",
             scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$current"),
@@ -663,9 +653,6 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
         current_sender_id="@alice:localhost",
         config=_config(),
         timezone="UTC",
-        prepare_scope_history_fn=prepare_scope_history,
-        **_sizing(),
-        fallback_static_token_budget=100,
     )
 
     assert [message.content for message in prepared.turn.context] == [
@@ -684,7 +671,8 @@ async def test_scheduled_history_limit_ignores_events_after_current() -> None:
     async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
 
-    prepared = await _prepare_execution_context_common(
+    prepared = await _prepare_common(
+        prepare_scope_history,
         make_turn_context(
             reply_to_event_id="$current",
             scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$current"),
@@ -702,9 +690,6 @@ async def test_scheduled_history_limit_ignores_events_after_current() -> None:
         current_sender_id="@alice:localhost",
         config=_config(),
         timezone="UTC",
-        prepare_scope_history_fn=prepare_scope_history,
-        **_sizing(),
-        fallback_static_token_budget=100,
     )
 
     assert [message.content for message in prepared.turn.context] == [
@@ -720,7 +705,8 @@ async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None
     async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
 
-    prepared = await _prepare_execution_context_common(
+    prepared = await _prepare_common(
+        prepare_scope_history,
         make_turn_context(
             reply_to_event_id="$current",
             scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$current"),
@@ -735,9 +721,6 @@ async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None
         current_sender_id="@alice:localhost",
         config=_config(),
         timezone="UTC",
-        prepare_scope_history_fn=prepare_scope_history,
-        **_sizing(),
-        fallback_static_token_budget=100,
     )
 
     assert prepared.prepared_history.replays_persisted_history is False
@@ -767,7 +750,8 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
         return _prepared_scope_with_persisted_replay()
 
     relayed_prompt = "@general ⏰ [Automated Task]\nPoll the deployment queue"
-    prepared = await _prepare_execution_context_common(
+    prepared = await _prepare_common(
+        prepare_scope_history,
         make_turn_context(
             reply_to_event_id="$handoff",
             scheduled_history_budget=ScheduledHistoryBudget(
@@ -795,9 +779,6 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
         current_sender_id="@alice:localhost",
         config=_config(),
         timezone="UTC",
-        prepare_scope_history_fn=prepare_scope_history,
-        **_sizing(),
-        fallback_static_token_budget=100,
     )
 
     assert len(prepared.turn.context) == len(expected_context)

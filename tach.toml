@@ -2588,7 +2588,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.history.conversation_text",
-    "mindroom.history.policy",
     "mindroom.history.request_messages",
     "mindroom.history.request_size",
     "mindroom.history.runtime",

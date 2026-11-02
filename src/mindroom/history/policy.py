@@ -52,7 +52,7 @@ def resolve_history_execution_plan(
     if compaction_config.model is None and compaction_context_window is None:
         # Only the active model falls back to the runtime window; an explicit summary model has just its own.
         compaction_context_window = active_context_window
-    replay_window_tokens = resolve_replay_window(
+    replay_window_tokens = _resolve_replay_window(
         active_context_window=active_context_window,
         configured_replay_window=compaction_config.replay_window_tokens,
     )
@@ -210,7 +210,7 @@ def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int
     return max(0, context_window_tokens - normalized_reserve_tokens - spent_tokens)
 
 
-def resolve_replay_window(
+def _resolve_replay_window(
     *,
     active_context_window: int | None,
     configured_replay_window: int | None,
