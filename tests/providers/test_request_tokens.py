@@ -14,10 +14,12 @@ import httpx
 import httpx2
 import pytest
 
+from mindroom.llm.media import Image
 from mindroom.llm.messages import Message, model_provenance
-from mindroom.llm.provider import ModelRequest, TokenCounter
+from mindroom.llm.provider import ModelRequest, TokenCounter, ToolSpec
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, plain_request_parts, route_request_tokens
 from tests.providers.anthropic_family_support import FAMILIES as CLAUDE_FAMILIES
 from tests.providers.anthropic_family_support import provider_for
 from tests.providers.gemini_ollama_support import FAMILIES as GEMINI_OLLAMA_FAMILIES
@@ -255,3 +257,24 @@ def test_claude_counts_replayed_thinking_by_its_answer_s_hidden_output(tmp_path:
         _claude_answer(route, text, metrics=metrics),
     )
     assert added >= 3_000 - visible
+
+
+def test_a_plain_route_sizes_an_answer_and_what_follows_it_alone() -> None:
+    """From an answer on, a route counts only the messages it sends from there, neither tools nor earlier media."""
+    texts: list[str] = []
+    lookup = ToolSpec(name="lookup", description="Look something up.", parameters={"type": "object"}, strict=None)
+    chart = Image(content=b"chart", mime_type="image/png")
+    request = ModelRequest(
+        messages=(
+            Message(role="user", content="Read this chart", images=[chart]),
+            Message(role="assistant", content="It rises."),
+            Message(role="user", content="Why?"),
+        ),
+        tools=(lookup,),
+    )
+
+    tail = route_request_tokens(_recording_counter(texts), request, 1, plain_request_parts)
+
+    assert texts == ["It rises.Why?"]
+    assert tail == len("It rises.Why?") // 4
+    assert route_request_tokens(_recording_counter([]), request, 0, plain_request_parts) > MEDIA_ALLOWANCE_TOKENS

@@ -27,7 +27,7 @@ from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_li
 from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, PreparedTools
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, REWRITTEN_ATTEMPT_KEY, Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
@@ -132,6 +132,28 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     }
     assert request.messages == tuple(messages[:2])
     assert request.tools == ()
+
+
+async def test_an_answer_to_another_request_than_the_loop_sent_records_no_request_identity() -> None:
+    """A pipeline stage that answered with another request in its place leaves the answer's usage unmatched."""
+    rewritten = TurnCompleted(
+        message=Message(
+            role="assistant",
+            content="done",
+            metrics=usage(9, 1),
+            provider_data={REWRITTEN_ATTEMPT_KEY: True},
+        ),
+        stop_reason="end",
+    )
+    model = ScriptedModel([[TextDelta("done"), rewritten]])
+    messages = _prompt()
+
+    await _run(spec(model), messages)
+
+    assert messages[-1].provider_data == {
+        REWRITTEN_ATTEMPT_KEY: True,
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
 
 
 async def test_request_settings_come_from_the_template_and_tools_from_the_spec() -> None:

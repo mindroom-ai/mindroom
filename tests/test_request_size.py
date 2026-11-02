@@ -149,13 +149,57 @@ def test_a_rewritten_attachment_ends_anchoring(tmp_path: Path) -> None:
     assert not _sized(tmp_path, model, later).reported
 
 
-def test_media_at_a_url_leaves_a_request_without_identity(tmp_path: Path) -> None:
+def test_a_rewritten_inline_attachment_ends_anchoring(tmp_path: Path) -> None:
+    model = ScriptedModel([])
+    image = Image(content=b"first chart", mime_type="image/png")
+    prompt = Message(role="user", content="Read this", images=[image])
+    first = _first(prompt)
+    answer = _answered(model, first, "Read")
+    later = replace(first, messages=(*first.messages, answer, Message(role="user", content="And now?")))
+    assert _sized(tmp_path, model, later).reported
+
+    prompt.images = [replace(image, content=b"second chart")]
+
+    assert not _sized(tmp_path, model, later).reported
+
+
+def test_media_at_a_url_leaves_every_later_request_without_identity(tmp_path: Path) -> None:
     """Media fetched from a URL can change between requests unseen, so no answer after it anchors."""
     model = ScriptedModel([])
-    first = _first(Message(role="user", content="Look", images=[Image(url="https://example.org/a.png")]))
+    looked = Message(role="user", content="Look", images=[Image(url="https://example.org/a.png")])
+    later = _first(
+        Message(role="user", content="Hi"),
+        Message(role="assistant", content="Hello"),
+        looked,
+        Message(role="assistant", content="Seen"),
+        Message(role="user", content="More"),
+    )
 
-    assert RequestDigests(model).prefixes(first)[-1] is None
-    assert not _sized(tmp_path, model, first).reported
+    prefixes = RequestDigests(model).prefixes(later)
+
+    assert all(prefixes[: later.messages.index(looked) + 1])
+    assert prefixes[later.messages.index(looked) + 1 :] == [None, None, None]
+    assert not _sized(tmp_path, model, later).reported
+
+
+@pytest.mark.parametrize("stored", ["id", "created_at", "metrics"])
+def test_what_storing_an_earlier_answer_adds_keeps_a_later_answer_anchoring(tmp_path: Path, stored: str) -> None:
+    """Storing a message gives it an id, a time, and timings no route sends, so the requests holding it keep their identity."""
+    model = ScriptedModel([])
+    first = _first(Message(role="user", content="Hi"))
+    earlier = _answered(model, first, "Hello")
+    second = replace(first, messages=(*first.messages, earlier, Message(role="user", content="More")))
+    answer = _answered(model, second, "Sure", reported=_REPORTED + 50)
+    later = replace(second, messages=(*second.messages, answer, Message(role="user", content="Thanks")))
+    expected = _sized(tmp_path, model, later)
+
+    if stored == "metrics":
+        earlier.metrics = MessageMetrics(tokens=earlier.metrics.tokens, duration=2.5, time_to_first_token=0.3)
+    else:
+        setattr(earlier, stored, {"id": "stored-message-7", "created_at": 1_700_000_000}[stored])
+
+    assert expected == RequestSize(_REPORTED + 50 + model.request_tokens(later, start=4), reported=True)
+    assert _sized(tmp_path, model, later) == expected
 
 
 def test_a_native_checkpoint_bounds_the_answers_that_anchor(tmp_path: Path) -> None:

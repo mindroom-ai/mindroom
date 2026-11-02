@@ -60,8 +60,9 @@ class RequestDigests:
         self._kept.clear()
 
     def _message_digest(self, message: Message) -> bytes | None:
+        # A kept entry holds its message, so no other message can take its ``id`` while it is kept.
         kept = self._kept.get(id(message))
-        if kept is not None and kept[0] is message:
+        if kept is not None:
             return kept[1]
         digest = _digest_of(message)
         if not any(item.filepath for _kind, item in media_items(message)):

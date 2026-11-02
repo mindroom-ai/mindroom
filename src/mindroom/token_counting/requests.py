@@ -58,7 +58,7 @@ class RequestParts:
 
     def cost(self, tokens: int) -> None:
         """Count ``tokens`` the provider charges for something its characters do not measure."""
-        self.tokens += max(tokens, 0)
+        self.tokens += tokens
 
     def flag(self, value: object) -> None:
         """Record a setting that changes how the route renders messages."""
