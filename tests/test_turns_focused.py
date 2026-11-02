@@ -1250,10 +1250,10 @@ async def test_a_newer_message_this_agent_already_settled_never_supersedes(
     """A newer message this agent already settled without answering cannot answer the older turn.
 
     A graceful restart settles a queued voice note for another agent as ignored
-    before the older turn replays, and turn retention then drops its transcript.
-    A message that mentions nobody but that this agent skipped, as when another
-    agent is chosen to answer it, likewise never becomes this agent's turn.
-    Only the journal still knows that this agent owes either message nothing.
+    before the older turn replays, and turn retention then drops its transcript,
+    so the note no longer says whom it addresses. A message that mentions nobody
+    but that this agent skipped, as when another agent is chosen to answer it,
+    looks like a message for this agent; only the journal knows it is settled.
     """
     harness = _build_harness(config, tmp_path)
     newer = await _serve_newer_requester_message(

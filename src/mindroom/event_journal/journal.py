@@ -16,7 +16,6 @@ import json
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from itertools import batched
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
@@ -89,8 +88,6 @@ _REPAIRED_RECOVERY_STATE = "repaired"
 _TURN_BACKED_KIND_VALUES = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
 _TURN_BACKED_KIND_PLACEHOLDERS = ", ".join("?" for _ in _TURN_BACKED_KIND_VALUES)
 _MATRIX_MEMBERSHIPS = frozenset({"ban", "invite", "join", "knock", "leave"})
-# Event IDs bound into one query, well under every backend's parameter limit.
-_PENDING_AMONG_BATCH = 500
 
 
 def validate_ingestion_batch_admission(admission: IngestionBatchAdmission) -> None:
@@ -1341,16 +1338,14 @@ def is_pending(transaction: Transaction, principal_id: str, event_id: str) -> bo
 
 
 def pending_among(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
-    """Return which of these events still owe semantic work, in bounded batches."""
-    pending: set[str] = set()
-    for batch in batched(event_ids, _PENDING_AMONG_BATCH, strict=False):
-        rows = transaction.fetchall(
-            "SELECT event_id FROM journal_events WHERE principal_id = ? AND state = 'pending' "  # noqa: S608
-            f"AND event_id IN ({', '.join('?' for _ in batch)})",
-            (principal_id, *batch),
-        )
-        pending.update(str(row["event_id"]) for row in rows)
-    return frozenset(pending)
+    """Return which of these events still owe semantic work."""
+    rows = turn_rows.fetch_in(
+        transaction,
+        "SELECT event_id FROM journal_events WHERE principal_id = ? AND state = 'pending' AND event_id IN ({in})",
+        (principal_id,),
+        event_ids,
+    )
+    return frozenset(str(row["event_id"]) for row in rows)
 
 
 def _source_has_redaction_handoff(
