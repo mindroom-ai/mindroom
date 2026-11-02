@@ -161,7 +161,7 @@ def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> N
     assert "continue_subagent" in instructions + description
     # Background semantics live only in the background-job addendum; the function description says the caller waits.
     assert "The caller waits; this does not create a Matrix thread." in description
-    assert "child tools that require approval pause both runs" in instructions
+    assert "a child tool that requires approval runs only once the user approves it" in instructions
 
 
 @pytest.mark.parametrize("initial", [False, True])
