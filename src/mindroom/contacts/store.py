@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 type _PartyKind = Literal["agent", "person"]
@@ -141,17 +142,39 @@ def update_contacts[T](runtime_paths: RuntimePaths, change: Callable[[ContactBoo
     return result
 
 
-def contact_room_ids(runtime_paths: RuntimePaths, agent_name: str, *, include_removed: bool = False) -> frozenset[str]:
+def agent_contacts(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+) -> list[tuple[ContactRecord, SideName]]:
+    """Return every contact this agent is a party of, in any status, with its side.
+
+    Only a personal agent can be a party, so only it reads the store, and a corrupt store stops no other agent.
+    """
+    if config.personal_agent_instance(agent_name) is None:
+        return []
+    return [
+        (record, side)
+        for record in read_contacts(runtime_paths).contacts
+        if (side := record.agent_side(agent_name)) is not None
+    ]
+
+
+def contact_room_ids(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    *,
+    include_removed: bool = False,
+) -> frozenset[str]:
     """Return the rooms of the active contacts this agent is a party of, which it keeps across restarts.
 
     With ``include_removed`` the rooms of its removed contacts count too, since a contact keeps its room once removed.
     """
     return frozenset(
         record.room_id
-        for record in read_contacts(runtime_paths).contacts
-        if (include_removed or record.status == "active")
-        and record.room_id is not None
-        and record.agent_side(agent_name) is not None
+        for record, _side in agent_contacts(config, runtime_paths, agent_name)
+        if (include_removed or record.status == "active") and record.room_id is not None
     )
 
 

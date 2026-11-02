@@ -164,9 +164,9 @@ def _failing_membership(*, fails_on: str) -> Callable[[str, str], Awaitable[bool
     return change
 
 
-def _kept(paths: RuntimePaths) -> set[str]:
+def _kept(config: Config, paths: RuntimePaths) -> set[str]:
     """Return the agents that keep the contact room across restarts."""
-    return {name for name in TOOLS if CONTACT_ROOM in contact_room_ids(paths, name)}
+    return {name for name in TOOLS if CONTACT_ROOM in contact_room_ids(config, paths, name)}
 
 
 @pytest.mark.asyncio
@@ -203,7 +203,7 @@ async def test_accept_creates_room_invites_and_joins(tmp_path: Path) -> None:
     invitees = (_account(paths, "mind_alice"), OWNER, CO_OWNER)
     assert matrix.invited() == {(client, CONTACT_ROOM, user_id) for user_id in invitees}
     assert matrix.invite.await_count == len(invitees)
-    assert _joined(runtime) == _kept(paths) == {"mind_alice", "mind_bob"}
+    assert _joined(runtime) == _kept(config, paths) == {"mind_alice", "mind_bob"}
     assert (accepted.status, accepted.room_id) == ("active", CONTACT_ROOM)
     assert _stored(paths) == [accepted]
 
@@ -226,7 +226,7 @@ async def test_the_personal_room_agent_accepts_and_the_target_agent_creates_the_
     matrix.create.assert_awaited_once_with(client, "Alice's Mind ↔ Bob's Work", initial_state=ROOM_STATE)
     invitees = (_account(paths, "mind_alice"), OWNER, CO_OWNER)
     assert matrix.invited() == {(client, CONTACT_ROOM, user_id) for user_id in invitees}
-    assert _joined(runtime) == _kept(paths) == {"mind_alice", "work_bob"}
+    assert _joined(runtime) == _kept(config, paths) == {"mind_alice", "work_bob"}
 
 
 @pytest.mark.asyncio
@@ -247,7 +247,7 @@ async def test_a_person_target_accepts_through_their_personal_agent_and_the_requ
     client = runtime.clients["mind_alice"]
     matrix.create.assert_awaited_once_with(client, f"Alice's Mind ↔ {CAROL}", initial_state=ROOM_STATE)
     assert matrix.invited() == {(client, CONTACT_ROOM, OWNER), (client, CONTACT_ROOM, CAROL)}
-    assert _joined(runtime) == _kept(paths) == {"mind_alice"}
+    assert _joined(runtime) == _kept(config, paths) == {"mind_alice"}
 
 
 @pytest.mark.asyncio
@@ -389,7 +389,7 @@ async def test_a_room_that_cannot_be_set_up_is_left_and_the_request_stays_pendin
     assert _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
     for client in runtime.clients.values():
         client.room_leave.assert_not_awaited()
-    assert _kept(paths) == set()
+    assert _kept(config, paths) == set()
     # The last attempt replaced the room of the one before, which stays a removed contact's.
     assert [stored.status for stored in _stored(paths)] == ["pending", "removed"]
     runtime.sent("mind_alice").assert_not_awaited()
@@ -413,7 +413,7 @@ async def test_a_join_that_fails_unexpectedly_also_leaves_the_room(tmp_path: Pat
         await _accept(config, paths, runtime, record.id)
 
     assert _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
-    assert _kept(paths) == set()
+    assert _kept(config, paths) == set()
     assert [stored.status for stored in _stored(paths)] == ["pending"]
     runtime.sent("mind_alice").assert_not_awaited()
 
@@ -539,7 +539,7 @@ async def test_a_cancellation_during_the_store_write_keeps_the_contact_it_activa
             await accepting
 
     assert [(stored.status, stored.room_id) for stored in _stored(paths)] == [("active", CONTACT_ROOM)]
-    assert _joined(runtime) == _kept(paths) == {"mind_alice", "mind_bob"}
+    assert _joined(runtime) == _kept(config, paths) == {"mind_alice", "mind_bob"}
     assert _memberships(runtime, "leave") == set()
 
 

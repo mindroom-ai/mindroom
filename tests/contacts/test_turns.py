@@ -15,7 +15,14 @@ from mindroom import agents as agents_module
 from mindroom import ai
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, _contacts_path, update_contacts
+from mindroom.contacts.store import (
+    ContactParty,
+    ContactRecord,
+    ContactSide,
+    _contacts_path,
+    contact_room_ids,
+    update_contacts,
+)
 from mindroom.contacts.turns import (
     _ContactAdmission,
     contact_admission,
@@ -182,13 +189,19 @@ def _corrupt_store(paths: RuntimePaths) -> None:
 
 
 def test_only_a_personal_agent_reads_the_contacts_store(tmp_path: Path) -> None:
-    """A corrupt store stops only the turns and room tools of personal agents, not those of any other agent."""
+    """A corrupt store stops only the turns, room tools, memory, and rooms of personal agents, not any other agent's."""
     config, paths = _setup(tmp_path)
     _corrupt_store(paths)
 
     assert contact_room(config, paths, CONTACT_ROOM, "creator") is None
+    assert contact_room_ids(config, paths, "creator") == frozenset()
+    assert contact_session_check(config, paths, "creator")(f"{CONTACT_ROOM}:{THREAD_ID}") is False
     with pytest.raises(ValueError, match="Contacts file"):
         contact_room(config, paths, CONTACT_ROOM, "mind_bob")
+    with pytest.raises(ValueError, match="Contacts file"):
+        contact_room_ids(config, paths, "mind_bob")
+    with pytest.raises(ValueError, match="Contacts file"):
+        contact_session_check(config, paths, "mind_bob")
 
 
 def test_an_agent_whose_contacts_is_removed_treats_its_active_contacts_as_removed(tmp_path: Path) -> None:

@@ -678,7 +678,9 @@ async def test_remove_by_either_owner_leaves_room(tmp_path: Path) -> None:
     runtime = _runtime()
     record = await _pending(config, paths, runtime)
     _activate(paths, record.id)
-    assert contact_room_ids(paths, "mind_alice") == contact_room_ids(paths, "mind_bob") == {CONTACT_ROOM}
+    assert (
+        contact_room_ids(config, paths, "mind_alice") == contact_room_ids(config, paths, "mind_bob") == {CONTACT_ROOM}
+    )
 
     removed = await flow.remove_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
 
@@ -686,7 +688,7 @@ async def test_remove_by_either_owner_leaves_room(tmp_path: Path) -> None:
     assert _stored(paths) == [removed]
     for name in ("mind_alice", "mind_bob"):
         runtime.bots[name].change_local_membership.assert_awaited_once_with(CONTACT_ROOM, "leave")
-        assert contact_room_ids(paths, name) == frozenset()
+        assert contact_room_ids(config, paths, name) == frozenset()
     runtime.bots["mind_carol"].change_local_membership.assert_not_awaited()
     for client in runtime.clients.values():
         client.room_leave.assert_not_awaited()
