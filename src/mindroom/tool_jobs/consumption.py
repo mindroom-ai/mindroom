@@ -36,9 +36,9 @@ _JOB_FAILED_TEXT = "Background tool job failed."
 # exceptions such as ``TimeoutError`` and ``httpx.ReadTimeout``.
 # Last legacy release: v2026.10.512; replacement: v2026.10.513, whose writers save the exception's type name when its
 # text is empty.
-# Handling: such a job reads as ``_JOB_FAILED_TEXT`` wherever its outcome is read: when the call that started it, a
-# subagent call included, reads it, when the job tool waits for it, and when the job tool collects it, so the model
-# reads that the call failed instead of an empty failure.
+# Handling: such a job reads as ``_JOB_FAILED_TEXT`` wherever its outcome is read: when the call that started it reads
+# it, when the job tool waits for it, and when the job tool collects it, so the model reads that the call failed
+# instead of an empty failure.
 # Coverage: tests/test_tool_job_execution.py::test_a_reattached_call_reads_a_job_saved_failed_without_error_text_as_failed;
 # tests/test_job_tools.py::test_job_wait_reads_a_job_saved_failed_without_error_text_as_failed;
 # tests/test_job_tools.py::test_collect_reads_a_job_saved_failed_without_error_text_as_failed

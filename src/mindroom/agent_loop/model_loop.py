@@ -340,8 +340,8 @@ async def _answer_resumed(
     for requirement in decided:
         execution = requirement.tool_execution
         if execution.confirmed is True:
-            # The decision has been taken: the entry no longer waits, so the dispatcher runs it, and it covers the
-            # call however its function is gated now, as one that asks as its job's first phase after jobs turned on.
+            # The decision has been taken and covers the call whatever gate its function has now, so the dispatcher
+            # runs it without asking again.
             function = replace(state.offered.functions[execution.tool_name], gate=None)
             execution.requires_confirmation = False
             planned = PlannedCall(function=function, execution=execution)

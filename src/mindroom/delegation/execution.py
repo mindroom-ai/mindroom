@@ -1,4 +1,4 @@
-"""Run the children a paused run's delegation calls wait on, durably, and continue the run with their results."""
+"""Run subagents: the children a paused run's delegation calls wait on, and the child a subagent call's job runs."""
 
 from __future__ import annotations
 
@@ -566,8 +566,11 @@ def _prepare_delegation_output(
     runtime_paths: RuntimePaths,
     raw_path: object,
     tool_name: str,
-) -> ToolOutputFileRequest | dict[str, object]:
-    """Resolve the output policy of the caller ``identity`` names without scaffolding or reconciling its workspace."""
+) -> ToolOutputFileRequest | str:
+    """Resolve the output policy of the caller ``identity`` names, or return why its output path is refused.
+
+    It neither scaffolds nor reconciles the caller's workspace.
+    """
     storage = resolve_agent_storage(identity.agent_name, config, runtime_paths, execution_identity=identity)
     workspace = resolve_agent_workspace_from_state_path(
         identity.agent_name,
@@ -581,7 +584,8 @@ def _prepare_delegation_output(
         runtime_paths,
         auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
     )
-    return prepare_tool_output_file(policy, tool_name=tool_name, output_path=raw_path)
+    request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=raw_path)
+    return json.dumps(request) if isinstance(request, dict) else request
 
 
 def _finalize_delegation_output(result: str, request: ToolOutputFileRequest | None) -> str:
@@ -715,56 +719,6 @@ async def _run_job_child(
         return status, _child_result_text(child, receipt)
 
 
-async def _run_delegation_job(
-    child: DelegationChild,
-    *,
-    job_id: str,
-    runtime: ToolJobRuntime,
-    owner: ToolExecutionIdentity,
-    parent_run_id: str | None,
-    tool_name: str,
-    arguments: dict[str, Any],
-    run_child: ChildResponseRunner,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    refresh_scheduler: KnowledgeRefreshScheduler | None,
-    output_request: ToolOutputFileRequest | None,
-) -> BackgroundOutcome:
-    """Run one prepared child as its subagent call's job, with the call's plugin hooks around it.
-
-    The child's status decides the job's: the output policy shapes only the text, so a saved or redirected failure
-    still fails the job and the call.
-    """
-    hook_state = await before_delegation(
-        execution_identity=owner,
-        arguments=arguments,
-        tool_name=tool_name,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    if hook_state.blocked_result is not None:
-        await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=None)
-        return delegation_outcome("failed", hook_state.blocked_result)
-    try:
-        status, text = await _run_job_child(
-            child,
-            job_id=job_id,
-            owner=owner,
-            parent_run_id=parent_run_id,
-            run_child=run_child,
-            config=config,
-            runtime_paths=runtime_paths,
-            refresh_scheduler=refresh_scheduler,
-            runtime=runtime,
-        )
-    except BaseException as error:
-        await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=child.result, error=error)
-        raise
-    result = _finalize_delegation_output(text, output_request)
-    await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=result)
-    return delegation_outcome(status, result)
-
-
 def delegation_call_job(
     child: DelegationChild,
     *,
@@ -781,8 +735,8 @@ def delegation_call_job(
 ) -> JobSpec | str:
     """Return the job a prepared subagent call runs as, known as its child, or why the call cannot run.
 
-    A cancellation or shutdown in this process settles the job's own live child; the saved child, which the job
-    keeps current, serves recovery after a crash.
+    The job runs the child with the call's plugin hooks around it. The child's status decides the job's: the output
+    policy shapes only the text, so a saved or redirected failure still fails the job and the call.
     """
     output_request = _prepare_delegation_output(
         owner,
@@ -791,25 +745,48 @@ def delegation_call_job(
         arguments.get(OUTPUT_PATH_ARGUMENT),
         tool_name=tool_name,
     )
-    if isinstance(output_request, dict):
-        return json.dumps(output_request)
-    return delegation_job(
-        child,
-        partial(
-            _run_delegation_job,
-            child,
-            job_id=job_id,
-            runtime=runtime,
-            owner=owner,
-            parent_run_id=parent_run_id,
-            tool_name=tool_name,
+    if isinstance(output_request, str):
+        return output_request
+
+    async def operation() -> BackgroundOutcome:
+        hook_state = await before_delegation(
+            execution_identity=owner,
             arguments=arguments,
-            run_child=run_child,
+            tool_name=tool_name,
             config=config,
             runtime_paths=runtime_paths,
-            refresh_scheduler=refresh_scheduler,
-            output_request=output_request,
-        ),
+        )
+        if hook_state.blocked_result is not None:
+            await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=None)
+            return delegation_outcome("failed", hook_state.blocked_result)
+        try:
+            status, text = await _run_job_child(
+                child,
+                job_id=job_id,
+                owner=owner,
+                parent_run_id=parent_run_id,
+                run_child=run_child,
+                config=config,
+                runtime_paths=runtime_paths,
+                refresh_scheduler=refresh_scheduler,
+                runtime=runtime,
+            )
+        except BaseException as error:
+            await after_delegation(
+                hook_state,
+                config=config,
+                runtime_paths=runtime_paths,
+                result=child.result,
+                error=error,
+            )
+            raise
+        result = _finalize_delegation_output(text, output_request)
+        await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=result)
+        return delegation_outcome(status, result)
+
+    return delegation_job(
+        child,
+        operation,
         cleanup=partial(interrupt_stopped_child, config=config, runtime_paths=runtime_paths),
     )
 
@@ -951,8 +928,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             args.get(OUTPUT_PATH_ARGUMENT),
             tool_name=tool_name,
         )
-        if isinstance(prepared_output, dict):
-            authorization = json.dumps(prepared_output)
+        if isinstance(prepared_output, str):
+            authorization = prepared_output
         else:
             output_request = prepared_output
     if isinstance(authorization, str):

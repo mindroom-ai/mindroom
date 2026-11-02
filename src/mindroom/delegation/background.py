@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
@@ -89,8 +90,10 @@ def delegation_job(
         finally:
             adapter["child"] = child_snapshot(child)
 
-    async def cancel(job: BackgroundJob) -> BackgroundOutcome | None:
-        return await reconcile_delegation(job, cleanup=cleanup, child=child)
-
-    # A subagent job is known by the agent it runs.
-    return JobSpec(tool_name=child.child_agent_name, kind="delegation", adapter=adapter, operation=run, cancel=cancel)
+    return JobSpec(
+        tool_name=child.child_agent_name,
+        kind="delegation",
+        adapter=adapter,
+        operation=run,
+        cancel=partial(reconcile_delegation, cleanup=cleanup, child=child),
+    )

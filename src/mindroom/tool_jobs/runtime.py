@@ -104,8 +104,8 @@ class JobSpec:
     kind: str = "tool"
     toolkit_name: str | None = None
     adapter: dict[str, Any]
-    operation: Callable[[], Awaitable[BackgroundOutcome]]
-    cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] | None = None
+    operation: _Operation
+    cancel: _Cleanup | None = None
 
 
 @dataclass(frozen=True)

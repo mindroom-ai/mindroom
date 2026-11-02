@@ -52,7 +52,10 @@ async def load_settled_subagent(
     runtime_paths: RuntimePaths,
     depth: int,
 ) -> DelegationChild:
-    """Load a scoped handle, first settling an abandoned attempt under its recovery lock, so this writes state."""
+    """Load a scoped handle, first settling an abandoned attempt under its recovery lock, so this writes state.
+
+    A handle whose current turn's job has not ended yet is refused as busy.
+    """
     load = partial(load_subagent, subagent_id, owner=owner, config=config, runtime_paths=runtime_paths, depth=depth)
     child = await load()
     if child.status == "running":

@@ -274,7 +274,7 @@ class DelegateTools(Toolkit):
     ) -> JobSpec | str:
         """Prepare the child a managed call of ``function_name`` runs as ``runtime``'s job ``job_id``, or say why not.
 
-        Nothing is written before the job is admitted: the job starts and settles the child it is known by.
+        The child's turn starts only once the job is admitted; the job starts and settles the child it is known by.
         """
         prepared = await self._prepare(function_name, arguments)
         if isinstance(prepared, str):

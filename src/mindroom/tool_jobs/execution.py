@@ -277,7 +277,6 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
         owner,
         depth=actor.depth,
         background_after=background_after,
-        job_approval=job_approval,
     )
 
 
@@ -335,12 +334,12 @@ async def _call_job(
     owner: ToolExecutionIdentity,
     *,
     job_id: str,
-    job_approval: bool,
 ) -> JobSpec:
     """Return the job one managed call runs as; a call refused before it runs fails with why.
 
-    ``detached`` is the call the job runs. A subagent call's toolkit prepares its child in the reply, so the job is
-    known as that child from its start.
+    ``detached`` holds the call's application arguments on copies of its context: a tool's job runs it, and a subagent
+    call's toolkit prepares its child from it in the reply, so the job is known as that child from its start. A call
+    whose function asks for its approval as its job's first phase (``ToolGate.JOB``) asks before it runs.
     """
     # The delegate toolkit imports the agent runtime, which imports this module.
     from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
@@ -370,7 +369,7 @@ async def _call_job(
             runtime_paths=scope.context.runtime_paths,
         )
 
-    approval = ask_approval if job_approval else None
+    approval = ask_approval if function.gate is ToolGate.JOB else None
     return JobSpec(
         tool_name=function.name,
         toolkit_name=job_call.tool.toolkit_name,
@@ -394,7 +393,6 @@ async def _run_managed_call(
     *,
     depth: int,
     background_after: float | None,
-    job_approval: bool,
 ) -> object:
     """Accept one call as a managed job, wait for it within the caller's budget, and return what it returned.
 
@@ -424,7 +422,6 @@ async def _run_managed_call(
             scope,
             owner,
             job_id=job_id,
-            job_approval=job_approval,
         )
         reference = scope.resources.acquire()
         _, claim = await runtime.start(
