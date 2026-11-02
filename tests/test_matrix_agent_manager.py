@@ -1478,6 +1478,86 @@ space_room_id: null
         assert agent_user.password == "existing_pass"  # noqa: S105
         mock_register.assert_not_called()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("stored_username", "requested_username", "configured_username"),
+        [
+            pytest.param("jarvis", "jarvis", "jarvis", id="created-with-it"),
+            pytest.param("jarvis", None, "jarvis", id="added-by-hand"),
+            pytest.param("jarvis", None, None, id="added-by-hand-without-setting"),
+            pytest.param("mindroom_calculator", "mindroom_calculator", None, id="default-account"),
+        ],
+    )
+    @patch("mindroom.matrix.users._register_user")
+    async def test_create_agent_user_reuses_a_stored_account_matching_its_matrix_username(
+        self,
+        mock_register: AsyncMock,
+        tmp_path: Path,
+        stored_username: str,
+        requested_username: str | None,
+        configured_username: str | None,
+    ) -> None:
+        """A restart, or an account added by hand to adopt it, loads the stored account without registering."""
+        runtime_paths = _runtime_paths(tmp_path)
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.add_account(
+            "agent_calculator",
+            stored_username,
+            "existing_pass",
+            requested_username=requested_username,
+        )
+        save_matrix_state(state, runtime_paths)
+
+        agent_user = await create_agent_user(
+            "http://localhost:8008",
+            "calculator",
+            "CalculatorAgent",
+            runtime_paths,
+            username=configured_username,
+        )
+
+        assert agent_user.user_id == f"@{stored_username}:localhost"
+        assert agent_user.password == "existing_pass"  # noqa: S105
+        mock_register.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("requested_username", ["mindroom_calculator", None])
+    @patch("mindroom.matrix.users._register_user")
+    async def test_create_agent_user_rejects_a_matrix_username_change_after_the_account_exists(
+        self,
+        mock_register: AsyncMock,
+        tmp_path: Path,
+        requested_username: str | None,
+    ) -> None:
+        """An agent's configured username must match the one its stored account was created or added with."""
+        runtime_paths = _runtime_paths(tmp_path)
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.add_account(
+            "agent_calculator",
+            "mindroom_calculator",
+            "existing_pass",
+            requested_username=requested_username,
+        )
+        save_matrix_state(state, runtime_paths)
+
+        with pytest.raises(
+            PermanentMatrixStartupError,
+            match=(
+                r"agents\.calculator\.matrix_username cannot be changed after the agent's Matrix account has been "
+                r"created\. Configured username 'jarvis' does not match the original requested username "
+                r"'mindroom_calculator'\."
+            ),
+        ):
+            await create_agent_user(
+                "http://localhost:8008",
+                "calculator",
+                "CalculatorAgent",
+                runtime_paths,
+                username="jarvis",
+            )
+
+        mock_register.assert_not_called()
+
     @pytest.mark.parametrize(
         ("colliding_entity_name", "agents", "teams"),
         [

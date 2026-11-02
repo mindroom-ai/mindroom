@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -46,6 +47,17 @@ def non_empty_stripped(value: str, *, field_name: str) -> str:
         msg = f"{field_name} must not be empty"
         raise ValueError(msg)
     return stripped
+
+
+_MATRIX_LOCALPART_PATTERN = re.compile(r"[a-z0-9._=/-]+")
+
+
+def validate_matrix_localpart(value: str, *, field_name: str) -> str:
+    """Return ``value`` when it is a localpart MindRoom may request for a Matrix account it creates."""
+    if not _MATRIX_LOCALPART_PATTERN.fullmatch(value):
+        msg = f"{field_name} must be a Matrix localpart of lowercase letters, digits, and ._=/-"
+        raise ValueError(msg)
+    return value
 
 
 def _blank_as_none(value: str | None) -> str | None:

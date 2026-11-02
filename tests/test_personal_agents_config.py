@@ -174,6 +174,7 @@ def test_expansion_leaves_malformed_sections_for_pydantic() -> None:
         ("users", {"@bob:x": {"private": {"per": "user"}}}, "private"),
         ("users", {"@bob:x": {"allow_self_config": True}}, "allow_self_config"),
         ("users", {"@bob:x": {"allow_self_config": "true"}}, "allow_self_config"),
+        ("users", {"@bob:x": {"matrix_username": "bob.mind"}}, "set the template's matrix_username instead"),
     ],
 )
 def test_template_validation(field: str, value: object, match: str) -> None:
@@ -199,6 +200,12 @@ def test_template_rejects_private_and_self_config_agent() -> None:
     for extra in ({"private": {"per": "user"}}, {"allow_self_config": True}):
         with pytest.raises(ValidationError):
             PersonalAgentTemplateConfig.model_validate({"agent": {"display_name": "Mind", **extra}})
+
+
+def test_template_agent_rejects_its_own_matrix_username() -> None:
+    """Every user's agent needs its own account, so the template's agent block cannot name one."""
+    with pytest.raises(ValidationError, match="agent: matrix_username is not supported"):
+        PersonalAgentTemplateConfig.model_validate({"agent": {"display_name": "Mind", "matrix_username": "mind"}})
 
 
 def test_roster_round_trip(tmp_path: Path) -> None:

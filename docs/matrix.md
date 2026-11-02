@@ -17,7 +17,7 @@ Each agent, team, and the router has its own Matrix user, created automatically 
 Account credentials are stored in `matrix_state.yaml` in the storage directory (default `mindroom_data/`).
 
 In chat, address an agent or team by its configured key, such as `@assistant`.
-MindRoom requests localparts such as `mindroom_assistant`, but the account recorded in `matrix_state.yaml` is authoritative, so an agent's actual Matrix ID (for example `@assistant_live:example.com`) can differ from the requested one.
+MindRoom requests localparts such as `mindroom_assistant`, or an agent's [`matrix_username`](configuration/agents.md#configuration-options), but the account recorded in `matrix_state.yaml` is authoritative, so an agent's actual Matrix ID (for example `@assistant_live:example.com`) can differ from the requested one.
 
 `MATRIX_MANAGED_ACCOUNT_AUTH` selects how these accounts authenticate:
 
@@ -27,6 +27,24 @@ MindRoom requests localparts such as `mindroom_assistant`, but the account recor
   Provide exactly one of `MATRIX_APPSERVICE_TOKEN` or `MATRIX_APPSERVICE_TOKEN_FILE`; setting either one without `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` stops startup.
   The application-service token is used only to register accounts and log in new devices.
   After switching an existing install to `appservice`, stored passwords are removed from `matrix_state.yaml` once each account logs in.
+
+### Use an Existing Matrix Account
+
+An agent can take over a Matrix account that already exists, such as one another agent platform used, and keep its Matrix ID and rooms.
+Before the agent's first start, while `matrix_state.yaml` has no entry for the agent, add the account under `accounts` with its localpart and password:
+
+```yaml
+accounts:
+  agent_assistant:  # agent_<agent key>
+    username: jarvis
+    password: the-account-password
+```
+
+MindRoom then logs in to that account instead of registering one.
+With `MATRIX_MANAGED_ACCOUNT_AUTH=appservice`, leave out `password`; the account must be inside the application service's exclusive user namespace.
+List every room the account should stay in under the agent's `rooms` by room ID, because an agent leaves joined rooms it is not configured for, except direct messages.
+Stop the other platform from using the account first, or both will answer.
+An adopted account needs no `matrix_username`, and with password auth, a `matrix_username` that names an existing account stops startup with `Matrix account collision` instead of taking it over.
 
 ## Internal User
 

@@ -118,6 +118,14 @@ def test_unknown_knowledge_base_lookup_reports_it_is_not_configured() -> None:
             config.get_knowledge_base_config(base_id)
 
 
+@pytest.mark.parametrize("matrix_username", ["Jarvis", "jarvis smith", "@jarvis", "jarvis:example.org", ""])
+def test_agent_matrix_username_must_be_a_matrix_localpart(matrix_username: str) -> None:
+    """An agent's matrix_username is a bare localpart, checked by the rule every requested MindRoom account follows."""
+    with pytest.raises(ValidationError, match="matrix_username must be a Matrix localpart"):
+        AgentConfig(display_name="Jarvis", matrix_username=matrix_username)
+    assert AgentConfig(display_name="Jarvis", matrix_username="jarvis.home-1").matrix_username == "jarvis.home-1"
+
+
 def test_history_limit_choice_rejects_both_limits_with_existing_message() -> None:
     """Shared history validation should keep the existing user-facing message."""
     with pytest.raises(ValueError, match="num_history_runs and num_history_messages are mutually exclusive"):

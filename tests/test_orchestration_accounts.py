@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.matrix_identifiers import agent_username_localpart
@@ -155,6 +155,69 @@ async def test_account_preparation_requests_personal_agent_username(tmp_path: Pa
         await _prepare(config, [ROUTER_AGENT_NAME, "mind_alice_smith"], paths)
 
     assert requested == {ROUTER_AGENT_NAME: None, "mind_alice_smith": "alice.mind"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("namespace", "localpart"), [("", "jarvis"), ("home1", "jarvis_home1")])
+async def test_account_preparation_requests_an_agents_configured_matrix_username(
+    tmp_path: Path,
+    namespace: str,
+    localpart: str,
+) -> None:
+    """An agent's matrix_username names its new account, with the installation namespace appended as to the default."""
+    paths = resolve_runtime_paths(
+        config_path=test_runtime_paths(tmp_path).config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": namespace},
+    )
+    config = Config.validate_with_runtime(
+        {
+            "agents": {"general": {"display_name": "GeneralAgent", "matrix_username": "jarvis"}},
+            "teams": {"crew": {"display_name": "Crew", "role": "Crew", "agents": ["general"]}},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+        },
+        paths,
+    )
+    requested: dict[str, str | None] = {}
+
+    async def record_user(
+        _homeserver: str,
+        entity_name: str,
+        display_name: str,
+        *,
+        username: str | None = None,
+        **_kwargs: object,
+    ) -> AgentMatrixUser:
+        requested[entity_name] = username
+        _persist_account(paths, entity_name, username or f"actual_{entity_name}")
+        return _matrix_user(entity_name, username or f"actual_{entity_name}", display_name)
+
+    with patch("mindroom.orchestration.accounts.create_agent_user", new=record_user):
+        await _prepare(config, [ROUTER_AGENT_NAME, "general", "crew"], paths)
+
+    assert requested == {ROUTER_AGENT_NAME: None, "general": localpart, "crew": None}
+
+
+@pytest.mark.asyncio
+async def test_account_preparation_refuses_a_matrix_username_the_stored_account_was_not_created_with(
+    tmp_path: Path,
+) -> None:
+    """Changing an agent's matrix_username after its account exists stops account preparation before any registration."""
+    config = _general_config(tmp_path, {"writer": {"display_name": "WriterAgent", "matrix_username": "jarvis"}})
+    paths = runtime_paths_for(config)
+    _persist_account(paths, "writer", "mindroom_writer")
+    create = AsyncMock()
+
+    with (
+        patch("mindroom.orchestration.accounts.create_agent_user", new=create),
+        pytest.raises(
+            PermanentStartupError,
+            match=r"agents\.writer\.matrix_username cannot be changed after the agent's Matrix account has been created",
+        ),
+    ):
+        await _prepare(config, [ROUTER_AGENT_NAME, "general", "writer"], paths)
+
+    create.assert_not_awaited()
 
 
 @pytest.mark.asyncio
