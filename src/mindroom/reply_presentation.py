@@ -45,6 +45,8 @@ AGENT_PLACEHOLDER = PROGRESS_PLACEHOLDER
 TEAM_PLACEHOLDER = TEAM_PROGRESS_PLACEHOLDER
 _DELIVERY_FAILED_NOTE = "Response delivery failed. Please retry."
 _APPROVAL_START_FAILED_NOTE = "Tool approval could not be started. Please try again."
+# A tool may have posted the answer already, so the note says only that the turn ended.
+_NOTHING_TO_SHOW_NOTE = "Done."
 
 
 def format_error_note(error: object) -> str:
@@ -58,6 +60,7 @@ _FIXED_NOTE_TEXTS = {
     NoteKind.INTERRUPTED: INTERRUPTED_RESPONSE_NOTE,
     NoteKind.DELIVERY_FAILED: _DELIVERY_FAILED_NOTE,
     NoteKind.APPROVAL_FAILED: _APPROVAL_START_FAILED_NOTE,
+    NoteKind.NOTHING_TO_SHOW: _NOTHING_TO_SHOW_NOTE,
 }
 
 

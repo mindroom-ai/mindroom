@@ -1299,7 +1299,7 @@ async def test_compact_scope_history_keeps_earlier_chunks_when_a_later_summary_e
         state=HistoryScopeState(),
         summarizer=_summarizer(model, summary_input_budget),
         available_history_budget=1,
-        max_summary_tokens=estimate_summary_text_tokens(short_summary),
+        max_summary_tokens=estimate_summary_text_tokens(short_summary, replay_estimator=None),
         before_tokens=2,
         replay_window_tokens=16_000,
         threshold_tokens=1,

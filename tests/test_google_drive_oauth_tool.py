@@ -21,7 +21,12 @@ from mindroom.config.main import Config
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES, google_oauth_provider
-from mindroom.tool_system.agno_toolkits import adapt_toolkit, configure_toolkit_functions, toolkit_function_names
+from mindroom.tool_system.agno_toolkits import (
+    adapt_toolkit,
+    configure_toolkit_functions,
+    rename_toolkit_functions,
+    toolkit_function_names,
+)
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -1148,7 +1153,7 @@ def test_google_drive_read_returns_text_without_nul_bytes(
     assert result["content"] == text
 
 
-def test_google_drive_large_file_error_names_exposed_download_function(tmp_path: Path) -> None:
+def test_google_drive_large_file_error_names_no_download_function_when_none_is_offered(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
@@ -1215,24 +1220,30 @@ _MIB = 1024 * 1024
         ),
     ],
 )
+@pytest.mark.parametrize("prefix", [pytest.param("", id="default"), pytest.param("work_", id="workspace")])
 def test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     metadata: dict[str, object],
     refusal: str,
     download_error: str | None,
+    prefix: str,
 ) -> None:
-    """A refused read names the download function only for a file it saves, and otherwise gives its refusal."""
+    """A refused read names the download function, as offered, only for a file it saves, else gives its refusal."""
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    if prefix:
+        # An additional Google workspace's tool renames every function of its toolkit this way.
+        rename_toolkit_functions(tool, {name: f"{prefix}{name}" for name in toolkit_function_names(tool)})
     service.files_resource.file_metadata = metadata
     tool._download_bytes = lambda _request: b"%PDF-1.7\n"
 
     result = json.loads(tool.read_file("shared-drive-file-id"))
 
+    download_function = f"{prefix}google_drive_download_file"
     if download_error is None:
-        assert result["error"] == f"{refusal} Use google_drive_download_file instead."
+        assert result["error"] == f"{refusal} Use {download_function} instead."
     else:
-        assert result["error"] == f"{refusal} google_drive_download_file would refuse it too: {download_error}"
+        assert result["error"] == f"{refusal} {download_function} would refuse it too: {download_error}"
     assert json.loads(tool.download_file("shared-drive-file-id")).get("error") == download_error
 
 
