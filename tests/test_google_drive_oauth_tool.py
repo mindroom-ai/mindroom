@@ -536,6 +536,7 @@ def test_google_drive_readonly_grant_keeps_reads_and_requires_reconnect_for_writ
         credentials_manager=credentials_manager,
         worker_target=None,
     )
+    tool._authenticate()
     service = _FakeDriveService()
     tool.service = service
 

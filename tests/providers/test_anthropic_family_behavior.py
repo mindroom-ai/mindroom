@@ -128,7 +128,6 @@ def test_identity_and_capabilities_per_route(
     assert capabilities.structured_output == structured_output
     assert capabilities.native_tool_search is native_tool_search
     assert capabilities.omitted_media == frozenset({"audio", "video"})
-    assert capabilities.conservative_token_estimates is True
     assert capabilities.provider_default_sampling is True
     assert capabilities.native_compaction is (route != "bedrock_claude")
 

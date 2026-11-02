@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     description="Run Python scripts in the background, monitor them, or cancel them",
     docs_url="https://docs.mindroom.chat/tools/background-scripts/",
     category=ToolCategory.DEVELOPMENT,
-    file_access=ToolFileAccess.UNCONFINED,
+    file_access=ToolFileAccess.NONE,
     executes_code=True,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

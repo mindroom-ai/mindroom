@@ -13,7 +13,7 @@ from mindroom.timing import timed
 
 from ._backend import resolve_memory_backend
 from ._entrypoint_snapshots import stable_entrypoint_preamble
-from ._file_backend import append_agent_daily_file_memory
+from ._file_backend import append_agent_daily_file_memory, cap_entrypoint
 from ._prompting import format_memories_as_context
 from ._shared import MemoryEntrypointContext, MemorySearchOutcome
 
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import TokenCounter
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -207,8 +208,9 @@ async def _entrypoint_preamble(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     conversation: ConversationRef | None,
+    counter: TokenCounter,
 ) -> str:
-    """Render the agent's `MEMORY.md` preamble, or the copy ``conversation`` keeps of it."""
+    """Render the agent's `MEMORY.md` preamble, or the copy ``conversation`` keeps of it, sized with ``counter``."""
     # The file backend reads the scoped MEMORY.md from disk; keep it off the
     # event loop (#1260).
     entrypoint = await asyncio.to_thread(
@@ -217,6 +219,7 @@ async def _entrypoint_preamble(
         config,
         execution_identity=execution_identity,
     )
+    entrypoint = await asyncio.to_thread(cap_entrypoint, entrypoint, config, counter)
     body = (
         _render_entrypoint_body(entrypoint, config, kept_copy=conversation is not None)
         if entrypoint.text or entrypoint.omitted_lines
@@ -242,11 +245,15 @@ async def conversation_entrypoint_preamble(
     execution_identity: ToolExecutionIdentity | None,
     *,
     conversation: ConversationRef,
+    counter: TokenCounter,
 ) -> str:
-    """Return the `MEMORY.md` preamble for ``conversation``, loading the file again when its history was compacted."""
+    """Return the `MEMORY.md` preamble for ``conversation``, loading the file again when its history was compacted.
+
+    ``counter`` counts tokens for the model the preamble goes to.
+    """
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return ""
-    return await _entrypoint_preamble(backend, agent_name, config, execution_identity, conversation)
+    return await _entrypoint_preamble(backend, agent_name, config, execution_identity, conversation, counter)
 
 
 @timed("system_prompt_assembly.memory_enhancement")
@@ -258,11 +265,12 @@ async def build_memory_prompt_parts(
     execution_identity: ToolExecutionIdentity | None = None,
     *,
     conversation: ConversationRef | None = None,
+    counter: TokenCounter,
 ) -> MemoryPromptParts:
     """Split stable entrypoint context from turn-local searched memories.
 
     A turn in ``conversation`` keeps the entrypoint that conversation last sent while its inlined copy only gains lines
-    and its prompt cache may be warm.
+    and its prompt cache may be warm. ``counter`` counts tokens for the model the turn runs on.
     """
     logger.debug("Building enhanced prompt", agent=agent_name)
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
@@ -285,6 +293,7 @@ async def build_memory_prompt_parts(
         config,
         execution_identity,
         conversation,
+        counter,
     )
 
     # The automatic per-turn path must not silently drop the degradation

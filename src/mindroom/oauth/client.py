@@ -22,7 +22,6 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
     OAuthCredentialUnreadableError,
-    load_oauth_credentials_snapshot_if_readable_sync,
     load_oauth_credentials_snapshot_sync,
     oauth_credential_generation,
     oauth_credentials_have_required_scopes,
@@ -178,7 +177,11 @@ class ScopedOAuthClientMixin:
         defer_to_original_auth: bool = False,
         quota_project_id: str | None = None,
     ) -> Any:  # noqa: ANN401
-        """Prepare OAuth state and initial credentials for the tool."""
+        """Prepare OAuth state and return the supplied credentials, if any.
+
+        Stored credentials are not read here: the toolkit keeps credentials per thread, and each thread that calls a
+        function authenticates on its first call, so a read here would serve only the thread building the agent.
+        """
         self._worker_target = worker_target
         self._config = config
         self._provided_credentials_lock = threading.RLock()
@@ -191,11 +194,7 @@ class ScopedOAuthClientMixin:
         self._defer_to_original_auth = defer_to_original_auth
         self._original_auth_completed = False
         self._oauth_call_state = _OAuthClientThreadState()
-        if self._provided_credentials is not None:
-            return self._provided_credentials
-        if defer_to_original_auth:
-            return None
-        return self._load_stored_credentials()
+        return self._provided_credentials
 
     def _set_original_auth(self, auth_method: Callable[[Any], Any]) -> None:
         """Keep ``auth_method``, an authentication method of the toolkit's class, bound to it as its fallback."""
@@ -583,47 +582,6 @@ class ScopedOAuthClientMixin:
     def _clear_oauth_connection_required(self) -> None:
         self._oauth_call_state.connection_required = False
         self._oauth_call_state.connection_reason = None
-
-    def _load_stored_credentials(self) -> Any | None:  # noqa: ANN401
-        """Load stored credentials for the current execution scope."""
-        context = self._oauth_credential_context()
-        snapshot = load_oauth_credentials_snapshot_if_readable_sync(context)
-        if snapshot is None:
-            self._google_credential_key = None
-            return None
-        self._google_credential_key = (context, snapshot.generation)
-        token_data = snapshot.credentials
-        if not token_data:
-            return None
-        if not self._stored_credentials_have_required_scopes(token_data):
-            self._oauth_logger.warning(
-                "oauth_credentials_missing_required_scopes",
-                tool_name=self._oauth_tool_name,
-                provider_id=self._oauth_provider.id,
-            )
-            return None
-        if not oauth_credentials_satisfy_identity_policy(self._oauth_provider, self._runtime_paths, token_data):
-            self._oauth_logger.warning(
-                "oauth_credentials_identity_policy_failed",
-                tool_name=self._oauth_tool_name,
-                provider_id=self._oauth_provider.id,
-            )
-            return None
-        try:
-            creds = self._credentials_from_token_data(
-                token_data,
-                context=context,
-                connection_generation=snapshot.connection_generation,
-            )
-        except Exception as exc:
-            self._oauth_logger.warning(
-                "oauth_credentials_load_failed",
-                tool_name=self._oauth_tool_name,
-                error_type=type(exc).__name__,
-            )
-            return None
-        self._oauth_logger.info("oauth_credentials_loaded", tool_name=self._oauth_tool_name)
-        return creds
 
     def _stored_credentials_have_required_scopes(self, token_data: dict[str, Any]) -> bool:
         """Return whether stored credentials can authenticate this toolkit."""

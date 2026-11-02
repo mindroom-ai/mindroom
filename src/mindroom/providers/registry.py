@@ -31,13 +31,14 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import ModelProvider, TokenCounter
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 __all__ = [
     "build_model_provider",
     "check_extra_kwargs",
     "configured_model",
+    "model_token_counter",
     "stream_idle_timeout_seconds",
 ]
 
@@ -144,6 +145,17 @@ def build_model_provider(
         media_fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
         request_log=request_log,
     )
+
+
+def model_token_counter(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> TokenCounter:
+    """Return how the model configured as ``model_name`` counts tokens."""
+    return build_model_provider(config, runtime_paths, model_name, execution_identity=execution_identity).token_counter
 
 
 def _sets_base_url(value: object) -> bool:

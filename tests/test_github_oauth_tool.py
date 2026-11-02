@@ -35,6 +35,7 @@ from mindroom.credentials.manager import (
 from mindroom.custom_tools import github as mindroom_github_module
 from mindroom.custom_tools.agno_compat_github_errors import _PROVIDER_DETAIL_LOG_PREFIXES
 from mindroom.custom_tools.github import GithubTools
+from mindroom.oauth import credential_lifecycle
 from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oauth_credentials_snapshot_sync
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
@@ -620,11 +621,43 @@ def test_requesters_cannot_use_each_others_github_oauth_credentials(tmp_path: Pa
         worker_target=_oauth_target("@alice:example.test"),
     )
     alice = _build_tool(runtime_paths, manager, alice_target)
-    alice.g = _FakeGithub()
+    alice.authenticate = lambda: _FakeGithub()
     bob = _build_tool(runtime_paths, manager, bob_target)
 
     assert json.loads(alice.list_repositories()) == ["example/project"]
     assert json.loads(bob.list_repositories())["oauth_connection_required"] is True
+
+
+def test_github_tool_reads_stored_token_only_in_a_calling_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every reply builds its toolkits, so building one reads no store; the thread that calls it authenticates."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    _save_scoped_oauth_credentials(
+        "github_oauth",
+        _oauth_credentials("alice-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+
+    def fail_store_access() -> None:
+        raise AssertionError
+
+    with monkeypatch.context() as no_store:
+        no_store.setattr(credential_lifecycle, "_get_oauth_transaction_loop", fail_store_access)
+        tool = _build_tool(runtime_paths, manager, _worker_target("@alice:example.test"))
+    tool.authenticate = _FakeGithub
+
+    def call() -> tuple[object, str | None]:
+        return json.loads(tool.list_repositories()), tool.access_token
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        repositories, access_token = executor.submit(call).result()
+
+    assert repositories == ["example/project"]
+    assert access_token == "alice-access"  # noqa: S105
 
 
 def test_github_workers_keep_token_and_client_ownership_thread_local(tmp_path: Path) -> None:
@@ -728,9 +761,9 @@ def test_github_oauth_is_requester_scoped_when_agent_runtime_is_not(
         worker_target=alice_oauth_target,
     )
     alice = _build_tool(runtime_paths, manager, alice_target)
-    alice.g = _FakeGithub()
+    alice.authenticate = lambda: _FakeGithub()
     bob = _build_tool(runtime_paths, manager, bob_target)
-    bob.g = _FakeGithub()
+    bob.authenticate = lambda: _FakeGithub()
 
     assert json.loads(alice.list_repositories()) == ["example/project"]
     assert json.loads(bob.list_repositories())["oauth_connection_required"] is True
@@ -868,7 +901,7 @@ def test_whitespace_explicit_tokens_fall_back_to_scoped_oauth(
         worker_target=target,
     )
     assert isinstance(tool, GithubTools)
-    tool.g = _FakeGithub()
+    tool.authenticate = lambda: _FakeGithub()
 
     assert json.loads(tool.list_repositories()) == ["example/project"]
     assert tool.access_token == "oauth-access"  # noqa: S105
@@ -1009,7 +1042,7 @@ def test_github_captured_nested_failure_preserves_partial_result(
     )
     tool = _build_tool(runtime_paths, manager, target)
     sentinel = f"provider-controlled-nested-secret-{status_code}"
-    tool.g = _CapturedNestedProviderFailureGithub(status_code, sentinel)
+    tool.authenticate = lambda: _CapturedNestedProviderFailureGithub(status_code, sentinel)
 
     result = tool.get_repository_with_stats("example/project")
 
@@ -1255,7 +1288,7 @@ def test_oauth_refresh_works_when_agno_calls_sync_tool_on_running_loop(tmp_path:
         worker_target=_oauth_target("@alice:example.test"),
     )
     tool = _build_tool(runtime_paths, manager, target)
-    tool.g = _FakeGithub()
+    tool.authenticate = lambda: _FakeGithub()
 
     async def call_sync_tool_entrypoint() -> str:
         return tool.list_repositories()
@@ -1399,7 +1432,7 @@ def test_github_provider_failures_relay_only_github_message_to_agent(
     tool = _build_tool(runtime_paths, manager, target)
     sentinel = f"provider-controlled-secret-{operation}-{status_code}"
     github_message = f"GitHub explanation for {operation}"
-    tool.g = _ProviderControlledFailureGithub(status_code, sentinel, github_message)
+    tool.authenticate = lambda: _ProviderControlledFailureGithub(status_code, sentinel, github_message)
     mindroom_logger = _CapturingLogger()
     agno_log_output = io.StringIO()
     agno_handler = logging.StreamHandler(agno_log_output)
@@ -1589,7 +1622,7 @@ def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> No
     )
     tool = _build_tool(runtime_paths, manager, target)
     sentinel = "provider-controlled-secret-for-spoofing"
-    tool.g = _ProviderControlledFailureGithub(500, sentinel, "Bad credentials: 401 null")
+    tool.authenticate = lambda: _ProviderControlledFailureGithub(500, sentinel, "Bad credentials: 401 null")
 
     result = tool.list_repositories()
 
@@ -1629,7 +1662,7 @@ def test_github_provider_failure_reports_status_and_github_message(
     )
     tool = _build_tool(runtime_paths, manager, target)
     sentinel = "provider-controlled-secret-for-status"
-    tool.g = _ProviderControlledFailureGithub(status_code, sentinel, "Not Found")
+    tool.authenticate = lambda: _ProviderControlledFailureGithub(status_code, sentinel, "Not Found")
 
     wrapped_result = tool.get_file_content("example/project", "src/notes.txt", ref="feature/notes")
     owned_result = tool.edit_issue("example/project", 7, title="Updated")
@@ -1694,7 +1727,7 @@ def test_github_retry_failure_stays_sanitized_when_upstream_logging_is_disabled(
     retry = cast("Retry", client._Github__requester.kwargs["retry"])
     client.close()
     sentinel = "provider-controlled-retry-secret-with-logging-disabled"
-    tool.g = _RetryProviderFailureGithub(retry, sentinel)
+    tool.authenticate = lambda: _RetryProviderFailureGithub(retry, sentinel)
     previous_disabled = agno_github_module.logger.disabled
     agno_github_module.logger.disabled = True
 
@@ -1734,7 +1767,7 @@ def test_github_wrapper_preserves_local_validation_error(tmp_path: Path) -> None
         worker_target=_oauth_target("@alice:example.test"),
     )
     tool = _build_tool(runtime_paths, manager, target)
-    tool.g = _ValidationGithub()
+    tool.authenticate = lambda: _ValidationGithub()
 
     result = tool.set_default_branch("example/project", "missing")
 

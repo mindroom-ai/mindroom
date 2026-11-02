@@ -397,16 +397,6 @@ def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> OAu
     return _run_oauth_transaction_sync(_load_oauth_credentials_snapshot_read(context))
 
 
-def load_oauth_credentials_snapshot_if_readable_sync(
-    context: OAuthCredentialContext,
-) -> OAuthCredentialsSnapshot | None:
-    """Load a client-construction snapshot, treating unreadable state as unavailable."""
-    try:
-        return load_oauth_credentials_snapshot_sync(context)
-    except OAuthCredentialUnreadableError:
-        return None
-
-
 async def load_oauth_credentials_snapshot(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
     """Load the last committed credentials without waiting for provider I/O."""
     return await _run_cancellable_oauth_transaction(lambda: _load_oauth_credentials_snapshot_read(context))

@@ -185,7 +185,7 @@ def test_every_documented_provider_value_gets_its_adapter_and_identity(route: st
     """Dispatch picks the family adapter, and the identity keeps the provider strings stored runs and usage carry.
 
     The pipeline hands callers the adapter as its own native-history route (Responses and Claude), replay estimator
-    (Responses), and recorded settings, so nothing has to unwrap it.
+    (Responses and Gemini), and recorded settings, so nothing has to unwrap it.
     """
     fields, adapter_type, provider_label = _ROUTES[route]
     config = Config(models={"target": ModelConfig(**fields)})
@@ -200,7 +200,7 @@ def test_every_documented_provider_value_gets_its_adapter_and_identity(route: st
     assert (provider.identity, provider.capabilities) == (adapter.identity, adapter.capabilities)
     native_history = adapter if adapter_type in {ResponsesAdapter, ClaudeProvider} else None
     assert provider.native_history_route is native_history
-    assert provider.replay_estimator is (adapter if adapter_type is ResponsesAdapter else None)
+    assert provider.token_counter.replay is (adapter if adapter_type in {ResponsesAdapter, GeminiProvider} else None)
     assert provider.model_params == adapter.model_params
 
 

@@ -86,44 +86,40 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
 class TestGmailTools:
     """Test suite for custom Gmail tools wrapper."""
 
-    @patch("google.oauth2.credentials.Credentials")
     def test_initialization_with_stored_credentials(
         self,
-        mock_credentials_class: Mock,
         mock_credentials_manager: CredentialsManager,
         runtime_paths: RuntimePaths,
     ) -> None:
-        """Test that GmailTools loads credentials from storage on init."""
-        mock_creds_instance = MagicMock()
-        mock_credentials_class.return_value = mock_creds_instance
-
+        """Test that GmailTools loads credentials from storage when a thread first authenticates, not on init."""
         with (
             patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init,
             patch.object(GmailTools, "register"),
         ):
             mock_parent_init.return_value = None
-            GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+            gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
 
-            mock_credentials_class.assert_called_once_with(
-                token="test_access_token",  # noqa: S106
-                refresh_token="test_refresh_token",  # noqa: S106
-                token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
-                client_id="test_client_id",
-                client_secret="test_client_secret",  # noqa: S106
-                scopes=[
-                    "openid",
-                    "https://www.googleapis.com/auth/userinfo.email",
-                    "https://www.googleapis.com/auth/userinfo.profile",
-                    "https://www.googleapis.com/auth/gmail.readonly",
-                    "https://www.googleapis.com/auth/gmail.modify",
-                    "https://www.googleapis.com/auth/gmail.compose",
-                ],
-                quota_project_id=None,
-                expiry=None,
-            )
+            mock_parent_init.assert_called_once_with(creds=None)
 
-            # Verify parent class was initialized with credentials
-            mock_parent_init.assert_called_once_with(creds=mock_creds_instance)
+            gmail_tools._authenticate()
+
+        creds = gmail_tools.creds
+        assert (creds.token, creds.refresh_token, creds.token_uri, creds.client_id, creds.client_secret) == (
+            "test_access_token",
+            "test_refresh_token",
+            "https://oauth2.googleapis.com/token",
+            "test_client_id",
+            "test_client_secret",
+        )
+        assert creds.scopes == [
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.compose",
+        ]
+        assert creds.expiry is None
 
     @patch("mindroom.custom_tools.gmail.logger")
     def test_initialization_without_credentials(
@@ -201,7 +197,7 @@ class TestGmailTools:
         mock_credentials_manager: CredentialsManager,
         runtime_paths: RuntimePaths,
     ) -> None:
-        """Test initialization when credentials are invalid."""
+        """Test authentication when stored credentials are invalid."""
         publish_oauth_credentials(
             google_oauth_provider("google_gmail"),
             {"invalid": "data"},
@@ -215,14 +211,13 @@ class TestGmailTools:
             patch.object(GmailTools, "register"),
         ):
             mock_parent_init.return_value = None
-            GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+            gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+
+            with pytest.raises(OAuthConnectionRequired):
+                gmail_tools._authenticate()
 
             mock_credentials_class.assert_not_called()
-            mock_logger.warning.assert_called_once_with(
-                "oauth_credentials_missing_required_scopes",
-                tool_name="gmail",
-                provider_id="google_gmail",
-            )
+            mock_logger.warning.assert_not_called()
             mock_parent_init.assert_called_once_with(creds=None)
 
     @patch("google.auth.transport.requests.Request")
@@ -358,6 +353,7 @@ class TestGmailTools:
             credentials_manager=mock_credentials_manager,
             send_email=False,
         )
+        gmail_tools._authenticate()
         service = MagicMock()
         service.users.return_value.getProfile.return_value.execute.return_value = {
             "emailAddress": "owner@example.com",
@@ -484,6 +480,7 @@ class TestGmailTools:
             credentials_manager=mock_credentials_manager,
             send_email=False,
         )
+        gmail_tools._authenticate()
         service = MagicMock()
         service.users.return_value.getProfile.return_value.execute.return_value = {
             "emailAddress": "owner@example.com",
@@ -522,6 +519,7 @@ class TestGmailTools:
             credentials_manager=mock_credentials_manager,
             send_email=False,
         )
+        gmail_tools._authenticate()
         service = MagicMock()
         service.users.return_value.getProfile.return_value.execute.return_value = profile
         gmail_tools.service = service
@@ -597,6 +595,7 @@ def _gmail_attachment_tool(
         tool_output_workspace_root=workspace_root,
         file_access=file_access,
     )
+    gmail_tools._authenticate()
     service = MagicMock()
     users = service.users.return_value
     users.messages.return_value.send.return_value.execute.return_value = {"id": "sent-1"}
