@@ -328,7 +328,6 @@ class KnowledgeGraphIngestionWorker:
             now=now,
             idle_seconds=settings.idle_seconds,
             limit=limit,
-            # The other side of a contact drove the conversations in its contact room.
             skip=contact_session_check(config, self.runtime_paths, scope.agent_name),
         )
         for session_id, updated_at in scan.empty:

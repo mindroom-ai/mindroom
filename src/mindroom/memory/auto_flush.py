@@ -439,8 +439,7 @@ class _MemoryAutoFlushWorker:
             now=now,
             idle_seconds=settings.idle_seconds,
             limit=limit,
-            # A delegated task's prompt comes from another agent, so it is not the delegate's conversation, and the
-            # other side of a contact drove the conversations in its contact room.
+            # A delegated task's prompt comes from another agent, so it is not the delegate's conversation.
             skip=lambda session_id: session_id.startswith(DELEGATION_SESSION_PREFIX) or in_contact_room(session_id),
         )
         for session_id, updated_at in scan.empty:

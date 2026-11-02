@@ -78,7 +78,6 @@ def _collect_leads(
     seen: dict[tuple[str, str], tuple[int, int]] = {}
     active = False
     for session_id, _updated_at in updated_sessions(storage, since=since):
-        # The other side of a contact drove the tool calls in its contact room, so they never steer exploration.
         if in_contact_room(session_id):
             continue
         try:

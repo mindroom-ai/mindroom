@@ -55,8 +55,8 @@ async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> li
         room_id=room_id,
         agent_name=context.agent_name,
     )
-    if counterparty is not None and (counterparty_matrix_id := registry.current_id(counterparty)) not in candidates:
-        candidates = [*candidates, counterparty_matrix_id]
+    if counterparty is not None:
+        candidates = [*candidates, registry.current_id(counterparty)]
     if context.orchestrator is not None:
         candidates = filter_materializable_responders(
             candidates,
