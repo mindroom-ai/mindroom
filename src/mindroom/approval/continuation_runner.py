@@ -1040,7 +1040,10 @@ class ApprovalContinuationRunner:
         *,
         target: MessageTarget,
     ) -> ResponseRequest:
-        """Rebuild the original response identity for resumed hooks and post-effects."""
+        """Rebuild the original response identity for resumed hooks and post-effects.
+
+        It carries no contact: a contact turn offers no function that asks for approval, so it never pauses.
+        """
         envelope = MessageEnvelope(
             source_event_id=continuation.source_event_ids[0],
             target=target,
@@ -1053,7 +1056,7 @@ class ApprovalContinuationRunner:
             message_received_depth=continuation.message_received_depth,
             dispatch_policy_source_kind=continuation.dispatch_policy_source_kind,
         )
-        request = ResponseRequest(
+        return ResponseRequest(
             thread_history=self._approval_memory_history(continuation),
             prompt=envelope.body,
             response_envelope=envelope,
@@ -1064,7 +1067,6 @@ class ApprovalContinuationRunner:
             correlation_id=continuation.correlation_id,
             participating_agent_names=continuation.team_member_names or (continuation.entity_name,),
         )
-        return self.locked.with_contact(request)
 
     def _approval_post_response_outcome(
         self,
