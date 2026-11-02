@@ -817,7 +817,7 @@ async def test_a_fold_whose_summary_the_next_reply_cannot_replay_is_not_stored(
     # summary fits the replay window only without it.
     context = "c" * 4000
     summary_calls.summary = "fact " * 2400
-    assert estimate_summary_text_tokens(summary_calls.summary) < 3500
+    assert estimate_summary_text_tokens(summary_calls.summary, replay_estimator=None) < 3500
     lifecycle = RecordingCompactionLifecycle()
     agent = _scoped_agent(
         ToolLoopModel(tool_rounds=5),
@@ -851,6 +851,32 @@ async def test_a_fold_whose_summary_the_next_reply_cannot_replay_is_not_stored(
     # The fold stopped compacting for the turn; the next reply refuses the same summary and replays what fits.
     assert len(summary_calls.inputs) == 2
     assert next_reply.compaction_reply_outcome == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_fold_sizes_its_summary_as_the_route_sizes_the_request(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+) -> None:
+    """A dense summary within the characters / 4 estimate but over the route's own estimate is not stored.
+
+    The rewritten request, which the route sizes, would exceed the model's window once the summary was stored.
+    """
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
+    model.replay_estimator = responses_adapter(tmp_path, "gpt-6-luna", store=False)
+    summary_calls.summary = "事实" * 5000
+    assert estimate_summary_text_tokens(summary_calls.summary, replay_estimator=None) < 3000
+    assert estimate_summary_text_tokens(summary_calls.summary, replay_estimator=model.replay_estimator) > 3500
+    lifecycle = RecordingCompactionLifecycle()
+
+    output = await _run(_scoped_agent(model, config, paths, storage, lifecycle=lifecycle), "Do the task")
+
+    assert str(output.content).endswith("done")
+    [failure] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
+    assert failure.failure_reason.startswith("The summary exceeds the history budget")
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
 
 
 @pytest.mark.asyncio

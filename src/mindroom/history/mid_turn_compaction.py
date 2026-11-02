@@ -360,6 +360,7 @@ async def _compact_scope(
         runtime_paths=compaction.runtime_paths,
         compaction_lifecycle=compaction.lifecycle,
         max_summary_tokens=max_summary_tokens,
+        replay_estimator=compaction.model.replay_estimator,
         on_commit=on_commit,
         # The request ``on_commit`` rewrote, estimated from what it holds, since no response has reported its size.
         rewritten_request_tokens=partial(size_request, messages),

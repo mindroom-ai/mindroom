@@ -1013,7 +1013,7 @@ async def test_compaction_stores_no_summary_the_reply_cannot_replay(
     decision = prepared.compaction_decision
     assert decision.hard_budget_tokens is not None
     assert decision.trigger_budget_tokens is not None
-    summary_tokens = estimate_summary_text_tokens(summary)
+    summary_tokens = estimate_summary_text_tokens(summary, replay_estimator=None)
     persisted = storage.load_session("session-1")
     assert persisted is not None
     if stored:
