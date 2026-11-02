@@ -88,7 +88,8 @@ from mindroom.response_admission import (
     ResponseAdmissionRefusedError,
 )
 from mindroom.session_ids import create_session_id
-from mindroom.token_budget import approximate_o200k_tokens, o200k_encoding
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import load_o200k, openai_model_counter
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
@@ -99,6 +100,7 @@ if TYPE_CHECKING:
     from mindroom.config.calls import CallProfile, LiveCallProfile, RealtimeCallProfile
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import TokenCounter
     from mindroom.matrix_rtc.call_backends import ResolvedVoiceBackend
     from mindroom.matrix_rtc.call_origin import CallOrigin
     from mindroom.matrix_rtc.call_session import VoiceBridgeLike
@@ -167,17 +169,18 @@ def _build_live_instructions(
     agent_system_prompt: str,
     *,
     agent_display_name: str,
+    counter: TokenCounter,
     origin_context: CallOriginContext | None = None,
 ) -> str:
-    """Use full context when it fits, otherwise require full-context delegation."""
+    """Use full context when it fits the voice model, which counts with ``counter``, else require full delegation."""
     suffix = f"\n\n{_LIVE_VOICE_INSTRUCTIONS}"
     complete = f"{agent_system_prompt}{suffix}"
-    complete_tokens = approximate_o200k_tokens(complete)
+    complete_tokens = count(counter, complete)
     if complete_tokens <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
         # The 8 tokens cover the newlines joining the brief to the prompt.
         remaining = min(CALL_BRIEF_TOKEN_BUDGET, _LIVE_INSTRUCTION_TOKEN_LIMIT - complete_tokens - 8)
         if origin_context is not None and remaining >= _LIVE_MIN_BRIEF_TOKENS:
-            brief = build_call_brief(origin_context, token_budget=remaining)
+            brief = build_call_brief(origin_context, token_budget=remaining, counter=counter)
             if brief:
                 return f"{agent_system_prompt}\n\n{brief}{suffix}"
         return complete
@@ -186,7 +189,7 @@ def _build_live_instructions(
         f"You are speaking as {agent_display_name}, the configured agent in a live voice call. "
         f"{_LIVE_OVERSIZED_INSTRUCTIONS}"
     )
-    if approximate_o200k_tokens(bounded) <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
+    if count(counter, bounded) <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
         return bounded
     return f"You are the configured agent in a live voice call. {_LIVE_OVERSIZED_INSTRUCTIONS}"
 
@@ -341,7 +344,7 @@ async def preload_matrix_call_dependencies(config: Config) -> None:
                 from livekit.plugins import openai  # noqa: F401, PLC0415
 
         # Call setup counts tokens; building the encoder on the event loop would stall it for about 300 ms.
-        await asyncio.to_thread(o200k_encoding)
+        await asyncio.to_thread(load_o200k)
         if "live" in backends:
             # The first GPT-Live call would otherwise wait for its audio process to import the LiveKit Agents SDK.
             prewarm_call_audio_process()
@@ -1464,12 +1467,19 @@ class CallManager:
             voice_instructions=_VOICE_STYLE_ADDENDUM if enable_responder else None,
             active_model_name=active_model_name,
             reconcile_spoken_response=self._call_config.backend != "live",
-            origin_brief=self._call_context_text(origin_context) if enable_responder else None,
+            origin_brief=partial(self._call_context_text, origin_context) if enable_responder else None,
         )
 
-    def _call_context_text(self, origin_context: CallOriginContext | None) -> str:
-        """Return the origin brief plus, when the agent can message, where to start longer work."""
-        parts = [build_call_brief(origin_context, token_budget=CALL_BRIEF_TOKEN_BUDGET) if origin_context else ""]
+    def _call_context_text(self, origin_context: CallOriginContext | None, counter: TokenCounter) -> str:
+        """Return the origin brief, sized for the model that counts with ``counter``, plus where to start longer work.
+
+        The note on where to start longer work comes only when the agent can message.
+        """
+        parts = [
+            build_call_brief(origin_context, token_budget=CALL_BRIEF_TOKEN_BUDGET, counter=counter)
+            if origin_context
+            else "",
+        ]
         if matrix_message_available_during_call(self._config, self._agent_name):
             origin = origin_context.origin if origin_context else None
             parts.append(build_call_handoff_note(origin, agent_name=self._agent_name))
@@ -1532,7 +1542,10 @@ class CallManager:
                 msg = "Realtime call API key was not resolved"
                 raise RuntimeError(msg)
             return VoiceAgentOptions(
-                instructions=_build_call_instructions(tooling.instructions, self._call_context_text(origin_context)),
+                instructions=_build_call_instructions(
+                    tooling.instructions,
+                    self._call_context_text(origin_context, openai_model_counter(realtime_config.model)),
+                ),
                 model=realtime_config.model,
                 api_key=backend.realtime_api_key,
                 voice=realtime_config.voice,
@@ -1558,9 +1571,12 @@ class CallManager:
                 raise RuntimeError(msg)
 
             async def get_live_instructions() -> str:
-                return _build_live_instructions(
+                # Counting the system prompt stays off the event loop.
+                return await asyncio.to_thread(
+                    _build_live_instructions,
                     await get_system_prompt(),
                     agent_display_name=self._config.agents[self._agent_name].display_name,
+                    counter=openai_model_counter(live_config.model),
                     origin_context=origin_context,
                 )
 

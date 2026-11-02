@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import tiktoken
 
 from mindroom import background_tasks, requester_identity
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -38,8 +39,10 @@ from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import ThreadTagsError
+from mindroom.token_counting import families
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, delivered_matrix_side_effect
+from tests.fakes.token_counter import fake_token_counter
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -60,6 +63,15 @@ CONDENSED = MEMORY.split("## Topic 7\n")[0] + "## Topic 7\nSee memory/topics.md\
 # Noon UTC; the default 04:00 schedule in the config's timezone is next due within a day.
 NOON = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 DAY_LATER = NOON + timedelta(days=1)
+
+
+@pytest.fixture(autouse=True)
+def _fake_agent_model_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These configs authored no model, so prompt_curation counts the files with a fake counter."""
+    monkeypatch.setattr(
+        "mindroom.automations.prompt_curation.model_token_counter",
+        lambda *_args, **_kwargs: fake_token_counter(),
+    )
 
 
 @dataclass
@@ -478,6 +490,28 @@ async def test_disabling_an_automation_on_reload_stops_it(tmp_path: Path) -> Non
     await _tick(runner, DAY_LATER)
 
     assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_prompt_curation_still_asks_when_its_token_vocabulary_cannot_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An installation without network access and without a cached vocabulary sizes the files by the stand-in."""
+
+    def offline(_name: str) -> object:
+        msg = "no network"
+        raise OSError(msg)
+
+    monkeypatch.setattr(families, "_encoders", {})
+    monkeypatch.setattr(tiktoken, "get_encoding", offline)
+    _config, _paths, runner, bot = _setup(tmp_path)
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    (prompt,) = bot.sent
+    assert prompt["body"].startswith("@mind 🧹 Prompt maintenance: the files loaded into every one of your prompts")
 
 
 @pytest.mark.asyncio

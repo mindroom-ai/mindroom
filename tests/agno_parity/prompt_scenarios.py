@@ -103,8 +103,8 @@ if TYPE_CHECKING:
         ModelProvider,
         ModelRequest,
         NativeHistoryRoute,
-        PortableReplayEstimator,
         StreamEvent,
+        TokenCounter,
         ToolChoice,
         ToolSpec,
     )
@@ -265,9 +265,9 @@ class _RecordingAdapter:
         return self.adapter.native_history_route
 
     @property
-    def replay_estimator(self) -> PortableReplayEstimator | None:
-        """The adapter's replay estimator."""
-        return self.adapter.replay_estimator
+    def token_counter(self) -> TokenCounter:
+        """The adapter's token counter."""
+        return self.adapter.token_counter
 
     @property
     def model_params(self) -> dict[str, Any]:
@@ -940,6 +940,8 @@ async def _build_voice_call(root: Path, **call: object) -> tuple[dict[str, Any],
             conversation_reader=make_conversation_reader_mock(),
         ),
     )
+    # The recorded input keeps the brief's text; the call tooling renders it for the responder's counter.
+    brief = call.get("origin_brief")
     tooling = await build_call_tools(
         agent_name="assistant",
         config=config,
@@ -949,7 +951,7 @@ async def _build_voice_call(root: Path, **call: object) -> tuple[dict[str, Any],
         requester_id=_REQUESTER_ID,
         authorize_operation=_caller_admitted,
         session_id=_CALL_SESSION_ID,
-        **call,
+        **{**call, "origin_brief": None if brief is None else lambda _counter: str(brief)},
     )
     return {"config": authored, "workspace_files": _WORKSPACE_FILES, "call": call}, tooling
 
