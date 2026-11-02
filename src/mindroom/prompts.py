@@ -486,6 +486,7 @@ RULES:
 - Lead with the main work item or topic, not the latest state update.
 - Do NOT include transient state.
 - Specifically avoid approval or merge status, round or attempt numbers, test counts or pass/fail tallies, progress markers like "in progress" or "awaiting review", and temporal phrases like "currently" or "just landed".
+- Tool approval requests, approvals, and denials are transient state too: name what the user wanted done, not whether a tool call was allowed.
 - If the thread is a test or review, say what is being tested or reviewed, not whether it passed.
 - Write a NOVEL summary in your own words.
 - Do NOT copy, quote, or truncate any message from the thread.
@@ -503,6 +504,7 @@ BAD -> GOOD EXAMPLES:
 - "🧪 Attachment cache test in progress — bot retrieving first line of uploaded test file" → "🧪 Attachment cache live test"
 - "✅ ISSUE-083: thread-goal plugin e2e test — all 4 operations passed successfully" → "🧪 ISSUE-083 thread-goal plugin end-to-end test"
 - "🌱 Bot echo test — three seed prompts sent and correctly replied" → "🔁 Bot echo/reply verification test"
+- "🔐 Denied save_file request for meeting_notes.md" → "📝 Saving meeting notes to a file"
 """
 THREAD_SUMMARY_USER_PROMPT_TEMPLATE = """Existing room tags with usage counts:
 <tag_vocabulary>

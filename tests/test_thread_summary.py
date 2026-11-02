@@ -656,15 +656,9 @@ class TestResolveThreadSummaryModelName:
         assert result == "default"
 
 
-_EXPECTED_GOOD_PROMPT_EXAMPLES = (
-    "\U0001f9f5 Review of PR #548 session persistence hooks",
-    "\U0001f9ea ISSUE-148 matrix cache invalidate-and-refetch live test",
-    "\U0001f9ea Attachment cache live test",
-    "\U0001f9ea ISSUE-083 thread-goal plugin end-to-end test",
-    "\U0001f501 Bot echo/reply verification test",
-)
 _TRANSIENT_STATUS_TERMS = (
     "approved",
+    "denied",
     "merged",
     "round",
     "retry",
@@ -1892,13 +1886,13 @@ class TestGenerateSummary:
 
     async def test_prompt_good_examples_are_stable_and_within_hard_limit(self) -> None:
         """Prompt GOOD examples should be short and avoid transient-status wording."""
-        instructions = THREAD_SUMMARY_INSTRUCTIONS
+        examples = THREAD_SUMMARY_INSTRUCTIONS.split("BAD -> GOOD EXAMPLES:\n", 1)[1]
+        good_examples = [line.rsplit(" → ", 1)[1].strip('"') for line in examples.splitlines()]
 
-        for example in _EXPECTED_GOOD_PROMPT_EXAMPLES:
-            assert example in instructions
+        assert good_examples
+        for example in good_examples:
             assert len(example) <= THREAD_SUMMARY_MAX_LENGTH
-            lowered = example.lower()
-            assert not any(term in lowered for term in _TRANSIENT_STATUS_TERMS)
+            assert not any(term in example.lower() for term in _TRANSIENT_STATUS_TERMS)
 
     async def test_summary_returned(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A valid summary is returned directly."""
