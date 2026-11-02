@@ -2,6 +2,7 @@
 
 A start that becomes ready within the grace period reports nothing.
 A longer one reports ``cold_start``, then ``waiting`` at each interval, then ``ready``; a failed start reports ``failed``.
+Every start, however short, logs one ``worker_cold_start`` event when it ends.
 """
 
 from __future__ import annotations
@@ -12,24 +13,24 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.worker_routing import worker_log_id
+from mindroom.logging_config import get_logger
+from mindroom.timing import elapsed_ms_between
+from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_key_agent_name, worker_log_id
+from mindroom.workers.backend import WorkerStartTimeoutError
 from mindroom.workers.models import WorkerReadyProgress
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Iterator
 
-    from mindroom.workers.models import ProgressSink, WorkerReadyPhase
+    from mindroom.workers.models import ProgressSink, WorkerReadyPhase, WorkerSpec
 
-__all__ = ["WorkerWarmupProgress", "noop_finalize_progress"]
+__all__ = ["WorkerStartReporter", "WorkerWarmupProgress"]
 
 _COLD_START_GRACE_SECONDS = 1.5
 _WAITING_PROGRESS_INTERVAL_SECONDS = 5.0
 _REPORTER_JOIN_TIMEOUT_SECONDS = 1.0
 
-
-def noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> None:
-    """Finish a start that no reporter followed."""
-    del _phase, _error
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -70,11 +71,16 @@ class _ReporterState:
             self.next_waiting_elapsed += _WAITING_PROGRESS_INTERVAL_SECONDS
         return events
 
-    def terminal_event(self, phase: WorkerReadyPhase, error: str | None) -> WorkerReadyProgress | None:
+    def terminal_event(
+        self,
+        phase: WorkerReadyPhase,
+        error: str | None,
+        elapsed_seconds: float,
+    ) -> WorkerReadyProgress | None:
         """Return the closing event: ``ready`` only after a reported ``cold_start``, ``failed`` always."""
         if phase == "ready" and not self.cold_start_emitted:
             return None
-        return self.event(phase, self.elapsed_seconds(), error)
+        return self.event(phase, elapsed_seconds, error)
 
 
 def _report_due_events(condition: threading.Condition, state: _ReporterState, progress_sink: ProgressSink) -> None:
@@ -100,7 +106,7 @@ class WorkerWarmupProgress:
     """
 
     def __init__(self, backend_name: str) -> None:
-        self._backend_name = backend_name
+        self.backend_name = backend_name
         self._sinks: dict[str, list[ProgressSink]] = {}
         self._latest: dict[str, WorkerReadyProgress] = {}
         self._lock = threading.Lock()
@@ -136,40 +142,79 @@ class WorkerWarmupProgress:
             for progress_sink in self._sinks.get(progress.worker_key, ()):
                 progress_sink(progress)
 
-    def start_reporter(
-        self,
-        worker_key: str,
-    ) -> tuple[Callable[[], None], Callable[[WorkerReadyPhase, str | None], None]]:
-        """Report one start of ``worker_key`` from a daemon thread, as each event falls due.
+    def start_reporter(self, spec: WorkerSpec) -> WorkerStartReporter:
+        """Report one start of the worker ``spec`` names, which its caller waits for."""
+        return WorkerStartReporter(self, spec)
 
-        Returns ``on_poll_tick``, which a readiness poll calls to wake the reporter, and ``finalize``, which reports
-        the events still due and the closing one once the start became ``ready`` or ``failed``.
-        """
-        condition = threading.Condition()
-        state = _ReporterState(worker_key=worker_key, backend_name=self._backend_name, started_at=time.monotonic())
-        thread = threading.Thread(
+
+class WorkerStartReporter:
+    """One start of a worker, reported from a daemon thread as each event falls due, and logged when it ends.
+
+    A readiness poll calls ``on_poll_tick`` to wake the reporter, the backend calls ``mark`` as the start passes one of
+    its milestones, and ``finish`` reports the events still due and the closing one, then logs the start.
+    """
+
+    def __init__(self, progress: WorkerWarmupProgress, spec: WorkerSpec) -> None:
+        self._progress = progress
+        self._spec = spec
+        self._milestones_ms: dict[str, float] = {}
+        self._condition = threading.Condition()
+        self._state = _ReporterState(
+            worker_key=spec.worker_key,
+            backend_name=progress.backend_name,
+            started_at=time.monotonic(),
+        )
+        self._thread = threading.Thread(
             target=_report_due_events,
-            args=(condition, state, self.emit),
-            name=f"{self._backend_name}-worker-progress:{worker_log_id(worker_key)}",
+            args=(self._condition, self._state, progress.emit),
+            name=f"{progress.backend_name}-worker-progress:{worker_log_id(spec.worker_key)}",
             daemon=True,
         )
-        thread.start()
+        self._thread.start()
 
-        def on_poll_tick() -> None:
-            with condition:
-                condition.notify_all()
+    def on_poll_tick(self) -> None:
+        """Wake the reporter so it sends the events that fell due since the last poll."""
+        with self._condition:
+            self._condition.notify_all()
 
-        def finalize(phase: WorkerReadyPhase, error: str | None) -> None:
-            with condition:
-                events = state.due_events()
-                terminal_event = state.terminal_event(phase, error)
-                state.done = True
-                condition.notify_all()
-            # The thread reports its last batch before it exits, so every event goes out in order.
-            thread.join(timeout=_REPORTER_JOIN_TIMEOUT_SECONDS)
-            for event in events:
-                self.emit(event)
-            if terminal_event is not None:
-                self.emit(terminal_event)
+    def mark(self, milestone: str) -> None:
+        """Record how long the start took to reach ``milestone``, logged as ``<milestone>_ms``; a repeat replaces it."""
+        self._milestones_ms[f"{milestone}_ms"] = elapsed_ms_between(self._state.started_at, time.monotonic())
 
-        return on_poll_tick, finalize
+    def finish(self, error: BaseException | None) -> None:
+        """Report the start as ``ready``, or as ``failed`` with ``error``, and log how long its callers waited."""
+        with self._condition:
+            events = self._state.due_events()
+            finished_at = time.monotonic()
+            terminal_event = self._state.terminal_event(
+                "ready" if error is None else "failed",
+                None if error is None else str(error),
+                finished_at - self._state.started_at,
+            )
+            self._state.done = True
+            self._condition.notify_all()
+        # The thread reports its last batch before it exits, so every event goes out in order.
+        self._thread.join(timeout=_REPORTER_JOIN_TIMEOUT_SECONDS)
+        for event in events:
+            self._progress.emit(event)
+        if terminal_event is not None:
+            self._progress.emit(terminal_event)
+        worker_key = self._spec.worker_key
+        logger.info(
+            "worker_cold_start",
+            worker=worker_log_id(worker_key),
+            backend=self._progress.backend_name,
+            # Only a background script's run-pinned worker borrows the state of another worker's scope.
+            kind="script" if self._spec.state_scope_worker_key is not None else "tool",
+            scope=resolved_worker_key_scope(worker_key),
+            agent_name=worker_key_agent_name(worker_key),
+            outcome=_outcome(error),
+            wait_ms=elapsed_ms_between(self._state.started_at, finished_at),
+            **self._milestones_ms,
+        )
+
+
+def _outcome(error: BaseException | None) -> str:
+    if error is None:
+        return "ready"
+    return "timeout" if isinstance(error, WorkerStartTimeoutError) else "error"

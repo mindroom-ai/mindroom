@@ -14,6 +14,7 @@ import httpx2
 
 from mindroom.llm.messages import system_texts
 from mindroom.llm.provider import ToolCallReady
+from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, request_settings
@@ -26,11 +27,12 @@ from mindroom.providers.openai.chat_wire import (
 )
 from mindroom.providers.openai.errors import provider_error, rejected_media, sdk_failures
 from mindroom.providers.openai.openrouter_cache import openrouter_prompt_cache_control, request_kwargs_with_prompt_cache
+from mindroom.token_counting.families import counter_for_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent
+    from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TokenCounter
     from mindroom.providers.openai.settings import ChatSettings
 
 __all__ = ["ChatAdapter"]
@@ -73,12 +75,25 @@ class ChatAdapter:
     clients: SDKClients
     # Chat Completions keeps no history of its own, and its replayed history is sized canonically.
     native_history_route: ClassVar[None] = None
-    replay_estimator: ClassVar[None] = None
 
     @property
     def model_params(self) -> dict[str, Any]:
         """The route's JSON-safe, non-secret settings."""
         return settings_params(self.settings)
+
+    @property
+    def token_counter(self) -> TokenCounter:
+        """OpenAI's models count locally on routes that serve only them.
+
+        Any other route may serve another model under an OpenAI name, so the name only picks its estimate.
+        """
+        route = self.wire.route
+        return counter_for_model(
+            self.identity,
+            local_encoder=self.identity.endpoint == OPENAI_BASE_URL_DEFAULT
+            or route == "azure"
+            or (route == "openrouter" and self.identity.id.startswith("openai/")),
+        )
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs = chat_request_kwargs(

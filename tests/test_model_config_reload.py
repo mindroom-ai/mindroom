@@ -15,7 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.history.policy import resolve_history_execution_plan
+from mindroom.history.policy import _compaction_input_budget, resolve_history_execution_plan
 from mindroom.history.runtime import resolve_entity_preparation_inputs
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -23,7 +23,6 @@ from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.registry import build_model_provider
 from mindroom.teams.members import BuiltTeam, build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
-from mindroom.token_budget import compute_compaction_input_budget
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.conftest import (
@@ -208,7 +207,7 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
         active_context_window=None,
     ).execution_plan
     assert after.replay_window_tokens == 64000
-    assert after.summary_input_budget_tokens == compute_compaction_input_budget(
+    assert after.summary_input_budget_tokens == _compaction_input_budget(
         64000,
         reserve_tokens=after.reserve_tokens,
     )
@@ -248,7 +247,7 @@ async def test_compaction_model_reload_updates_effective_budgets(
         after = _history_plan(runtime.config, runtime.runtime_paths, name)
         assert after.replay_window_tokens == before[name].replay_window_tokens
         if model_field == "model":
-            assert after.summary_input_budget_tokens == compute_compaction_input_budget(
+            assert after.summary_input_budget_tokens == _compaction_input_budget(
                 96000,
                 reserve_tokens=after.reserve_tokens,
             )
@@ -278,7 +277,7 @@ async def test_context_window_reload_preserves_explicit_replay_cap(runtime: _Mul
     assert runtime.config is not None
     plan = _history_plan(runtime.config, runtime.runtime_paths, "general")
     assert plan.replay_window_tokens == 3000
-    assert plan.summary_input_budget_tokens == compute_compaction_input_budget(
+    assert plan.summary_input_budget_tokens == _compaction_input_budget(
         64000,
         reserve_tokens=plan.reserve_tokens,
     )

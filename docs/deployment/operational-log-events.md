@@ -52,7 +52,7 @@ Every record carries `event`, `level`, `logger`, and `timestamp` next to its own
 {"sample_count": 1200, "p50_ms": 0.412, "p95_ms": 1.87, "p99_ms": 4.02, "max_ms": 11.3, "gc_collections_total": [5120, 466, 31], "max_lag_scheduled_at": "2026-01-01T12:00:41.250+00:00", "max_lag_observed_at": "2026-01-01T12:00:41.261+00:00", "event": "event_loop_scheduler_lag_summary", "logger": "mindroom.event_loop_stall", "level": "info", "timestamp": "2026-01-01T12:01:00.012345Z"}
 ```
 
-`event_loop_scheduler_lag_summary` is an `info` record, so keep `LOG_LEVEL` at `INFO` or lower, or raise only that logger with `MINDROOM_LOGGER_LEVELS=mindroom.event_loop_stall:INFO`.
+`event_loop_scheduler_lag_summary` and `worker_cold_start` are `info` records, so keep `LOG_LEVEL` at `INFO` or lower, or raise only their loggers with `MINDROOM_LOGGER_LEVELS=mindroom.event_loop_stall:INFO,mindroom.workers.progress:INFO`.
 `agent_error`, `event_loop_stall_detected`, and `event_loop_stall_ongoing` are `error` records, and the other stable events below are `warning` records.
 See [Environment Variables](../configuration/index.md#environment-variables) for the logging controls.
 
@@ -227,6 +227,36 @@ Count it grouped by `tool_name` and alert when one tool fails far more often tha
 Failures that share a `correlation_id` came from a single turn, and `error_type` and `error_message` give the cause.
 For a tool that uses an OAuth connection, also check for [`oauth_credentials_refresh_failed`](#oauth_credentials_refresh_failed) records.
 
+### `worker_cold_start`
+
+Logged when a call had to wait for a [dedicated worker](sandbox-proxy.md#worker-scopes) of the Docker or Kubernetes backend that was not ready, such as a new, stopped, scaled-down, failed, or recreated worker, once it became ready or its start failed.
+A call to a ready worker logs nothing, and calls that wait for the same start share its one record.
+
+| Field | Meaning |
+|-------|---------|
+| `worker` | The worker's log ID, the hash other worker logs name it by and the end of its state directory name |
+| `backend` | `kubernetes` or `docker` |
+| `kind` | `script` for the worker of one [background script](../tools/background-scripts.md) run, otherwise `tool` |
+| `scope` | The worker's [scope](sandbox-proxy.md#worker-scopes): `shared`, `user`, `user_agent`, or `unscoped` for an agent without `worker_scope` |
+| `agent_name` | Agent the worker serves, as its worker key spells it, or `null` for a `user` worker, which serves every agent on that scope |
+| `outcome` | `ready`, `timeout` for a worker that did not become ready within the backend's ready timeout, or `error` |
+| `wait_ms` | Milliseconds from finding the worker not ready until it answered its health check, or until its start failed |
+| `pod_ready_ms` | Kubernetes only: milliseconds from the same point until Kubernetes reported the worker's pod ready, which covers applying or scaling up its Deployment, scheduling, image pull, and container start; the rest of `wait_ms` is the first health check through the worker's Service |
+
+```json
+{"worker": "3f9c2a7b1d4e8f60", "backend": "kubernetes", "kind": "tool", "scope": "user_agent", "agent_name": "code", "outcome": "ready", "wait_ms": 14211.6, "pod_ready_ms": 13190.2, "event": "worker_cold_start", "logger": "mindroom.workers.progress", "level": "info", "timestamp": "2026-01-01T12:00:14.211Z"}
+```
+
+```text
+chart     p50 and p95 of wait_ms where event = "worker_cold_start" and outcome = "ready", grouped by kind
+alert on  count of logs where event = "worker_cold_start" and outcome != "ready" > 3 in 15 minutes
+```
+
+A high `pod_ready_ms` points at scheduling or image pulls: check for pending worker pods, node scale-up, and the worker image pull policy.
+A large gap between `pod_ready_ms` and `wait_ms` points at the worker's Service or a network policy between the primary and its workers.
+Many `tool` records for the same `worker` mean it is used less often than its idle timeout, such as [`workers.kubernetes.idleTimeoutSeconds`](kubernetes.md#worker-settings), so it scales down between uses.
+A `timeout` means the worker did not become ready within [`workers.kubernetes.readyTimeoutSeconds`](kubernetes.md#worker-settings) or `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS`; the call that waited fails, and for a tool call a [`tool_call_failed`](#tool_call_failed) record carries the error.
+
 ### `oauth_credentials_refresh_failed`
 
 Logged when MindRoom cannot refresh the access token of a stored [OAuth connection](../oauth-framework.md), for a tool or an MCP server.
@@ -317,6 +347,7 @@ Request logs hold each request as MindRoom hands it to the provider's client lib
 Credentials such as tokens, cookies, passwords, API keys, authorization headers, and PEM private keys are redacted, but these files can still contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
 
 Export `MINDROOM_TIMING=1` before startup to log timing for tool calls and one INFO-level `Dispatch pipeline timing` summary per turn, including `time_to_model_request_ms` and context, queue, payload, agent-build, and model spans.
+A reply whose tool call waited more than 1.5 seconds for a worker to start, or whose worker failed to start, also carries `worker_wait_ms`, the longest such wait, which matches `wait_ms` of that start's [`worker_cold_start`](#worker_cold_start) record; a streamed reply also shows a warmup notice during that wait.
 
 ```bash
 LOG_LEVEL=DEBUG MINDROOM_LOG_FORMAT=json MINDROOM_TIMING=1 mindroom run

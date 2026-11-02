@@ -30,7 +30,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.session_storage.agent_storage import create_agent_state_storage
-from mindroom.token_budget import estimate_compaction_input_tokens
+from mindroom.token_counting.counts import count
 from tests.conftest import install_model_providers, loop_runs_while_blocked, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
@@ -98,6 +98,7 @@ async def test_history_sizing_allows_loop_progress(
             model=model,
             resolved_inputs=resolved,
             non_prompt_tokens=0,
+            static_fingerprint="static",
             runtime_paths=paths,
             config=config,
             scope_context=ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
@@ -110,8 +111,8 @@ async def test_history_sizing_allows_loop_progress(
     loop_progress: list[bool] = []
     if stage == "summary":
         monkeypatch.setattr(
-            "mindroom.history.compaction.estimate_compaction_input_tokens",
-            _noting_loop_progress(estimate_compaction_input_tokens, loop_progress),
+            "mindroom.history.compaction.count",
+            _noting_loop_progress(count, loop_progress),
         )
     else:
         monkeypatch.setattr(
@@ -144,7 +145,7 @@ async def test_history_sizing_allows_loop_progress(
             threshold_tokens=1000,
             progress=None,
             complete=_reported,
-            replay_estimator=model,
+            counter=model.token_counter,
         )
         assert outcome is not None
     assert loop_progress
@@ -188,7 +189,7 @@ async def test_history_storage_work_allows_loop_progress(
         threshold_tokens=1000,
         progress=None,
         complete=_reported,
-        replay_estimator=model,
+        counter=model.token_counter,
     )
     assert outcome is not None
     assert loop_progress == [True]
@@ -228,6 +229,7 @@ async def test_forced_compaction_reuses_canonical_history_count(
         model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,
+        static_fingerprint="static",
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
@@ -298,7 +300,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
                 resolved_inputs=resolved,
                 history_budget=1000,
                 before_tokens=11,
-                replay_estimator=model,
+                counter=model.token_counter,
                 config=config,
                 runtime_paths=paths,
             ),
@@ -351,6 +353,7 @@ async def test_cancelled_finalization_finishes_before_the_session_is_reused(
         model=model,
         resolved_inputs=_agent_inputs(config),
         non_prompt_tokens=0,
+        static_fingerprint="static",
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
@@ -416,8 +419,8 @@ async def test_summary_retry_sizing_allows_loop_progress(
     """Every estimate lets queued loop work run, including after a model refusal."""
     loop_progress: list[bool] = []
     monkeypatch.setattr(
-        "mindroom.history.compaction.estimate_compaction_input_tokens",
-        _noting_loop_progress(estimate_compaction_input_tokens, loop_progress),
+        "mindroom.history.compaction.count",
+        _noting_loop_progress(count, loop_progress),
     )
     summary = "Greeting received."
     responses: list[object] = [summary]
@@ -482,6 +485,7 @@ async def test_cancelling_preparation_sizing_preserves_input(
         model=model,
         resolved_inputs=_agent_inputs(config),
         non_prompt_tokens=0,
+        static_fingerprint="static",
         runtime_paths=paths,
         config=config,
         scope_context=ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),

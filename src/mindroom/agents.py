@@ -1622,6 +1622,7 @@ def create_agent(
     agent_cli_in_shell: bool = False,
     persona: SubagentPersona | None = None,
     tool_names: tuple[str, ...] | None = None,
+    provider: ModelProvider | None = None,
 ) -> AgentBuild:
     """Build an agent from configuration: its model, tools, prompt, request settings, and surface.
 
@@ -1635,6 +1636,7 @@ def create_agent(
             it narrowed to the persona's kept knowledge bases. A graph-enabled agent's graph is added to it,
             unless a persona names the bases it keeps.
         model: The model this agent's turn runs, which the caller resolved for the turn.
+        provider: ``model``'s provider, when the caller already built it for the turn.
         plugins: The plugin view the caller captured for this operation: the build's tools, placement, skills, and
             tool hooks all come from it, deferred toolkits included.
         include_interactive_questions: Whether to include the interactive
@@ -1687,12 +1689,8 @@ def create_agent(
         ensure_default_agent_workspaces(config, runtime_paths.storage_root)
 
     model_name = model.model_name
-    provider = _build_agent_model_provider(
-        config,
-        runtime_paths,
-        model_name,
-        execution_identity,
-    )
+    if provider is None:
+        provider = _build_agent_model_provider(config, runtime_paths, model_name, execution_identity)
     # An authored persona's prompt replaces the agent's identity; it gets only the caller skills and knowledge bases
     # its persona keeps, and a narrowed build none.
     # An explicit tool list is small and must be present from the first request, so every toolkit it names loads

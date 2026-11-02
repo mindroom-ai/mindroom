@@ -57,6 +57,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     ModelRequest,
     NativeCompactionReplay,
+    TokenCounter,
     ToolSpec,
 )
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -69,6 +70,7 @@ from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import persist_to, watch_session_row
+from mindroom.token_counting.counts import utf8_byte_bound
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
@@ -78,6 +80,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.usage.storage import run_usage_snapshot
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model
+from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import (
     BIG_TOOL,
     TEST_AGENT_SCOPE,
@@ -180,6 +183,8 @@ class _Agent:
     before_request: tuple[BeforeRequestHook, ...] = ()
     system_messages: tuple[Message, ...] = ()
     records: list[RunRecord] = field(default_factory=list)
+    # The history size the reply's preparation found, from the provider's reported size where one applied.
+    prepared_history_tokens: int | None = None
 
     def spec(self) -> AgentSpec:
         return AgentSpec(
@@ -218,6 +223,7 @@ async def _run(
     session_id: str = "session-1",
     metadata: dict[str, Any] | None = None,
     user_id: str | None = None,
+    media: MediaInputs | None = None,
 ) -> RunRecord:
     turn = _turn(prompt)
     store = agent.store
@@ -251,6 +257,7 @@ async def _run(
         prompt_id=turn.prompt.id,
         lifecycle=agent.lifecycle,
         turn_recorder=agent.turn_recorder,
+        prepared_history_tokens=agent.prepared_history_tokens,
     )
     store_persist = persist_to(store, session) if store is not None else None
 
@@ -265,7 +272,7 @@ async def _run(
             summary=session.summary if agent.replays_history else None,
             history=history,
             turn=turn,
-            media=MediaInputs(),
+            media=media or MediaInputs(),
         ),
         ctx=RunContext(run_id=str(uuid4()), session=UnstoredSession(session_id), user_id=user_id, metadata=metadata),
         hooks=LoopHooks(before_request=(*agent.before_request, compaction_hook)),
@@ -511,7 +518,7 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     pdf = File(content=b"%PDF-1.7\n" + b"x" * 300_000, mime_type="application/pdf", filename="report.pdf")
     message = Message(role="user", content="Summarize the attached report.", files=[pdf])
 
-    tokens = estimate_request_messages_tokens([message], replay_estimator=model)
+    tokens = estimate_request_messages_tokens([message], counter=model.token_counter)
 
     assert tokens < 10_000
 
@@ -528,8 +535,9 @@ def test_request_sizing_leaves_out_deferred_tool_definitions() -> None:
         ),
     ]
 
-    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) < 1_000
-    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) > 0
+    counter = fake_token_counter()
+    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"}), counter) < 1_000
+    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"}), counter) > 0
 
 
 def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None:
@@ -540,9 +548,10 @@ def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None
         parameters={"type": "object", "properties": {"key": {"type": "string"}}},
         strict=None,
     )
-    static = build_static_token_estimator((), [lookup], frozenset())
+    counter = fake_token_counter()
+    static = build_static_token_estimator(counter, (), [lookup], frozenset())
 
-    assert mid_turn_compaction._tool_tokens([lookup], [], frozenset()) == static.estimate("")
+    assert mid_turn_compaction._tool_tokens([lookup], [], frozenset(), counter) == static.estimate("")
 
 
 @pytest.mark.parametrize("provider", ["openai", "claude", "claude_legacy"])
@@ -557,7 +566,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
     server-tool blocks before v2026.9.44.
     """
     if provider == "openai":
-        replay_estimator = responses_adapter(tmp_path, "gpt-6-luna", store=False)
+        counter = responses_adapter(tmp_path, "gpt-6-luna", store=False).token_counter
         provider_data: dict[str, Any] = {
             RESPONSE_OUTPUT_KEY: [
                 {
@@ -582,7 +591,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
             ],
         }
     else:
-        replay_estimator = None
+        counter = fake_token_counter()
         search = [
             {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
             {
@@ -600,16 +609,49 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
         Message(role="assistant", provider_data=provider_data),
     ]
 
-    total = estimate_request_messages_tokens(
-        searched,
-        replay_estimator=replay_estimator,
-    ) + mid_turn_compaction._tool_tokens(
+    total = estimate_request_messages_tokens(searched, counter=counter) + mid_turn_compaction._tool_tokens(
         [BIG_TOOL],
         searched,
         frozenset({"big_tool"}),
+        counter,
     )
 
     assert 15_000 < total < 30_000
+
+
+@pytest.mark.parametrize("reported", [True, False], ids=["reported-history", "estimated-history"])
+def test_the_first_request_counts_loaded_tool_definitions_once(*, reported: bool) -> None:
+    """A reported request size already holds the definitions Claude's tool search loaded; an estimate leaves them out."""
+    search = [
+        {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
+        {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srv_1",
+            "content": {
+                "type": "tool_search_tool_search_result",
+                "tool_references": [{"type": "tool_reference", "tool_name": "big_tool"}],
+            },
+        },
+    ]
+    history = [
+        Message(role="user", content="Use the big tool", from_history=True),
+        Message(role="assistant", provider_data={"claude_blocks": search}, from_history=True),
+    ]
+    counter = fake_token_counter()
+
+    total = mid_turn_compaction._prepared_request_tokens(
+        1_000,
+        reported=reported,
+        messages=[*history, Message(role="user", content="Go on")],
+        tools=[BIG_TOOL],
+        deferred=frozenset({"big_tool"}),
+        counter=counter,
+    )
+
+    if reported:
+        assert total < 2_000
+    else:
+        assert total > 15_000
 
 
 def test_aggregate_usage_of_retried_requests_never_anchors_sizing() -> None:
@@ -733,6 +775,52 @@ async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prepared_history_tokens", "images", "system", "folds"),
+    [
+        pytest.param(None, 0, "", True, id="estimated"),
+        pytest.param(2_500, 0, "", False, id="prepared-history"),
+        pytest.param(2_500, 2, "", True, id="prepared-history-plus-new-images"),
+        pytest.param(2_500, 0, "s" * 40_000, True, id="prepared-history-plus-a-grown-system-prompt"),
+    ],
+)
+async def test_the_first_request_takes_its_history_size_from_the_reply_s_preparation(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+    *,
+    prepared_history_tokens: int | None,
+    images: int,
+    system: str,
+    folds: bool,
+) -> None:
+    """Before any response, the replayed history is as large as the reply's preparation found, and the rest estimated.
+
+    That size comes from the provider's reported size where one applied, which a padded estimate of the history would
+    exceed, folding a conversation that fits; today's system prompt and the prompt's images are estimated on top.
+    """
+    config, paths = _config(tmp_path, context_window=12_000)
+    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
+    old = [Message(role="user", content="h" * 40_000), Message(role="assistant", content="a" * 8_000)]
+    seed_session(storage, _session("session-1", runs=[_completed_run("old", messages=old)]))
+    model = ToolLoopModel(tool_rounds=0)
+    agent = _scoped_agent(
+        model,
+        config,
+        paths,
+        storage,
+        prepared_history_tokens=prepared_history_tokens,
+        system_messages=(Message(role="system", content=system),) if system else (),
+    )
+    media = MediaInputs(
+        images=[Image(id=f"photo-{index}", content=b"\x89PNG", mime_type="image/png") for index in range(images)],
+    )
+
+    await _run(agent, "Do the task", media=media)
+
+    assert bool(summary_calls.inputs) is folds
+
+
+@pytest.mark.asyncio
 async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
     tmp_path: Path,
     summary_calls: SummaryCalls,
@@ -817,7 +905,7 @@ async def test_a_fold_whose_summary_the_next_reply_cannot_replay_is_not_stored(
     # summary fits the replay window only without it.
     context = "c" * 4000
     summary_calls.summary = "fact " * 2400
-    assert estimate_summary_text_tokens(summary_calls.summary, replay_estimator=None) < 3500
+    assert estimate_summary_text_tokens(summary_calls.summary, fake_token_counter()) < 3500
     lifecycle = RecordingCompactionLifecycle()
     agent = _scoped_agent(
         ToolLoopModel(tool_rounds=5),
@@ -853,22 +941,42 @@ async def test_a_fold_whose_summary_the_next_reply_cannot_replay_is_not_stored(
     assert next_reply.compaction_reply_outcome == "failed"
 
 
+class _DenseTextRoute:
+    """A route whose own estimate counts each CJK character as a token, which a quarter token per character undercounts."""
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
+        texts = [str(message.content) for message in messages]
+        return sum(-(-len(text) // 4) + sum(character >= "\u3000" for character in text) for text in texts)
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        return False
+
+
 @pytest.mark.asyncio
-async def test_a_fold_sizes_its_summary_as_the_route_sizes_the_request(
+@pytest.mark.parametrize(
+    "counter",
+    [
+        pytest.param(fake_token_counter(replay=_DenseTextRoute()), id="route-request-estimate"),
+        pytest.param(TokenCounter(estimate=lambda _text: None), id="vocabulary-loading"),
+    ],
+)
+async def test_a_fold_never_stores_a_summary_on_a_count_that_undercounts_it(
     tmp_path: Path,
     summary_calls: SummaryCalls,
+    counter: TokenCounter,
 ) -> None:
-    """A dense summary within the characters / 4 estimate but over the route's own estimate is not stored.
+    """A dense summary within a quarter token per character, but over the route's request estimate, is not stored.
 
-    The rewritten request, which the route sizes, would exceed the model's window once the summary was stored.
+    The rewritten request, which the route sizes, would exceed the model's window once the summary was stored, and
+    while the vocabulary loads, its bytes bound it for every later reply that replays it.
     """
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
     model = ToolLoopModel(tool_rounds=5)
-    model.replay_estimator = responses_adapter(tmp_path, "gpt-6-luna", store=False)
+    model.token_counter = counter
     summary_calls.summary = "事实" * 5000
-    assert estimate_summary_text_tokens(summary_calls.summary, replay_estimator=None) < 3000
-    assert estimate_summary_text_tokens(summary_calls.summary, replay_estimator=model.replay_estimator) > 3500
+    assert estimate_summary_text_tokens(summary_calls.summary, counter) < 3000
+    assert estimate_summary_text_tokens(summary_calls.summary, counter, as_request=True, upper_bound=True) > 3500
     lifecycle = RecordingCompactionLifecycle()
 
     output = await _run(_scoped_agent(model, config, paths, storage, lifecycle=lifecycle), "Do the task")
@@ -885,8 +993,12 @@ async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
     summary_calls: SummaryCalls,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A Claude summarizer sizes its input by bytes, more conservatively than request estimates.
-    install_model_providers(monkeypatch, {"summary": summary_model(model_id="claude-haiku-5-5", claude=True)})
+    # The summarizer counts a token per byte, more than request estimates do.
+    by_bytes = TokenCounter(estimate=utf8_byte_bound)
+    install_model_providers(
+        monkeypatch,
+        {"summary": summary_model(model_id="claude-haiku-5-5", token_counter=by_bytes)},
+    )
     config, paths = _config(tmp_path, context_window=20_000, summary_context_window=8_000)
     model = ToolLoopModel(tool_rounds=25)
     facts = iter(range(100))
@@ -1599,9 +1711,14 @@ async def test_a_mid_turn_compaction_notice_sizes_the_request_before_and_after_i
     # The first request after the fold carries its summary.
     rewritten = next(request for request in model.requests if any(map(is_compaction_summary, request.messages)))
     rewritten_tokens = (
-        estimate_request_messages_tokens(rewritten.messages, replay_estimator=None)
-        + mid_turn_compaction._thinking_tokens(rewritten.messages)
-        + mid_turn_compaction._tool_tokens(rewritten.request.tools, rewritten.messages, frozenset())
+        estimate_request_messages_tokens(rewritten.messages, counter=fake_token_counter())
+        + mid_turn_compaction._thinking_tokens(rewritten.messages, fake_token_counter())
+        + mid_turn_compaction._tool_tokens(
+            rewritten.request.tools,
+            rewritten.messages,
+            frozenset(),
+            fake_token_counter(),
+        )
     )
     assert outcome.after_tokens == rewritten_tokens
     assert outcome.after_tokens < outcome.before_tokens
@@ -1617,14 +1734,9 @@ async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path, m
     sized: list[tuple[str | None, ...]] = []
     estimated = mid_turn_compaction._estimated_request_tokens
 
-    def recording(
-        compaction: mid_turn_compaction._MidTurnCompaction,
-        policy: mid_turn_compaction._Policy,
-        messages: list[Message],
-        tools: Sequence[ToolSpec],
-    ) -> int:
+    def recording(policy: mid_turn_compaction._Policy, messages: list[Message], tools: Sequence[ToolSpec]) -> int:
         sized.append(tuple(message.id for message in messages))
-        return estimated(compaction, policy, messages, tools)
+        return estimated(policy, messages, tools)
 
     monkeypatch.setattr(mid_turn_compaction, "_estimated_request_tokens", recording)
 
@@ -1942,13 +2054,26 @@ def _native(threshold: int) -> NativeCompactionReplay:
     return NativeCompactionReplay(route=_NATIVE_ROUTE, threshold=threshold)
 
 
+class _CheckpointingEveryResponse(ToolLoopModel):
+    """A tool loop on a native route whose provider compacts on every request."""
+
+    def respond(self, number: int, request: ModelRequest) -> Message:
+        message = super().respond(number, request)
+        record_native_checkpoint(
+            message,
+            [{"type": "compaction", "id": f"cmp{number}", "encrypted_content": "c"}],
+            request.native_compaction,
+        )
+        return message
+
+
 @pytest.mark.asyncio
-async def test_native_request_under_the_limit_never_text_compacts(
+async def test_a_checkpoint_response_billed_for_the_replaced_transcript_never_text_compacts(
     tmp_path: Path,
     summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path, context_window=1_000_000)
-    model = ToolLoopModel(
+    model = _CheckpointingEveryResponse(
         tool_rounds=4,
         usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=999_900 * number)),
     )
@@ -1957,6 +2082,21 @@ async def test_native_request_under_the_limit_never_text_compacts(
 
     assert summary_calls.inputs == []
     assert model.requests[-1].request.native_compaction == _native(500_000)
+
+
+@pytest.mark.asyncio
+async def test_a_native_request_sizes_the_next_one_by_its_reported_size(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+) -> None:
+    """A native response that created no checkpoint is billed for what it sent, which the estimate overcounts."""
+    config, paths = _config(tmp_path)
+    model = ToolLoopModel(tool_rounds=5, usage=lambda _number: MessageMetrics(tokens=TokenCounts(input_tokens=100)))
+
+    await _run(_Agent(model, config, paths, native_compaction=_native(2000)), "Do the task")
+
+    assert summary_calls.inputs == []
+    assert model.requests[-1].request.native_compaction == _native(2000)
 
 
 @pytest.mark.asyncio

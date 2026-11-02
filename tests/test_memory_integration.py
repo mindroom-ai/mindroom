@@ -6,7 +6,7 @@ from collections.abc import Generator  # noqa: TC003
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -105,6 +105,7 @@ class TestMemoryIntegration:
             runtime_paths,
             execution_identity=None,
             conversation=ConversationRef("test_session", (None, None)),
+            counter=ANY,
         )
 
         # The recalled memory follows the prompt as turn context, which the run stores there.
@@ -145,6 +146,7 @@ class TestMemoryIntegration:
             runtime_paths,
             execution_identity=None,
             conversation=None,
+            counter=ANY,
         )
 
         # Note: Memory storage now happens at the bot level, not in ai_response

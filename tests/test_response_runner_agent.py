@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime
@@ -92,9 +94,13 @@ from mindroom.response_sources import Owned, ResponseSources, Unclaimed, Unclaim
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import PausePresentationError, StreamingDeliveryError
+from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.events import FailedReply
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_store import SourcePreparation
+from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.progress import WorkerWarmupProgress
 from tests.bot_helpers import (
     AgentBotTestBase,
     _hook_envelope,
@@ -122,7 +128,7 @@ from tests.conftest import (
     seed_session,
     unwrap_extracted_collaborator,
 )
-from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer
+from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.journal_membership_helpers import admit_room_membership
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import (
@@ -133,6 +139,7 @@ from tests.response_runner_helpers import (
     stream_transport,
     streamed_answer,
 )
+from tests.test_sandbox_proxy import _FakeResponse, _static_worker_manager_lease, _StreamsFromPost
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Sequence
@@ -143,6 +150,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.users import AgentMatrixUser
     from mindroom.post_response_effects import ResponseOutcome
     from mindroom.response_turn import ResponseTurnContext
+    from mindroom.workers.models import ProgressSink
 
 
 async def _respond(bot: AgentBot, request: ResponseRequest, *, streaming: bool = False) -> FinalDeliveryOutcome:
@@ -2954,6 +2962,118 @@ class TestAgentBot(AgentBotTestBase):
         reply = await bot._reply_runtime.store.replies.for_sources((target.source_event_id,))
         assert reply is not None
         assert reply.state is rl.ReplyState.FAILED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False])
+    async def test_a_reply_records_how_long_its_tool_call_waited_for_a_worker_to_start(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        streaming: bool,
+    ) -> None:
+        """A shell call that waits for its worker to start puts that wait in the reply's pipeline timing.
+
+        The call goes through the shell toolkit's worker stand-in and the sandbox proxy to a dedicated backend that
+        reports the start as the Kubernetes backend does. A streamed reply shows the warmup notice while it waits.
+        """
+        monkeypatch.setattr("mindroom.workers.progress._COLD_START_GRACE_SECONDS", 0.01)
+        config = self._config_for_storage(tmp_path)
+        config.memory.backend = "none"
+        config.agents["calculator"].tools = ["shell"]
+        config.agents["calculator"].worker_scope = "shared"
+        paths = replace(runtime_paths_for(config), process_env={"MINDROOM_WORKER_BACKEND": "kubernetes"})
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=paths)
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        notice_shown = threading.Event()
+        room_send = bot.client.room_send.side_effect
+
+        async def watch_for_notice(**kwargs: Any) -> MagicMock:  # noqa: ANN401
+            if "Preparing isolated worker" in kwargs["content"].get("body", ""):
+                notice_shown.set()
+            return room_send(**kwargs)
+
+        bot.client.room_send.side_effect = watch_for_notice
+        progress = WorkerWarmupProgress("kubernetes")
+        reported: list[WorkerReadyProgress] = []
+
+        class _ColdWorkerBackend:
+            cleanup_locator = None
+
+            def ensure_worker(
+                self,
+                spec: WorkerSpec,
+                *,
+                now: float | None = None,
+                progress_sink: ProgressSink | None = None,
+            ) -> WorkerHandle:
+                del now
+                with (
+                    progress.subscribed(spec.worker_key, progress_sink),
+                    progress.subscribed(spec.worker_key, reported.append),
+                ):
+                    start = progress.start_reporter(spec)
+                    # A streamed reply's notice shows while the worker starts; a collected reply shows none.
+                    if streaming:
+                        notice_shown.wait(timeout=10)
+                    else:
+                        time.sleep(0.05)
+                    start.finish(None)
+                return WorkerHandle(
+                    worker_id="worker-1",
+                    worker_key=spec.worker_key,
+                    endpoint="http://worker/api/sandbox-runner/execute",
+                    auth_token="worker-token",  # noqa: S106
+                    status="ready",
+                    backend_name="kubernetes",
+                    last_used_at=0.0,
+                    created_at=0.0,
+                )
+
+            def touch_worker(self, worker_key: str, *, now: float | None = None) -> None:
+                del worker_key, now
+
+        class _WorkerClient(_StreamsFromPost):
+            def __init__(self, *, timeout: float) -> None:
+                del timeout
+
+            def __enter__(self) -> _WorkerClient:
+                return self
+
+            def __exit__(self, *_exc: object) -> None:
+                return
+
+            def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+                del url, json, headers
+                return _FakeResponse({"ok": True, "result": "/app"})
+
+        monkeypatch.setattr(
+            sandbox_proxy,
+            "lease_primary_worker_manager",
+            lambda *_args, **_kwargs: _static_worker_manager_lease(_ColdWorkerBackend()),
+        )
+        monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _WorkerClient)
+        model = ScriptedModel([calls(tool_call("run_shell_command", "call-1", args="pwd")), answer("Done")])
+        install_model_providers(monkeypatch, {"default": model})
+        timing = DispatchPipelineTiming(source_event_id="$event", room_id="!test:localhost")
+        envelope = request_envelope(
+            room_id="!test:localhost",
+            reply_to_event_id="$event",
+            prompt="Where am I?",
+            user_id="@alice:localhost",
+        )
+        request = _response_request(prompt="Where am I?", user_id="@alice:localhost", response_envelope=envelope)
+
+        await _respond(bot, replace(request, pipeline_timing=timing), streaming=streaming)
+
+        [answered] = [message for message in model.requests[-1].messages if message.role == "tool"]
+        assert "/app" in str(answered.content)
+        assert notice_shown.is_set() is streaming
+        [ready] = [event for event in reported if event.phase == "ready"]
+        assert timing.metadata["worker_wait_ms"] == round(ready.elapsed_seconds * 1000, 1)
 
 
 class TestAdaptiveResponse(AgentBotTestBase):

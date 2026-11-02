@@ -107,7 +107,7 @@ from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.members import allow_direct_private_team_agents, requested_team_agent_names
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
-from mindroom.timing import timed
+from mindroom.timing import bind_reply_pipeline_timing, timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.agent_tools import room_turn_offers
@@ -1847,24 +1847,26 @@ class ResponseRunner:
             fallback = ai_run_extra_content_from_metadata(recorder.run_metadata) or {}
             return merge_response_extra_content({**fallback, **run_metadata_content} or None, request.attachment_ids)
 
-        if use_streaming:
-            return await self._deliver_streamed(
+        # The turn's tool calls note how long they waited for a worker to start in the reply's timing.
+        with bind_reply_pipeline_timing(request.pipeline_timing):
+            if use_streaming:
+                return await self._deliver_streamed(
+                    turn,
+                    response_stream,
+                    response_identity=response_identity,
+                    run_metadata_content=run_metadata_content,
+                    tool_trace=tool_trace,
+                    final_extra_content=final_extra_content,
+                    progress=progress,
+                )
+            return await self._deliver_collected(
                 turn,
                 response_stream,
                 response_identity=response_identity,
-                run_metadata_content=run_metadata_content,
                 tool_trace=tool_trace,
                 final_extra_content=final_extra_content,
                 progress=progress,
             )
-        return await self._deliver_collected(
-            turn,
-            response_stream,
-            response_identity=response_identity,
-            tool_trace=tool_trace,
-            final_extra_content=final_extra_content,
-            progress=progress,
-        )
 
     async def _deliver_streamed(
         self,
