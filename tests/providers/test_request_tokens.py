@@ -228,3 +228,38 @@ def test_gemini_counts_a_replayed_thought_signature_as_its_reported_reasoning(tm
 
     assert _difference(route, signed, plain) == 300
     assert _difference(route, replace(signed, from_history=True), replace(plain, from_history=True)) == 300
+
+
+def test_openrouter_counts_encrypted_reasoning_details_as_their_reported_reasoning(tmp_path: Path) -> None:
+    """OpenRouter sends each answer's ``reasoning_details`` back; encrypted ones cost what their answer reported."""
+    route = _route("openrouter", tmp_path)
+    metrics = MessageMetrics(tokens=TokenCounts(output_tokens=420, reasoning_tokens=400))
+    plain = Message(role="assistant", content="Pack a light rain jacket.", metrics=metrics, from_history=True)
+    encrypted = replace(
+        plain,
+        provider_data={"reasoning_details": [{"type": "reasoning.encrypted", "data": "Z" * 4_000, "id": "rd-1"}]},
+    )
+
+    assert _difference(route, encrypted, plain) == 400
+
+
+def test_claude_counts_replayed_thinking_by_its_answer_s_hidden_output(tmp_path: Path) -> None:
+    """Claude replays a thinking summary but bills the thinking its answer produced, which its output reports."""
+    route = _route("anthropic", tmp_path)
+    text = {"type": "text", "text": "Pack a light rain jacket."}
+    thinking = {"type": "thinking", "thinking": "Rain is likely.", "signature": "c2lnbmF0dXJl"}
+    provenance = model_provenance(route.identity.id, route.identity.provider)
+    metrics = MessageMetrics(tokens=TokenCounts(output_tokens=3_000))
+
+    def answer(*blocks: dict[str, Any]) -> Message:
+        return Message(
+            role="assistant",
+            content="Pack a light rain jacket.",
+            metrics=metrics,
+            provider_data={**provenance, CLAUDE_BLOCKS_KEY: list(blocks)},
+            from_history=True,
+        )
+
+    visible = route.request_tokens(ModelRequest(messages=(Message(role="user", content=text["text"]),)))
+
+    assert _difference(route, answer(thinking, text), answer(text)) >= 3_000 - visible
