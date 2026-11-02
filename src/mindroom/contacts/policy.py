@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
+from mindroom.contacts.parties import party_label, party_name
 from mindroom.hooks import EVENT_CONTACT_BEFORE_SEND, ContactBeforeSendContext, emit_policy
 from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
@@ -52,12 +53,21 @@ def effective_rules(config: Config, agent_name: str, side: ContactSide) -> str:
     return "\n".join(f"- {rule}" for rule in rules)
 
 
-def _contact_rules_question() -> JudgmentQuestion:
-    """Return the question the judge answers about each message: does it follow every rule."""
+def _contact_rules_question(config: Config, record: ContactRecord, side: SideName) -> JudgmentQuestion:
+    """Return the question the judge answers about each message of ``side``'s agent: does it follow every rule.
+
+    Owners write rules about themselves as "I" and "my", while their agent writes about them in the third person, so
+    the judge learns who writes the message, for whom, and to whom.
+    """
+    sender = record.party(side)
+    owner = sender.owner
+    recipient = party_label(config, record.party(record.other(side)))
     return JudgmentQuestion(
         id=_CONTACT_RULES_QUESTION_ID,
         instructions=(
-            "An assistant acting for its owner wants to send the message below to an outside party. "
+            f"{party_name(config, sender)} ({sender.id}) is an assistant acting for its owner {owner}. "
+            f"It wants to send the message below, written on behalf of {owner}, to {recipient}. "
+            f"In the rules, I, me, and my mean {owner}, and the message may name {owner} in the third person. "
             "Decide whether the message follows every rule."
         ),
         when_true="The message follows every rule.",
@@ -110,6 +120,7 @@ async def check_contact_message(
             contacts.judge,
             config,
             context.runtime_paths,
+            _contact_rules_question(config, record, side),
             agent_name=sender.id,
             owner=sender.owner,
             rules=rules or NO_CONTACT_RULES,
@@ -160,6 +171,7 @@ async def _judge_refusal(
     judge: JudgmentConfig,
     config: Config,
     runtime_paths: RuntimePaths,
+    question: JudgmentQuestion,
     *,
     agent_name: str,
     owner: str,
@@ -167,7 +179,7 @@ async def _judge_refusal(
     text: str,
 ) -> tuple[Literal["revise", "deny"], str] | None:
     """Return why the judge keeps ``text`` from being sent, or None when it follows the rules."""
-    request = build_judgment_request(_contact_rules_question(), (JudgmentMessage("user", text),), instructions=rules)
+    request = build_judgment_request(question, (JudgmentMessage("user", text),), instructions=rules)
     if not request.complete:
         return "deny", f"The message cannot be checked ({request.incomplete_reason})."
     evaluate = create_judgment_evaluator(

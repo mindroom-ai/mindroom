@@ -141,10 +141,18 @@ def _judge_model(monkeypatch: pytest.MonkeyPatch, reply: str) -> ScriptedModel:
 
 
 def _judged(model: ScriptedModel) -> dict[str, Any]:
-    """Return the request the judge model received: its question, its guidance, and the one message it judged."""
+    """Return the request the judge model received: its guidance and the one message it judged.
+
+    Its question always says who writes the message, for whom, and to whom.
+    """
     (request,) = model.requests
     body = json.loads(request.messages[1].content)
     assert body["question"]["id"] == _CONTACT_RULES_QUESTION_ID
+    assert body["question"]["instructions"].startswith(
+        f"Alice's Mind (mind_alice) is an assistant acting for its owner {ALICE}. "
+        f"It wants to send the message below, written on behalf of {ALICE}, to Bob's Mind (mind_bob), the agent of {BOB}. "
+        f"In the rules, I, me, and my mean {ALICE}",
+    )
     (message,) = body["state"]["conversation"]
     return {"guidance": body["guidance"], "role": message["role"], "text": message["text"]}
 
@@ -175,17 +183,40 @@ def test_effective_rules_are_empty_without_any_rule(tmp_path: Path) -> None:
     assert effective_rules(config, "mind_alice", ContactSide(rules="  \n")) == ""
 
 
-def test_contact_rules_question_asks_whether_the_message_follows_every_rule() -> None:
+def test_contact_rules_question_asks_whether_the_message_follows_every_rule(tmp_path: Path) -> None:
     """The judge answers true only for a message that follows every rule."""
-    question = _contact_rules_question()
+    config, _ = _config(tmp_path)
+    question = _contact_rules_question(config, _record(), "requester")
 
     assert question.id == _CONTACT_RULES_QUESTION_ID == "contact_rules"
-    assert question.instructions == (
-        "An assistant acting for its owner wants to send the message below to an outside party. "
-        "Decide whether the message follows every rule."
-    )
+    assert question.instructions.endswith("Decide whether the message follows every rule.")
     assert question.when_true == "The message follows every rule."
     assert question.when_false == "The message breaks or may break a rule."
+
+
+@pytest.mark.parametrize(
+    ("target", "recipient"),
+    [
+        (ContactParty(kind="agent", id="mind_bob", owner=BOB), f"Bob's Mind (mind_bob), the agent of {BOB}"),
+        (ContactParty(kind="person", id=BOB, owner=BOB), BOB),
+    ],
+)
+def test_the_judge_knows_who_writes_for_whom_and_to_whom(
+    tmp_path: Path,
+    target: ContactParty,
+    recipient: str,
+) -> None:
+    """Rules an owner wrote as "I" and "my" mean the owner, and a message naming the owner speaks for them."""
+    config, _ = _config(tmp_path)
+
+    question = _contact_rules_question(config, _record(target=target), "requester")
+
+    assert question.instructions == (
+        f"Alice's Mind (mind_alice) is an assistant acting for its owner {ALICE}. "
+        f"It wants to send the message below, written on behalf of {ALICE}, to {recipient}. "
+        f"In the rules, I, me, and my mean {ALICE}, and the message may name {ALICE} in the third person. "
+        "Decide whether the message follows every rule."
+    )
 
 
 @pytest.mark.asyncio

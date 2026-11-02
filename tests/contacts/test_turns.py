@@ -227,6 +227,7 @@ def test_contact_turn_instructions_name_both_sides_the_rules_and_how_to_answer(
     lines = item.text.splitlines()
     assert f"This room is contact c1 between you, acting for {CO_OWNER}, and {other_label}." in lines
     assert f"Everyone here other than {CO_OWNER} speaks for the other side." in lines
+    assert f"You speak as {CO_OWNER}'s agent, never as {CO_OWNER}, so refer to {CO_OWNER} in the third person." in lines
     assert f"- {CONFIG_RULE}\n- {OWNER_RULE}" in item.text
     assert "Your final reply in this room is never shown to anyone." in lines
     assert answer in lines

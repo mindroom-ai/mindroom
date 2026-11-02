@@ -9539,7 +9539,7 @@ depends_on = ["mindroom.contacts.parties", "mindroom.contacts.store"]
 
 [[modules]]
 path = "mindroom.contacts.policy"
-depends_on = ["mindroom.hooks", "mindroom.judgment.evaluator", "mindroom.judgment.state"]
+depends_on = ["mindroom.contacts.parties", "mindroom.hooks", "mindroom.judgment.evaluator", "mindroom.judgment.state"]
 
 [[modules]]
 path = "mindroom.contacts.flow"

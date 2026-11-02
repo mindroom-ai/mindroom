@@ -155,7 +155,7 @@ The checks run in order:
 1. A new message is refused once the conversation already ends with [`defaults.max_consecutive_agent_replies`](configuration/agents.md#defaults) agent messages in a row, until a person writes.
 2. Plugin hooks on [`contact:before_send`](hooks.md#policy) run in priority order and can rewrite, return, or block the message.
 3. When `contacts.judge` is set, the judge decides whether the text follows the agent's rules for the contact.
-   It sees only the message and the rules, not the conversation.
+   It sees only the message, the rules, and which agent sends it for whom to whom, not the conversation, and it reads "I" and "my" in the rules as the agent's owner.
 
 | Outcome | Result |
 | --- | --- |
