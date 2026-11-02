@@ -326,7 +326,7 @@ class TestMatrixRegistration:
         message = str(excinfo.value)
         assert (
             "another matrix_username or mindroom_user.username, or for generated names a new namespace "
-            "(a unique MINDROOM_NAMESPACE, or `mindroom connect` again on a paired install)"
+            "(`mindroom connect` again on a paired install, otherwise a unique MINDROOM_NAMESPACE)"
         ) in message
         assert "add its credentials to matrix_state.yaml" in message
         assert "https://docs.mindroom.chat/matrix/#use-an-existing-matrix-account" in message

@@ -578,8 +578,8 @@ def _account_collision_error(user_id: str, login_response: object) -> ValueError
     msg = (
         f"Matrix account collision for {user_id}: the user already exists but login with the configured password failed "
         f"({login_response}). Choose an unused name: another matrix_username or mindroom_user.username, or for "
-        "generated names a new namespace (a unique MINDROOM_NAMESPACE, or `mindroom connect` again on a paired "
-        "install). To use the existing account instead, add its credentials to matrix_state.yaml "
+        "generated names a new namespace (`mindroom connect` again on a paired install, otherwise a unique "
+        "MINDROOM_NAMESPACE). To use the existing account instead, add its credentials to matrix_state.yaml "
         "(https://docs.mindroom.chat/matrix/#use-an-existing-matrix-account)."
     )
     return matrix_startup_error(msg, permanent=True)
