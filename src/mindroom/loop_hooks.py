@@ -148,8 +148,8 @@ def _loop_hooks(
     stays silent never compacts or requests; the bound approval receipt then joins the messages of a run that reads
     it, before its first request as a reader; mid-turn compaction last sizes the request that is sent, rewrites the
     live messages, keeping the receipt, and folds into the scope only when the run replays it. Queued-message notices
-    follow every tool batch and a resume's entry when ``queued_notices`` is on; the run hears of the ended jobs of ``job_notices_for`` after each batch;
-    ``skill_review_capture`` records the run's final request.
+    follow every tool batch and a resume's entry when ``queued_notices`` is on; the run hears of the ended jobs of
+    ``job_notices_for`` after each batch; ``skill_review_capture`` records the run's final request.
     """
     before_request: list[BeforeRequestHook] = []
     if job_definitions is not None:
