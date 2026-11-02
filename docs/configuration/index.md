@@ -76,6 +76,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `room_models` | Map of room key or Matrix room ID to model name, the authored model default for a room | [Models](models.md#room_model) (`!room_model`) |
 | `room_thread_summary_models` | Map of room key, Matrix room ID, or agent or team name to automatic thread summary model | [Matrix & Attachments](../tools/matrix-and-attachments.md#automatic-thread-summaries) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](../rooms.md#matrix-space) |
+| `server_emoji` | Room whose emoji packs every MindRoom Chat user on the homeserver can use | [Custom Emoji](../custom-emoji.md#let-mindroom-create-the-room) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](../scheduling.md#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](../external-triggers.md) |
 | `slack` | How Slack workspace members map to Matrix users | [Slack](../tools/slack.md#slack-configuration) |

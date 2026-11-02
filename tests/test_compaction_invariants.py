@@ -178,6 +178,7 @@ async def _compact(
         state=read_scope_state(session),
         summarizer=summarizer,
         available_history_budget=None,
+        max_summary_tokens=None,
         replay_window_tokens=replay_window_tokens,
         threshold_tokens=None,
         before_tokens=0,

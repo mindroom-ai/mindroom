@@ -1406,7 +1406,8 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
             session=session,
             # The final prompt leaves one token of the 64,000-token window after its reserve.
             static_prompt_tokens=64_000 - 16_384 - 1,
-            available_history_budget=1,
+            # The prompt compaction ran for left room for the summary.
+            available_history_budget=1_000,
         )
 
     persisted = storage.load_session("session-1")

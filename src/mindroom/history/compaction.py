@@ -13,7 +13,12 @@ from uuid import uuid4
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.failure_text import failure_text
 from mindroom.history.conversation_text import utterances
-from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
+from mindroom.history.replay import (
+    current_summary_text,
+    estimate_prompt_visible_history_tokens,
+    estimate_summary_text_tokens,
+    scope_visible_runs,
+)
 from mindroom.history.storage import (
     FoldBasis,
     append_compaction_chunk,
@@ -321,6 +326,7 @@ async def compact_scope_history(
     state: HistoryScopeState,
     summarizer: Summarizer,
     available_history_budget: int | None,
+    max_summary_tokens: int | None,
     before_tokens: int,
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
@@ -330,6 +336,7 @@ async def compact_scope_history(
 ) -> CompactionOutcome | None:
     """Compact the scope owning ``session`` by appending summary rows that fold its oldest runs, chunk by chunk.
 
+    ``max_summary_tokens`` is the most history the reply can replay; no chunk whose summary exceeds it is stored.
     ``progress`` receives the progress after each stored chunk that leaves runs to replay, and ``complete`` the
     outcome after the last stored chunk.
     """
@@ -390,6 +397,7 @@ async def compact_scope_history(
             working_session=working_session,
             summarizer=summarizer,
             runs=runs,
+            max_summary_tokens=max_summary_tokens,
             before_persist=before_persist,
             after_persist=after_persist,
         )
@@ -452,10 +460,15 @@ async def _rewrite_working_session_for_compaction(
     working_session: ConversationSession,
     summarizer: Summarizer,
     runs: Sequence[AnyRunRecord],
+    max_summary_tokens: int | None,
     before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
     after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
 ) -> _CompactionRewriteResult | None:
-    """Fold ``runs``, oldest first, into one appended summary row per chunk, stopping when the conversation changes."""
+    """Fold ``runs``, oldest first, into one appended summary row per chunk.
+
+    Stops when the conversation changes or a chunk's summary exceeds ``max_summary_tokens``; with nothing stored yet,
+    either stop fails the compaction.
+    """
     scope = owner_scope(persisted_session)
     summary_text: str | None = None
     compacted_run_count = 0
@@ -472,7 +485,7 @@ async def _rewrite_working_session_for_compaction(
             ),
         )
         if basis is None:
-            _stop_for_changed_conversation(persisted_session.session_id, scope, compacted_run_count)
+            _stop_compaction(ConversationChangedError(), persisted_session.session_id, scope, compacted_run_count)
             break
         chunk = await _summarize_chunk(summarizer, previous_summary, remaining)
         if chunk is None:
@@ -483,6 +496,15 @@ async def _rewrite_working_session_for_compaction(
                 candidate_runs=len(remaining),
                 summary_input_budget_tokens=summarizer.model.input_budget_tokens,
             )
+            break
+        summary_tokens = estimate_summary_text_tokens(chunk.summary)
+        if max_summary_tokens is not None and summary_tokens > max_summary_tokens:
+            # Replay never drops a saved summary, so storing this one would fail a reply that can still fit raw runs.
+            msg = (
+                f"The summary exceeds the history budget ({summary_tokens} estimated tokens; "
+                f"{max_summary_tokens} available)."
+            )
+            _stop_compaction(RuntimeError(msg), persisted_session.session_id, scope, compacted_run_count)
             break
         await before_persist(chunk.included_runs)
         compacted_run_ids = tuple(run.run_id for run in chunk.included_runs)
@@ -497,7 +519,7 @@ async def _rewrite_working_session_for_compaction(
             ),
         )
         if not appended:
-            _stop_for_changed_conversation(persisted_session.session_id, scope, compacted_run_count)
+            _stop_compaction(ConversationChangedError(), persisted_session.session_id, scope, compacted_run_count)
             break
         summarizer = chunk.summarizer
         summary_text = chunk.summary
@@ -523,13 +545,14 @@ class ConversationChangedError(RuntimeError):
         super().__init__("The conversation changed during compaction.")
 
 
-def _stop_for_changed_conversation(session_id: str, scope: HistoryScope, compacted_run_count: int) -> None:
-    """Stop compacting after another writer changed the scope's history; with nothing stored yet, compaction failed."""
+def _stop_compaction(error: Exception, session_id: str, scope: HistoryScope, compacted_run_count: int) -> None:
+    """Stop compacting because of ``error``; with nothing stored yet, compaction failed with it."""
     if compacted_run_count == 0:
-        raise ConversationChangedError
+        raise error
     # Earlier chunks stand.
     logger.warning(
-        "Compaction stopped because the conversation changed",
+        "Compaction stopped early",
+        reason=str(error),
         session_id=session_id,
         scope=scope.key,
         compacted_runs=compacted_run_count,

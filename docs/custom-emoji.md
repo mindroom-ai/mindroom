@@ -30,6 +30,35 @@ People on other homeservers cannot pick them, but MindRoom Chat shows them the p
 The room is an ordinary Matrix room, and its packs are ordinary [MSC2545](https://github.com/matrix-org/matrix-spec-proposals/pull/2545) image packs (`im.ponies.room_emotes` state events).
 A client that supports image packs can join the room and use them like the packs of any room.
 
+## Let MindRoom create the room
+
+When MindRoom runs against the homeserver, as in a Kubernetes deployment of the MindRoom runtime, the easiest path is to let MindRoom create and maintain the room, with no access token and no script.
+Turn it on in `config.yaml`:
+
+```yaml
+server_emoji:
+  enabled: true
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Create and maintain the emoji room |
+| `name` | string | `"Emoji"` | Name of the room and of its first emoji pack when MindRoom creates them; cannot be empty |
+| `moderators_only` | bool | `false` | Let only moderators add, rename, or remove emoji |
+
+MindRoom creates the room `#emoji:<server name>`, or `#emoji_<namespace>:<server name>` when `MINDROOM_NAMESPACE` is set, with the same settings as the script below.
+On every start it logs `server_emoji_room_ready` with the room's alias and ID.
+Publish that alias with the `io.mindroom.emoji` key as described in [Enable it](#enable-it); with the `mindroom-client` Helm chart, set `serverEmoji.room: "#emoji:example.com"`.
+
+On every start, and on a config reload that changes `server_emoji` or `room_defaults`, MindRoom sets who may add emoji from `moderators_only`, keeps members from posting, gives the users in `room_defaults.admins` administrator power in the room, and publishes the alias again if someone deleted it.
+Changing `name` later renames neither the room nor its pack; rename the pack in MindRoom Chat.
+Setting `enabled: false` leaves the room as it is.
+If the alias already names another room, MindRoom logs `server_emoji_room_alias_taken`, leaves that room alone, and creates no room.
+If you made that room with the script, keep publishing it and turn `server_emoji` off.
+Otherwise, delete the alias and restart MindRoom, which then creates the room.
+Do not publish a room you did not make: on a homeserver with open registration, anyone can create a room under a free alias.
+On a homeserver without MindRoom, create the room with the script.
+
 ## Enable it
 
 Create the room once, with an operator's access token, from the root of a MindRoom checkout:
@@ -70,7 +99,7 @@ Add that key to the homeserver's `/.well-known/matrix/client` file:
 With the `mindroom-client` Helm chart, set `serverEmoji.room` to the same value and the chart serves `/.well-known/matrix/client` with the key; see the [chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#server-custom-emoji).
 Quote the value in the values file, as in `room: "#emoji:example.com"`: unquoted, `#` starts a YAML comment and `!` a YAML tag, and the chart then publishes nothing.
 Tuwunel's own `[global.well_known]` section has no setting for extra keys, so when Tuwunel answers that path, serve the file from your reverse proxy or the client chart instead.
-Nothing changes in `config.yaml`.
+With the script, nothing changes in `config.yaml`.
 Without the key, custom emoji stay personal to each user.
 
 ## If the script stops early
@@ -101,7 +130,7 @@ The same level lets someone rename or remove emoji, because a pack is a single M
 
 A user who may not add still sees **+**.
 Their emoji goes to their own Personal Pack, and the form says so.
-To change the rule later, set **Manage Emojis & Stickers** in the room's permissions.
+To change the rule later, set **Manage Emojis & Stickers** in the room's permissions; for a room MindRoom maintains, set `server_emoji.moderators_only` instead.
 
 In MindRoom Chat, the **Server Emoji** section of **Settings → Emojis & Stickers** lists the server's packs.
 Opening a pack shows its emoji.
@@ -120,7 +149,7 @@ MindRoom Chat also mutes the room when it joins it, so a mention hidden in a pac
 - A kick does not last, because MindRoom Chat joins the room again by itself.
   Ban someone to keep them out.
 - At the default power level `0`, any member may also create more packs, each up to about 64 KB that every member syncs.
-  A server with open registration should use `--moderators-only`.
+  A server with open registration should use `--moderators-only`, or `server_emoji.moderators_only: true` for a room MindRoom maintains.
 - A room made by hand and published by alias needs that alias as its canonical alias and `m.federate: false` in its creation content: MindRoom Chat only trusts a local-only room carrying the alias, because another server can set any alias in its own rooms. Publish the room ID instead if the room is federated.
 - To replace the room, tombstone the old one or remove its canonical alias, then publish the new one.
 

@@ -5,6 +5,7 @@ mode for `visibility`, so an entry naming an undeclared module matches nothing.
 A grant to a declared module whose `depends_on` lacks the granting module pre-approves an import that no code makes,
 because `exact = true` keeps every `depends_on` list equal to the module's runtime imports.
 This test fails on both, so a module's `visibility` list names exactly the declared modules that import it.
+Tach likewise ignores an `[[interfaces]]` block whose `from` names an undeclared module, so a second test requires a declared one.
 """
 
 from __future__ import annotations
@@ -28,3 +29,11 @@ def test_visibility_names_only_declared_importers() -> None:
         if not depends_on.get(grantee, set()) & granting
     ]
     assert stale == [], "Each entry must name a declared module whose depends_on lists the granting module"
+
+
+def test_interfaces_name_only_declared_modules() -> None:
+    """Every interface `from` entry names a declared module, so no interface block is silently unenforced."""
+    config = tomllib.loads(TACH_CONFIG.read_text(encoding="utf-8"))
+    declared = {module["path"] for module in config["modules"]}
+    undeclared = sorted({path for interface in config["interfaces"] for path in interface["from"]} - declared)
+    assert undeclared == [], "Each interface must name a declared module; delete or redeclare these blocks"

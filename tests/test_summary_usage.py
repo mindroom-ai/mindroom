@@ -105,6 +105,7 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
                 on_usage=scope_usage_recorder(storage, session.session_id),
             ),
             available_history_budget=None,
+            max_summary_tokens=None,
             replay_window_tokens=None,
             threshold_tokens=None,
             before_tokens=0,

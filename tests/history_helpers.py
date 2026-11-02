@@ -205,6 +205,19 @@ def _summarizer(
     )
 
 
+def _included_run_count(previous_summary: str | None, compacted_runs: Sequence[AnyRunRecord], budget: int) -> int:
+    """Return how many of ``compacted_runs`` one summary input of ``budget`` tokens holds."""
+    return len(
+        build_summary_input(
+            previous_summary=previous_summary,
+            compacted_runs=compacted_runs,
+            max_input_tokens=budget,
+            history_settings=_ALL_HISTORY_SETTINGS,
+            token_estimator=estimate_compaction_input_tokens,
+        )[1],
+    )
+
+
 async def _reported(outcome: CompactionOutcome) -> CompactionOutcome:
     """Stand in for the reply lifecycle's success report."""
     return outcome
