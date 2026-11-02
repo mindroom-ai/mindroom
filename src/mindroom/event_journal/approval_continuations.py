@@ -169,7 +169,9 @@ def _origin_from_dict(stored: Mapping[str, object]) -> TurnOrigin:
         trust=TurnTrust(cast("str", stored["trust"])),
         # LEGACY_COMPAT: Approval continuation origins without the acts-for-requester flag.
         # Legacy format: the stored origin of an approval continuation had no acts_for_requester key.
-        # Last legacy release: v2026.11.75; replacement: the next release stores the flag in every origin.
+        # Last legacy release: every release before this change ships, v2026.11.87 the newest when written, stores
+        #   origins without the flag; replacement: unreleased, the first release with this change stores it in every
+        #   origin.
         # Handling: absence reads as False, so the speaker comes from the origin's intent alone, as it did for every
         #   continuation paused before contact turns let another sender's message run for an agent's owner.
         # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_continuation_origin_without_the_acts_for_requester_flag_loads_with_it_unset.
