@@ -612,10 +612,10 @@ class TurnDispatcher:
     async def _for_another_participant(self, room: nio.MatrixRoom, event_id: str, source: Mapping[str, object]) -> bool:
         """Return whether a message may be for other agents or people only, so this agent may never answer it.
 
-        A voice message is judged by the transcript ingress stored for this agent.
-        An upload that mentions nobody, a voice message not transcribed yet
-        included, takes whom it addresses from the caption coalescing batches it
-        with, so by itself it could be for anyone.
+        A voice message is judged by the transcript ingress stored for this agent;
+        one not transcribed yet could be for anyone. An upload that mentions nobody
+        takes whom it addresses from the caption coalescing batches it with, so by
+        itself it could be for anyone too.
         """
         voice = await self.deps.turn_store.prepared_voice_for_source(event_id)
         content = voice.to_content() if voice is not None else source.get("content")

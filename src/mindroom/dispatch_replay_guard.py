@@ -89,10 +89,11 @@ async def _is_unresponded_requester_event(
 
     The filters SQL cannot express. Whose turn an event really is depends on
     trusted relay metadata inside its content, a router transcript echo is a
-    display artifact rather than a turn, this agent ignores a message for
-    another participant without ever answering it, and a command exits dispatch
-    long before a response would be owed -- so none of the four can be decided
-    from a column.
+    display artifact rather than a turn, a message that may be for another
+    participant -- one mentioning only others, or an upload or untranscribed
+    voice message whose addressee is not known yet -- may never become this
+    agent's turn, and a command exits dispatch long before a response would be
+    owed -- so none of the four can be decided from a column.
 
     ``handled`` stays even though a pending row is the journal's own answer
     to "unfinished". The two records settle at different moments: a source is

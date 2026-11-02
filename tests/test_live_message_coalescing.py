@@ -1879,6 +1879,18 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
         ("$research", "@test_agent please check this for alice", research, 1002),
         ("$alice-last", "alice last", "@alice:localhost", 1003),
     ]
+    # Sync admits every message the thread shows before ingress resolves it.
+    for event_id, body, sender, timestamp in messages:
+        await _admit_pending_thread_event(
+            bot,
+            _text_event(
+                event_id=event_id,
+                body=body,
+                sender=sender,
+                server_timestamp=timestamp,
+                thread_id="$thread",
+            ).source,
+        )
     history = thread_history_result(
         [
             make_visible_message(sender="@alice:localhost", body="root", event_id="$thread", timestamp=1000),
@@ -5122,6 +5134,16 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
             latest_event_id="$newer-bob",
         ),
     ]
+    await _admit_pending_thread_event(
+        bot,
+        _text_event(
+            event_id="$newer-bob",
+            body="newer bob",
+            sender="@bob:localhost",
+            server_timestamp=3000,
+            thread_id="$thread",
+        ).source,
+    )
     source_event_metadata = {
         relay_event_id: SourceEventMetadata(
             sender="@bob:localhost",
@@ -6138,6 +6160,10 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_cmd]
+    await _admit_pending_thread_event(
+        bot,
+        _text_event(event_id="$m2", body="!help", sender="@user:localhost", server_timestamp=2000).source,
+    )
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6188,6 +6214,10 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_cmd]
+    await _admit_pending_thread_event(
+        bot,
+        _text_event(event_id="$m2", body="  !help  ", sender="@user:localhost", server_timestamp=2000).source,
+    )
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6245,6 +6275,15 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     dispatch.context.thread_history = [newer_msg]
+    await _admit_pending_thread_event(
+        bot,
+        _text_event(
+            event_id="$s2",
+            body="another scheduled output",
+            sender="@mindroom_test_agent:localhost",
+            server_timestamp=2000,
+        ).source,
+    )
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6294,6 +6333,15 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$h2",
     )
     dispatch.context.thread_history = [newer_msg]
+    await _admit_pending_thread_event(
+        bot,
+        _text_event(
+            event_id="$h2",
+            body="newer message",
+            sender="@mindroom_test_agent:localhost",
+            server_timestamp=2000,
+        ).source,
+    )
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6345,6 +6393,15 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     dispatch.context.thread_history = [second_fire_msg]
+    await _admit_pending_thread_event(
+        bot,
+        _text_event(
+            event_id="$s2",
+            body="scheduled fire 2",
+            sender="@mindroom_test_agent:localhost",
+            server_timestamp=2000,
+        ).source,
+    )
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
