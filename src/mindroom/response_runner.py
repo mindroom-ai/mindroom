@@ -56,6 +56,7 @@ from mindroom.reply_presentation import (
 )
 from mindroom.reply_scope import (
     ClaimRefused,
+    ReplyWriteRefusedError,
     SpanHandle,
     current_slot,
     current_span,
@@ -1152,21 +1153,26 @@ class ResponseRunner:
             return None
         handle = current_span()
         assert handle is not None, "a placeholder is its reply's create"
-        placeholder_event_id = await self.deps.delivery_gateway.send_text(
-            SendTextRequest(
-                target=resolved_target,
-                response_text=placeholder_message,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-                # A streamed answer creates its visible message here and
-                # only edits it afterwards, so this send is the one a crash
-                # could duplicate into two answers in the room.
-                reply_write=initial_write(
-                    handle,
-                    Presentation(placeholder=placeholder_message, show_tool_calls=handle.base.show_tool_calls),
-                    placeholder_only=True,
+        try:
+            placeholder_event_id = await self.deps.delivery_gateway.send_text(
+                SendTextRequest(
+                    target=resolved_target,
+                    response_text=placeholder_message,
+                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+                    # A streamed answer creates its visible message here and
+                    # only edits it afterwards, so this send is the one a crash
+                    # could duplicate into two answers in the room.
+                    reply_write=initial_write(
+                        handle,
+                        Presentation(placeholder=placeholder_message, show_tool_calls=handle.base.show_tool_calls),
+                        placeholder_only=True,
+                    ),
                 ),
-            ),
-        )
+            )
+        except ReplyWriteRefusedError:
+            # The reply's rule wrote no create, as after a Stop or once the reply's event is already bound; the rule
+            # decided the reply, and the turn goes on without a placeholder.
+            return None
         if placeholder_event_id is not None and request.pipeline_timing is not None:
             request.pipeline_timing.mark("placeholder_sent")
             request.pipeline_timing.mark_first_visible_reply("placeholder")
