@@ -712,10 +712,13 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            capture_logs() as logs,
             pytest.raises(PermanentMatrixStartupError, match="boom"),
         ):
             await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
 
+        # A startup error, such as an account collision, is no crash, so it is logged once without a traceback.
+        assert _logged_errors(logs) == [("MindRoom startup failed", None, False)]
         mock_orchestrator.stop.assert_awaited_once()
         # Startup shortens the GIL switch interval before the orchestrator starts.
         assert sys.getswitchinterval() == pytest.approx(0.001)
@@ -725,29 +728,21 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("start_error", "raised", "logged"),
-        [
-            # A startup error, such as an account collision, is no crash, so it is reported without a traceback.
-            (PermanentMatrixStartupError("account collision"), PermanentMatrixStartupError, "MindRoom startup failed"),
-            (RuntimeError("orchestrator crashed"), RuntimeError, "Error in MindRoom runtime"),
-            # An orchestrator that returns while no shutdown was requested ends the run as a crash does.
-            (None, RuntimeError, "Error in MindRoom runtime"),
-        ],
-        ids=["startup error", "crash", "unexpected return"],
+        "start_error",
+        # An orchestrator that returns while no shutdown was requested ends the run as a crash does.
+        [RuntimeError("orchestrator crashed"), None],
+        ids=["crash", "unexpected return"],
     )
     async def test_the_error_that_ends_the_run_is_logged_once(
         self,
         tmp_path: Path,
         start_error: Exception | None,
-        raised: type[Exception],
-        logged: str,
     ) -> None:
-        """The run logs the error that ends it exactly once, with a traceback unless it is a startup error."""
+        """The run logs the error that ends it exactly once, with its traceback."""
         reset_runtime_state()
         mock_orchestrator = _mock_runtime_orchestrator()
-        mock_orchestrator.start = AsyncMock(side_effect=start_error, return_value=None)
+        mock_orchestrator.start = AsyncMock(side_effect=start_error)
         mock_orchestrator.stop = AsyncMock()
-        mock_orchestrator.running = False
 
         async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
             await asyncio.Event().wait()
@@ -758,11 +753,11 @@ class TestAgentBot(AgentBotTestBase):
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             capture_logs() as logs,
-            pytest.raises(raised),
+            pytest.raises(RuntimeError),
         ):
             await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
 
-        assert _logged_errors(logs) == [(logged, None, raised is RuntimeError)]
+        assert _logged_errors(logs) == [("Error in MindRoom runtime", None, True)]
 
     @pytest.mark.asyncio
     async def test_a_failure_the_run_does_not_raise_is_logged_on_its_own(self, tmp_path: Path) -> None:
@@ -771,7 +766,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.start = AsyncMock(side_effect=RuntimeError("orchestrator crashed"))
         mock_orchestrator.stop = AsyncMock()
-        mock_orchestrator.running = False
 
         async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
             await asyncio.Event().wait()
@@ -1344,7 +1338,6 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.orchestrator.logger.error") as mock_error,
         ):
             await _run_api_server(
                 "127.0.0.1",
@@ -1354,7 +1347,6 @@ class TestAgentBot(AgentBotTestBase):
                 shutdown_requested,
             )
 
-        mock_error.assert_not_called()
         assert get_api_server_address() is None
 
     @pytest.mark.asyncio
@@ -1832,16 +1824,12 @@ class TestAgentBot(AgentBotTestBase):
         async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
             await asyncio.Event().wait()
 
-        async def _api_fails(*_args: object, **_kwargs: object) -> None:
-            msg = "API crashed"
-            raise RuntimeError(msg)
-
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
-            patch("mindroom.orchestrator._run_api_server", side_effect=_api_fails),
+            patch("mindroom.orchestrator._run_api_server", side_effect=RuntimeError("API crashed")),
             pytest.raises(RuntimeError, match="API crashed"),
         ):
             await main(

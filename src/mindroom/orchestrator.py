@@ -200,12 +200,6 @@ def _raise_embedded_api_server_exit(
     raise RuntimeError(msg) from cause
 
 
-def _raise_orchestrator_exit() -> NoReturn:
-    """Raise the error for an orchestrator that returned while no shutdown was requested, which `_run_runtime` logs."""
-    msg = "MindRoom orchestrator exited unexpectedly"
-    raise RuntimeError(msg)
-
-
 class _SignalAwareUvicornServer(uvicorn.Server):
     """Uvicorn server that sets the shared shutdown event on a signal and stops whenever that event is set."""
 
@@ -1706,7 +1700,8 @@ async def _consume_completed_runtime_tasks(
                         task_name=task_name,
                     )
                     continue
-                _raise_orchestrator_exit()
+                msg = "MindRoom orchestrator exited unexpectedly"
+                raise RuntimeError(msg)  # noqa: TRY301 - handled below like a failed task's own error
             logger.info(
                 "runtime_task_completed",
                 task_name=task_name,
